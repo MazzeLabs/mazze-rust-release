@@ -1,0 +1,22 @@
+[package]
+description = "Mazze VM Types"
+homepage = "https://www.mazze.io"
+license = "GPL-3.0"
+name = "mazze-vm-types"
+version = "2.0.2"
+edition = "2021"
+
+[dependencies]
+mazze-bytes = { path = "../../mazze_bytes" }
+mazze-db-errors = { path = "../../dbs/db-errors" }
+mazze-types = { path = "../../mazze_types" }
+keccak-hash = "0.5"
+primitives = { path = "../../primitives" }
+rlp = "0.4.0"
+rlp_derive = { git = "https://github.com/MazzeLabs/mazze-parity-deps", rev = "223e9acc6f7ba9f1b296639f08b326a72d7b92fa"  }
+serde = { version = "1.0", features = ["rc"] }
+serde_derive = "1.0"
+solidity-abi = {path= "../../util/solidity-abi" }
+
+[features]
+testonly_code = []

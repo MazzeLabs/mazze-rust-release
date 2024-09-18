@@ -1,0 +1,60 @@
+[package]
+description = "Mazze execution helper"
+homepage = "https://www.mazze.io"
+license = "GPL-3.0"
+name = "mazze-execute-helper"
+version = "2.0.2"
+edition = "2021"
+
+[dependencies]
+# substrate-bn = { git = "https://github.com/paritytech/bn", default-features = false, rev="63f8c587356a67b33c7396af98e065b66fca5dda" }
+# byteorder = "1.0"
+# mazzekey = { path = "../../accounts/mazzekey" }
+mazze-bytes = { path = "../../mazze_bytes" }
+# mazze-math = { path = "../../mazze_math"}
+mazze-internal-common = { path = "../internal_common" }
+mazze-parameters = { path = "../parameters" }
+mazze-statedb = { path = "../../dbs/statedb" }
+mazze-vm-tracer-derive = { path= "../../util/mazze-vm-tracer-derive" }
+mazze-types = { path = "../../mazze_types" }
+mazze-vm-types = { path = "../vm-types" }
+mazze-vm-interpreter = { path = "../vm-interpreter" }
+mazze-executor = { path = "../executor" }
+error-chain = { version = "0.12", default-features = false }
+# keccak-hash = "0.5"
+# lazy_static = "1.4"
+log = "0.4"
+malloc_size_of = {path = "../../util/malloc_size_of" }
+malloc_size_of_derive = {path = "../../util/malloc_size_of_derive" }
+# num = "0.2"
+# parity-crypto = "0.9.0"
+# parking_lot = "0.11"
+primitives = { path = "../../primitives" }
+rlp = "0.4.0"
+rlp_derive = { git = "https://github.com/MazzeLabs/mazze-parity-deps", rev = "223e9acc6f7ba9f1b296639f08b326a72d7b92fa"  }
+# rustc-hex = "2.1"
+serde = { version = "1.0", features = ["rc"] }
+serde_derive = "1.0"
+serde_json = { version = "1.0", default-features = false, features = [
+    "alloc",
+]}
+# serde_json = "1.0"
+solidity-abi = { path= "../../util/solidity-abi" }
+# solidity-abi-derive = { path="../../util/solidity-abi-derive" }
+# sha3-macro = {path="../../util/sha3-macro"}
+# strum = "0.20"
+strum_macros = "0.20"
+# bls-signatures = {git = "https://github.com/MazzeLabs/bls-signatures.git", rev = "0cf4158a4d17d1405d3bdc10dd4065e4e00e88dd", default-features = false, features = ["multicore"]}
+# tiny-keccak = {version = "2.0",  features = ["keccak"]}
+# diem-crypto = { path = "../src/pos/crypto/crypto" }
+# diem-types = { path = "../src/pos/types" }
+pow-types = {path = "../core/src/pos/types/pow-types" }
+# impl-trait-for-tuples = "^0.2"
+# impl-tools = "^0.10"
+typemap = { package = "typemap-ors", version = "1.0"}
+
+alloy-primitives = { workspace = true }
+alloy-sol-types = "0.7.1"
+revm = { version = "8.0", default-features = false, features = ["std"] }
+alloy-rpc-types-trace = { workspace = true }
+geth-tracer = { path = "../geth-tracer" }

@@ -1,0 +1,23 @@
+[package]
+description = "Mazze VM Interpreter"
+homepage = "https://www.mazze.io"
+license = "GPL-3.0"
+name = "mazze-vm-interpreter"
+version = "2.0.2"
+edition = "2021"
+
+[dependencies]
+bit-set = "0.4"
+mazze-bytes = { path = "../../mazze_bytes" }
+mazze-types = { path = "../../mazze_types" }
+mazze-vm-types = { path = "../vm-types" }
+keccak-hash = "0.5"
+lazy_static = "1.4"
+log = "0.4"
+malloc_size_of = {path = "../../util/malloc_size_of" }
+memory-cache = { path = "../../util/memory-cache" }
+parking_lot = "0.11"
+rustc-hex = "2.1"
+
+[dev-dependencies]
+mazze-vm-types = { path = "../vm-types", features = ["testonly_code"] }

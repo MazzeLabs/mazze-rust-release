@@ -1,0 +1,17 @@
+[package]
+description = "Mazze core parameters library"
+homepage = "https://www.mazze.io"
+license = "GPL-3.0"
+name = "mazze-parameters"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+mazze-types = { path = "../../mazze_types" }
+mazze-vm-types = { path = "../vm-types" }
+mazzekey = { path = "../../mazze_key" }
+mazze-bytes = { path = "../../mazze_bytes" }
+
+lazy_static = "1.4"
+hex-literal = "0.4.1"
+rustc-hex = "2.1"

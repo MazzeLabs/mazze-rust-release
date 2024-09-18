@@ -1,0 +1,29 @@
+[package]
+description = "Mazze transaction generator library"
+homepage = "https://www.mazze.io"
+license = "GPL-3.0"
+name = "txgen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = "2"
+mazzecore = { path = "../mazzecore/core" }
+mazze-types = { path = "../mazze_types" }
+mazze-vm-types = { path = "../mazzecore/vm-types" }
+mazze-bytes = { path = "../mazze_bytes" }
+primitives = { path = "../primitives" }
+parking_lot = "0.11"
+rlp = "0.4.0"
+rand = "0.7"
+rustc-hex = "2.1"
+secret-store = { path = "../secret_store" }
+network = { path = "../network" }
+mazzekey = { path = "../mazze_key" }
+log = "0.4"
+db = { path = "../dbs/db" }
+toml = "0.5.8"
+io = { path = "../util/io" }
+priority-send-queue = { path = "../util/priority-send-queue" }
+metrics = { path = "../util/metrics" }
+lazy_static = "1.4"

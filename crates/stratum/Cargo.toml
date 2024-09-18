@@ -1,0 +1,20 @@
+[package]
+description = "Mazze Stratum lib"
+homepage = "https://www.mazze.io"
+name = "mazze-stratum"
+version = "1.12.0"
+license = "GPL-3.0"
+edition = "2021"
+
+[dependencies]
+mazze-types = { path = "../mazze_types" }
+keccak-hash = "0.5"
+jsonrpc-core = "15.1.0"
+jsonrpc-tcp-server = "15.1.0"
+log = "0.4"
+parking_lot = "0.11"
+
+[dev-dependencies]
+env_logger = "0.5"
+tokio = "0.1"
+tokio-io = "0.1"

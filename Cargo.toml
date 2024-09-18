@@ -1,0 +1,96 @@
+# Use workspace section to allow test all cases under root folder (cargo test --all).
+[workspace]
+members = [
+    "crates/mazze_bytes",
+    "crates/mazze_types",
+    "crates/mazze_addr",
+    "crates/mazze_math",
+    "crates/mazze_utils",
+    "crates/stratum",
+    "crates/accounts",
+    "crates/blockgen",
+    "crates/mazze_key",
+    "crates/mazze_store",
+    "crates/dbs/db",
+    "crates/dbs/kvdb-rocksdb",
+    "crates/dbs/db-errors",
+    "crates/network",
+    "crates/primitives",
+    "crates/secret_store",
+    "crates/transactiongen",
+    "bins/mazze_store",
+    "bins/mazze_key",
+    "bins/mazze",
+    "crates/mazzecore/core",
+    "crates/mazzecore/execute-helper",
+    "crates/mazzecore/executor",
+    "crates/mazzecore/internal_common",
+    "crates/mazzecore/packing-pool",
+    "crates/mazzecore/parameters",
+    "crates/dbs/statedb",
+    "crates/dbs/storage",
+    "crates/mazzecore/vm-interpreter",
+    "crates/mazzecore/vm-types",
+    "crates/util/mazze-vm-tracer-derive",
+    "crates/util/dag",
+    "crates/util/delegate",
+    "crates/util/heap-map",
+    "crates/util/hibitset",
+    "crates/util/io",
+    "crates/util/link-cut-tree",
+    "crates/util/log_device",
+    "crates/util/malloc_size_of",
+    "crates/util/malloc_size_of_derive",
+    "crates/util/memory-cache",
+    "crates/util/metrics",
+    "crates/util/priority-send-queue",
+    "crates/util/random_crash",
+    "crates/util/runtime",
+    "crates/util/sha3-macro",
+    "crates/util/solidity-abi",
+    "crates/util/solidity-abi-derive",
+    "crates/util/throttling",
+    "crates/util/treap-map",
+    "crates/util/version",
+    "crates/serde_utils",
+    "crates/mazzecore/geth-tracer", "bins/mazze-miner",
+]
+
+resolver = "2"
+
+[workspace.package]
+version = "2.0.2"
+authors = ["s94130586"]
+description = "A rust implementation of the Mazze-Protocol"
+documentation = "https://doc.mazzenetwork.org"
+#edition = "2018"
+homepage = "https://www.mazze.io/"
+keywords = ["Mazze"]
+repository = "https://github.com/s94130586/mazze-rust"
+license-file = "LICENSE"
+
+[patch.crates-io]
+sqlite3-sys = { git = "https://github.com/MazzeLabs/sqlite3-sys", rev = "7c7eb656f9ef0169e4c6532a6257e8255174e5a5" }
+
+[profile.test]
+debug-assertions = true
+
+[profile.test.package]
+parity-secp256k1 = { opt-level = 3 }
+
+[profile.bench]
+debug-assertions = true
+overflow-checks = true
+
+[profile.release]
+overflow-checks = true
+# Temporarily run with debug assertion before main-net release.
+debug-assertions = true
+
+[workspace.dependencies]
+serde_derive = "1.0"
+serde = { version = "1.0", features = ["derive", "alloc"] }
+serde_json = "1.0"
+
+alloy-primitives = "0.7.1"
+alloy-rpc-types-trace = { git = "https://github.com/alloy-rs/alloy", rev = "4e22b9e" }

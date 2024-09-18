@@ -1,0 +1,10 @@
+[package]
+name = "mazze-addr"
+version = "0.1.0"
+license = "GPL-3.0"
+description = "Mazze Address Encoder/Decoder"
+
+[dependencies]
+mazze-types = { path = "../mazze_types" }
+lazy_static = "1.4"
+rustc-hex = "2.1"

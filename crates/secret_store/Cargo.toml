@@ -1,0 +1,16 @@
+[package]
+description = "Mazze secret key management library"
+homepage = "https://www.mazze.io"
+license = "GPL-3.0"
+name = "secret-store"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mazze-types = { path = "../mazze_types" }
+parking_lot = "0.11"
+rlp = "0.4.0"
+rand = "0.7"
+mazzekey = { path = "../mazze_key" }
+malloc_size_of_derive = {path = "../util/malloc_size_of_derive" }
+malloc_size_of= {path = "../util/malloc_size_of" }

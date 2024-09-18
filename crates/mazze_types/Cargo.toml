@@ -1,0 +1,15 @@
+[package]
+name = "mazze-types"
+version = "0.2.0"
+license = "GPL-3.0"
+description = "Mazze types"
+
+[dependencies]
+ethereum-types = "0.9"
+serde_derive = "1.0"
+serde = "1.0"
+rlp = "0.4.0"
+rlp_derive = { git = "https://github.com/MazzeLabs/mazze-parity-deps", rev = "223e9acc6f7ba9f1b296639f08b326a72d7b92fa"  }
+
+[features]
+storage_benchmark_no_account_space_check = []

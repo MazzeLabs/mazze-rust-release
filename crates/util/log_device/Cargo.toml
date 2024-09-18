@@ -1,0 +1,13 @@
+[package]
+name = "log-device"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+parking_lot = "0.11"
+byteorder = "1.2.7"
+db = { path = "../../dbs/db" }
+rlp = "0.4.0"
+rlp_derive = { git = "https://github.com/MazzeLabs/mazze-parity-deps", rev = "223e9acc6f7ba9f1b296639f08b326a72d7b92fa"  }
+kvdb = "0.4"
+rand = "0.7"

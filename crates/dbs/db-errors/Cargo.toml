@@ -1,0 +1,15 @@
+[package]
+description = "Mazze DB Error Types"
+homepage = "https://www.mazze.io"
+license = "GPL-3.0"
+name = "mazze-db-errors"
+version = "2.0.2"
+edition = "2021"
+
+[dependencies]
+primitives = { path = "../../primitives" }
+mazze-types = { path = "../../mazze_types" }
+rlp = "0.4.0"
+error-chain = { version = "0.12", default-features = false }
+sqlite = "0.25"
+strfmt = "0.1"

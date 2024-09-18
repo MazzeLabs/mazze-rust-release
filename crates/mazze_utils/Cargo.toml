@@ -1,0 +1,11 @@
+[package]
+description = "Mazze utilities library"
+homepage = "https://www.mazze.io"
+license = "GPL-3.0"
+name = "mazze-utils"
+version = "0.6.0"
+edition = "2021"
+
+[dependencies]
+log = "0.4"
+parking_lot = "0.11"

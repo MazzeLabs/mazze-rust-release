@@ -34,11 +34,30 @@ sudo ufw allow 58546 # jsonrpc_ws_eth_port
 ```
 
 
-### 4. Run
+### 4. Build and run
 ```bash
-./start-node.sh
-./start-miner.sh
+cargo build --release
+cd run && ./start-node.sh && ./start-miner.sh 
 ```
+
+### 5. Inspect logs
+
+The node and worker will output log files in `run/logs/`, one file for each process. The name of each log includes the timestamp when the process has been launched.
+To inspect the logs, we suggest using `tail` on the node/miner logs as follows:
+```bash
+# For the node
+# Replace <timestamp> with the actual file name timestamp (make sure to select the latest log file)
+
+tail -f run/logs/mazze-node-<timestamp>.txt
+
+# For the mining worker
+# Replace <timestamp> with the actual file name timestamp (make sure to select the latest log file)
+
+tail -f run/logs/mazze-miner-<timestamp>.txt
+```
+
+
+
 
 ## License
 

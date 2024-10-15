@@ -8,8 +8,12 @@ PID_FILE="miner_pid.txt"
 # Create logs directory if it doesn't exist
 mkdir -p logs
 
-MAZZE_MINER_LOG_FILE="./logs/mazze-miner-$(date +%Y-%m-%d_%H:%M:%S).txt"
-RUST_LOG=info $EXECUTABLE --config hydra.toml --worker-id 1 --num-threads 16 > "$MAZZE_MINER_LOG_FILE" 2>&1 &
+MAZZE_MINER_LOG_FILE="./logs/mazze-miner.log"
+
+# Add a timestamp line to the log file
+echo "-------$(date '+%Y-%m-%d %H:%M:%S')-------" >> "$MAZZE_MINER_LOG_FILE"
+
+RUST_LOG=info $EXECUTABLE --config hydra.toml --worker-id 1 --num-threads 16 >> "$MAZZE_MINER_LOG_FILE" 2>&1 &
 
 PID=$!
 

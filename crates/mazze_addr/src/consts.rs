@@ -53,7 +53,7 @@ const MAINNET_PREFIX: &str = "mazze";
 const TESTNET_PREFIX: &str = "mazzetest";
 const NETWORK_ID_PREFIX: &str = "net";
 // These two network_ids are reserved.
-const RESERVED_NETWORK_IDS: [u64; 2] = [1, 1029];
+const RESERVED_NETWORK_IDS: [u64; 2] = [1, 1990];
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum AddressType {

@@ -205,9 +205,12 @@ pub mod pow {
     // We target two blocks per second. This strikes a good balance between the
     // growth of the metadata, the memory consumption of the consensus graph,
     // and the confirmation speed
-    // Current value is 1 second, raised from 0.5 seconds
+    // Current value is 0.125 seconds (125000 usec), lowered from 0.5 seconds (500000 usec)
     // This value is being used to compute the number of blocks per hour, day, year.
-    pub const TARGET_AVERAGE_BLOCK_GENERATION_PERIOD: u64 = 10000000;
+    // One second is 1000000 usec
+
+    pub const ONE_SECOND_IN_USEC: u64 = 1000000;
+    pub const TARGET_AVERAGE_BLOCK_GENERATION_PERIOD: u64 = 125000;
 
     // TODO: compute a more appropriate initial difficulty
     // previous initial difficulty: 20_000_000_000;
@@ -259,13 +262,17 @@ pub mod block {
 }
 
 pub mod staking {
-    use super::pow::TARGET_AVERAGE_BLOCK_GENERATION_PERIOD;
+    use super::pow::{TARGET_AVERAGE_BLOCK_GENERATION_PERIOD, ONE_SECOND_IN_USEC};
     use crate::consensus::ONE_MAZZE_IN_MAZZY;
     use mazze_types::U256;
 
+    pub const BLOCKS_PER_SECOND: u64 = ONE_SECOND_IN_USEC / TARGET_AVERAGE_BLOCK_GENERATION_PERIOD;
+
+    // 8 blocks per second
+    pub const BLOCKS_PER_MINUTE: u64 = BLOCKS_PER_SECOND * 60;
+
     /// This is the number of blocks per hour.
-    pub const BLOCKS_PER_HOUR: u64 =
-        3600 * 1000000 / TARGET_AVERAGE_BLOCK_GENERATION_PERIOD;
+    pub const BLOCKS_PER_HOUR: u64 = BLOCKS_PER_MINUTE * 60;
     /// This is the number of blocks per day.
     pub const BLOCKS_PER_DAY: u64 = BLOCKS_PER_HOUR * 24;
     /// This is the number of blocks per year.

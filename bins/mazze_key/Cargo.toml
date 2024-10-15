@@ -8,12 +8,14 @@ authors = ["Parity Technologies <admin@parity.io>"]
 docopt = "1.0"
 env_logger = "0.5"
 mazzekey = { path = "../../crates/mazze_key" }
+mazze-addr = { path = "../../crates/mazze_addr" }
 panic_hook = { git = "https://github.com/MazzeLabs/mazze-parity-deps", rev = "223e9acc6f7ba9f1b296639f08b326a72d7b92fa"  }
 parity-wordlist="1.2"
 rustc-hex = "2.1"
 serde = "1.0"
 serde_derive = "1.0"
 threadpool = "1.7"
+hex = "0.4"
 
 [[bin]]
 name = "mazzekey"

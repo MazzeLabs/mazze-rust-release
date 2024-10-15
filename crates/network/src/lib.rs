@@ -198,7 +198,7 @@ impl NetworkConfiguration {
     pub fn network_id_to_known_mazze_network(id: u64) -> Network {
         match id {
             1 => Network::Test,
-            1029 => Network::Main,
+            1990 => Network::Main,
             n => Network::Id(n),
         }
     }

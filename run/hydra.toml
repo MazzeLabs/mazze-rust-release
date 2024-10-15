@@ -547,7 +547,7 @@ get_logs_filter_max_limit = 5000
 
 # The chain ID of Mazze Network (Mazze space)
 # 1 for testnet
-# 1029 for Mainnet (Hydra)
+# 1990 for Mainnet (Hydra)
 #
 chain_id = 1990
 

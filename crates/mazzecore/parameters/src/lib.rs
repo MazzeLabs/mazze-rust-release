@@ -66,7 +66,7 @@ pub mod consensus_internal {
     /// The maximum number of blocks to be executed in each epoch
     pub const EPOCH_EXECUTED_BLOCK_BOUND: usize = 200;
     // The initial base mining reward in uMAZZE.
-    pub const INITIAL_BASE_MINING_REWARD_IN_UMAZZE: u64 = 2_000_000;
+    pub const INITIAL_BASE_MINING_REWARD_IN_UMAZZE: u64 = 4_000_000;
     // The average number of blocks mined per quarter.
     pub const MINED_BLOCK_COUNT_PER_QUARTER: u64 = 15_768_000;
 
@@ -205,12 +205,12 @@ pub mod pow {
     // We target two blocks per second. This strikes a good balance between the
     // growth of the metadata, the memory consumption of the consensus graph,
     // and the confirmation speed
-    // Current value is 0.125 seconds (125000 usec), lowered from 0.5 seconds (500000 usec)
+    // Current value is 0.250 seconds (250000 usec), lowered from 0.5 seconds (500000 usec)
     // This value is being used to compute the number of blocks per hour, day, year.
     // One second is 1000000 usec
 
     pub const ONE_SECOND_IN_USEC: u64 = 1000000;
-    pub const TARGET_AVERAGE_BLOCK_GENERATION_PERIOD: u64 = 125000;
+    pub const TARGET_AVERAGE_BLOCK_GENERATION_PERIOD: u64 = 250000;
 
     // TODO: compute a more appropriate initial difficulty
     // previous initial difficulty: 20_000_000_000;

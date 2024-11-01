@@ -1,4 +1,4 @@
-use log::info;
+use log::{info, trace};
 use mazze_types::{H256, U256};
 use mazzecore::pow::{
     boundary_to_difficulty, PowComputer, ProofOfWorkProblem,
@@ -6,9 +6,15 @@ use mazzecore::pow::{
 };
 use serde_json::Value;
 use std::str::FromStr;
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+struct MiningState {
+    current_problem: Option<ProofOfWorkProblem>,
+    is_solved: bool,
+    solution_sender: Option<mpsc::Sender<ProofOfWorkSolution>>,
+}
 
 #[derive(Clone)]
 pub struct Miner {
@@ -16,15 +22,97 @@ pub struct Miner {
     pub worker_name: String,
     pow_computer: Arc<PowComputer>,
     num_threads: usize,
+    state: Arc<Mutex<MiningState>>,
 }
 
 impl Miner {
     pub fn new(num_threads: usize, worker_id: usize) -> Self {
-        Miner {
+        let state = Arc::new(Mutex::new(MiningState {
+            current_problem: None,
+            is_solved: false,
+            solution_sender: None,
+        }));
+
+        let miner = Miner {
             worker_id,
             worker_name: format!("worker-{}", worker_id),
             pow_computer: Arc::new(PowComputer::new()),
             num_threads,
+            state,
+        };
+
+        miner.spawn_mining_threads();
+        miner
+    }
+
+    fn spawn_mining_threads(&self) {
+        let partition_size = U256::MAX / U256::from(self.num_threads);
+
+        for i in 0..self.num_threads {
+            let state = Arc::clone(&self.state);
+            let pow = Arc::clone(&self.pow_computer);
+            let start_nonce = U256::from(i) * partition_size;
+            let nonce_range = partition_size;
+            let worker_name = self.worker_name.clone();
+
+            info!(
+                "[{}] Spawning mining thread {} with nonce range start: {}",
+                worker_name, i, start_nonce
+            );
+
+            thread::spawn(move || {
+                info!("[{}] Mining thread {} started", worker_name, i);
+
+                loop {
+                    let (problem, sender) = {
+                        let state_guard = state.lock().unwrap();
+                        if state_guard.is_solved {
+                            trace!(
+                                "[{}] Thread {}: Problem solved, yielding",
+                                worker_name,
+                                i
+                            );
+                            thread::yield_now();
+                            continue;
+                        }
+                        (
+                            state_guard.current_problem.clone(),
+                            state_guard.solution_sender.clone(),
+                        )
+                    };
+
+                    match (problem, sender) {
+                        (Some(problem), Some(sender)) => {
+                            trace!(
+                                "[{}] Thread {}: Mining with nonce start {}",
+                                worker_name,
+                                i,
+                                start_nonce
+                            );
+                            if let Some(solution) = pow.mine_range(
+                                &problem,
+                                start_nonce,
+                                Duration::from_secs(1),
+                            ) {
+                                let mut state_guard = state.lock().unwrap();
+                                if !state_guard.is_solved {
+                                    info!("[{}] Thread {}: Found solution with nonce {}", worker_name, i, solution.nonce);
+                                    state_guard.is_solved = true;
+                                    let _ = sender.send(solution);
+                                }
+                            }
+                        }
+                        _ => {
+                            trace!(
+                                "[{}] Thread {}: No problem to solve, yielding",
+                                worker_name,
+                                i
+                            );
+                            thread::yield_now();
+                        }
+                    }
+                }
+            });
         }
     }
 
@@ -32,21 +120,12 @@ impl Miner {
         &self, problem: &ProofOfWorkProblem, timeout: Duration,
     ) -> Option<ProofOfWorkSolution> {
         let (tx, rx) = mpsc::channel();
-        let problem = Arc::new(problem.clone());
-        let partition_size = U256::MAX / U256::from(self.num_threads);
 
-        for i in 0..self.num_threads {
-            let tx = tx.clone();
-            let problem = Arc::clone(&problem);
-            let pow = Arc::clone(&self.pow_computer);
-            thread::spawn(move || {
-                let start_nonce = U256::from(i) * partition_size;
-                if let Some(solution) =
-                    pow.mine_range(&problem, start_nonce, timeout)
-                {
-                    let _ = tx.send(solution);
-                }
-            });
+        {
+            let mut state = self.state.lock().unwrap();
+            state.current_problem = Some(problem.clone());
+            state.is_solved = false;
+            state.solution_sender = Some(tx);
         }
 
         rx.recv_timeout(timeout).ok()

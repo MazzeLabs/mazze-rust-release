@@ -1,4 +1,4 @@
-use log::{info, trace};
+use log::{info, trace, warn};
 use mazze_types::{H256, U256};
 use mazzecore::pow::{
     boundary_to_difficulty, ProofOfWorkProblem, ProofOfWorkSolution,
@@ -8,9 +8,9 @@ use serde_json::Value;
 use std::str::FromStr;
 use std::sync::{mpsc, Arc, RwLock};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-const CHECK_INTERVAL: u64 = 100; // Check for new problem every 100 nonces
+const CHECK_INTERVAL: u64 = 10; // Check for new problem every 10 nonces
 
 struct MiningState {
     current_problem: Option<ProofOfWorkProblem>,
@@ -85,9 +85,22 @@ impl Miner {
             thread::spawn(move || {
                 info!("[{}] Mining thread {} started", worker_name, i);
 
+                // Add delay based on thread number to stagger VM creation
+                // thread::sleep(Duration::from_millis(100 * (i as u64)));
+                let mut last_log_time = Instant::now();
+
+                // Initialize RandomX VM for this thread
+                // let flags = RandomXFlag::get_recommended_flags();
+                // let cache = RandomXCache::new(flags, &[0u8; 32])
+                //     .expect("Failed to create RandomX cache");
+                let mut seed = [0u8; 32];
+                seed[0] = i as u8; // Use thread ID as part of the seed
+
                 // Initialize RandomX VM for this thread
                 let flags = RandomXFlag::get_recommended_flags();
-                let vm = RandomXVM::new(flags, None, None)
+                let cache = RandomXCache::new(flags, &seed)
+                    .expect("Failed to create RandomX cache");
+                let vm = RandomXVM::new(flags, Some(cache), None)
                     .expect("Failed to create RandomX VM");
 
                 let mut current_problem: Option<ProofOfWorkProblem> = None;
@@ -111,50 +124,78 @@ impl Miner {
                                     "[{}] Thread {}: New problem received, block_height: {}",
                                     worker_name, i, problem.block_height
                                 );
-                            }
 
-                            let (start_nonce, end_nonce) =
-                                Self::calculate_nonce_range(
-                                    i,
-                                    num_threads,
-                                    &problem.boundary,
-                                );
-                            let mut current_nonce = start_nonce;
-                            while current_nonce < end_nonce {
-                                // Check for new problem periodically
-                                if current_nonce.low_u64() % CHECK_INTERVAL == 0
-                                {
-                                    let state_guard = state.read().unwrap();
-                                    if state_guard.current_problem.as_ref()
-                                        != Some(&problem)
-                                    {
-                                        break;
-                                    }
-                                }
-
-                                let hash = Self::compute_hash(
-                                    &vm,
-                                    &current_nonce,
-                                    &problem.block_hash,
-                                );
-                                let hash_u256 = U256::from(hash.as_bytes());
-
-                                if hash_u256 <= problem.boundary {
-                                    info!(
-                                        "[{}] Thread {}: Found solution with nonce {}",
-                                        worker_name, i, current_nonce
+                                let (start_nonce, end_nonce) =
+                                    Self::calculate_nonce_range(
+                                        i,
+                                        num_threads,
+                                        &problem.boundary,
                                     );
-                                    let solution = ProofOfWorkSolution {
-                                        nonce: current_nonce,
-                                    };
-                                    let _ = sender.send(solution);
-                                    break;
-                                }
+                                let mut current_nonce = start_nonce;
 
-                                current_nonce += U256::one();
+                                // Reset last_log_time when starting new problem
+                                last_log_time = Instant::now();
+
+                                while current_nonce < end_nonce {
+                                    // Check for new problem periodically
+                                    if current_nonce.low_u64() % CHECK_INTERVAL
+                                        == 0
+                                    {
+                                        let state_guard = state.read().unwrap();
+                                        if state_guard.current_problem.as_ref()
+                                            != Some(&problem)
+                                        {
+                                            break;
+                                        }
+                                    }
+
+                                    let hash = Self::compute_hash(
+                                        &vm,
+                                        &current_nonce,
+                                        &problem.block_hash,
+                                    );
+                                    let hash_u256 = U256::from(hash.as_bytes());
+
+                                    if hash_u256 <= problem.boundary {
+                                        trace!(
+                                            "[{}] Thread {}: Found solution with nonce {}",
+                                            worker_name, i, current_nonce
+                                        );
+                                        let solution = ProofOfWorkSolution {
+                                            nonce: current_nonce,
+                                        };
+                                        // let _ = sender.send(solution);
+
+                                        match sender.send(solution) {
+                                            Ok(_) => trace!(
+                                                "[{}] Thread {}: Successfully sent solution with nonce {}",
+                                                worker_name, i, current_nonce
+                                            ),
+                                            Err(e) => warn!(
+                                                "[{}] Thread {}: Failed to send solution: {}",
+                                                worker_name, i, e
+                                            ),
+                                        }
+                                    }
+
+                                    current_nonce = current_nonce
+                                        .overflowing_add(U256::one())
+                                        .0;
+                                }
                             }
                         }
                         _ => {
+                            if last_log_time.elapsed() >= Duration::from_secs(1)
+                            {
+                                info!(
+                                    "[{}] Thread {}: No problem, yielding",
+                                    worker_name, i
+                                );
+                                last_log_time = Instant::now();
+                            }
+
+                            // Add small sleep to prevent tight loop
+                            thread::sleep(Duration::from_millis(100));
                             thread::yield_now();
                         }
                     }
@@ -174,7 +215,17 @@ impl Miner {
             state.solution_sender = Some(tx);
         }
 
-        rx.recv_timeout(timeout).ok()
+        // Wait for solution with timeout
+        let result = rx.recv_timeout(timeout).ok();
+
+        // Only clear the problem if we got a solution or timed out
+        if result.is_some() || rx.try_recv().is_err() {
+            let mut state = self.state.write().unwrap();
+            state.current_problem = None;
+            state.solution_sender = None;
+        }
+
+        result
     }
 
     pub fn parse_job(

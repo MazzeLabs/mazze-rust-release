@@ -148,7 +148,7 @@ impl StratumClient {
         if let Some(problem) = &self.current_job {
             info!("Submitting share for job: {}", problem.block_height);
             let request = json!({
-                "id": 4,
+                "id": format!("{}-{}", solution.nonce, problem.block_height),
                 "method": "mining.submit",
                 "params": [
                     self.miner.worker_name, // Worker names

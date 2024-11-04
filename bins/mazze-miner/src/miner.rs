@@ -228,17 +228,13 @@ impl Miner {
         while start.elapsed() < timeout {
             for rx in &receivers {
                 if let Ok(solution) = rx.try_recv() {
-                    // Clear state and return solution
-                    let mut state = self.state.write().unwrap();
-                    state.current_problem = None;
-                    state.solution_senders = vec![None; self.num_threads];
                     return Some(solution);
                 }
             }
             thread::sleep(Duration::from_millis(1));
         }
 
-        // Clear state on timeout
+        // Clear state only on timeout
         let mut state = self.state.write().unwrap();
         state.current_problem = None;
         state.solution_senders = vec![None; self.num_threads];

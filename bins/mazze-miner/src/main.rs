@@ -4,7 +4,6 @@ use miner_config::MinerConfig;
 use std::process;
 use tokio;
 use tokio::signal::ctrl_c;
-use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 
 mod miner;
@@ -51,7 +50,10 @@ async fn connect_with_retry(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::init();
+    // env_logger::init();
+    env_logger::builder()
+        .format_timestamp_millis()
+        .init();
 
     info!("Initializing Mazze Miner client...");
 

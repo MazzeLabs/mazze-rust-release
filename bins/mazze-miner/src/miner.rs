@@ -11,7 +11,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
-const CHECK_INTERVAL: u64 = 10; // Check for new problem every 10 nonces
+// TODO: make this adjustable based on difficulty
+const CHECK_INTERVAL: u64 = 5; // Check for new problem every 5 nonces
 
 struct MiningState {
     current_problem: Option<ProofOfWorkProblem>,
@@ -96,10 +97,6 @@ impl Miner {
                 seed[0] = i as u8; // Use thread ID as part of the seed
 
                 let flags = RandomXFlag::get_recommended_flags();
-                let cache = RandomXCache::new(flags, &seed)
-                    .expect("Failed to create RandomX cache");
-                let vm = RandomXVM::new(flags, Some(cache), None)
-                    .expect("Failed to create RandomX VM");
 
                 let mut current_problem: Option<ProofOfWorkProblem> = None;
 
@@ -121,6 +118,16 @@ impl Miner {
                                     worker_name, i, problem.block_height
                                 );
 
+                                // Reinitialize RandomX VM with the new block hash
+                                let cache = RandomXCache::new(
+                                    flags,
+                                    &problem.block_hash.as_bytes(),
+                                )
+                                .expect("Failed to create RandomX cache");
+                                let vm =
+                                    RandomXVM::new(flags, Some(cache), None)
+                                        .expect("Failed to create RandomX VM");
+
                                 let (start_nonce, end_nonce) =
                                     Self::calculate_nonce_range(
                                         i,
@@ -128,7 +135,6 @@ impl Miner {
                                         &problem.boundary,
                                     );
                                 let mut current_nonce = start_nonce;
-
                                 last_log_time = Instant::now();
 
                                 while current_nonce < end_nonce {
@@ -142,7 +148,7 @@ impl Miner {
                                             break;
                                         }
                                     }
-                                    
+
                                     let hash = Self::compute_hash(
                                         &vm,
                                         &current_nonce,
@@ -175,6 +181,12 @@ impl Miner {
                                     current_nonce = current_nonce
                                         .overflowing_add(U256::one())
                                         .0;
+
+                                    if problem.difficulty < U256::from(100) {
+                                        thread::sleep(Duration::from_millis(
+                                            100,
+                                        ));
+                                    }
                                 }
                             }
                         }

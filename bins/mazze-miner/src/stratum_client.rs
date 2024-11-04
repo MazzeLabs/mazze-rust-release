@@ -1,5 +1,6 @@
 use futures::{SinkExt, StreamExt};
 use log::{debug, error, info, trace, warn};
+use mazze_types::U256;
 use mazzecore::pow::{ProofOfWorkProblem, ProofOfWorkSolution};
 use serde_json::{json, Value};
 use tokio::net::TcpStream;

@@ -6,15 +6,16 @@ use mazzecore::pow::{
 use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
 use serde_json::Value;
 use std::str::FromStr;
-use std::sync::{mpsc, Arc, RwLock};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
+use tokio::sync::broadcast;
 
 const CHECK_INTERVAL: u64 = 10; // Check for new problem every 10 nonces
 
 struct MiningState {
     current_problem: Option<ProofOfWorkProblem>,
-    solution_senders: Vec<Option<mpsc::Sender<ProofOfWorkSolution>>>,
+    stratum_sender: broadcast::Sender<(ProofOfWorkSolution, u64)>,
 }
 
 #[derive(Clone)]
@@ -26,10 +27,13 @@ pub struct Miner {
 }
 
 impl Miner {
-    pub fn new(num_threads: usize, worker_id: usize) -> Self {
+    pub fn new(
+        num_threads: usize, worker_id: usize,
+    ) -> (Self, broadcast::Receiver<(ProofOfWorkSolution, u64)>) {
+        let (tx, rx) = broadcast::channel(32);
         let state = Arc::new(RwLock::new(MiningState {
             current_problem: None,
-            solution_senders: vec![None; num_threads],
+            stratum_sender: tx,
         }));
 
         let miner = Miner {
@@ -40,7 +44,7 @@ impl Miner {
         };
 
         miner.spawn_mining_threads();
-        miner
+        (miner, rx)
     }
 
     fn compute_hash(vm: &RandomXVM, nonce: &U256, block_hash: &H256) -> H256 {
@@ -85,18 +89,12 @@ impl Miner {
             thread::spawn(move || {
                 info!("[{}] Mining thread {} started", worker_name, i);
 
-                // Add delay based on thread number to stagger VM creation
-                // thread::sleep(Duration::from_millis(100 * (i as u64)));
                 let mut last_log_time = Instant::now();
 
                 // Initialize RandomX VM for this thread
-                // let flags = RandomXFlag::get_recommended_flags();
-                // let cache = RandomXCache::new(flags, &[0u8; 32])
-                //     .expect("Failed to create RandomX cache");
                 let mut seed = [0u8; 32];
                 seed[0] = i as u8; // Use thread ID as part of the seed
 
-                // Initialize RandomX VM for this thread
                 let flags = RandomXFlag::get_recommended_flags();
                 let cache = RandomXCache::new(flags, &seed)
                     .expect("Failed to create RandomX cache");
@@ -106,18 +104,16 @@ impl Miner {
                 let mut current_problem: Option<ProofOfWorkProblem> = None;
 
                 loop {
-                    // Read current problem state (no locks held during mining)
                     let (problem, sender) = {
                         let state_guard = state.read().unwrap();
                         (
                             state_guard.current_problem.clone(),
-                            state_guard.solution_senders[i].clone(),
+                            state_guard.stratum_sender.clone(),
                         )
                     };
 
                     match (problem, sender) {
-                        (Some(problem), Some(sender)) => {
-                            // Check if problem changed
+                        (Some(problem), _sender) => {
                             if current_problem.as_ref() != Some(&problem) {
                                 current_problem = Some(problem.clone());
                                 info!(
@@ -133,11 +129,9 @@ impl Miner {
                                     );
                                 let mut current_nonce = start_nonce;
 
-                                // Reset last_log_time when starting new problem
                                 last_log_time = Instant::now();
 
                                 while current_nonce < end_nonce {
-                                    // Check for new problem periodically
                                     if current_nonce.low_u64() % CHECK_INTERVAL
                                         == 0
                                     {
@@ -148,7 +142,7 @@ impl Miner {
                                             break;
                                         }
                                     }
-
+                                    
                                     let hash = Self::compute_hash(
                                         &vm,
                                         &current_nonce,
@@ -164,15 +158,15 @@ impl Miner {
                                         let solution = ProofOfWorkSolution {
                                             nonce: current_nonce,
                                         };
-                                        // let _ = sender.send(solution);
 
-                                        match sender.send(solution) {
+                                        let state_guard = state.read().unwrap();
+                                        match state_guard.stratum_sender.send((solution, problem.block_height)) {
                                             Ok(_) => info!(
-                                                "[{}] Thread {}: Successfully sent solution with nonce {}",
-                                                worker_name, i, current_nonce
+                                                "[{}] Thread {}: Successfully sent solution with nonce {} for block {}",
+                                                worker_name, i, current_nonce, problem.block_height
                                             ),
                                             Err(e) => warn!(
-                                                "[{}] Thread {}: Failed to send solution: {}",
+                                                "[{}] Thread {}: Failed to send solution to stratum: {}",
                                                 worker_name, i, e
                                             ),
                                         }
@@ -195,7 +189,7 @@ impl Miner {
                             }
 
                             // Add small sleep to prevent tight loop
-                            thread::sleep(Duration::from_millis(100));
+                            thread::sleep(Duration::from_millis(10));
                             thread::yield_now();
                         }
                     }
@@ -204,47 +198,11 @@ impl Miner {
         }
     }
 
-    pub fn mine(
-        &self, problem: &ProofOfWorkProblem, timeout: std::time::Duration,
-    ) -> Option<ProofOfWorkSolution> {
-        let mut receivers = Vec::with_capacity(self.num_threads);
-        let mut senders = Vec::with_capacity(self.num_threads);
-
-        // Create channels for each thread
-        for _ in 0..self.num_threads {
-            let (tx, rx) = mpsc::channel();
-            senders.push(Some(tx));
-            receivers.push(rx);
-        }
-
+    pub fn mine(&self, problem: &ProofOfWorkProblem) {
         {
             let mut state = self.state.write().unwrap();
             state.current_problem = Some(problem.clone());
-            state.solution_senders = senders;
         }
-
-        // Wait for solutions until timeout
-        let start = Instant::now();
-        let mut first_solution = None;
-
-        while start.elapsed() < timeout {
-            for rx in &receivers {
-                if let Ok(solution) = rx.try_recv() {
-                    if first_solution.is_none() {
-                        first_solution = Some(solution);
-                    }
-                    // Continue receiving solutions until timeout
-                }
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-
-        // Clear state after timeout
-        let mut state = self.state.write().unwrap();
-        state.current_problem = None;
-        state.solution_senders = vec![None; self.num_threads];
-
-        first_solution
     }
 
     pub fn parse_job(

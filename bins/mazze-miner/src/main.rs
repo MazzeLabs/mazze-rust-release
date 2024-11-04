@@ -1,8 +1,10 @@
 use log::{error, info};
+use mazzecore::pow::ProofOfWorkSolution;
 use miner_config::MinerConfig;
 use std::process;
 use tokio;
 use tokio::signal::ctrl_c;
+use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 
 mod miner;
@@ -13,6 +15,10 @@ use stratum_client::StratumClient;
 
 async fn connect_with_retry(
     config: &MinerConfig, miner: Miner,
+    solution_receiver: tokio::sync::broadcast::Receiver<(
+        ProofOfWorkSolution,
+        u64,
+    )>,
 ) -> Result<StratumClient, Box<dyn std::error::Error>> {
     let initial_delay = Duration::from_secs(1);
     let max_delay = Duration::from_secs(60);
@@ -23,6 +29,7 @@ async fn connect_with_retry(
             &config.stratum_address,
             &config.stratum_secret,
             miner.clone(),
+            solution_receiver.resubscribe(),
         )
         .await
         {
@@ -61,7 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.worker_id, config.num_threads
     );
 
-    let miner = Miner::new(config.num_threads, config.worker_id);
+    let (miner, solution_receiver) =
+        Miner::new(config.num_threads, config.worker_id);
 
     // Set up Ctrl+C handler
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
@@ -73,7 +81,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     loop {
-        match connect_with_retry(&config, miner.clone()).await {
+        match connect_with_retry(
+            &config,
+            miner.clone(),
+            solution_receiver.resubscribe(),
+        )
+        .await
+        {
             Ok(mut client) => {
                 info!("Starting mining operation");
                 tokio::select! {

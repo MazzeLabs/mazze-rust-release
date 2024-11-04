@@ -14,7 +14,7 @@ const CHECK_INTERVAL: u64 = 10; // Check for new problem every 10 nonces
 
 struct MiningState {
     current_problem: Option<ProofOfWorkProblem>,
-    solution_sender: Option<mpsc::Sender<ProofOfWorkSolution>>,
+    solution_senders: Vec<Option<mpsc::Sender<ProofOfWorkSolution>>>,
 }
 
 #[derive(Clone)]
@@ -29,7 +29,7 @@ impl Miner {
     pub fn new(num_threads: usize, worker_id: usize) -> Self {
         let state = Arc::new(RwLock::new(MiningState {
             current_problem: None,
-            solution_sender: None,
+            solution_senders: vec![None; num_threads],
         }));
 
         let miner = Miner {
@@ -111,7 +111,7 @@ impl Miner {
                         let state_guard = state.read().unwrap();
                         (
                             state_guard.current_problem.clone(),
-                            state_guard.solution_sender.clone(),
+                            state_guard.solution_senders[i].clone(),
                         )
                     };
 
@@ -207,25 +207,42 @@ impl Miner {
     pub fn mine(
         &self, problem: &ProofOfWorkProblem, timeout: std::time::Duration,
     ) -> Option<ProofOfWorkSolution> {
-        let (tx, rx) = mpsc::channel();
+        let mut receivers = Vec::with_capacity(self.num_threads);
+        let mut senders = Vec::with_capacity(self.num_threads);
+
+        // Create channels for each thread
+        for _ in 0..self.num_threads {
+            let (tx, rx) = mpsc::channel();
+            senders.push(Some(tx));
+            receivers.push(rx);
+        }
 
         {
             let mut state = self.state.write().unwrap();
             state.current_problem = Some(problem.clone());
-            state.solution_sender = Some(tx);
+            state.solution_senders = senders;
         }
 
-        // Wait for solution with timeout
-        let result = rx.recv_timeout(timeout).ok();
-
-        // Only clear the problem if we got a solution or timed out
-        if result.is_some() || rx.try_recv().is_err() {
-            let mut state = self.state.write().unwrap();
-            state.current_problem = None;
-            state.solution_sender = None;
+        // Wait for first solution with timeout
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            for rx in &receivers {
+                if let Ok(solution) = rx.try_recv() {
+                    // Clear state and return solution
+                    let mut state = self.state.write().unwrap();
+                    state.current_problem = None;
+                    state.solution_senders = vec![None; self.num_threads];
+                    return Some(solution);
+                }
+            }
+            thread::sleep(Duration::from_millis(1));
         }
 
-        result
+        // Clear state on timeout
+        let mut state = self.state.write().unwrap();
+        state.current_problem = None;
+        state.solution_senders = vec![None; self.num_threads];
+        None
     }
 
     pub fn parse_job(

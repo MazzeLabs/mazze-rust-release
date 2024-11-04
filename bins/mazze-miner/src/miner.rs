@@ -157,7 +157,7 @@ impl Miner {
                                     let hash_u256 = U256::from(hash.as_bytes());
 
                                     if hash_u256 <= problem.boundary {
-                                        trace!(
+                                        info!(
                                             "[{}] Thread {}: Found solution with nonce {}",
                                             worker_name, i, current_nonce
                                         );
@@ -167,7 +167,7 @@ impl Miner {
                                         // let _ = sender.send(solution);
 
                                         match sender.send(solution) {
-                                            Ok(_) => trace!(
+                                            Ok(_) => info!(
                                                 "[{}] Thread {}: Successfully sent solution with nonce {}",
                                                 worker_name, i, current_nonce
                                             ),
@@ -223,22 +223,28 @@ impl Miner {
             state.solution_senders = senders;
         }
 
-        // Wait for first solution with timeout
+        // Wait for solutions until timeout
         let start = Instant::now();
+        let mut first_solution = None;
+
         while start.elapsed() < timeout {
             for rx in &receivers {
                 if let Ok(solution) = rx.try_recv() {
-                    return Some(solution);
+                    if first_solution.is_none() {
+                        first_solution = Some(solution);
+                    }
+                    // Continue receiving solutions until timeout
                 }
             }
             thread::sleep(Duration::from_millis(1));
         }
 
-        // Clear state only on timeout
+        // Clear state after timeout
         let mut state = self.state.write().unwrap();
         state.current_problem = None;
         state.solution_senders = vec![None; self.num_threads];
-        None
+
+        first_solution
     }
 
     pub fn parse_job(

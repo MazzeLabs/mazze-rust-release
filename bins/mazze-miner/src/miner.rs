@@ -6,6 +6,7 @@ use mazzecore::pow::{
 use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
 use serde_json::Value;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -16,8 +17,36 @@ const CYCLE_LENGTH: u64 = 1200; // 1 second
                                 // TODO: make this adjustable based on difficulty
 const CHECK_INTERVAL: u64 = 2; // Check for new problem every 2 nonces
 
+struct LocalProblemState {
+    problem: ProofOfWorkProblem,
+    hash_chunks: [u64; 4],
+}
+
+impl LocalProblemState {
+    fn new(problem: ProofOfWorkProblem) -> Self {
+        let hash_bytes = problem.block_hash.as_bytes();
+        let mut hash_chunks = [0u64; 4];
+
+        for i in 0..4 {
+            hash_chunks[i] = u64::from_le_bytes(
+                hash_bytes[i * 8..(i + 1) * 8].try_into().unwrap(),
+            );
+        }
+
+        Self {
+            problem,
+            hash_chunks,
+        }
+    }
+}
+struct AtomicProblemState {
+    block_height: AtomicU64,
+    block_hash: [AtomicU64; 4], // H256 split into 4 u64s for atomic access
+}
+
 struct MiningState {
     current_problem: Option<ProofOfWorkProblem>,
+    atomic_state: AtomicProblemState,
 }
 
 #[derive(Clone)]
@@ -38,6 +67,15 @@ impl Miner {
 
         let state = Arc::new(RwLock::new(MiningState {
             current_problem: None,
+            atomic_state: AtomicProblemState {
+                block_height: AtomicU64::new(0),
+                block_hash: [
+                    AtomicU64::new(0),
+                    AtomicU64::new(0),
+                    AtomicU64::new(0),
+                    AtomicU64::new(0),
+                ],
+            },
         }));
 
         let miner = Miner {
@@ -121,7 +159,7 @@ impl Miner {
 
                 let flags = RandomXFlag::get_recommended_flags();
 
-                let mut current_problem: Option<ProofOfWorkProblem> = None;
+                let mut current_problem: Option<LocalProblemState> = None;
 
                 loop {
                     let (problem, sender) = {
@@ -134,8 +172,12 @@ impl Miner {
 
                     match (problem, sender) {
                         (Some(problem), _sender) => {
-                            if current_problem.as_ref() != Some(&problem) {
-                                current_problem = Some(problem.clone());
+                            if current_problem.as_ref().map(|p| &p.problem)
+                                != Some(&problem)
+                            {
+                                current_problem = Some(LocalProblemState::new(
+                                    problem.clone(),
+                                ));
                                 info!(
                                     "[{}] Thread {}: New problem received, block_height: {}",
                                     worker_name, i, problem.block_height
@@ -164,11 +206,36 @@ impl Miner {
                                     if current_nonce.low_u64() % CHECK_INTERVAL
                                         == 0
                                     {
-                                        let state_guard = state.read().unwrap();
-                                        if state_guard.current_problem.as_ref()
-                                            != Some(&problem)
+                                        // Fast atomic checks first
+                                        let current_height = state
+                                            .read()
+                                            .unwrap()
+                                            .atomic_state
+                                            .block_height
+                                            .load(Ordering::Acquire);
+                                        if current_height
+                                            != problem.block_height
                                         {
                                             break;
+                                        }
+
+                                        // Only check block hash if height matches
+                                        let local_chunks = &current_problem
+                                            .as_ref()
+                                            .unwrap()
+                                            .hash_chunks;
+                                        let mut hash_matches = true;
+                                        for i in 0..4 {
+                                            let stored = state
+                                                .read()
+                                                .unwrap()
+                                                .atomic_state
+                                                .block_hash[i]
+                                                .load(Ordering::Acquire);
+                                            if stored != local_chunks[i] {
+                                                hash_matches = false;
+                                                break;
+                                            }
                                         }
                                     }
 
@@ -237,10 +304,23 @@ impl Miner {
     }
 
     pub fn mine(&self, problem: &ProofOfWorkProblem) {
-        {
-            let mut state = self.state.write().unwrap();
-            state.current_problem = Some(problem.clone());
+        let mut state = self.state.write().unwrap();
+
+        state
+            .atomic_state
+            .block_height
+            .store(problem.block_height, Ordering::Release);
+
+        // Split block hash into u64 chunks and store
+        let hash_bytes = problem.block_hash.as_bytes();
+        for i in 0..4 {
+            let val = u64::from_le_bytes(
+                hash_bytes[i * 8..(i + 1) * 8].try_into().unwrap(),
+            );
+            state.atomic_state.block_hash[i].store(val, Ordering::Release);
         }
+
+        state.current_problem = Some(problem.clone());
     }
 
     pub fn parse_job(

@@ -105,6 +105,39 @@ impl ThreadLocalVM {
     }
 }
 
+// Add new struct for atomic state snapshot
+struct AtomicStateSnapshot {
+    block_height: u64,
+    block_hash: [u64; 4],
+}
+
+// Add method to AtomicProblemState
+impl AtomicProblemState {
+    fn snapshot(&self) -> AtomicStateSnapshot {
+        AtomicStateSnapshot {
+            block_height: self.block_height.load(Ordering::Acquire),
+            block_hash: [
+                self.block_hash[0].load(Ordering::Acquire),
+                self.block_hash[1].load(Ordering::Acquire),
+                self.block_hash[2].load(Ordering::Acquire),
+                self.block_hash[3].load(Ordering::Acquire),
+            ],
+        }
+    }
+
+    fn update(&self, problem: &ProofOfWorkProblem) {
+        self.block_height
+            .store(problem.block_height, Ordering::Release);
+        let hash_bytes = problem.block_hash.as_bytes();
+        for i in 0..4 {
+            let val = u64::from_le_bytes(
+                hash_bytes[i * 8..(i + 1) * 8].try_into().unwrap(),
+            );
+            self.block_hash[i].store(val, Ordering::Release);
+        }
+    }
+}
+
 impl Miner {
     pub fn new(
         num_threads: usize, worker_id: usize,
@@ -245,52 +278,25 @@ impl Miner {
                                     if current_nonce.low_u64() % CHECK_INTERVAL
                                         == 0
                                     {
-                                        // Fast atomic checks first
-                                        let current_height = state
+                                        let snapshot = state
                                             .read()
                                             .unwrap()
                                             .atomic_state
-                                            .block_height
-                                            .load(Ordering::Acquire);
-                                        if current_height
+                                            .snapshot();
+
+                                        if snapshot.block_height
                                             != problem.block_height
                                         {
                                             break;
                                         }
 
-                                        // Only check block hash if height matches
                                         let local_chunks = &current_problem
                                             .as_ref()
                                             .unwrap()
                                             .hash_chunks;
-
-                                        // Get all hash chunks at once with a single lock
-                                        let stored_chunks = {
-                                            let state_guard =
-                                                state.read().unwrap();
-                                            [
-                                                state_guard
-                                                    .atomic_state
-                                                    .block_hash[0]
-                                                    .load(Ordering::Acquire),
-                                                state_guard
-                                                    .atomic_state
-                                                    .block_hash[1]
-                                                    .load(Ordering::Acquire),
-                                                state_guard
-                                                    .atomic_state
-                                                    .block_hash[2]
-                                                    .load(Ordering::Acquire),
-                                                state_guard
-                                                    .atomic_state
-                                                    .block_hash[3]
-                                                    .load(Ordering::Acquire),
-                                            ]
-                                        };
-
                                         let mut hash_matches = true;
                                         for i in 0..4 {
-                                            if stored_chunks[i]
+                                            if snapshot.block_hash[i]
                                                 != local_chunks[i]
                                             {
                                                 hash_matches = false;
@@ -370,21 +376,7 @@ impl Miner {
 
     pub fn mine(&self, problem: &ProofOfWorkProblem) {
         let mut state = self.state.write().unwrap();
-
-        state
-            .atomic_state
-            .block_height
-            .store(problem.block_height, Ordering::Release);
-
-        // Split block hash into u64 chunks and store
-        let hash_bytes = problem.block_hash.as_bytes();
-        for i in 0..4 {
-            let val = u64::from_le_bytes(
-                hash_bytes[i * 8..(i + 1) * 8].try_into().unwrap(),
-            );
-            state.atomic_state.block_hash[i].store(val, Ordering::Release);
-        }
-
+        state.atomic_state.update(problem);
         state.current_problem = Some(problem.clone());
     }
 

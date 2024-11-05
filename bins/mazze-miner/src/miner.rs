@@ -203,11 +203,8 @@ impl Miner {
 
                 let mut last_log_time = Instant::now();
 
-                // Initialize RandomX VM for this thread
-                let mut seed = [0u8; 32];
-                seed[0] = i as u8; // Use thread ID as part of the seed
-
                 let flags = RandomXFlag::get_recommended_flags();
+                let mut vm = ThreadLocalVM::new(flags, &H256::zero());
 
                 let mut current_problem: Option<LocalProblemState> = None;
 
@@ -233,17 +230,8 @@ impl Miner {
                                     worker_name, i, problem.block_height
                                 );
 
-                                // Reinitialize RandomX VM with the new block hash
-                                let cache = RandomXCache::new(
-                                    flags,
-                                    &problem.block_hash.as_bytes(),
-                                )
-                                .expect("Failed to create RandomX cache");
+                                vm.update_if_needed(&problem.block_hash);
 
-                                let vm = ThreadLocalVM::new(
-                                    flags,
-                                    &problem.block_hash,
-                                );
                                 let (start_nonce, end_nonce) =
                                     Self::calculate_nonce_range(
                                         i,

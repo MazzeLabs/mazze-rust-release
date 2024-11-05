@@ -264,6 +264,7 @@ impl Miner {
                                             .unwrap()
                                             .hash_chunks;
 
+                                        let mut hash_matches = true;
                                         for i in 0..4 {
                                             let stored = state
                                                 .read()
@@ -272,8 +273,12 @@ impl Miner {
                                                 .block_hash[i]
                                                 .load(Ordering::Acquire);
                                             if stored != local_chunks[i] {
+                                                hash_matches = false;
                                                 break;
                                             }
+                                        }
+                                        if !hash_matches {
+                                            break;
                                         }
                                     }
 

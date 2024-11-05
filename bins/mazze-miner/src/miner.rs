@@ -264,15 +264,35 @@ impl Miner {
                                             .unwrap()
                                             .hash_chunks;
 
+                                        // Get all hash chunks at once with a single lock
+                                        let stored_chunks = {
+                                            let state_guard =
+                                                state.read().unwrap();
+                                            [
+                                                state_guard
+                                                    .atomic_state
+                                                    .block_hash[0]
+                                                    .load(Ordering::Acquire),
+                                                state_guard
+                                                    .atomic_state
+                                                    .block_hash[1]
+                                                    .load(Ordering::Acquire),
+                                                state_guard
+                                                    .atomic_state
+                                                    .block_hash[2]
+                                                    .load(Ordering::Acquire),
+                                                state_guard
+                                                    .atomic_state
+                                                    .block_hash[3]
+                                                    .load(Ordering::Acquire),
+                                            ]
+                                        };
+
                                         let mut hash_matches = true;
                                         for i in 0..4 {
-                                            let stored = state
-                                                .read()
-                                                .unwrap()
-                                                .atomic_state
-                                                .block_hash[i]
-                                                .load(Ordering::Acquire);
-                                            if stored != local_chunks[i] {
+                                            if stored_chunks[i]
+                                                != local_chunks[i]
+                                            {
                                                 hash_matches = false;
                                                 break;
                                             }

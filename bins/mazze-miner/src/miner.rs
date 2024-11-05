@@ -6,17 +6,18 @@ use mazzecore::pow::{
 use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
 use serde_json::Value;
 use std::str::FromStr;
+use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
-// TODO: make this adjustable based on difficulty
-const CHECK_INTERVAL: u64 = 5; // Check for new problem every 5 nonces
+const CYCLE_LENGTH: u64 = 1200; // 1 second
+                                // TODO: make this adjustable based on difficulty
+const CHECK_INTERVAL: u64 = 2; // Check for new problem every 2 nonces
 
 struct MiningState {
     current_problem: Option<ProofOfWorkProblem>,
-    stratum_sender: broadcast::Sender<(ProofOfWorkSolution, u64)>,
 }
 
 #[derive(Clone)]
@@ -25,24 +26,47 @@ pub struct Miner {
     pub worker_name: String,
     num_threads: usize,
     state: Arc<RwLock<MiningState>>,
+    solution_sender: mpsc::Sender<(ProofOfWorkSolution, ProofOfWorkProblem)>,
 }
 
 impl Miner {
     pub fn new(
         num_threads: usize, worker_id: usize,
     ) -> (Self, broadcast::Receiver<(ProofOfWorkSolution, u64)>) {
-        let (tx, rx) = broadcast::channel(32);
+        let (stratum_tx, rx) = broadcast::channel(32);
+        let (solution_tx, solution_rx) = mpsc::channel();
+
         let state = Arc::new(RwLock::new(MiningState {
             current_problem: None,
-            stratum_sender: tx,
         }));
 
         let miner = Miner {
             worker_id,
             worker_name: format!("worker-{}", worker_id),
             num_threads,
-            state,
+            state: Arc::clone(&state),
+            solution_sender: solution_tx,
         };
+
+        // Spawn solution handling thread
+        let worker_name = miner.worker_name.clone();
+        thread::spawn(move || {
+            while let Ok((solution, problem)) = solution_rx.recv() {
+                if let Err(e) =
+                    stratum_tx.send((solution, problem.block_height))
+                {
+                    warn!(
+                        "[{}] Failed to send solution to stratum: {}",
+                        worker_name, e
+                    );
+                } else {
+                    // stop working on this problem
+                    if state.read().unwrap().current_problem == Some(problem) {
+                        state.write().unwrap().current_problem = None;
+                    }
+                }
+            }
+        });
 
         miner.spawn_mining_threads();
         (miner, rx)
@@ -62,20 +86,14 @@ impl Miner {
     fn calculate_nonce_range(
         thread_id: usize, num_threads: usize, boundary: &U256,
     ) -> (U256, U256) {
-        // Calculate total search space based on boundary
-        let total_space = U256::MAX / boundary;
-
-        // Calculate range size for each thread
-        let range_size = total_space / U256::from(num_threads);
-
-        // Calculate start and end for this thread
-        let start = U256::from(thread_id) * range_size * boundary;
+        // Focus on lower nonce ranges first
+        let range_size = U256::from(boundary) / U256::from(num_threads);
+        let start = range_size * U256::from(thread_id);
         let end = if thread_id == num_threads - 1 {
-            U256::MAX
+            U256::from(u64::MAX)
         } else {
-            (start + range_size * boundary) - U256::one()
+            start + range_size
         };
-
         (start, end)
     }
 
@@ -84,10 +102,15 @@ impl Miner {
             let state = Arc::clone(&self.state);
             let worker_name = self.worker_name.clone();
             let num_threads = self.num_threads;
+            let solution_sender = self.solution_sender.clone();
 
             info!("[{}] Spawning mining thread {}", worker_name, i);
 
             thread::spawn(move || {
+                thread::sleep(Duration::from_millis(
+                    ((CYCLE_LENGTH as usize / num_threads) * i) as u64,
+                ));
+
                 info!("[{}] Mining thread {} started", worker_name, i);
 
                 let mut last_log_time = Instant::now();
@@ -105,7 +128,7 @@ impl Miner {
                         let state_guard = state.read().unwrap();
                         (
                             state_guard.current_problem.clone(),
-                            state_guard.stratum_sender.clone(),
+                            solution_sender.clone(),
                         )
                     };
 
@@ -157,6 +180,18 @@ impl Miner {
                                     let hash_u256 = U256::from(hash.as_bytes());
 
                                     if hash_u256 <= problem.boundary {
+                                        let is_current = {
+                                            let state = state.read().unwrap();
+                                            state.current_problem
+                                                == Some(problem.clone())
+                                        };
+                                        if !is_current {
+                                            trace!(
+                                                "[{}] Thread {}: Found solution for stale problem, skipping",
+                                                worker_name, i
+                                            );
+                                            continue;
+                                        }
                                         info!(
                                             "[{}] Thread {}: Found solution with nonce {}",
                                             worker_name, i, current_nonce
@@ -165,28 +200,22 @@ impl Miner {
                                             nonce: current_nonce,
                                         };
 
-                                        let state_guard = state.read().unwrap();
-                                        match state_guard.stratum_sender.send((solution, problem.block_height)) {
+                                        match solution_sender.send((solution, problem.clone())) {
                                             Ok(_) => info!(
                                                 "[{}] Thread {}: Successfully sent solution with nonce {} for block {}",
                                                 worker_name, i, current_nonce, problem.block_height
                                             ),
                                             Err(e) => warn!(
-                                                "[{}] Thread {}: Failed to send solution to stratum: {}",
+                                                "[{}] Thread {}: Failed to send solution: {}",
                                                 worker_name, i, e
                                             ),
                                         }
+                                        break;
                                     }
 
                                     current_nonce = current_nonce
                                         .overflowing_add(U256::one())
                                         .0;
-
-                                    if problem.difficulty < U256::from(100) {
-                                        thread::sleep(Duration::from_millis(
-                                            100,
-                                        ));
-                                    }
                                 }
                             }
                         }
@@ -199,9 +228,6 @@ impl Miner {
                                 );
                                 last_log_time = Instant::now();
                             }
-
-                            // Add small sleep to prevent tight loop
-                            thread::sleep(Duration::from_millis(10));
                             thread::yield_now();
                         }
                     }

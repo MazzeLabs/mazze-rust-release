@@ -170,6 +170,12 @@ impl Miner {
         let worker_name = miner.worker_name.clone();
         thread::spawn(move || {
             while let Ok((solution, problem)) = solution_rx.recv() {
+                // Single lock acquisition for state update
+                let should_clear_problem = {
+                    let state_guard = state.read().unwrap();
+                    state_guard.current_problem == Some(problem.clone())
+                };
+
                 if let Err(e) =
                     stratum_tx.send((solution, problem.block_height))
                 {
@@ -177,11 +183,9 @@ impl Miner {
                         "[{}] Failed to send solution to stratum: {}",
                         worker_name, e
                     );
-                } else {
-                    // stop working on this problem
-                    if state.read().unwrap().current_problem == Some(problem) {
-                        state.write().unwrap().current_problem = None;
-                    }
+                } else if should_clear_problem {
+                    // Only acquire write lock if we need to clear the problem
+                    state.write().unwrap().current_problem = None;
                 }
             }
         });

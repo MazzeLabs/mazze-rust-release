@@ -59,6 +59,52 @@ pub struct Miner {
     solution_sender: mpsc::Sender<(ProofOfWorkSolution, ProofOfWorkProblem)>,
 }
 
+struct ThreadLocalVM {
+    vm: RandomXVM,
+    cache: RandomXCache,
+    current_block_hash: H256,
+    flags: RandomXFlag,
+}
+
+impl ThreadLocalVM {
+    fn new(flags: RandomXFlag, block_hash: &H256) -> Self {
+        let cache = RandomXCache::new(flags, block_hash.as_bytes())
+            .expect("Failed to create RandomX cache");
+        let vm = RandomXVM::new(flags, Some(cache.clone()), None)
+            .expect("Failed to create RandomX VM");
+
+        Self {
+            vm,
+            cache,
+            current_block_hash: *block_hash,
+            flags,
+        }
+    }
+
+    fn update_if_needed(&mut self, block_hash: &H256) {
+        if self.current_block_hash != *block_hash {
+            self.cache = RandomXCache::new(self.flags, block_hash.as_bytes())
+                .expect("Failed to create RandomX cache");
+            self.vm =
+                RandomXVM::new(self.flags, Some(self.cache.clone()), None)
+                    .expect("Failed to create RandomX VM");
+            self.current_block_hash = *block_hash;
+        }
+    }
+
+    fn compute_hash(&self, nonce: &U256, block_hash: &H256) -> H256 {
+        let mut input = [0u8; 64];
+        input[..32].copy_from_slice(block_hash.as_bytes());
+        nonce.to_little_endian(&mut input[32..64]);
+
+        let hash = self
+            .vm
+            .calculate_hash(&input)
+            .expect("Failed to calculate hash");
+        H256::from_slice(&hash)
+    }
+}
+
 impl Miner {
     pub fn new(
         num_threads: usize, worker_id: usize,
@@ -109,17 +155,6 @@ impl Miner {
 
         miner.spawn_mining_threads();
         (miner, rx)
-    }
-
-    fn compute_hash(vm: &RandomXVM, nonce: &U256, block_hash: &H256) -> H256 {
-        let mut input = [0u8; 64];
-        for i in 0..32 {
-            input[i] = block_hash[i];
-        }
-        nonce.to_little_endian(&mut input[32..64]);
-
-        let hash = vm.calculate_hash(&input).expect("Failed to calculate hash");
-        H256::from_slice(&hash)
     }
 
     fn calculate_nonce_range(
@@ -204,10 +239,11 @@ impl Miner {
                                     &problem.block_hash.as_bytes(),
                                 )
                                 .expect("Failed to create RandomX cache");
-                                let vm =
-                                    RandomXVM::new(flags, Some(cache), None)
-                                        .expect("Failed to create RandomX VM");
 
+                                let vm = ThreadLocalVM::new(
+                                    flags,
+                                    &problem.block_hash,
+                                );
                                 let (start_nonce, end_nonce) =
                                     Self::calculate_nonce_range(
                                         i,
@@ -239,7 +275,7 @@ impl Miner {
                                             .as_ref()
                                             .unwrap()
                                             .hash_chunks;
-                                        let mut hash_matches = true;
+
                                         for i in 0..4 {
                                             let stored = state
                                                 .read()
@@ -248,14 +284,12 @@ impl Miner {
                                                 .block_hash[i]
                                                 .load(Ordering::Acquire);
                                             if stored != local_chunks[i] {
-                                                hash_matches = false;
                                                 break;
                                             }
                                         }
                                     }
 
-                                    let hash = Self::compute_hash(
-                                        &vm,
+                                    let hash = vm.compute_hash(
                                         &current_nonce,
                                         &problem.block_hash,
                                     );

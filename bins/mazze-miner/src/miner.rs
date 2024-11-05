@@ -1,3 +1,4 @@
+use core_affinity;
 use log::{info, trace, warn};
 use mazze_types::{H256, U256};
 use mazzecore::pow::{
@@ -136,20 +137,34 @@ impl Miner {
     }
 
     fn spawn_mining_threads(&self) {
+        let core_ids =
+            core_affinity::get_core_ids().expect("Failed to get core IDs");
+        let core_count = core_ids.len();
+
         for i in 0..self.num_threads {
             let state = Arc::clone(&self.state);
             let worker_name = self.worker_name.clone();
             let num_threads = self.num_threads;
             let solution_sender = self.solution_sender.clone();
+            let core_id = core_ids[i % core_count];
 
-            info!("[{}] Spawning mining thread {}", worker_name, i);
+            info!(
+                "[{}] Spawning mining thread {} on core {}",
+                worker_name, i, core_id.id
+            );
 
             thread::spawn(move || {
+                // Pin thread to specific core
+                core_affinity::set_for_current(core_id);
+
                 thread::sleep(Duration::from_millis(
                     ((CYCLE_LENGTH as usize / num_threads) * i) as u64,
                 ));
 
-                info!("[{}] Mining thread {} started", worker_name, i);
+                info!(
+                    "[{}] Mining thread {} started on core {}",
+                    worker_name, i, core_id.id
+                );
 
                 let mut last_log_time = Instant::now();
 

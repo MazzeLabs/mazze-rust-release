@@ -309,37 +309,40 @@ impl Miner {
                                     let hash_u256 = U256::from(hash.as_bytes());
 
                                     if hash_u256 <= problem.boundary {
-                                        let is_current = {
-                                            let state = state.read().unwrap();
-                                            state.current_problem
-                                                == Some(problem.clone())
-                                        };
-                                        if !is_current {
+                                        // Single lock acquisition for all solution validation
+                                        let state_guard = state.read().unwrap();
+                                        if state_guard.current_problem
+                                            == Some(problem.clone())
+                                        {
+                                            info!(
+                                                "[{}] Thread {}: Found solution with nonce {}",
+                                                worker_name, i, current_nonce
+                                            );
+                                            let solution =
+                                                ProofOfWorkSolution {
+                                                    nonce: current_nonce,
+                                                };
+                                            drop(state_guard); // Release lock before potentially slow operation
+
+                                            if solution_sender
+                                                .send((
+                                                    solution,
+                                                    problem.clone(),
+                                                ))
+                                                .is_ok()
+                                            {
+                                                info!(
+                                                    "[{}] Thread {}: Successfully sent solution with nonce {} for block {}",
+                                                    worker_name, i, current_nonce, problem.block_height
+                                                );
+                                                break;
+                                            }
+                                        } else {
                                             trace!(
                                                 "[{}] Thread {}: Found solution for stale problem, skipping",
                                                 worker_name, i
                                             );
-                                            continue;
                                         }
-                                        info!(
-                                            "[{}] Thread {}: Found solution with nonce {}",
-                                            worker_name, i, current_nonce
-                                        );
-                                        let solution = ProofOfWorkSolution {
-                                            nonce: current_nonce,
-                                        };
-
-                                        match solution_sender.send((solution, problem.clone())) {
-                                            Ok(_) => info!(
-                                                "[{}] Thread {}: Successfully sent solution with nonce {} for block {}",
-                                                worker_name, i, current_nonce, problem.block_height
-                                            ),
-                                            Err(e) => warn!(
-                                                "[{}] Thread {}: Failed to send solution: {}",
-                                                worker_name, i, e
-                                            ),
-                                        }
-                                        break;
                                     }
 
                                     current_nonce = current_nonce

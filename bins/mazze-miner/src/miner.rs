@@ -7,7 +7,7 @@ use mazzecore::pow::{
 use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
 use serde_json::Value;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{self, AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -43,11 +43,11 @@ impl LocalProblemState {
 struct AtomicProblemState {
     block_height: AtomicU64,
     block_hash: [AtomicU64; 4], // H256 split into 4 u64s for atomic access
+    is_active: AtomicBool,
 }
 
 struct MiningState {
     current_problem: Option<ProofOfWorkProblem>,
-    atomic_state: AtomicProblemState,
 }
 
 #[derive(Clone)]
@@ -56,6 +56,7 @@ pub struct Miner {
     pub worker_name: String,
     num_threads: usize,
     state: Arc<RwLock<MiningState>>,
+    atomic_state: Arc<AtomicProblemState>,
     solution_sender: mpsc::Sender<(ProofOfWorkSolution, ProofOfWorkProblem)>,
 }
 
@@ -147,22 +148,25 @@ impl Miner {
 
         let state = Arc::new(RwLock::new(MiningState {
             current_problem: None,
-            atomic_state: AtomicProblemState {
-                block_height: AtomicU64::new(0),
-                block_hash: [
-                    AtomicU64::new(0),
-                    AtomicU64::new(0),
-                    AtomicU64::new(0),
-                    AtomicU64::new(0),
-                ],
-            },
         }));
+
+        let atomic_state = Arc::new(AtomicProblemState {
+            block_height: AtomicU64::new(0),
+            block_hash: [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ],
+            is_active: AtomicBool::new(false),
+        });
 
         let miner = Miner {
             worker_id,
             worker_name: format!("worker-{}", worker_id),
             num_threads,
             state: Arc::clone(&state),
+            atomic_state: Arc::clone(&atomic_state),
             solution_sender: solution_tx,
         };
 
@@ -219,6 +223,7 @@ impl Miner {
             let num_threads = self.num_threads;
             let solution_sender = self.solution_sender.clone();
             let core_id = core_ids[i % core_count];
+            let atomic_state = Arc::clone(&self.atomic_state);
 
             info!(
                 "[{}] Spawning mining thread {} on core {}",
@@ -282,32 +287,38 @@ impl Miner {
                                     if current_nonce.low_u64() % CHECK_INTERVAL
                                         == 0
                                     {
-                                        let snapshot = state
-                                            .read()
-                                            .unwrap()
-                                            .atomic_state
-                                            .snapshot();
-
-                                        if snapshot.block_height
+                                        let current_height = atomic_state
+                                            .block_height
+                                            .load(Ordering::Acquire);
+                                        if current_height
                                             != problem.block_height
                                         {
                                             break;
                                         }
 
-                                        let local_chunks = &current_problem
-                                            .as_ref()
-                                            .unwrap()
-                                            .hash_chunks;
                                         let mut hash_matches = true;
+                                        let hash_bytes =
+                                            problem.block_hash.as_bytes();
                                         for i in 0..4 {
-                                            if snapshot.block_hash[i]
-                                                != local_chunks[i]
-                                            {
+                                            let stored =
+                                                atomic_state.block_hash[i]
+                                                    .load(Ordering::Acquire);
+                                            let expected = u64::from_le_bytes(
+                                                hash_bytes[i * 8..(i + 1) * 8]
+                                                    .try_into()
+                                                    .unwrap(),
+                                            );
+                                            if stored != expected {
                                                 hash_matches = false;
                                                 break;
                                             }
                                         }
-                                        if !hash_matches {
+
+                                        if !hash_matches
+                                            || !atomic_state
+                                                .is_active
+                                                .load(Ordering::Acquire)
+                                        {
                                             break;
                                         }
                                     }
@@ -379,8 +390,24 @@ impl Miner {
     }
 
     pub fn mine(&self, problem: &ProofOfWorkProblem) {
+        self.atomic_state
+            .block_height
+            .store(problem.block_height, Ordering::Release);
+
+        let hash_bytes = problem.block_hash.as_bytes();
+        for i in 0..4 {
+            let val = u64::from_le_bytes(
+                hash_bytes[i * 8..(i + 1) * 8].try_into().unwrap(),
+            );
+            self.atomic_state.block_hash[i].store(val, Ordering::Release);
+        }
+
+        // Memory fence to ensure all hash bytes are written before setting active
+        atomic::fence(Ordering::Release);
+        self.atomic_state.is_active.store(true, Ordering::Release);
+
+        // Update RwLock state only for solution handling
         let mut state = self.state.write().unwrap();
-        state.atomic_state.update(problem);
         state.current_problem = Some(problem.clone());
     }
 

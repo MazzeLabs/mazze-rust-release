@@ -6,10 +6,7 @@ use mazzecore::pow::{
 };
 use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
 use serde_json::Value;
-use std::arch::x86_64::{
-    __m256i, _mm256_cmpgt_epi8, _mm256_loadu_si256, _mm256_set1_epi8,
-    _mm256_testc_si256,
-};
+use std::mem;
 use std::str::FromStr;
 use std::sync::atomic::{self, AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -18,108 +15,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
-const CYCLE_LENGTH: u64 = 1200; // 1 second
-                                // TODO: make this adjustable based on difficulty
+use crate::core::*;
+
 const CHECK_INTERVAL: u64 = 2; // Check for new problem every 2 nonces
 
 const BATCH_SIZE: usize = 8;
-
-struct BatchHasher {
-    inputs: Vec<Vec<u8>>,
-    prefetch_buffer: Vec<u8>, // New field
-}
-
-impl BatchHasher {
-    fn new() -> Self {
-        Self {
-            inputs: Vec::with_capacity(BATCH_SIZE),
-            prefetch_buffer: vec![0u8; 64 * BATCH_SIZE * 2],
-        }
-    }
-
-    fn prepare_batch(&mut self, start_nonce: U256, block_hash: &H256) {
-        self.inputs.clear();
-
-        for i in 0..BATCH_SIZE {
-            let nonce = start_nonce + i;
-            let mut input = vec![0u8; 64];
-
-            // Copy block hash
-            input[..32].copy_from_slice(block_hash.as_bytes());
-
-            // Set nonce
-            nonce.to_little_endian(&mut input[32..64]);
-
-            self.inputs.push(input);
-        }
-    }
-
-    fn compute_hash_batch(
-        &mut self, vm: &RandomXVM, start_nonce: U256, block_hash: &H256,
-    ) -> Vec<H256> {
-        self.prepare_batch(start_nonce, block_hash);
-
-        let input_refs: Vec<&[u8]> =
-            self.inputs.iter().map(|v| v.as_slice()).collect();
-
-        let hashes = vm
-            .calculate_hash_set(&input_refs)
-            .expect("Failed to calculate hash batch");
-
-        hashes
-            .into_iter()
-            .map(|hash| H256::from_slice(&hash))
-            .collect()
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    unsafe fn compare_hashes_simd(
-        &self, hashes: &[H256], boundary: &U256,
-    ) -> Option<usize> {
-        let mut boundary_bytes = [0u8; 32];
-        boundary.to_little_endian(&mut boundary_bytes);
-        let boundary_vec =
-            _mm256_loadu_si256(boundary_bytes.as_ptr() as *const __m256i);
-
-        for (i, hash) in hashes.iter().enumerate() {
-            let hash_vec =
-                _mm256_loadu_si256(hash.as_bytes().as_ptr() as *const __m256i);
-            let cmp = _mm256_cmpgt_epi8(boundary_vec, hash_vec);
-            if _mm256_testc_si256(cmp, _mm256_set1_epi8(-1)) != 0 {
-                return Some(i);
-            }
-        }
-        None
-    }
-}
-
-struct LocalProblemState {
-    problem: ProofOfWorkProblem,
-    hash_chunks: [u64; 4],
-}
-
-impl LocalProblemState {
-    fn new(problem: ProofOfWorkProblem) -> Self {
-        let hash_bytes = problem.block_hash.as_bytes();
-        let mut hash_chunks = [0u64; 4];
-
-        for i in 0..4 {
-            hash_chunks[i] = u64::from_le_bytes(
-                hash_bytes[i * 8..(i + 1) * 8].try_into().unwrap(),
-            );
-        }
-
-        Self {
-            problem,
-            hash_chunks,
-        }
-    }
-}
-struct AtomicProblemState {
-    block_height: AtomicU64,
-    block_hash: [AtomicU64; 4], // H256 split into 4 u64s for atomic access
-    is_active: AtomicBool,
-}
 
 struct MiningState {
     current_problem: Option<ProofOfWorkProblem>,
@@ -130,88 +30,8 @@ pub struct Miner {
     pub worker_id: usize,
     pub worker_name: String,
     num_threads: usize,
-    state: Arc<RwLock<MiningState>>,
     atomic_state: Arc<AtomicProblemState>,
-    solution_sender: mpsc::Sender<(ProofOfWorkSolution, ProofOfWorkProblem)>,
-}
-
-struct ThreadLocalVM {
-    vm: RandomXVM,
-    cache: RandomXCache,
-    current_block_hash: H256,
-    flags: RandomXFlag,
-}
-
-impl ThreadLocalVM {
-    fn new(flags: RandomXFlag, block_hash: &H256) -> Self {
-        let cache = RandomXCache::new(flags, block_hash.as_bytes())
-            .expect("Failed to create RandomX cache");
-        let vm = RandomXVM::new(flags, Some(cache.clone()), None)
-            .expect("Failed to create RandomX VM");
-
-        Self {
-            vm,
-            cache,
-            current_block_hash: *block_hash,
-            flags,
-        }
-    }
-
-    fn update_if_needed(&mut self, block_hash: &H256) {
-        if self.current_block_hash != *block_hash {
-            self.cache = RandomXCache::new(self.flags, block_hash.as_bytes())
-                .expect("Failed to create RandomX cache");
-            self.vm =
-                RandomXVM::new(self.flags, Some(self.cache.clone()), None)
-                    .expect("Failed to create RandomX VM");
-            self.current_block_hash = *block_hash;
-        }
-    }
-
-    fn compute_hash(&self, nonce: &U256, block_hash: &H256) -> H256 {
-        let mut input = [0u8; 64];
-        input[..32].copy_from_slice(block_hash.as_bytes());
-        nonce.to_little_endian(&mut input[32..64]);
-
-        let hash = self
-            .vm
-            .calculate_hash(&input)
-            .expect("Failed to calculate hash");
-        H256::from_slice(&hash)
-    }
-}
-
-// Add new struct for atomic state snapshot
-struct AtomicStateSnapshot {
-    block_height: u64,
-    block_hash: [u64; 4],
-}
-
-// Add method to AtomicProblemState
-impl AtomicProblemState {
-    fn snapshot(&self) -> AtomicStateSnapshot {
-        AtomicStateSnapshot {
-            block_height: self.block_height.load(Ordering::Acquire),
-            block_hash: [
-                self.block_hash[0].load(Ordering::Acquire),
-                self.block_hash[1].load(Ordering::Acquire),
-                self.block_hash[2].load(Ordering::Acquire),
-                self.block_hash[3].load(Ordering::Acquire),
-            ],
-        }
-    }
-
-    fn update(&self, problem: &ProofOfWorkProblem) {
-        self.block_height
-            .store(problem.block_height, Ordering::Release);
-        let hash_bytes = problem.block_hash.as_bytes();
-        for i in 0..4 {
-            let val = u64::from_le_bytes(
-                hash_bytes[i * 8..(i + 1) * 8].try_into().unwrap(),
-            );
-            self.block_hash[i].store(val, Ordering::Release);
-        }
-    }
+    solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
 }
 
 impl Miner {
@@ -221,50 +41,27 @@ impl Miner {
         let (stratum_tx, rx) = broadcast::channel(32);
         let (solution_tx, solution_rx) = mpsc::channel();
 
-        let state = Arc::new(RwLock::new(MiningState {
-            current_problem: None,
-        }));
-
-        let atomic_state = Arc::new(AtomicProblemState {
-            block_height: AtomicU64::new(0),
-            block_hash: [
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-            ],
-            is_active: AtomicBool::new(false),
-        });
+        let atomic_state = Arc::new(AtomicProblemState::default());
 
         let miner = Miner {
             worker_id,
             worker_name: format!("worker-{}", worker_id),
             num_threads,
-            state: Arc::clone(&state),
             atomic_state: Arc::clone(&atomic_state),
             solution_sender: solution_tx,
         };
 
         // Spawn solution handling thread
         let worker_name = miner.worker_name.clone();
+        let atomic_state = Arc::clone(&atomic_state);
         thread::spawn(move || {
-            while let Ok((solution, problem)) = solution_rx.recv() {
-                // Single lock acquisition for state update
-                let should_clear_problem = {
-                    let state_guard = state.read().unwrap();
-                    state_guard.current_problem == Some(problem.clone())
-                };
-
-                if let Err(e) =
-                    stratum_tx.send((solution, problem.block_height))
-                {
+            while let Ok((solution, block_height)) = solution_rx.recv() {
+                // TODO: add hash check here
+                if let Err(e) = stratum_tx.send((solution, block_height)) {
                     warn!(
                         "[{}] Failed to send solution to stratum: {}",
                         worker_name, e
                     );
-                } else if should_clear_problem {
-                    // Only acquire write lock if we need to clear the problem
-                    state.write().unwrap().current_problem = None;
                 }
             }
         });
@@ -273,189 +70,25 @@ impl Miner {
         (miner, rx)
     }
 
-    fn calculate_nonce_range(
-        thread_id: usize, num_threads: usize, boundary: &U256,
-    ) -> (U256, U256) {
-        // Focus on lower nonce ranges first
-        let range_size = U256::from(boundary) / U256::from(num_threads);
-        let start = range_size * U256::from(thread_id);
-        let end = if thread_id == num_threads - 1 {
-            U256::from(u64::MAX)
-        } else {
-            start + range_size
-        };
-        (start, end)
-    }
+    pub fn mine(&mut self, problem: &ProofOfWorkProblem) {
+        // Create new atomic state from problem
+        let mut new_state = AtomicProblemState::new(
+            problem.block_height,
+            problem.block_hash,
+            problem.boundary,
+        );
 
-    fn spawn_mining_threads(&self) {
-        let core_ids =
-            core_affinity::get_core_ids().expect("Failed to get core IDs");
-        let core_count = core_ids.len();
+        // Swap the new state with the old one atomically
+        let old_state = Arc::get_mut(&mut self.atomic_state)
+            .expect("Cannot get mutable reference to atomic state");
+        mem::swap(old_state, &mut new_state);
 
-        for i in 0..self.num_threads {
-            let state = Arc::clone(&self.state);
-            let worker_name = self.worker_name.clone();
-            let num_threads = self.num_threads;
-            let solution_sender = self.solution_sender.clone();
-            let core_id = core_ids[i % core_count];
-            let atomic_state = Arc::clone(&self.atomic_state);
-
-            info!(
-                "[{}] Spawning mining thread {} on core {}",
-                worker_name, i, core_id.id
-            );
-
-            thread::spawn(move || {
-                // Pin thread to specific core
-                core_affinity::set_for_current(core_id);
-
-                thread::sleep(Duration::from_millis(
-                    ((CYCLE_LENGTH as usize / num_threads) * i) as u64,
-                ));
-
-                info!(
-                    "[{}] Mining thread {} started on core {}",
-                    worker_name, i, core_id.id
-                );
-
-                let mut last_log_time = Instant::now();
-
-                let flags = RandomXFlag::get_recommended_flags();
-                let mut vm = ThreadLocalVM::new(flags, &H256::zero());
-
-                let mut current_problem: Option<LocalProblemState> = None;
-                let mut hasher = BatchHasher::new();
-
-                loop {
-                    let (problem, sender) = {
-                        let state_guard = state.read().unwrap();
-                        (
-                            state_guard.current_problem.clone(),
-                            solution_sender.clone(),
-                        )
-                    };
-
-                    match (problem, sender) {
-                        (Some(problem), sender) => {
-                            if current_problem.as_ref().map(|p| &p.problem)
-                                != Some(&problem)
-                            {
-                                current_problem = Some(LocalProblemState::new(
-                                    problem.clone(),
-                                ));
-                                info!(
-                                    "[{}] Thread {}: New problem received, block_height: {}",
-                                    worker_name, i, problem.block_height
-                                );
-
-                                vm.update_if_needed(&problem.block_hash);
-
-                                let (start_nonce, end_nonce) =
-                                    Self::calculate_nonce_range(
-                                        i,
-                                        num_threads,
-                                        &problem.boundary,
-                                    );
-                                let mut current_nonce = start_nonce;
-                                last_log_time = Instant::now();
-
-                                while current_nonce < end_nonce {
-                                    // Check if the problem has changed
-                                    if current_nonce.low_u64() % CHECK_INTERVAL
-                                        == 0
-                                    {
-                                        let current_height = atomic_state
-                                            .block_height
-                                            .load(Ordering::Acquire);
-                                        if current_height
-                                            != problem.block_height
-                                        {
-                                            break;
-                                        }
-
-                                        if !Self::check_hash_match(
-                                            &problem.block_hash,
-                                            &atomic_state.snapshot(),
-                                        ) {
-                                            break;
-                                        }
-                                    }
-
-                                    let hashes = hasher.compute_hash_batch(
-                                        &vm.vm,
-                                        current_nonce,
-                                        &problem.block_hash,
-                                    );
-
-                                    let mut solution_found = false;
-                                    for (i, hash) in hashes.iter().enumerate() {
-                                        let hash_u256 =
-                                            U256::from(hash.as_bytes());
-
-                                        if hash_u256 <= problem.boundary {
-                                            solution_found =
-                                                Self::send_solution(
-                                                    &sender,
-                                                    &worker_name,
-                                                    i,
-                                                    current_nonce + i,
-                                                    &problem,
-                                                );
-                                        }
-                                    }
-
-                                    if solution_found {
-                                        break; // Break from main mining loop
-                                    }
-
-                                    // Increment nonce after processing batch
-                                    current_nonce = current_nonce
-                                        .overflowing_add(U256::from(BATCH_SIZE))
-                                        .0;
-                                }
-                            }
-                        }
-                        _ => {
-                            if last_log_time.elapsed() >= Duration::from_secs(1)
-                            {
-                                info!(
-                                    "[{}] Thread {}: No problem, yielding",
-                                    worker_name, i
-                                );
-                                last_log_time = Instant::now();
-                            }
-                            thread::yield_now();
-                        }
-                    }
-                }
-            });
-        }
-    }
-
-    pub fn mine(&self, problem: &ProofOfWorkProblem) {
-        self.atomic_state
-            .block_height
-            .store(problem.block_height, Ordering::Release);
-
-        let hash_bytes = problem.block_hash.as_bytes();
-        for i in 0..4 {
-            let val = u64::from_le_bytes(
-                hash_bytes[i * 8..(i + 1) * 8].try_into().unwrap(),
-            );
-            self.atomic_state.block_hash[i].store(val, Ordering::Release);
-        }
-
-        // Memory fence to ensure all hash bytes are written before setting active
+        // Ensure all threads see the new state
         atomic::fence(Ordering::Release);
-        self.atomic_state.is_active.store(true, Ordering::Release);
-
-        // Update RwLock state only for solution handling
-        let mut state = self.state.write().unwrap();
-        state.current_problem = Some(problem.clone());
     }
 
     pub fn parse_job(
-        &self, params: &[Value],
+        &mut self, params: &[Value],
     ) -> Result<ProofOfWorkProblem, String> {
         if params.len() < 4 {
             return Err("Invalid job data: not enough parameters".into());
@@ -496,28 +129,111 @@ impl Miner {
             pow_hash,
             boundary,
         );
-        info!(
-            "Created ProofOfWorkProblem with boundary: 0x{:x}, difficulty: {}",
-            problem.boundary, problem.difficulty
-        );
+
+        // Immediately update the atomic state
+        self.mine(&problem);
+
         Ok(problem)
     }
 
-    fn check_hash_match(
-        block_hash: &H256, atomic_state: &AtomicStateSnapshot,
-    ) -> bool {
-        let hash_bytes = block_hash.as_bytes();
-        for i in 0..4 {
-            let stored = atomic_state.block_hash[i];
-            let expected = u64::from_le_bytes(
-                hash_bytes[i * 8..(i + 1) * 8].try_into().unwrap(),
-            );
-            if stored != expected {
-                return false;
-            }
-        }
+    fn spawn_mining_threads(&self) {
+        let core_ids =
+            core_affinity::get_core_ids().expect("Failed to get core IDs");
+        let core_count = core_ids.len();
 
-        true
+        for i in 0..self.num_threads {
+            let worker_name = self.worker_name.clone();
+            let num_threads = self.num_threads;
+            let solution_sender = self.solution_sender.clone();
+            let core_id = core_ids[i % core_count];
+            let atomic_state = Arc::clone(&self.atomic_state);
+
+            info!(
+                "[{}] Spawning mining thread {} on core {}",
+                worker_name, i, core_id.id
+            );
+
+            thread::spawn(move || {
+                // Pin thread to specific core
+                core_affinity::set_for_current(core_id);
+
+                info!(
+                    "[{}] Mining thread {} started on core {}",
+                    worker_name, i, core_id.id
+                );
+
+                let flags = RandomXFlag::get_recommended_flags();
+                let mut vm = ThreadLocalVM::new(flags, &H256::zero());
+
+                let mut hasher = BatchHasher::new();
+
+                let current_problem =
+                    AtomicProblemState::from_problem(&atomic_state);
+
+                loop {
+                    // Get current problem details atomically
+                    let (height, block_hash, boundary) =
+                        atomic_state.get_problem_details();
+
+                    if current_problem.block_height.load(Ordering::Relaxed)
+                        != height
+                    {
+                        info!(
+                                "[{}] Thread {}: New problem received, block_height: {}",
+                                worker_name, i, height
+                            );
+
+                        current_problem.update(&atomic_state);
+                        vm.update_if_needed(&block_hash);
+
+                        let (start_nonce, end_nonce) = current_problem
+                            .calculate_nonce_range(i, num_threads);
+                        let mut current_nonce = start_nonce;
+
+                        while current_nonce < end_nonce {
+                            // Check if problem changed
+                            if current_nonce.low_u64() % CHECK_INTERVAL == 0 {
+                                let (new_height, _, _) =
+                                    atomic_state.get_problem_details();
+                                if new_height != height {
+                                    break;
+                                }
+                            }
+
+                            let hashes = hasher.compute_hash_batch(
+                                &vm.vm,
+                                current_nonce,
+                                &block_hash,
+                            );
+
+                            for (i, hash) in hashes.iter().enumerate() {
+                                let hash_u256 = U256::from(hash.as_bytes());
+                                if hash_u256 <= boundary {
+                                    let solution = ProofOfWorkSolution {
+                                        nonce: current_nonce + i,
+                                    };
+                                    if let Err(e) =
+                                        solution_sender.send((solution, height))
+                                    {
+                                        warn!(
+                                                "[{}] Thread {}: Failed to send solution: {}",
+                                                worker_name, i, e
+                                            );
+                                    }
+                                    break;
+                                }
+                            }
+
+                            current_nonce = current_nonce
+                                .overflowing_add(U256::from(BATCH_SIZE))
+                                .0;
+                        }
+                    }
+
+                    thread::yield_now();
+                }
+            });
+        }
     }
 
     fn send_solution(
@@ -548,5 +264,221 @@ impl Miner {
                 return false;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::Rng;
+    use std::time::Instant;
+
+    #[test]
+    fn benchmark_equality_comparison() {
+        let test_cases = 1_000_000;
+
+        // Create two identical problems for best-case scenario
+        let problem1 = AtomicProblemState::new(
+            1,
+            H256::random(), // Use random hash for realistic test
+            U256::from(1000000),
+        );
+        let problem2 = AtomicProblemState::from_problem(&problem1);
+
+        // Benchmark SIMD version
+        let start = Instant::now();
+        for _ in 0..test_cases {
+            let _ = problem1.eq(&problem2);
+        }
+        let simd_duration = start.elapsed();
+
+        // Benchmark scalar version (forcing non-SIMD path)
+        let start = Instant::now();
+        for _ in 0..test_cases {
+            let _ = problem1.get_block_hash() == problem2.get_block_hash()
+                && problem1.get_boundary() == problem2.get_boundary();
+        }
+        let scalar_duration = start.elapsed();
+
+        println!("Equality comparison over {} iterations:", test_cases);
+        println!("SIMD implementation: {:?}", simd_duration);
+        println!("Scalar implementation: {:?}", scalar_duration);
+        println!(
+            "Speedup factor: {:.2}x",
+            scalar_duration.as_nanos() as f64 / simd_duration.as_nanos() as f64
+        );
+    }
+
+    #[test]
+    fn test_hash_match_correctness_and_performance() {
+        // Create test data
+        let mut rng = rand::thread_rng();
+        let test_cases = 1_000_000; // Number of test iterations
+
+        // Generate random test data
+        let mut test_data: Vec<(H256, AtomicStateSnapshot)> =
+            Vec::with_capacity(test_cases);
+        for _ in 0..test_cases {
+            // Generate random hash
+            let mut hash_bytes = [0u8; 32];
+            rng.fill(&mut hash_bytes);
+            let block_hash = H256::from_slice(&hash_bytes);
+
+            // Create matching atomic state
+            let mut block_hash_chunks = [0u64; 4];
+            for i in 0..4 {
+                block_hash_chunks[i] = u64::from_le_bytes(
+                    hash_bytes[i * 8..(i + 1) * 8].try_into().unwrap(),
+                );
+            }
+
+            let atomic_state = AtomicStateSnapshot {
+                block_height: 0,
+                block_hash: block_hash_chunks,
+            };
+
+            test_data.push((block_hash, atomic_state));
+        }
+
+        // Test correctness
+        for (block_hash, atomic_state) in test_data.iter() {
+            #[cfg(target_arch = "x86_64")]
+            {
+                let simd_result =
+                    Miner::check_hash_match(block_hash, atomic_state);
+                assert!(
+                    simd_result,
+                    "SIMD implementation failed to match identical hashes"
+                );
+            }
+
+            // Test non-matching case
+            let mut modified_state = atomic_state.clone();
+            modified_state.block_hash[0] ^= 1; // Flip one bit
+            #[cfg(target_arch = "x86_64")]
+            {
+                let simd_result =
+                    Miner::check_hash_match(block_hash, &modified_state);
+                assert!(
+                    !simd_result,
+                    "SIMD implementation failed to detect different hashes"
+                );
+            }
+        }
+
+        // Benchmark performance
+        let start_time = Instant::now();
+        for (block_hash, atomic_state) in test_data.iter() {
+            #[cfg(target_arch = "x86_64")]
+            {
+                let _ = Miner::check_hash_match(block_hash, atomic_state);
+            }
+        }
+        let simd_duration = start_time.elapsed();
+
+        // Implement and test the non-SIMD version for comparison
+        fn check_hash_match_sequential(
+            block_hash: &H256, atomic_state: &AtomicStateSnapshot,
+        ) -> bool {
+            let hash_bytes = block_hash.as_bytes();
+            for i in 0..4 {
+                let stored = atomic_state.block_hash[i];
+                let expected = u64::from_le_bytes(
+                    hash_bytes[i * 8..(i + 1) * 8].try_into().unwrap(),
+                );
+                if stored != expected {
+                    return false;
+                }
+            }
+            true
+        }
+
+        let start_time = Instant::now();
+        for (block_hash, atomic_state) in test_data.iter() {
+            let _ = check_hash_match_sequential(block_hash, atomic_state);
+        }
+        let sequential_duration = start_time.elapsed();
+
+        println!("Performance comparison over {} iterations:", test_cases);
+        println!("SIMD implementation: {:?}", simd_duration);
+        println!("Sequential implementation: {:?}", sequential_duration);
+        println!(
+            "Speedup factor: {:.2}x",
+            sequential_duration.as_nanos() as f64
+                / simd_duration.as_nanos() as f64
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn check_hash_match(
+        block_hash: &H256, atomic_state: &AtomicStateSnapshot,
+    ) -> bool {
+        use std::arch::x86_64::{
+            __m256i, _mm256_cmpeq_epi64, _mm256_loadu_si256,
+            _mm256_set1_epi64x, _mm256_testc_si256,
+        };
+
+        unsafe {
+            // Load the entire atomic state hash (32 bytes) as a 256-bit vector
+            let atomic_hash = _mm256_loadu_si256(
+                atomic_state.block_hash.as_ptr() as *const __m256i,
+            );
+
+            // Load the block hash as a 256-bit vector
+            let expected_hash = _mm256_loadu_si256(
+                block_hash.as_bytes().as_ptr() as *const __m256i,
+            );
+
+            // Compare the two vectors for equality
+            // _mm256_cmpeq_epi64 returns -1 (all ones) for equal elements
+            let cmp = _mm256_cmpeq_epi64(atomic_hash, expected_hash);
+
+            // Check if all elements are equal (all bits are 1)
+            _mm256_testc_si256(cmp, _mm256_set1_epi64x(-1)) == 1
+        }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn check_hash_match(
+        block_hash: &H256, atomic_state: &AtomicStateSnapshot,
+    ) -> bool {
+        let hash_bytes = block_hash.as_bytes();
+        for i in 0..4 {
+            let stored = atomic_state.block_hash[i];
+            let expected = u64::from_le_bytes(
+                hash_bytes[i * 8..(i + 1) * 8].try_into().unwrap(),
+            );
+            if stored != expected {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn test_atomic_problem_state_comparisons() {
+        let problem1 = AtomicProblemState::new(1, H256::zero(), U256::zero());
+
+        let problem2 = AtomicProblemState::new(2, H256::zero(), U256::zero());
+
+        // Test ordering
+        assert!(problem1 < problem2);
+        assert!(problem2 > problem1);
+        assert!(problem1 <= problem2);
+        assert!(problem2 >= problem1);
+
+        // Test equality
+        let problem1_clone =
+            AtomicProblemState::new(1, H256::zero(), U256::zero());
+        assert_eq!(problem1, problem1_clone);
+
+        // Test comparison with ProofOfWorkProblem
+        let pow_problem = ProofOfWorkProblem::new_from_boundary(
+            1,
+            H256::zero(),
+            U256::zero(),
+        );
+        assert_eq!(problem1, pow_problem);
+        assert!(problem2 > pow_problem);
     }
 }

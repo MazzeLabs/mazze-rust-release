@@ -11,6 +11,7 @@ mod miner_config;
 mod stratum_client;
 use miner::Miner;
 use stratum_client::StratumClient;
+mod core;
 
 async fn connect_with_retry(
     config: &MinerConfig, miner: Miner,
@@ -51,9 +52,7 @@ async fn connect_with_retry(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // env_logger::init();
-    env_logger::builder()
-        .format_timestamp_millis()
-        .init();
+    env_logger::builder().format_timestamp_millis().init();
 
     info!("Initializing Mazze Miner client...");
 

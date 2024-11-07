@@ -181,7 +181,7 @@ impl Miner {
         let flags = RandomXFlag::get_recommended_flags();
         let mut vm = ThreadLocalVM::new(flags, &H256::zero());
         let mut hasher = BatchHasher::new();
-        let mut current_state = AtomicProblemState::default();
+        let current_state = AtomicProblemState::default();
 
         // Initialize SIMD boundary for x86_64
         #[cfg(target_arch = "x86_64")]
@@ -190,7 +190,7 @@ impl Miner {
         // Main mining loop
         loop {
             // Get current problem details atomically
-            let (height, block_hash, boundary) =
+            let (height, block_hash, _boundary) =
                 atomic_state.get_problem_details();
 
             // Check for new problem
@@ -322,6 +322,7 @@ impl Miner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hex::FromHex;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -411,6 +412,105 @@ mod tests {
             total_transitions > 0,
             "Should have detected state transitions"
         );
+    }
+
+    #[test]
+    fn test_boundary_conversions() {
+        // Test boundary from hex string
+        let boundary_hex =
+            "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let boundary = U256::from_str(boundary_hex).unwrap();
+
+        // Convert to atomic state format and back
+        let mut atomic_state = AtomicProblemState::default();
+        for i in 0..4 {
+            let chunk = boundary.0[i];
+            atomic_state.boundary[i].store(chunk, Ordering::Relaxed);
+        }
+
+        let recovered_boundary = atomic_state.get_boundary();
+        assert_eq!(boundary, recovered_boundary, "Boundary conversion failed");
+    }
+
+    #[test]
+    fn test_block_hash_conversions() {
+        // Test block hash from hex string
+        let block_hash_hex =
+            "7dc6e0aad8b74e5ee04e2f34e01b457d017bc4c38c7a5db001e5c7baecbab4e8";
+        let block_hash =
+            H256::from_slice(&Vec::from_hex(block_hash_hex).unwrap());
+
+        // Convert to bytes and back
+        let bytes = block_hash.as_bytes();
+        let recovered_hash = H256::from_slice(bytes);
+
+        assert_eq!(block_hash, recovered_hash, "Block hash conversion failed");
+    }
+
+    #[test]
+    fn test_nonce_validation() {
+        // Setup test data
+        let block_hash_hex =
+            "7dc6e0aad8b74e5ee04e2f34e01b457d017bc4c38c7a5db001e5c7baecbab4e8";
+        let block_hash =
+            H256::from_slice(&Vec::from_hex(block_hash_hex).unwrap());
+
+        let boundary_hex =
+            "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let boundary = U256::from_str(boundary_hex).unwrap();
+
+        let nonce = U256::from_dec_str("14474011154664524427946373126085988481658748083205070504932198000989141204990").unwrap();
+
+        // Setup VM and hasher
+        let flags = RandomXFlag::get_recommended_flags();
+        let vm = ThreadLocalVM::new(flags, &block_hash);
+        let mut hasher = BatchHasher::new();
+
+        // Test single nonce validation
+        let hashes = hasher.compute_hash_batch(&vm.vm, nonce, &block_hash);
+        let hash = &hashes[0];
+        let hash_u256 = U256::from(hash.as_bytes());
+
+        assert!(hash_u256 <= boundary, "Known valid nonce failed validation");
+    }
+
+    #[test]
+    fn test_simd_boundary_comparison() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Setup test data
+            let boundary_hex = "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+            let boundary = U256::from_str(boundary_hex).unwrap();
+
+            // Create atomic state with known boundary
+            let mut atomic_state = AtomicProblemState::default();
+            for i in 0..4 {
+                atomic_state.boundary[i]
+                    .store(boundary.0[i], Ordering::Relaxed);
+            }
+
+            // Create SIMD boundary
+            let simd_boundary = unsafe { SIMDBoundary::new(&atomic_state) };
+
+            // Test known valid hash
+            let block_hash_hex = "7dc6e0aad8b74e5ee04e2f34e01b457d017bc4c38c7a5db001e5c7baecbab4e8";
+            let block_hash =
+                H256::from_slice(&Vec::from_hex(block_hash_hex).unwrap());
+
+            let flags = RandomXFlag::get_recommended_flags();
+            let vm = ThreadLocalVM::new(flags, &block_hash);
+            let mut hasher = BatchHasher::new();
+
+            let nonce = U256::from_dec_str("14474011154664524427946373126085988481658748083205070504932198000989141204990").unwrap();
+            let hashes = hasher.compute_hash_batch(&vm.vm, nonce, &block_hash);
+
+            unsafe {
+                assert!(
+                    simd_boundary.compare_hash(&hashes[0]),
+                    "SIMD comparison failed for known valid hash"
+                );
+            }
+        }
     }
 }
 

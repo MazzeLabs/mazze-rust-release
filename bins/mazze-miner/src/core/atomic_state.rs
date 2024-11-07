@@ -42,7 +42,7 @@ impl AtomicProblemState {
     }
 
     pub fn new_from(problem: &AtomicProblemState) -> Self {
-        let mut state = Self::default();
+        let state = Self::default();
         state.update(problem);
         state
     }

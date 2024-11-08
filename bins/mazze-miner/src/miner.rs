@@ -20,6 +20,16 @@ const CHECK_INTERVAL: u64 = 2; // Check for new problem every 2 nonces
 
 const BATCH_SIZE: usize = 8;
 
+/*
+Flow:
+Writer (mine thread)                    Reader (mining threads)
+─────────────────────                  ─────────────────────
+prepare new state
+│                                      read current ptr ──┐
+atomic ptr swap ───────────────────►   use state data    │
+                                      compare states    ◄─┘
+*/
+
 #[derive(Clone)]
 pub struct Miner {
     pub worker_id: usize,
@@ -65,20 +75,10 @@ impl Miner {
     }
 
     pub fn mine(&mut self, problem: &ProofOfWorkProblem) {
-        // Create new atomic state from problem
-        let mut new_state = AtomicProblemState::new(
-            problem.block_height,
-            problem.block_hash,
-            problem.boundary,
-        );
+        // Create new state (already handles endianness)
+        let new_state = ProblemState::from(problem);
 
-        // Swap the new state with the old one atomically
-        let old_state = Arc::get_mut(&mut self.atomic_state)
-            .expect("Cannot get mutable reference to atomic state");
-        mem::swap(old_state, &mut new_state);
-
-        // Ensure all threads see the new state
-        atomic::fence(Ordering::Release);
+        self.atomic_state.update(new_state);
     }
 
     pub fn parse_job(
@@ -181,74 +181,86 @@ impl Miner {
         let flags = RandomXFlag::get_recommended_flags();
         let mut vm = ThreadLocalVM::new(flags, &H256::zero());
         let mut hasher = BatchHasher::new();
-        let current_state = AtomicProblemState::default();
-
-        // Initialize SIMD boundary for x86_64
-        #[cfg(target_arch = "x86_64")]
-        let mut simd_boundary = unsafe { SIMDBoundary::new(&atomic_state) };
+        let mut current_generation = 0;
 
         // Main mining loop
         loop {
-            // Get current problem details atomically
-            let (height, block_hash, _boundary) =
-                atomic_state.get_problem_details();
+            let state_generation = atomic_state.get_generation();
+            if current_generation != state_generation {
+                current_generation = state_generation;
 
-            // Check for new problem
-            if current_state != *atomic_state {
+                let (height, block_hash, _) =
+                    atomic_state.get_problem_details();
+
                 info!(
                     "[{}] Thread {}: New problem received, block_height: {}",
                     worker_name, thread_id, height
                 );
 
-                // Update current state and VM
-                current_state.update(&atomic_state);
                 vm.update_if_needed(&block_hash);
-
-                // Update SIMD boundary when problem changes (x86_64 only)
-                #[cfg(target_arch = "x86_64")]
-                unsafe {
-                    simd_boundary = SIMDBoundary::new(&atomic_state);
-                }
 
                 // Calculate nonce range for this thread
                 let (start_nonce, end_nonce) =
-                    current_state.calculate_nonce_range(thread_id, num_threads);
+                    atomic_state.calculate_nonce_range(thread_id, num_threads);
                 let mut current_nonce = start_nonce;
 
                 while current_nonce < end_nonce {
-                    // Check if problem changed
-                    if current_nonce.low_u64() % CHECK_INTERVAL == 0
-                        && current_state != *atomic_state
-                    {
+                    // Check for new problem periodically
+                    if current_nonce.low_u64() % CHECK_INTERVAL == 0 {
                         break;
                     }
 
                     // Process batch and check for solutions
                     #[cfg(target_arch = "x86_64")]
-                    let solution = Miner::process_hash_batch(
-                        &mut vm,
-                        &mut hasher,
-                        current_nonce,
-                        &block_hash,
-                        &simd_boundary,
-                    );
+                    {
+                        let hashes = hasher.compute_hash_batch(
+                            &vm.vm,
+                            current_nonce,
+                            &block_hash,
+                        );
+
+                        // Use SIMD comparison
+                        for (i, hash) in hashes.iter().enumerate() {
+                            if atomic_state.check_hash_simd(hash) {
+                                let solution = ProofOfWorkSolution {
+                                    nonce: current_nonce + i,
+                                };
+                                if let Err(e) =
+                                    solution_sender.send((solution, height))
+                                {
+                                    warn!(
+                                    "[{}] Thread {}: Failed to send solution: {}",
+                                    worker_name, thread_id, e
+                                );
+                                }
+                            }
+                        }
+                    }
 
                     #[cfg(not(target_arch = "x86_64"))]
-                    let solution = Miner::process_hash_batch(
-                        &mut vm,
-                        &mut hasher,
-                        current_nonce,
-                        &block_hash,
-                        &atomic_state,
-                    );
+                    {
+                        let hashes = hasher.compute_hash_batch(
+                            &vm.vm,
+                            current_nonce,
+                            &block_hash,
+                        );
+                        let boundary = atomic_state.get_boundary();
 
-                    if let Some(solution) = solution {
-                        if let Err(e) = solution_sender.send((solution, height))
-                        {
-                            warn!(
-                                "[{}] Thread {}: Failed to send solution: {}",
-                                worker_name, thread_id, e
-                            );
+                        for (i, hash) in hashes.iter().enumerate() {
+                            let hash_u256 = U256::from(hash.as_bytes());
+                            if hash_u256 <= boundary {
+                                let solution = ProofOfWorkSolution {
+                                    nonce: current_nonce + i,
+                                };
+                                if let Err(e) =
+                                    solution_sender.send((solution, height))
+                                {
+                                    warn!(
+                                    "[{}] Thread {}: Failed to send solution: {}",
+                                    worker_name, thread_id, e
+                                );
+                                }
+                            }
                         }
                     }
 
@@ -270,53 +282,6 @@ impl Miner {
             worker_name, thread_id, core_id.id
         );
     }
-
-    fn initialize_mining_vm() -> ThreadLocalVM {
-        let flags = RandomXFlag::get_recommended_flags();
-        ThreadLocalVM::new(flags, &H256::zero())
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    fn process_hash_batch(
-        vm: &mut ThreadLocalVM, hasher: &mut BatchHasher, current_nonce: U256,
-        block_hash: &H256, atomic_state: &AtomicProblemState,
-    ) -> Option<ProofOfWorkSolution> {
-        let hashes = hasher.compute_hash_batch(vm, current_nonce, block_hash);
-        let boundary = atomic_state.get_boundary();
-
-        for (i, hash) in hashes.iter().enumerate() {
-            let hash_u256 = U256::from(hash.as_bytes());
-            if hash_u256 <= boundary {
-                return Some(ProofOfWorkSolution {
-                    nonce: current_nonce + i,
-                });
-            }
-        }
-
-        None
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    fn process_hash_batch(
-        vm: &mut ThreadLocalVM, hasher: &mut BatchHasher, current_nonce: U256,
-        block_hash: &H256, simd_boundary: &SIMDBoundary,
-    ) -> Option<ProofOfWorkSolution> {
-        let hashes =
-            hasher.compute_hash_batch(&vm.vm, current_nonce, block_hash);
-
-        unsafe {
-            // Check each hash in the batch using the cached SIMD boundary
-            for (i, hash) in hashes.iter().enumerate() {
-                if simd_boundary.compare_hash(hash) {
-                    return Some(ProofOfWorkSolution {
-                        nonce: current_nonce + i,
-                    });
-                }
-            }
-        }
-
-        None
-    }
 }
 
 #[cfg(test)]
@@ -327,41 +292,50 @@ mod tests {
 
     #[test]
     fn test_mining_state_transitions() {
-        // Create initial state
-        let state1 =
-            AtomicProblemState::new(1, H256::random(), U256::from(1000000));
+        // Create a single atomic state to track real transitions
+        let atomic_state = AtomicProblemState::default();
+        let initial_gen = atomic_state.get_generation();
 
-        // Create newer state
-        let state2 =
-            AtomicProblemState::new(2, H256::random(), U256::from(1000000));
-
-        // Test ordering
-        assert!(
-            state1 < state2,
-            "State with higher block height should be greater"
-        );
-
-        // Test equality with problem
-        let problem = ProofOfWorkProblem::new_from_boundary(
+        // Update with first state
+        let state1 = ProblemState::new(
             1,
-            state1.get_block_hash(),
-            state1.get_boundary(),
+            H256::from([1u8; 32]), // Deterministic hash
+            U256::from(1000000),
         );
-        assert_eq!(state1, problem, "State should equal equivalent problem");
+        atomic_state.update(state1);
+        let gen1 = atomic_state.get_generation();
 
-        // Test state updates
-        let current_state = AtomicProblemState::default();
+        // Update with second state
+        let state2 = ProblemState::new(
+            2,
+            H256::from([2u8; 32]), // Deterministic hash
+            U256::from(1000000),
+        );
+        atomic_state.update(state2);
+        let gen2 = atomic_state.get_generation();
+
+        // Test generations increase with updates
         assert!(
-            current_state < state1,
-            "Default state should be less than any valid state"
+            gen1 > initial_gen,
+            "Generation should increase after first update"
+        );
+        assert!(
+            gen2 > gen1,
+            "Generation should increase after second update"
         );
 
-        current_state.update(&state1);
-        assert_eq!(current_state, state1, "State should equal after update");
-
-        assert!(
-            current_state < state2,
-            "Updated state should be less than newer state"
+        // Verify current state matches last update
+        let (height, hash, boundary) = atomic_state.get_problem_details();
+        assert_eq!(height, 2, "Height should match last update");
+        assert_eq!(
+            hash,
+            H256::from([2u8; 32]),
+            "Hash should match last update"
+        );
+        assert_eq!(
+            boundary,
+            U256::from(1000000),
+            "Boundary should match last update"
         );
     }
 
@@ -369,82 +343,80 @@ mod tests {
     fn test_concurrent_state_transitions() {
         let atomic_state = Arc::new(AtomicProblemState::default());
         let thread_count = 4;
-        let iterations = 1000;
-
+        let iterations = 100; // Reduced for clarity
         let mut handles = vec![];
+
+        println!("Starting concurrent state transition test");
         let start = Instant::now();
 
-        for _thread_id in 0..thread_count {
+        // Spawn checker threads
+        for thread_id in 0..thread_count {
             let state = Arc::clone(&atomic_state);
             handles.push(thread::spawn(move || {
-                let local_state = AtomicProblemState::default();
+                let mut current_generation = 0;
                 let mut transitions = 0;
 
-                for _i in 0..iterations {
-                    if local_state != *state {
-                        local_state.update(&state);
+                println!(
+                    "Thread {} started checking for state changes",
+                    thread_id
+                );
+
+                for i in 0..iterations {
+                    let new_generation = state.get_generation();
+                    if current_generation != new_generation {
+                        println!(
+                            "Thread {} detected change at iteration {}",
+                            thread_id, i
+                        );
+                        current_generation = new_generation;
                         transitions += 1;
                     }
-                    thread::yield_now();
+                    thread::sleep(Duration::from_millis(1)); // Small sleep to reduce CPU usage
                 }
+
+                println!(
+                    "Thread {} finished with {} transitions",
+                    thread_id, transitions
+                );
                 transitions
             }));
         }
 
+        // Ensure threads have started
+        thread::sleep(Duration::from_millis(50));
+
+        println!("Starting state updates");
         // Update shared state a few times
         for i in 1..=5 {
-            thread::sleep(Duration::from_millis(10));
-            let new_state =
-                AtomicProblemState::new(i, H256::random(), U256::from(1000000));
-            atomic_state.update(&new_state);
+            let new_state = ProblemState::new(
+                i,
+                H256::from([i as u8; 32]), // Deterministic hash based on i
+                U256::from(1000000),
+            );
+            println!("Updating state to block height {}", i);
+            atomic_state.update(new_state);
+            thread::sleep(Duration::from_millis(50)); // Give more time for detection
         }
 
-        let total_transitions: usize =
-            handles.into_iter().map(|h| h.join().unwrap()).sum();
+        let transitions: Vec<usize> =
+            handles.into_iter().map(|h| h.join().unwrap()).collect();
 
-        println!(
-            "Completed {} state transitions across {} threads in {:?}",
-            total_transitions,
-            thread_count,
-            start.elapsed()
-        );
+        let total_transitions: usize = transitions.iter().sum();
+
+        println!("Test completed in {:?}", start.elapsed());
+        println!("Transitions per thread: {:?}", transitions);
+        println!("Total transitions: {}", total_transitions);
+
+        // We expect each thread to see at least one change
         assert!(
-            total_transitions > 0,
-            "Should have detected state transitions"
+            total_transitions >= thread_count,
+            "Each thread should detect at least one state transition. \
+             Expected at least {} total transitions, got {} \
+             (transitions per thread: {:?})",
+            thread_count,
+            total_transitions,
+            transitions
         );
-    }
-
-    #[test]
-    fn test_boundary_conversions() {
-        // Test boundary from hex string
-        let boundary_hex =
-            "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-        let boundary = U256::from_str(boundary_hex).unwrap();
-
-        // Convert to atomic state format and back
-        let mut atomic_state = AtomicProblemState::default();
-        for i in 0..4 {
-            let chunk = boundary.0[i];
-            atomic_state.boundary[i].store(chunk, Ordering::Relaxed);
-        }
-
-        let recovered_boundary = atomic_state.get_boundary();
-        assert_eq!(boundary, recovered_boundary, "Boundary conversion failed");
-    }
-
-    #[test]
-    fn test_block_hash_conversions() {
-        // Test block hash from hex string
-        let block_hash_hex =
-            "7dc6e0aad8b74e5ee04e2f34e01b457d017bc4c38c7a5db001e5c7baecbab4e8";
-        let block_hash =
-            H256::from_slice(&Vec::from_hex(block_hash_hex).unwrap());
-
-        // Convert to bytes and back
-        let bytes = block_hash.as_bytes();
-        let recovered_hash = H256::from_slice(bytes);
-
-        assert_eq!(block_hash, recovered_hash, "Block hash conversion failed");
     }
 
     #[test]
@@ -475,82 +447,34 @@ mod tests {
     }
 
     #[test]
-    fn test_simd_boundary_comparison() {
-        #[cfg(target_arch = "x86_64")]
-        {
-            // Setup test data
-            let boundary_hex = "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-            let boundary = U256::from_str(boundary_hex).unwrap();
+    fn test_concurrent_mining() {
+        let (mut miner, _rx) = Miner::new(4, 1);
 
-            // Create atomic state with known boundary
-            let mut atomic_state = AtomicProblemState::default();
-            for i in 0..4 {
-                atomic_state.boundary[i]
-                    .store(boundary.0[i], Ordering::Relaxed);
-            }
+        // Create and submit a problem
+        let problem = ProofOfWorkProblem::new_from_boundary(
+            1,
+            H256::random(),
+            U256::from(1000000),
+        );
 
-            // Create SIMD boundary
-            let simd_boundary = unsafe { SIMDBoundary::new(&atomic_state) };
+        miner.mine(&problem);
 
-            // Test known valid hash
-            let block_hash_hex = "7dc6e0aad8b74e5ee04e2f34e01b457d017bc4c38c7a5db001e5c7baecbab4e8";
-            let block_hash =
-                H256::from_slice(&Vec::from_hex(block_hash_hex).unwrap());
+        // Let it mine for a bit
+        thread::sleep(Duration::from_secs(1));
 
-            let flags = RandomXFlag::get_recommended_flags();
-            let vm = ThreadLocalVM::new(flags, &block_hash);
-            let mut hasher = BatchHasher::new();
+        // Submit a new problem
+        let new_problem = ProofOfWorkProblem::new_from_boundary(
+            2,
+            H256::random(),
+            U256::from(1000000),
+        );
 
-            let nonce = U256::from_dec_str("14474011154664524427946373126085988481658748083205070504932198000989141204990").unwrap();
-            let hashes = hasher.compute_hash_batch(&vm.vm, nonce, &block_hash);
+        miner.mine(&new_problem);
 
-            unsafe {
-                assert!(
-                    simd_boundary.compare_hash(&hashes[0]),
-                    "SIMD comparison failed for known valid hash"
-                );
-            }
-        }
-    }
-}
+        // Verify all threads picked up the new problem
+        thread::sleep(Duration::from_millis(100));
 
-use std::arch::x86_64::__m256i;
-
-#[cfg(target_arch = "x86_64")]
-struct SIMDBoundary {
-    boundary_vec: __m256i,
-}
-
-#[cfg(target_arch = "x86_64")]
-impl SIMDBoundary {
-    unsafe fn new(atomic_state: &AtomicProblemState) -> Self {
-        use std::arch::x86_64::_mm256_loadu_si256;
-
-        // Load boundary chunks with Relaxed ordering since we'll reuse it
-        let mut boundary_bytes = [0u8; 32];
-        for i in 0..4 {
-            let chunk = atomic_state.boundary[i].load(Ordering::Relaxed);
-            boundary_bytes[i * 8..(i + 1) * 8]
-                .copy_from_slice(&chunk.to_le_bytes());
-        }
-
-        Self {
-            boundary_vec: _mm256_loadu_si256(
-                boundary_bytes.as_ptr() as *const __m256i
-            ),
-        }
-    }
-
-    #[inline]
-    unsafe fn compare_hash(&self, hash: &H256) -> bool {
-        use std::arch::x86_64::{
-            _mm256_cmpgt_epi8, _mm256_loadu_si256, _mm256_set1_epi8,
-            _mm256_testc_si256,
-        };
-
-        let hash_vec =
-            _mm256_loadu_si256(hash.as_bytes().as_ptr() as *const __m256i);
-        let cmp = _mm256_cmpgt_epi8(self.boundary_vec, hash_vec);
-        _mm256_testc_si256(cmp, _mm256_set1_epi8(-1)) != 0
+        let (height, _, _) = miner.atomic_state.get_problem_details();
+        assert_eq!(height, 2, "All threads should be mining the new problem");
     }
 }

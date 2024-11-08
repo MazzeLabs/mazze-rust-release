@@ -1,5 +1,5 @@
 use core_affinity::{self, CoreId};
-use log::{info, warn};
+use log::{debug, info, warn};
 use mazze_types::{H256, U256};
 use mazzecore::pow::{
     boundary_to_difficulty, ProofOfWorkProblem, ProofOfWorkSolution,
@@ -12,9 +12,11 @@ use std::sync::atomic::{self, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 use crate::core::*;
+use crate::mining_metrics::MiningMetrics;
 
 const CHECK_INTERVAL: u64 = 2; // Check for new problem every 2 nonces
 
@@ -37,6 +39,7 @@ pub struct Miner {
     num_threads: usize,
     atomic_state: Arc<AtomicProblemState>,
     solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
+    metrics: Arc<MiningMetrics>,
 }
 
 impl Miner {
@@ -48,20 +51,46 @@ impl Miner {
 
         let atomic_state = Arc::new(AtomicProblemState::default());
 
+        let metrics = Arc::new(MiningMetrics::new());
+
         let miner = Miner {
             worker_id,
             worker_name: format!("worker-{}", worker_id),
             num_threads,
             atomic_state: Arc::clone(&atomic_state),
             solution_sender: solution_tx,
+            metrics: Arc::clone(&metrics),
         };
 
         // Spawn solution handling thread
         let worker_name = miner.worker_name.clone();
+
         thread::spawn(move || {
-            while let Ok((solution, block_height)) = solution_rx.recv() {
-                // TODO: add hash check here
-                if let Err(e) = stratum_tx.send((solution, block_height)) {
+            while let Ok((solution, solution_height)) = solution_rx.recv() {
+                let start_time = std::time::Instant::now();
+
+                // Get current problem's block height
+                let current_height = atomic_state.get_block_height();
+
+                // Skip stale solutions
+                if solution_height < current_height {
+                    debug!(
+                        "[{}] Skipping stale solution for block {}, current height: {}",
+                        worker_name, solution_height, current_height
+                    );
+                    continue;
+                }
+
+                // Skip future solutions (shouldn't happen, but better be safe)
+                if solution_height > current_height {
+                    warn!(
+                        "[{}] Got solution for future block {} while at height {}",
+                        worker_name, solution_height, current_height
+                    );
+                    continue;
+                }
+
+                if let Err(e) = stratum_tx.send((solution, solution_height)) {
                     warn!(
                         "[{}] Failed to send solution to stratum: {}",
                         worker_name, e
@@ -75,8 +104,33 @@ impl Miner {
     }
 
     pub fn mine(&mut self, problem: &ProofOfWorkProblem) {
+        // Check if this is the same problem we're already mining
+        let (current_height, current_hash, _) =
+            self.atomic_state.get_problem_details();
+
+        if current_height == problem.block_height
+            && current_hash == problem.block_hash
+        {
+            debug!(
+                "[{}] Received duplicate problem for block {}, ignoring",
+                self.worker_name, problem.block_height
+            );
+            return;
+        }
+
+        // Only count new blocks, not duplicate notifications
+        self.metrics.new_block();
+
         // Create new state (already handles endianness)
         let new_state = ProblemState::from(problem);
+
+        info!(
+            "[{}] New mining problem: height={}, pow_hash={:.4}...{:.4}",
+            self.worker_name,
+            problem.block_height,
+            hex::encode(&problem.block_hash.as_bytes()[..4]),
+            hex::encode(&problem.block_hash.as_bytes()[28..32])
+        );
 
         self.atomic_state.update(new_state);
     }
@@ -192,11 +246,6 @@ impl Miner {
                 let (height, block_hash, _) =
                     atomic_state.get_problem_details();
 
-                info!(
-                    "[{}] Thread {}: New problem received, block_height: {}",
-                    worker_name, thread_id, height
-                );
-
                 vm.update_if_needed(&block_hash);
 
                 // Calculate nonce range for this thread
@@ -218,10 +267,20 @@ impl Miner {
                             current_nonce,
                             &block_hash,
                         );
+                        info!(
+                            "[{}] Thread {}: Processed {} hashes",
+                            worker_name,
+                            thread_id,
+                            hashes.len()
+                        );
 
                         // Use SIMD comparison
                         for (i, hash) in hashes.iter().enumerate() {
                             if atomic_state.check_hash_simd(hash) {
+                                info!(
+                                    "Solution found! {:?}",
+                                    current_nonce + i
+                                );
                                 let solution = ProofOfWorkSolution {
                                     nonce: current_nonce + i,
                                 };
@@ -244,6 +303,8 @@ impl Miner {
                             current_nonce,
                             &block_hash,
                         );
+                        hashes_processed += BATCH_SIZE as u64;
+
                         let boundary = atomic_state.get_boundary();
 
                         for (i, hash) in hashes.iter().enumerate() {
@@ -288,6 +349,7 @@ impl Miner {
 mod tests {
     use super::*;
     use hex::FromHex;
+    use hex_literal::hex;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -336,6 +398,50 @@ mod tests {
             boundary,
             U256::from(1000000),
             "Boundary should match last update"
+        );
+    }
+
+    #[test]
+    fn test_boundary_comparison() {
+        let boundary = hex!(
+            "1222220000000000000000000000000000000000000000000000000000000000"
+        );
+        let hash = hex!(
+            "9111110000000000000000000000000000000000000000000000000000000000"
+        );
+
+        let state = ProblemState::new(
+            0,
+            H256::zero(),
+            U256::from_big_endian(&boundary),
+        );
+
+        let atomic_state = AtomicProblemState::new(
+            0,
+            H256::zero(),
+            U256::from_big_endian(&boundary),
+        );
+
+        // This should print false because 0x91... > 0x12...
+        println!("Hash: {}", hex::encode(&hash));
+        println!("Boundary: {}", hex::encode(&boundary));
+        println!(
+            "Is hash <= boundary? {}",
+            atomic_state.check_hash_simd(&H256::from_slice(&hash))
+        );
+
+        // Convert to U256 for direct comparison
+        let hash_int = U256::from_big_endian(&hash);
+        let boundary_int = U256::from_big_endian(&boundary);
+        println!("Direct comparison: {}", hash_int <= boundary_int);
+
+        assert!(
+            hash_int > boundary_int,
+            "0x91... should be greater than 0x12..."
+        );
+        assert!(
+            !atomic_state.check_hash_simd(&H256::from_slice(&hash)),
+            "SIMD comparison should return false for hash > boundary"
         );
     }
 

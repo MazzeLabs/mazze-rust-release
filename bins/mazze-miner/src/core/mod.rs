@@ -13,4 +13,4 @@ pub trait IntoChunks {
 
 // Common constants
 pub const CHECK_INTERVAL: u64 = 2;
-pub const BATCH_SIZE: usize = 8;
+pub const BATCH_SIZE: usize = 16;

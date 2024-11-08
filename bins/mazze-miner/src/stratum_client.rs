@@ -127,6 +127,7 @@ impl StratumClient {
                     }
                 }
                 Ok((solution, block_height)) = solution_receiver.recv() => {
+                    info!("Received solution: {:?}, block_height: {}", solution.nonce, block_height);
                     if let Some(problem) = &self.current_job {
                         if block_height == problem.block_height {
                             self.submit_share(&solution).await?;

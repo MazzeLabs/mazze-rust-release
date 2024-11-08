@@ -116,6 +116,10 @@ impl AtomicProblemState {
         self.generation.load(Ordering::Acquire)
     }
 
+    pub fn get_block_height(&self) -> u64 {
+        self.with_state(|state| state.block_height)
+    }
+
     pub fn calculate_nonce_range(
         &self, thread_id: usize, num_threads: usize,
     ) -> (U256, U256) {
@@ -134,15 +138,16 @@ impl AtomicProblemState {
 
     #[cfg(target_arch = "x86_64")]
     pub fn check_hash_simd(&self, hash: &H256) -> bool {
+        use log::trace;
         unsafe {
             use std::arch::x86_64::{
-                __m256i, _mm256_cmpgt_epi8, _mm256_loadu_si256,
-                _mm256_testz_si256,
+                __m256i, _mm256_cmpeq_epi8, _mm256_cmpgt_epi8,
+                _mm256_loadu_si256, _mm256_movemask_epi8, _mm256_testz_si256,
             };
 
             self.with_state(|state| {
-                println!("Boundary: {:?}", hex::encode(&state.boundary));
-                println!("Hash:     {:?}", hex::encode(hash.as_bytes()));
+                trace!("Comparing hash:     {}", hex::encode(hash.as_bytes()));
+                trace!("Against boundary:   {}", hex::encode(&state.boundary));
 
                 let boundary_vec = _mm256_loadu_si256(
                     state.boundary.as_ptr() as *const __m256i
@@ -151,24 +156,32 @@ impl AtomicProblemState {
                     hash.as_bytes().as_ptr() as *const __m256i
                 );
 
-                // Compare hash > boundary
-                let cmp = _mm256_cmpgt_epi8(hash_vec, boundary_vec);
+                // First check equality
+                let eq = _mm256_cmpeq_epi8(hash_vec, boundary_vec);
+                let eq_mask = _mm256_movemask_epi8(eq);
 
-                // Print the comparison result bits
-                let mut cmp_bits = [0u8; 32];
-                std::ptr::copy_nonoverlapping(
-                    &cmp as *const _ as *const u8,
-                    cmp_bits.as_mut_ptr(),
-                    32,
+                trace!("Equality mask: {:032b}", eq_mask);
+
+                if eq_mask == -1 {
+                    trace!("All bytes equal, returning true");
+                    return true; // All bytes equal
+                }
+
+                // Find first differing byte
+                let first_diff = eq_mask.trailing_ones() as usize;
+                trace!("First differing byte at position: {}", first_diff);
+                trace!(
+                    "Hash byte: {:02x}, Boundary byte: {:02x}",
+                    hash.as_bytes()[first_diff],
+                    state.boundary[first_diff]
                 );
-                println!("Compare bits: {:?}", hex::encode(&cmp_bits));
 
-                // Test if any bit is set (meaning hash > boundary)
-                let has_greater = _mm256_testz_si256(cmp, cmp) == 0;
-                println!("Has greater bits: {}", has_greater);
+                // Compare the first differing byte
+                let result =
+                    hash.as_bytes()[first_diff] <= state.boundary[first_diff];
+                trace!("Final comparison result: {}", result);
 
-                // Return true if hash <= boundary (no bits set in comparison)
-                !has_greater
+                result
             })
         }
     }
@@ -243,6 +256,8 @@ impl Drop for AtomicProblemState {
 mod tests {
     use std::str::FromStr;
 
+    use log::trace;
+
     use super::*;
 
     #[test]
@@ -267,24 +282,26 @@ mod tests {
                 AtomicProblemState::new(1, H256::zero(), boundary);
 
             // Debug prints for verification
-            println!("Testing valid hash comparison:");
+            trace!("Testing valid hash comparison:");
             let simd_result = atomic_state.check_hash_simd(&valid_hash);
             let scalar_result = U256::from(valid_hash.as_bytes()) <= boundary;
-            println!(
+            trace!(
                 "SIMD result: {}, Scalar result: {}",
-                simd_result, scalar_result
+                simd_result,
+                scalar_result
             );
             assert!(
                 simd_result && scalar_result,
                 "Valid hash should be accepted by both comparisons"
             );
 
-            println!("\nTesting invalid hash comparison:");
+            trace!("\nTesting invalid hash comparison:");
             let simd_result = atomic_state.check_hash_simd(&invalid_hash);
             let scalar_result = U256::from(invalid_hash.as_bytes()) <= boundary;
-            println!(
+            trace!(
                 "SIMD result: {}, Scalar result: {}",
-                simd_result, scalar_result
+                simd_result,
+                scalar_result
             );
             assert!(
                 !simd_result && !scalar_result,

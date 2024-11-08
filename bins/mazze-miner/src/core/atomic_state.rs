@@ -41,6 +41,7 @@ impl From<&ProofOfWorkProblem> for ProblemState {
 pub struct AtomicProblemState {
     state: AtomicPtr<ProblemState>,
     generation: AtomicU64,
+    solution_submitted: AtomicBool,
 }
 
 impl Default for AtomicProblemState {
@@ -53,6 +54,7 @@ impl Default for AtomicProblemState {
         Self {
             state: AtomicPtr::new(Box::into_raw(Box::new(initial_state))),
             generation: AtomicU64::new(0),
+            solution_submitted: AtomicBool::new(false),
         }
     }
 }
@@ -70,6 +72,7 @@ impl AtomicProblemState {
         Self {
             state: AtomicPtr::new(Box::into_raw(Box::new(initial_state))),
             generation: AtomicU64::new(0),
+            solution_submitted: AtomicBool::new(false),
         }
     }
 
@@ -90,6 +93,7 @@ impl AtomicProblemState {
 
         // SAFETY: old_ptr was created by Box::into_raw and hasn't been freed
         unsafe { Box::from_raw(old_ptr) };
+        self.solution_submitted.store(false, Ordering::Release);
     }
 
     pub fn get_problem_details(&self) -> (u64, H256, U256) {
@@ -102,6 +106,14 @@ impl AtomicProblemState {
                 boundary,
             )
         })
+    }
+
+    pub fn mark_solution_submitted(&self) {
+        self.solution_submitted.store(true, Ordering::Release);
+    }
+
+    pub fn has_solution(&self) -> bool {
+        self.solution_submitted.load(Ordering::Acquire)
     }
 
     pub fn get_block_hash(&self) -> H256 {

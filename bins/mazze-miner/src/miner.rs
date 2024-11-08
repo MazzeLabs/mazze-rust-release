@@ -6,13 +6,11 @@ use mazzecore::pow::{
 };
 use randomx_rs::RandomXFlag;
 use serde_json::Value;
-use std::mem;
 use std::str::FromStr;
-use std::sync::atomic::{self, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::broadcast;
 
 use crate::core::*;
@@ -243,6 +241,15 @@ impl Miner {
             if current_generation != state_generation {
                 current_generation = state_generation;
 
+                if atomic_state.has_solution() {
+                    trace!(
+                        "[{}] Solution already submitted for current block, waiting for next job",
+                        worker_name
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+
                 let (height, block_hash, _) =
                     atomic_state.get_problem_details();
 
@@ -277,6 +284,7 @@ impl Miner {
                         // Use SIMD comparison
                         for (i, hash) in hashes.iter().enumerate() {
                             if atomic_state.check_hash_simd(hash) {
+                                atomic_state.mark_solution_submitted();
                                 trace!(
                                     "[{}] Thread {}: Solution found! {:?}",
                                     worker_name,
@@ -291,8 +299,8 @@ impl Miner {
                                 {
                                     warn!(
                                     "[{}] Thread {}: Failed to send solution: {}",
-                                    worker_name, thread_id, e
-                                );
+                                        worker_name, thread_id, e
+                                    );
                                 }
                             }
                         }
@@ -320,8 +328,8 @@ impl Miner {
                                 {
                                     warn!(
                                     "[{}] Thread {}: Failed to send solution: {}",
-                                    worker_name, thread_id, e
-                                );
+                                        worker_name, thread_id, e
+                                    );
                                 }
                             }
                         }

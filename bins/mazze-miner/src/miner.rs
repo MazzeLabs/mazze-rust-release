@@ -1,5 +1,5 @@
 use core_affinity::{self, CoreId};
-use log::{debug, info, warn};
+use log::{debug, info, trace, warn};
 use mazze_types::{H256, U256};
 use mazzecore::pow::{
     boundary_to_difficulty, ProofOfWorkProblem, ProofOfWorkSolution,
@@ -277,8 +277,10 @@ impl Miner {
                         // Use SIMD comparison
                         for (i, hash) in hashes.iter().enumerate() {
                             if atomic_state.check_hash_simd(hash) {
-                                info!(
-                                    "Solution found! {:?}",
+                                trace!(
+                                    "[{}] Thread {}: Solution found! {:?}",
+                                    worker_name,
+                                    thread_id,
                                     current_nonce + i
                                 );
                                 let solution = ProofOfWorkSolution {

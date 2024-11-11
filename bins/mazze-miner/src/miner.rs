@@ -11,6 +11,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::broadcast;
 
 use crate::core::*;
@@ -18,7 +19,7 @@ use crate::mining_metrics::MiningMetrics;
 
 const CHECK_INTERVAL: u64 = 2; // Check for new problem every 2 nonces
 
-const BATCH_SIZE: usize = 8;
+const BATCH_SIZE: usize = 4;
 
 /*
 Flow:
@@ -226,6 +227,9 @@ impl Miner {
         solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
         atomic_state: Arc<AtomicProblemState>,
     ) {
+        let start = Instant::now();
+        println!("Starting VM initialization...");
+
         // Pin thread to core
         Miner::setup_thread_affinity(core_id, &worker_name, thread_id);
 
@@ -235,10 +239,13 @@ impl Miner {
         let mut hasher = BatchHasher::new();
         let mut current_generation = 0;
 
+        println!("VM initialization took {:?}", start.elapsed());
+
         // Main mining loop
         loop {
             let state_generation = atomic_state.get_generation();
             if current_generation != state_generation {
+                let hash_start = Instant::now();
                 current_generation = state_generation;
 
                 if atomic_state.has_solution() {
@@ -263,7 +270,10 @@ impl Miner {
                 while current_nonce < end_nonce {
                     // Check for new problem periodically
                     if current_nonce.low_u64() % CHECK_INTERVAL == 0 {
-                        break;
+                        // Only break if there's a new generation
+                        if atomic_state.get_generation() != current_generation {
+                            break;
+                        }
                     }
 
                     // Process batch and check for solutions
@@ -273,6 +283,11 @@ impl Miner {
                             &vm.vm,
                             current_nonce,
                             &block_hash,
+                        );
+                        println!(
+                            "Batch of {} hashes took {:?}",
+                            hashes.len(),
+                            hash_start.elapsed()
                         );
                         info!(
                             "[{}] Thread {}: Processed {} hashes",
@@ -360,6 +375,7 @@ mod tests {
     use super::*;
     use hex::FromHex;
     use hex_literal::hex;
+    use mazzecore::pow;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -443,7 +459,7 @@ mod tests {
         // Convert to U256 for direct comparison
         let hash_int = U256::from_big_endian(&hash);
         let boundary_int = U256::from_big_endian(&boundary);
-        println!("Direct comparison: {}", hash_int <= boundary_int);
+        // println!("Direct comparison: {}", hash_int <= boundary_int);
 
         assert!(
             hash_int > boundary_int,
@@ -501,7 +517,7 @@ mod tests {
         // Ensure threads have started
         thread::sleep(Duration::from_millis(50));
 
-        println!("Starting state updates");
+        // println!("Starting state updates");
         // Update shared state a few times
         for i in 1..=5 {
             let new_state = ProblemState::new(
@@ -509,7 +525,7 @@ mod tests {
                 H256::from([i as u8; 32]), // Deterministic hash based on i
                 U256::from(1000000),
             );
-            println!("Updating state to block height {}", i);
+            // println!("Updating state to block height {}", i);
             atomic_state.update(new_state);
             thread::sleep(Duration::from_millis(50)); // Give more time for detection
         }
@@ -519,9 +535,9 @@ mod tests {
 
         let total_transitions: usize = transitions.iter().sum();
 
-        println!("Test completed in {:?}", start.elapsed());
-        println!("Transitions per thread: {:?}", transitions);
-        println!("Total transitions: {}", total_transitions);
+        // println!("Test completed in {:?}", start.elapsed());
+        // println!("Transitions per thread: {:?}", transitions);
+        // println!("Total transitions: {}", total_transitions);
 
         // We expect each thread to see at least one change
         assert!(
@@ -592,5 +608,72 @@ mod tests {
 
         let (height, _, _) = miner.atomic_state.get_problem_details();
         assert_eq!(height, 2, "All threads should be mining the new problem");
+    }
+
+    #[test]
+    fn test_single_mining_thread() {
+        // Setup basic components
+        let atomic_state = Arc::new(AtomicProblemState::default());
+        let (solution_tx, solution_rx) = mpsc::channel();
+        let core_id = core_affinity::get_core_ids().unwrap()[0];
+        let diff = U256::from(4);
+        let boundary = pow::difficulty_to_boundary(&diff);
+
+        // Spawn the mining thread first
+        let atomic_state_clone = Arc::clone(&atomic_state);
+        let thread_handle = thread::spawn(move || {
+            // println!("Mining thread started");
+            Miner::run_mining_thread(
+                0,
+                core_id,
+                "test-worker".to_string(),
+                1,
+                solution_tx,
+                atomic_state_clone,
+            )
+        });
+
+        // Give thread time to initialize
+        thread::sleep(Duration::from_secs(2));
+
+        // Now create and send the problem
+        let problem =
+            ProofOfWorkProblem::new_from_boundary(1, H256::random(), boundary);
+
+        println!("Sending problem:");
+        println!("  Height: {}", problem.block_height);
+        println!("  Hash: {}", hex::encode(problem.block_hash.as_bytes()));
+        println!("  Boundary: {}", problem.boundary);
+
+        // Update atomic state with our problem
+        atomic_state.update(ProblemState::from(&problem));
+        atomic_state.update(ProblemState::from(
+            &ProofOfWorkProblem::new_from_boundary(2, H256::random(), boundary),
+        ));
+
+        // Check for solutions
+        let timeout = Duration::from_secs(5);
+        let start = Instant::now();
+
+        while start.elapsed() < timeout {
+            match solution_rx.try_recv() {
+                Ok((solution, height)) => {
+                    println!(
+                        "Found solution: nonce={}, height={}",
+                        solution.nonce, height
+                    );
+                    // return;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    thread::sleep(Duration::from_millis(100));
+                    println!("Still mining... {:?}", start.elapsed());
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    panic!("Mining thread disconnected unexpectedly");
+                }
+            }
+        }
+
+        panic!("No solution found within timeout period");
     }
 }

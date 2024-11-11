@@ -19,8 +19,6 @@ use crate::mining_metrics::MiningMetrics;
 
 const CHECK_INTERVAL: u64 = 2; // Check for new problem every 2 nonces
 
-const BATCH_SIZE: usize = 4;
-
 /*
 Flow:
 Writer (mine thread)                    Reader (mining threads)
@@ -654,6 +652,7 @@ mod tests {
         // Check for solutions
         let timeout = Duration::from_secs(5);
         let start = Instant::now();
+        let mut solutions_found = 0;
 
         while start.elapsed() < timeout {
             match solution_rx.try_recv() {
@@ -662,7 +661,7 @@ mod tests {
                         "Found solution: nonce={}, height={}",
                         solution.nonce, height
                     );
-                    // return;
+                    solutions_found += 1;
                 }
                 Err(mpsc::TryRecvError::Empty) => {
                     thread::sleep(Duration::from_millis(100));
@@ -674,6 +673,10 @@ mod tests {
             }
         }
 
-        panic!("No solution found within timeout period");
+        assert!(
+            solutions_found > 0,
+            "No solution found within timeout period"
+        );
+        println!("Found {} solutions", solutions_found);
     }
 }

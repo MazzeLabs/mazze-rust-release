@@ -13,6 +13,7 @@ use miner::Miner;
 use stratum_client::StratumClient;
 mod core;
 mod mining_metrics;
+mod core_numa;
 
 async fn connect_with_retry(
     config: &MinerConfig, miner: Miner,

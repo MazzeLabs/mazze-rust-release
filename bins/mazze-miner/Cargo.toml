@@ -21,6 +21,8 @@ toml = "0.5"
 core_affinity = "0.8.1"
 rand = "0.8"
 libc = "0.2.162"
+numa = "0.5"
+parking_lot = "0.12" 
 
 [dev-dependencies]
 hex-literal = "0.4"

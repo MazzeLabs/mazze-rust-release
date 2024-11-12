@@ -15,7 +15,9 @@ use std::time::Instant;
 use tokio::sync::broadcast;
 
 use crate::core::*;
+use crate::core_numa::NumaError;
 use crate::core_numa::NumaVMManager;
+use crate::core_numa::ThreadAssignment;
 use crate::mining_metrics::MiningMetrics;
 
 const CHECK_INTERVAL: u64 = 8 * BATCH_SIZE as u64; // Check for new problem every 32 nonces
@@ -29,57 +31,6 @@ prepare new state
 atomic ptr swap ───────────────────►   use state data    │
                                       compare states    ◄─┘
 */
-
-// pub struct NumaAwareMiner {
-//     thread_manager: ThreadManager,
-//     vm_manager: Arc<NumaVMManager>,
-//     atomic_state: Arc<AtomicProblemState>,
-//     solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
-// }
-
-// impl NumaAwareMiner {
-//     pub fn new(num_threads: usize) -> Result<Self, NumaError> {
-//         let thread_manager = ThreadManager::new(num_threads)?;
-//         let vm_manager = Arc::new(NumaVMManager::new(&thread_manager)?);
-//         let (solution_tx, _) = mpsc::channel();
-
-//         Ok(Self {
-//             thread_manager,
-//             vm_manager,
-//             atomic_state: Arc::new(AtomicProblemState::default()),
-//             solution_sender: solution_tx,
-//         })
-//     }
-
-//     pub fn start_mining(&self) -> Result<(), NumaError> {
-//         for assignment in &self.thread_manager.assignments {
-//             let vm_manager = Arc::clone(&self.vm_manager);
-//             let atomic_state = Arc::clone(&self.atomic_state);
-//             let solution_sender = self.solution_sender.clone();
-
-//             thread::spawn(move || {
-//                 // Use hwloc for thread binding
-//                 let topology =
-//                     Topology::new().expect("Failed to create topology");
-//                 if let Some(node) = topology
-//                     .objects_with_type(ObjectType::NUMANode)
-//                     .find(|n| n.os_index() as usize == assignment.node_id)
-//                 {
-//                     node.bind_thread()
-//                         .expect("Failed to bind thread to NUMA node");
-//                 }
-
-//                 Self::mining_loop(
-//                     assignment,
-//                     vm_manager.get_vm(assignment.node_id),
-//                     atomic_state,
-//                     solution_sender,
-//                 )
-//             });
-//         }
-//         Ok(())
-//     }
-// }
 
 #[derive(Clone)]
 pub struct Miner {
@@ -231,6 +182,200 @@ impl Miner {
         self.mine(&problem);
 
         Ok(problem)
+    }
+
+    pub fn new_numa(
+        num_threads: usize, worker_id: usize,
+    ) -> Result<
+        (Self, broadcast::Receiver<(ProofOfWorkSolution, u64)>),
+        NumaError,
+    > {
+        let (stratum_tx, rx) = broadcast::channel(32);
+        let (solution_tx, solution_rx) = mpsc::channel();
+        let atomic_state = Arc::new(AtomicProblemState::default());
+        let metrics = Arc::new(MiningMetrics::new());
+        let vm_manager = Arc::new(NumaVMManager::new()?);
+
+        let miner = Miner {
+            worker_id,
+            worker_name: format!("worker-{}", worker_id),
+            num_threads,
+            atomic_state: Arc::clone(&atomic_state),
+            solution_sender: solution_tx,
+            metrics: Arc::clone(&metrics),
+        };
+
+        // Spawn solution handler
+        let worker_name = miner.worker_name.clone();
+        Self::spawn_solution_handler(
+            solution_rx,
+            stratum_tx,
+            atomic_state.clone(),
+            worker_name,
+        );
+
+        // Spawn mining threads
+        miner.spawn_numa_mining_threads(vm_manager)?;
+
+        Ok((miner, rx))
+    }
+
+    fn spawn_numa_mining_threads(
+        &self, vm_manager: Arc<NumaVMManager>,
+    ) -> Result<(), NumaError> {
+        info!(
+            "[{}] Spawning {} NUMA-aware mining threads",
+            self.worker_name, self.num_threads
+        );
+
+        let mut handles = Vec::with_capacity(self.num_threads);
+
+        for thread_id in 0..self.num_threads {
+            let assignment =
+                vm_manager.assign_thread(thread_id, self.num_threads)?;
+
+            info!(
+                "[{}] Assigning thread {} to NUMA node {} core {}",
+                self.worker_name,
+                thread_id,
+                assignment.node_id,
+                assignment.core_id
+            );
+
+            let handle = self.spawn_mining_thread_numa(
+                assignment,
+                Arc::clone(&vm_manager),
+            )?;
+
+            handles.push(handle);
+        }
+
+        // Store handles if needed for cleanup
+        Ok(())
+    }
+
+    fn spawn_mining_thread_numa(
+        &self, assignment: ThreadAssignment, vm_manager: Arc<NumaVMManager>,
+    ) -> Result<thread::JoinHandle<()>, NumaError> {
+        let worker_name = self.worker_name.clone();
+        let solution_sender = self.solution_sender.clone();
+        let atomic_state = Arc::clone(&self.atomic_state);
+        let num_threads = self.num_threads;
+
+        let handle = thread::spawn(move || {
+            #[cfg(target_os = "linux")]
+            unsafe {
+                libc::nice(1);
+            }
+
+            Self::run_mining_thread_numa(
+                assignment.thread_id,
+                assignment.core_id,
+                worker_name,
+                solution_sender,
+                atomic_state,
+                vm_manager.clone(),
+                num_threads,
+            );
+
+            // Cleanup thread assignment on exit
+            vm_manager.cleanup_thread(assignment.thread_id);
+        });
+
+        Ok(handle)
+    }
+
+    fn run_mining_thread_numa(
+        thread_id: usize, node_id: usize, worker_name: String,
+        solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
+        atomic_state: Arc<AtomicProblemState>, vm_manager: Arc<NumaVMManager>,
+        num_threads: usize,
+    ) {
+        info!(
+            "[{}] Starting mining thread {} on NUMA node {}",
+            worker_name, thread_id, node_id
+        );
+
+        // Get VM for this NUMA node
+        let vm = vm_manager.get_vm_read(node_id);
+        let mut hasher = BatchHasher::new();
+        let mut current_generation = 0;
+
+        loop {
+            let state_generation = atomic_state.get_generation();
+            if current_generation != state_generation {
+                current_generation = state_generation;
+
+                if atomic_state.has_solution() {
+                    trace!(
+                        "[{}] Solution already submitted for current block",
+                        worker_name
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+
+                let (height, block_hash, _) =
+                    atomic_state.get_problem_details();
+
+                // Update VM if needed
+                {
+                    let mut vm_lock = vm_manager.get_vm_write(node_id);
+                    let block_hash_bytes: [u8; 32] =
+                        block_hash.as_bytes().try_into().unwrap();
+                    if let Err(e) =
+                        vm_lock.update_if_needed(&block_hash_bytes)
+                    {
+                        warn!("[{}] Failed to update VM: {}", worker_name, e);
+                        continue;
+                    }
+                }
+
+                // Calculate nonce range for this thread
+                let (start_nonce, end_nonce) =
+                    atomic_state.calculate_nonce_range(thread_id, num_threads);
+                let mut current_nonce = start_nonce;
+
+                while current_nonce < end_nonce {
+                    if current_nonce.low_u64() % CHECK_INTERVAL == 0 {
+                        thread::yield_now();
+                    }
+
+                    if atomic_state.get_generation() != current_generation {
+                        break;
+                    }
+
+                    // Process batch and check for solutions
+                    let hashes = hasher.compute_hash_batch(
+                        &*vm.get_vm(),
+                        current_nonce,
+                        &block_hash,
+                    );
+
+                    for (i, hash) in hashes.iter().enumerate() {
+                        if atomic_state.check_hash_simd(hash) {
+                            atomic_state.mark_solution_submitted();
+                            let solution = ProofOfWorkSolution {
+                                nonce: current_nonce + i,
+                            };
+                            if let Err(e) =
+                                solution_sender.send((solution, height))
+                            {
+                                warn!(
+                                    "[{}] Failed to send solution: {}",
+                                    worker_name, e
+                                );
+                            }
+                        }
+                    }
+
+                    current_nonce =
+                        current_nonce.overflowing_add(U256::from(BATCH_SIZE)).0;
+                }
+            }
+
+            thread::yield_now();
+        }
     }
 
     fn spawn_mining_threads(&self) {
@@ -435,6 +580,44 @@ impl Miner {
             "[{}] Mining thread {} started on core {}",
             worker_name, thread_id, core_id.id
         );
+    }
+
+    fn spawn_solution_handler(
+        solution_rx: mpsc::Receiver<(ProofOfWorkSolution, u64)>,
+        stratum_tx: broadcast::Sender<(ProofOfWorkSolution, u64)>,
+        atomic_state: Arc<AtomicProblemState>,
+        worker_name: String,
+    ) {
+        thread::spawn(move || {
+            while let Ok((solution, solution_height)) = solution_rx.recv() {
+                let current_height = atomic_state.get_block_height();
+
+                // Skip stale solutions
+                if solution_height < current_height {
+                    debug!(
+                        "[{}] Skipping stale solution for block {}, current height: {}",
+                        worker_name, solution_height, current_height
+                    );
+                    continue;
+                }
+
+                // Skip future solutions (shouldn't happen, but better be safe)
+                if solution_height > current_height {
+                    warn!(
+                        "[{}] Got solution for future block {} while at height {}",
+                        worker_name, solution_height, current_height
+                    );
+                    continue;
+                }
+
+                if let Err(e) = stratum_tx.send((solution, solution_height)) {
+                    warn!(
+                        "[{}] Failed to send solution to stratum: {}",
+                        worker_name, e
+                    );
+                }
+            }
+        });
     }
 }
 

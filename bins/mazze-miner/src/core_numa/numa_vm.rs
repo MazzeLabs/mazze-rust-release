@@ -2,9 +2,10 @@ use hwlocality::{object::types::ObjectType, Topology};
 use log::{debug, info, warn};
 use parking_lot::RwLock;
 use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::{topology::NumaTopology, NumaError};
+use super::{topology::NumaTopology, NumaError, ThreadAssignment};
 
 pub struct NumaAwareVM {
     vm: Arc<RwLock<RandomXVM>>,
@@ -12,6 +13,9 @@ pub struct NumaAwareVM {
     node_id: usize,
     flags: RandomXFlag,
 }
+
+unsafe impl Send for NumaAwareVM {}
+unsafe impl Sync for NumaAwareVM {}
 
 impl NumaAwareVM {
     pub fn new(node_id: usize) -> Result<Self, NumaError> {
@@ -48,6 +52,10 @@ impl NumaAwareVM {
             node_id,
             flags,
         })
+    }
+
+    pub fn get_vm(&self) -> parking_lot::RwLockReadGuard<'_, RandomXVM> {
+        self.vm.read()
     }
 
     fn get_optimal_flags(node_id: usize) -> Result<RandomXFlag, NumaError> {
@@ -125,50 +133,85 @@ impl NumaAwareVM {
 
 pub struct NumaVMManager {
     vms: Vec<Arc<RwLock<NumaAwareVM>>>,
-    topology: Topology,
+    topology: NumaTopology,
+    active_threads: parking_lot::RwLock<HashMap<usize, ThreadAssignment>>,
 }
 
 impl NumaVMManager {
     pub fn new() -> Result<Self, NumaError> {
-        info!("Creating new NUMA VM Manager");
-        let topology = Topology::new().map_err(|e| {
-            warn!("Failed to create topology: {}", e);
-            NumaError::TopologyError(e.to_string())
-        })?;
+        let topology = NumaTopology::detect()?;
+        let vms = Self::initialize_vms(&topology)?;
 
-        let vms = topology
-            .objects_with_type(ObjectType::NUMANode)
-            .map(|node| {
-                let node_id = node.os_index().unwrap_or_default();
-                debug!("Creating VM for NUMA node {}", node_id);
+        Ok(Self {
+            vms,
+            topology,
+            active_threads: parking_lot::RwLock::new(HashMap::new()),
+        })
+    }
+
+    pub fn get_vm_read(
+        &self, node_id: usize,
+    ) -> parking_lot::RwLockReadGuard<'_, NumaAwareVM> {
+        self.vms[node_id].read()
+    }
+
+    // For write access
+    pub fn get_vm_write(
+        &self, node_id: usize,
+    ) -> parking_lot::RwLockWriteGuard<'_, NumaAwareVM> {
+        self.vms[node_id].write()
+    }
+
+    fn initialize_vms(
+        topology: &NumaTopology,
+    ) -> Result<Vec<Arc<RwLock<NumaAwareVM>>>, NumaError> {
+        let nodes = topology.get_nodes();
+        info!("Initializing VMs for {} NUMA nodes", nodes.len());
+
+        nodes
+            .iter()
+            .map(|&node_id| {
+                info!("Creating VM for NUMA node {}", node_id);
                 let vm = NumaAwareVM::new(node_id)?;
                 Ok(Arc::new(RwLock::new(vm)))
             })
-            .collect::<Result<Vec<_>, NumaError>>()?;
-
-        info!("Successfully created {} NUMA-aware VMs", vms.len());
-        Ok(Self { vms, topology })
+            .collect()
     }
 
-    pub fn get_vm(&self, node_id: usize) -> Arc<RwLock<NumaAwareVM>> {
-        debug!("Getting VM for node {}", node_id);
-        self.vms[node_id].clone()
+    pub fn assign_thread(
+        &self, thread_id: usize, total_threads: usize,
+    ) -> Result<ThreadAssignment, NumaError> {
+        let mut active_threads = self.active_threads.write();
+
+        // Check if thread is already assigned
+        if let Some(assignment) = active_threads.get(&thread_id) {
+            return Ok(assignment.clone());
+        }
+
+        // Calculate optimal node assignment
+        let node_id = thread_id % self.vms.len();
+        let cores = self.topology.get_cores_for_node(node_id)?;
+        let core_id = (thread_id / self.vms.len()) % cores.len();
+
+        let assignment = ThreadAssignment::new(thread_id, node_id, core_id);
+        active_threads.insert(thread_id, assignment.clone());
+
+        Ok(assignment)
     }
 
     pub fn update_all_vms(
         &self, block_hash: &[u8; 32],
     ) -> Result<(), NumaError> {
-        info!("Updating all VMs with new block hash");
-        for (i, vm) in self.vms.iter().enumerate() {
-            debug!("Updating VM {} of {}", i + 1, self.vms.len());
+        for (node_id, vm) in self.vms.iter().enumerate() {
+            info!("Updating VM for NUMA node {}", node_id);
             vm.write().update_if_needed(block_hash)?;
         }
-        info!("Successfully updated all VMs");
         Ok(())
     }
 
-    pub fn get_node_count(&self) -> usize {
-        self.vms.len()
+    pub fn cleanup_thread(&self, thread_id: usize) {
+        let mut active_threads = self.active_threads.write();
+        active_threads.remove(&thread_id);
     }
 }
 
@@ -193,10 +236,7 @@ mod tests {
         assert!(manager.is_ok(), "Failed to create VM manager");
 
         if let Ok(manager) = manager {
-            assert!(
-                manager.get_node_count() > 0,
-                "Should have at least one node"
-            );
+            assert!(manager.vms.len() > 0, "Should have at least one node");
         }
     }
 

@@ -1,4 +1,5 @@
 use crate::core::IntoChunks;
+use log::info;
 use mazze_types::{H256, U256};
 use mazzecore::pow::ProofOfWorkProblem;
 use std::sync::atomic;
@@ -89,11 +90,14 @@ impl AtomicProblemState {
     pub fn update(&self, new_state: ProblemState) {
         let new_box = Box::into_raw(Box::new(new_state));
         let old_ptr = self.state.swap(new_box, Ordering::Release);
-        self.generation.fetch_add(1, Ordering::Release);
+        let gen = self.generation.fetch_add(1, Ordering::Release);
 
         // SAFETY: old_ptr was created by Box::into_raw and hasn't been freed
-        unsafe { Box::from_raw(old_ptr) };
+        unsafe {
+            let _ = Box::from_raw(old_ptr);
+        };
         self.solution_submitted.store(false, Ordering::Release);
+        info!("Updated atomic state to generation={}", gen);
     }
 
     pub fn get_problem_details(&self) -> (u64, H256, U256) {

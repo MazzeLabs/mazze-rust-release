@@ -25,11 +25,13 @@ impl ThreadLocalVM {
 
     pub fn update_if_needed(&mut self, block_hash: &H256) {
         if self.current_block_hash != *block_hash {
-            self.cache = RandomXCache::new(self.flags, block_hash.as_bytes())
-                .expect("Failed to create RandomX cache");
-            self.vm =
-                RandomXVM::new(self.flags, Some(self.cache.clone()), None)
-                    .expect("Failed to create RandomX VM");
+            let new_cache =
+                RandomXCache::new(self.flags, block_hash.as_bytes())
+                    .expect("Failed to create RandomX cache");
+            self.vm
+                .reinit_cache(new_cache.clone())
+                .expect("Failed to reinit RandomX VM cache");
+            self.cache = new_cache;
             self.current_block_hash = *block_hash;
         }
     }

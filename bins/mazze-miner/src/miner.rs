@@ -17,7 +17,7 @@ use tokio::sync::broadcast;
 use crate::core::*;
 use crate::mining_metrics::MiningMetrics;
 
-const CHECK_INTERVAL: u64 = 2; // Check for new problem every 2 nonces
+const CHECK_INTERVAL: u64 = 8 * BATCH_SIZE as u64; // Check for new problem every 32 nonces
 
 /*
 Flow:
@@ -208,6 +208,11 @@ impl Miner {
         );
 
         thread::spawn(move || {
+            #[cfg(target_os = "linux")]
+            unsafe {
+                libc::nice(1);
+            }
+
             Miner::run_mining_thread(
                 thread_id,
                 core_id,
@@ -226,18 +231,29 @@ impl Miner {
         atomic_state: Arc<AtomicProblemState>,
     ) {
         let start = Instant::now();
-        println!("Starting VM initialization...");
+        debug!("Starting VM initialization...");
 
         // Pin thread to core
         Miner::setup_thread_affinity(core_id, &worker_name, thread_id);
 
         // Initialize mining components
-        let flags = RandomXFlag::get_recommended_flags();
+        let mut flags = RandomXFlag::get_recommended_flags();
+        #[cfg(target_os = "linux")]
+        {
+            let hugepages_available =
+                std::fs::read_to_string("/proc/sys/vm/nr_hugepages")
+                    .map(|s| s.trim().parse::<i32>().unwrap_or(0) > 0)
+                    .unwrap_or(false);
+            if hugepages_available {
+                flags |= RandomXFlag::FLAG_LARGE_PAGES;
+            }
+        }
+
         let mut vm = ThreadLocalVM::new(flags, &H256::zero());
         let mut hasher = BatchHasher::new();
         let mut current_generation = 0;
 
-        println!("VM initialization took {:?}", start.elapsed());
+        debug!("VM initialization took {:?}", start.elapsed());
 
         // Main mining loop
         loop {
@@ -269,9 +285,11 @@ impl Miner {
                     // Check for new problem periodically
                     if current_nonce.low_u64() % CHECK_INTERVAL == 0 {
                         // Only break if there's a new generation
-                        if atomic_state.get_generation() != current_generation {
-                            break;
-                        }
+                        thread::yield_now();
+                    }
+
+                    if atomic_state.get_generation() != current_generation {
+                        break;
                     }
 
                     // Process batch and check for solutions
@@ -282,12 +300,12 @@ impl Miner {
                             current_nonce,
                             &block_hash,
                         );
-                        println!(
+                        trace!(
                             "Batch of {} hashes took {:?}",
                             hashes.len(),
                             hash_start.elapsed()
                         );
-                        info!(
+                        debug!(
                             "[{}] Thread {}: Processed {} hashes",
                             worker_name,
                             thread_id,

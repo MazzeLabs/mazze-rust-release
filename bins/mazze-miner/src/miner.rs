@@ -15,6 +15,7 @@ use std::time::Instant;
 use tokio::sync::broadcast;
 
 use crate::core::*;
+use crate::core_numa::NumaVMManager;
 use crate::mining_metrics::MiningMetrics;
 
 const CHECK_INTERVAL: u64 = 8 * BATCH_SIZE as u64; // Check for new problem every 32 nonces
@@ -28,6 +29,57 @@ prepare new state
 atomic ptr swap ───────────────────►   use state data    │
                                       compare states    ◄─┘
 */
+
+// pub struct NumaAwareMiner {
+//     thread_manager: ThreadManager,
+//     vm_manager: Arc<NumaVMManager>,
+//     atomic_state: Arc<AtomicProblemState>,
+//     solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
+// }
+
+// impl NumaAwareMiner {
+//     pub fn new(num_threads: usize) -> Result<Self, NumaError> {
+//         let thread_manager = ThreadManager::new(num_threads)?;
+//         let vm_manager = Arc::new(NumaVMManager::new(&thread_manager)?);
+//         let (solution_tx, _) = mpsc::channel();
+
+//         Ok(Self {
+//             thread_manager,
+//             vm_manager,
+//             atomic_state: Arc::new(AtomicProblemState::default()),
+//             solution_sender: solution_tx,
+//         })
+//     }
+
+//     pub fn start_mining(&self) -> Result<(), NumaError> {
+//         for assignment in &self.thread_manager.assignments {
+//             let vm_manager = Arc::clone(&self.vm_manager);
+//             let atomic_state = Arc::clone(&self.atomic_state);
+//             let solution_sender = self.solution_sender.clone();
+
+//             thread::spawn(move || {
+//                 // Use hwloc for thread binding
+//                 let topology =
+//                     Topology::new().expect("Failed to create topology");
+//                 if let Some(node) = topology
+//                     .objects_with_type(ObjectType::NUMANode)
+//                     .find(|n| n.os_index() as usize == assignment.node_id)
+//                 {
+//                     node.bind_thread()
+//                         .expect("Failed to bind thread to NUMA node");
+//                 }
+
+//                 Self::mining_loop(
+//                     assignment,
+//                     vm_manager.get_vm(assignment.node_id),
+//                     atomic_state,
+//                     solution_sender,
+//                 )
+//             });
+//         }
+//         Ok(())
+//     }
+// }
 
 #[derive(Clone)]
 pub struct Miner {

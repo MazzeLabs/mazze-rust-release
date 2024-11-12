@@ -1,69 +1,139 @@
-pub struct NumaInfo {
-    node_count: usize,
-    current_node: NodeId,
+use hwlocality::cpu::binding::CpuBindingFlags;
+use hwlocality::cpu::cpuset::CpuSet;
+use hwlocality::object::types::ObjectType;
+use hwlocality::Topology;
+use log::{debug, info, warn};
+
+use super::NumaError;
+
+pub struct NumaTopology {
+    topology: Topology,
 }
 
-impl NumaInfo {
-    pub fn detect() -> Option<Self> {
-        if !numa::is_available() {
-            return None;
+impl NumaTopology {
+    pub fn detect() -> Result<Self, NumaError> {
+        info!("Detecting NUMA topology...");
+        let topology = Topology::new().map_err(|e| {
+            warn!("Failed to create topology: {}", e);
+            NumaError::TopologyError(e.to_string())
+        })?;
+
+        debug!("NUMA topology detected successfully");
+        Ok(Self { topology })
+    }
+
+    pub fn get_nodes(&self) -> Vec<usize> {
+        let nodes = self
+            .topology
+            .objects_with_type(ObjectType::NUMANode)
+            .map(|node| node.os_index().unwrap_or_default())
+            .collect::<Vec<_>>();
+
+        info!("Found {} NUMA nodes", nodes.len());
+        debug!("NUMA nodes: {:?}", nodes);
+        nodes
+    }
+
+    pub fn get_cores_for_node(
+        &self, node_id: usize,
+    ) -> Result<Vec<usize>, NumaError> {
+        self.topology
+            .objects_with_type(ObjectType::NUMANode)
+            .find(|node| node.os_index().unwrap_or_default() == node_id)
+            .and_then(|node| node.cpuset())
+            .map(|cpuset| {
+                cpuset.iter_set().map(|core_id| core_id.into()).collect()
+            })
+            .ok_or_else(|| NumaError::TopologyError("Node not found".into()))
+    }
+
+    pub fn bind_thread_to_node(&self, node_id: usize) -> Result<(), NumaError> {
+        debug!("Attempting to bind thread to NUMA node {}", node_id);
+
+        let node = self
+            .topology
+            .objects_with_type(ObjectType::NUMANode)
+            .find(|node| node.os_index().unwrap_or_default() == node_id)
+            .ok_or_else(|| {
+                warn!("NUMA node {} not found", node_id);
+                NumaError::TopologyError("Node not found".into())
+            })?;
+
+        if let Some(cpuset) = node.cpuset() {
+            let mut owned_cpuset = CpuSet::new();
+            let cpu_ids: Vec<_> = cpuset.iter_set().collect();
+            debug!("Binding thread to CPUs: {:?}", cpu_ids);
+
+            for cpu_id in cpu_ids {
+                owned_cpuset.set(cpu_id);
+            }
+
+            self.topology
+                .bind_cpu(&owned_cpuset, CpuBindingFlags::THREAD)
+                .map_err(|e| {
+                    warn!(
+                        "Failed to bind thread to NUMA node {}: {}",
+                        node_id, e
+                    );
+                    NumaError::ThreadBindError(e.to_string())
+                })?;
+
+            info!("Successfully bound thread to NUMA node {}", node_id);
         }
-        Some(Self {
-            node_count: numa::nodes().count(),
-            current_node: numa::current_node(),
-        })
+
+        Ok(())
     }
 }
 
-pub struct ThreadAssignment {
-    thread_id: usize,
-    node_id: NodeId,
-    core_id: usize,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-pub struct NumaThreadManager {
-    assignments: Vec<ThreadAssignment>,
-    topology: NumaTopology,
-}
-
-impl NumaThreadManager {
-    pub fn new(requested_threads: usize) -> Result<Self, NumaError> {
-        let topology = NumaTopology::detect()?;
-        let assignments = Self::distribute_threads(&topology, requested_threads)?;
-        
-        Ok(Self {
-            assignments,
-            topology,
-        })
+    #[test]
+    fn test_topology_detection() {
+        let topology = NumaTopology::detect();
+        assert!(topology.is_ok(), "Should be able to detect topology");
     }
 
-    pub fn assign_thread(&self, thread_id: usize) -> Result<ThreadAssignment, NumaError> {
-        self.assignments.iter()
-            .find(|a| a.thread_id == thread_id)
-            .cloned()
-            .ok_or(NumaError::ThreadAssignmentFailed)
-    }
-
-    fn distribute_threads(
-        topology: &NumaTopology,
-        requested_threads: usize
-    ) -> Result<Vec<ThreadAssignment>, NumaError> {
-        let mut assignments = Vec::new();
+    #[test]
+    fn test_get_nodes() {
+        let topology = NumaTopology::detect().unwrap();
         let nodes = topology.get_nodes();
-        
-        // Distribute threads evenly across NUMA nodes
-        for thread_id in 0..requested_threads {
-            let node_id = nodes[thread_id % nodes.len()];
-            let cores = topology.get_cores_for_node(node_id)?;
-            let core_id = cores[thread_id / nodes.len() % cores.len()];
-            
-            assignments.push(ThreadAssignment {
-                thread_id,
-                node_id,
-                core_id,
-            });
+        assert!(!nodes.is_empty(), "Should find at least one NUMA node");
+    }
+
+    #[test]
+    fn test_get_cores_for_node() {
+        let topology = NumaTopology::detect().unwrap();
+        let nodes = topology.get_nodes();
+
+        for node_id in nodes {
+            let cores = topology.get_cores_for_node(node_id);
+            assert!(cores.is_ok(), "Should get cores for node {}", node_id);
+            assert!(
+                !cores.unwrap().is_empty(),
+                "Node {} should have cores",
+                node_id
+            );
         }
-        
-        Ok(assignments)
+    }
+
+    #[test]
+    fn test_invalid_node() {
+        let topology = NumaTopology::detect().unwrap();
+        let invalid_node = usize::MAX;
+        let result = topology.get_cores_for_node(invalid_node);
+        assert!(result.is_err(), "Should fail for invalid node");
+    }
+
+    #[test]
+    fn test_thread_binding() {
+        let topology = NumaTopology::detect().unwrap();
+        let nodes = topology.get_nodes();
+
+        if let Some(&first_node) = nodes.first() {
+            let result = topology.bind_thread_to_node(first_node);
+            assert!(result.is_ok(), "Should be able to bind to first node");
+        }
     }
 }

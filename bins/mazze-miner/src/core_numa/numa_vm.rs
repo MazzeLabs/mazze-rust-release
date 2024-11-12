@@ -1,17 +1,38 @@
-use hwlocality::{object::types::ObjectType, Topology};
 use log::{debug, info, warn};
 use parking_lot::RwLock;
-use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
-use std::collections::HashMap;
+use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag, RandomXVM};
 use std::sync::Arc;
+use std::{collections::HashMap, sync::atomic::AtomicBool};
 
-use super::{topology::NumaTopology, NumaError, ThreadAssignment};
+use super::{topology::NumaTopology, NumaError};
+
+#[derive(Clone, Debug)]
+pub struct ThreadAssignment {
+    pub thread_id: usize,
+    pub node_id: usize,
+    pub core_id: usize,
+}
+
+impl ThreadAssignment {
+    pub fn new(thread_id: usize, node_id: usize, core_id: usize) -> Self {
+        debug!(
+            "Creating thread assignment: thread={}, node={}, core={}",
+            thread_id, node_id, core_id
+        );
+        Self {
+            thread_id,
+            node_id,
+            core_id,
+        }
+    }
+}
 
 pub struct NumaAwareVM {
     vm: Arc<RwLock<RandomXVM>>,
-    cache: Arc<RwLock<RandomXCache>>,
+    standby_vm: Arc<RwLock<RandomXVM>>,
     node_id: usize,
     flags: RandomXFlag,
+    current_key: [u8; 32],
 }
 
 unsafe impl Send for NumaAwareVM {}
@@ -24,8 +45,17 @@ impl NumaAwareVM {
         let topology = NumaTopology::detect()?;
         topology.bind_thread_to_node(node_id)?;
 
-        let flags = Self::get_optimal_flags(node_id)?;
-        debug!("Using RandomX flags: {:?}", flags);
+        let flags = RandomXFlag::get_recommended_flags();
+
+        if Self::check_node_memory(node_id)? {
+            info!("SKIPPED: Enabling full memory mode for node {}", node_id);
+            // flags |= RandomXFlag::FLAG_FULL_MEM;
+        } else {
+            warn!(
+                "Insufficient memory for full mode on node {}, defaulting",
+                node_id
+            );
+        }
 
         info!("Initializing RandomX cache for node {}", node_id);
         let cache = Arc::new(RwLock::new(
@@ -35,41 +65,47 @@ impl NumaAwareVM {
             })?,
         ));
 
-        info!("Creating RandomX VM for node {}", node_id);
-        let vm = Arc::new(RwLock::new(
-            RandomXVM::new(flags, Some(cache.read().clone()), None).map_err(
+        let dataset = if flags.contains(RandomXFlag::FLAG_FULL_MEM) {
+            info!("Creating RandomX dataset for node {}", node_id);
+            Some(RandomXDataset::new(flags, cache.read().clone(), 0).map_err(
                 |e| {
-                    warn!("Failed to create RandomX VM: {}", e);
+                    warn!("Failed to create RandomX dataset: {}", e);
                     NumaError::RandomXError(e)
                 },
-            )?,
+            )?)
+        } else {
+            None
+        };
+
+        info!("Creating RandomX VMs for node {}", node_id);
+        let vm = Arc::new(RwLock::new(
+            RandomXVM::new(flags, Some(cache.read().clone()), dataset.clone())
+                .map_err(|e| {
+                    warn!("Failed to create RandomX VM: {}", e);
+                    NumaError::RandomXError(e)
+                })?,
+        ));
+
+        let standby_vm = Arc::new(RwLock::new(
+            RandomXVM::new(flags, Some(cache.read().clone()), dataset)
+                .map_err(|e| {
+                    warn!("Failed to create RandomX VM: {}", e);
+                    NumaError::RandomXError(e)
+                })?,
         ));
 
         info!("Successfully created NUMA-aware VM for node {}", node_id);
         Ok(Self {
             vm,
-            cache,
+            standby_vm,
             node_id,
             flags,
+            current_key: [0u8; 32],
         })
     }
 
     pub fn get_vm(&self) -> parking_lot::RwLockReadGuard<'_, RandomXVM> {
         self.vm.read()
-    }
-
-    fn get_optimal_flags(node_id: usize) -> Result<RandomXFlag, NumaError> {
-        debug!("Getting optimal RandomX flags for node {}", node_id);
-        let mut flags = RandomXFlag::get_recommended_flags();
-
-        if Self::check_node_memory(node_id)? {
-            info!("Enabling full memory mode for node {}", node_id);
-            flags |= RandomXFlag::FLAG_FULL_MEM;
-        } else {
-            warn!("Insufficient memory for full mode on node {}", node_id);
-        }
-
-        Ok(flags)
     }
 
     pub fn check_node_memory(node_id: usize) -> Result<bool, NumaError> {
@@ -108,25 +144,27 @@ impl NumaAwareVM {
     pub fn update_if_needed(
         &mut self, block_hash: &[u8; 32],
     ) -> Result<(), NumaError> {
-        debug!("Updating VM on node {} with new block hash", self.node_id);
+        if self.current_key != *block_hash {
+            info!("Updating RandomX VM for node {} with new key", self.node_id);
 
-        let new_cache =
-            RandomXCache::new(self.flags, block_hash).map_err(|e| {
-                warn!("Failed to create new cache: {}", e);
-                NumaError::RandomXError(e)
-            })?;
+            // Create new cache
+            let new_cache = RandomXCache::new(self.flags, block_hash)
+                .map_err(NumaError::RandomXError)?;
 
-        {
-            let mut vm = self.vm.write();
-            debug!("Reinitializing VM cache on node {}", self.node_id);
-            vm.reinit_cache(new_cache.clone()).map_err(|e| {
-                warn!("Failed to reinit VM cache: {}", e);
-                NumaError::RandomXError(e)
-            })?;
+            // Update standby VM in a separate scope
+            {
+                let mut standby = self.standby_vm.write();
+                standby
+                    .reinit_cache(new_cache)
+                    .map_err(NumaError::RandomXError)?;
+            } // standby lock is released here
+
+            // Now safe to swap
+            std::mem::swap(&mut self.vm, &mut self.standby_vm);
+            self.current_key = *block_hash;
+
+            info!("Successfully updated RandomX VM for node {}", self.node_id);
         }
-
-        *self.cache.write() = new_cache;
-        info!("Successfully updated VM on node {}", self.node_id);
         Ok(())
     }
 }
@@ -135,18 +173,25 @@ pub struct NumaVMManager {
     vms: Vec<Arc<RwLock<NumaAwareVM>>>,
     topology: NumaTopology,
     active_threads: parking_lot::RwLock<HashMap<usize, ThreadAssignment>>,
+    is_updating: Arc<AtomicBool>,
 }
 
 impl NumaVMManager {
     pub fn new() -> Result<Self, NumaError> {
         let topology = NumaTopology::detect()?;
-        let vms = Self::initialize_vms(&topology)?;
+        let nodes = topology.get_nodes();
+        let vms = Self::initialize_vms(&topology, &nodes)?;
 
         Ok(Self {
             vms,
             topology,
             active_threads: parking_lot::RwLock::new(HashMap::new()),
+            is_updating: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    pub fn is_updating(&self) -> bool {
+        self.is_updating.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn get_vm_read(
@@ -163,9 +208,8 @@ impl NumaVMManager {
     }
 
     fn initialize_vms(
-        topology: &NumaTopology,
+        topology: &NumaTopology, nodes: &[usize],
     ) -> Result<Vec<Arc<RwLock<NumaAwareVM>>>, NumaError> {
-        let nodes = topology.get_nodes();
         info!("Initializing VMs for {} NUMA nodes", nodes.len());
 
         nodes
@@ -179,19 +223,13 @@ impl NumaVMManager {
     }
 
     pub fn assign_thread(
-        &self, thread_id: usize, total_threads: usize,
+        &self, thread_id: usize,
     ) -> Result<ThreadAssignment, NumaError> {
         let mut active_threads = self.active_threads.write();
-
-        // Check if thread is already assigned
-        if let Some(assignment) = active_threads.get(&thread_id) {
-            return Ok(assignment.clone());
-        }
-
-        // Calculate optimal node assignment
-        let node_id = thread_id % self.vms.len();
+        let num_nodes = self.vms.len();
+        let node_id = thread_id % num_nodes;
         let cores = self.topology.get_cores_for_node(node_id)?;
-        let core_id = (thread_id / self.vms.len()) % cores.len();
+        let core_id = (thread_id / num_nodes) % cores.len();
 
         let assignment = ThreadAssignment::new(thread_id, node_id, core_id);
         active_threads.insert(thread_id, assignment.clone());

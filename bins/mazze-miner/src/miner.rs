@@ -15,6 +15,7 @@ use std::time::Instant;
 use tokio::sync::broadcast;
 
 use crate::core::*;
+use crate::core_numa::NewNumaVMManager;
 use crate::core_numa::NumaError;
 use crate::core_numa::NumaVMManager;
 use crate::core_numa::ThreadAssignment;
@@ -40,21 +41,21 @@ pub struct Miner {
     atomic_state: Arc<AtomicProblemState>,
     solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
     metrics: Arc<MiningMetrics>,
-    vm_manager: Arc<NumaVMManager>,
+    vm_manager: Arc<NewNumaVMManager>,
 }
 
 impl Miner {
-    pub fn new_legacy(
+    pub fn new_numa(
         num_threads: usize, worker_id: usize,
-    ) -> (Self, broadcast::Receiver<(ProofOfWorkSolution, u64)>) {
+    ) -> Result<
+        (Self, broadcast::Receiver<(ProofOfWorkSolution, u64)>),
+        NumaError,
+    > {
         let (stratum_tx, rx) = broadcast::channel(32);
         let (solution_tx, solution_rx) = mpsc::channel();
-
         let atomic_state = Arc::new(AtomicProblemState::default());
-
         let metrics = Arc::new(MiningMetrics::new());
-
-        let vm_manager = Arc::new(NumaVMManager::new().unwrap());
+        let vm_manager = Arc::new(NewNumaVMManager::new()?);
 
         let miner = Miner {
             worker_id,
@@ -66,77 +67,19 @@ impl Miner {
             vm_manager: Arc::clone(&vm_manager),
         };
 
-        // Spawn solution handling thread
+        // Spawn solution handler
         let worker_name = miner.worker_name.clone();
-
-        thread::spawn(move || {
-            while let Ok((solution, solution_height)) = solution_rx.recv() {
-                let start_time = std::time::Instant::now();
-
-                // Get current problem's block height
-                let current_height = atomic_state.get_block_height();
-
-                // Skip stale solutions
-                if solution_height < current_height {
-                    debug!(
-                        "[{}] Skipping stale solution for block {}, current height: {}",
-                        worker_name, solution_height, current_height
-                    );
-                    continue;
-                }
-
-                // Skip future solutions (shouldn't happen, but better be safe)
-                if solution_height > current_height {
-                    warn!(
-                        "[{}] Got solution for future block {} while at height {}",
-                        worker_name, solution_height, current_height
-                    );
-                    continue;
-                }
-
-                if let Err(e) = stratum_tx.send((solution, solution_height)) {
-                    warn!(
-                        "[{}] Failed to send solution to stratum: {}",
-                        worker_name, e
-                    );
-                }
-            }
-        });
-
-        miner.spawn_mining_threads_legacy();
-        (miner, rx)
-    }
-
-    pub fn mine_legacy(&mut self, problem: &ProofOfWorkProblem) {
-        // Check if this is the same problem we're already mining
-        let (current_height, current_hash, _) =
-            self.atomic_state.get_problem_details();
-
-        if current_height == problem.block_height
-            && current_hash == problem.block_hash
-        {
-            debug!(
-                "[{}] Received duplicate problem for block {}, ignoring",
-                self.worker_name, problem.block_height
-            );
-            return;
-        }
-
-        // Only count new blocks, not duplicate notifications
-        self.metrics.new_block();
-
-        // Create new state (already handles endianness)
-        let new_state = ProblemState::from(problem);
-
-        info!(
-            "[{}] New mining problem: height={}, pow_hash={:.4}...{:.4}",
-            self.worker_name,
-            problem.block_height,
-            hex::encode(&problem.block_hash.as_bytes()[..4]),
-            hex::encode(&problem.block_hash.as_bytes()[28..32])
+        Self::spawn_solution_handler(
+            solution_rx,
+            stratum_tx,
+            atomic_state.clone(),
+            worker_name,
         );
 
-        self.atomic_state.update(new_state);
+        // Spawn mining threads
+        miner.spawn_numa_mining_threads()?;
+
+        Ok((miner, rx))
     }
 
     pub fn mine(&mut self, problem: &ProofOfWorkProblem) {
@@ -181,55 +124,6 @@ impl Miner {
         self.atomic_state.update(new_state);
 
         debug!("[{}] Atomic state updated successfully", self.worker_name);
-    }
-
-    pub fn parse_job_legacy(
-        &mut self, params: &[Value],
-    ) -> Result<ProofOfWorkProblem, String> {
-        if params.len() < 4 {
-            return Err("Invalid job data: not enough parameters".into());
-        }
-
-        let pow_hash_str =
-            params[2].as_str().ok_or("Invalid pow_hash: not a string")?;
-        let boundary_str =
-            params[3].as_str().ok_or("Invalid boundary: not a string")?;
-
-        let pow_hash = H256::from_slice(
-            &hex::decode(pow_hash_str.trim_start_matches("0x"))
-                .map_err(|e| format!("Invalid pow_hash: {}", e))?,
-        );
-
-        let boundary = U256::from_str(boundary_str.trim_start_matches("0x"))
-            .map_err(|e| format!("Invalid boundary: {}", e))?;
-
-        let block_height = params[1]
-            .as_str()
-            .ok_or("Invalid block height: not a string")?
-            .parse::<u64>()
-            .map_err(|e| format!("Invalid block height: {}", e))?;
-
-        let difficulty = boundary_to_difficulty(&boundary);
-
-        info!(
-            "Parsed job: block_height={}, pow_hash={:.4}…{:.4}, boundary=0x{:x}, calculated difficulty={}",
-            block_height,
-            pow_hash,
-            hex::encode(&pow_hash.as_bytes()[28..32]),
-            boundary,
-            difficulty
-        );
-
-        let problem = ProofOfWorkProblem::new_from_boundary(
-            block_height,
-            pow_hash,
-            boundary,
-        );
-
-        // Immediately update the atomic state
-        self.mine(&problem);
-
-        Ok(problem)
     }
 
     pub fn parse_job(
@@ -286,10 +180,7 @@ impl Miner {
         );
 
         // Update VMs before updating atomic state
-        if let Err(e) = self
-            .vm_manager
-            .update_all_vms(&problem.block_hash.as_bytes().try_into().unwrap())
-        {
+        if let Err(e) = self.vm_manager.update_all_vms(problem) {
             return Err(format!("Failed to update VMs: {}", e));
         }
 
@@ -302,43 +193,6 @@ impl Miner {
         self.mine(&problem);
 
         Ok(problem)
-    }
-
-    pub fn new_numa(
-        num_threads: usize, worker_id: usize,
-    ) -> Result<
-        (Self, broadcast::Receiver<(ProofOfWorkSolution, u64)>),
-        NumaError,
-    > {
-        let (stratum_tx, rx) = broadcast::channel(32);
-        let (solution_tx, solution_rx) = mpsc::channel();
-        let atomic_state = Arc::new(AtomicProblemState::default());
-        let metrics = Arc::new(MiningMetrics::new());
-        let vm_manager = Arc::new(NumaVMManager::new()?);
-
-        let miner = Miner {
-            worker_id,
-            worker_name: format!("worker-{}", worker_id),
-            num_threads,
-            atomic_state: Arc::clone(&atomic_state),
-            solution_sender: solution_tx,
-            metrics: Arc::clone(&metrics),
-            vm_manager: Arc::clone(&vm_manager),
-        };
-
-        // Spawn solution handler
-        let worker_name = miner.worker_name.clone();
-        Self::spawn_solution_handler(
-            solution_rx,
-            stratum_tx,
-            atomic_state.clone(),
-            worker_name,
-        );
-
-        // Spawn mining threads
-        miner.spawn_numa_mining_threads()?;
-
-        Ok((miner, rx))
     }
 
     fn spawn_numa_mining_threads(&self) -> Result<(), NumaError> {
@@ -389,13 +243,9 @@ impl Miner {
                 &assignment,
                 worker_name,
                 solution_sender,
-                atomic_state,
-                vm_manager.clone(),
+                vm_manager,
                 num_threads,
             );
-
-            // Cleanup thread assignment on exit
-            vm_manager.cleanup_thread(assignment.thread_id);
         });
 
         Ok(handle)
@@ -404,8 +254,7 @@ impl Miner {
     fn run_mining_thread_numa(
         assignment: &ThreadAssignment, worker_name: String,
         solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
-        atomic_state: Arc<AtomicProblemState>, vm_manager: Arc<NumaVMManager>,
-        num_threads: usize,
+        vm_manager: Arc<NewNumaVMManager>, num_threads: usize,
     ) {
         info!(
             "[{}] Starting mining thread {} on NUMA node {} core {}",
@@ -415,7 +264,7 @@ impl Miner {
             assignment.core_id
         );
 
-        // Set thread affinity based on assignment
+        // Set thread affinity
         #[cfg(target_os = "linux")]
         if let Some(core_ids) = core_affinity::get_core_ids() {
             if let Some(core_id) = core_ids.get(assignment.core_id) {
@@ -428,8 +277,7 @@ impl Miner {
         }
 
         let mut hasher = BatchHasher::new();
-        let mut current_generation = 0;
-        let mut current_nonce = 0;
+        let numa_vm = vm_manager.get_vm(assignment.node_id);
 
         info!(
             "[{}] Thread {} starting mining loop",
@@ -437,330 +285,62 @@ impl Miner {
         );
 
         loop {
-            // debug!(
-            //     "[{}] Thread {} attempting to access atomic state",
-            //     worker_name, assignment.thread_id
-            // );
-            let state_generation = atomic_state.get_generation();
-            // debug!(
-            //     "[{}] Thread {} accessed atomic state successfully",
-            //     worker_name, assignment.thread_id
-            // );
-            if current_nonce % 100_000 == 0 {
-                debug!(
-                    "[{}] Thread {} checking gen: current={}, state={}, height={}",
-                    worker_name,
-                    assignment.thread_id,
-                    current_generation,
-                    state_generation,
-                    atomic_state.get_block_height()
-                );
-            }
-            current_nonce += 1;
-            if current_generation != state_generation {
-                current_generation = state_generation;
+            let active_state = numa_vm.get_active_state();
 
-                if atomic_state.has_solution() {
-                    trace!(
-                        "[{}] Solution already submitted for current block",
-                        worker_name
-                    );
-                    thread::sleep(Duration::from_millis(10));
-                    continue;
+            // Calculate nonce range for this thread
+            let (start_nonce, end_nonce) = numa_vm
+                .calculate_nonce_range(assignment.thread_id, num_threads);
+            let mut current_nonce = start_nonce;
+
+            while current_nonce < end_nonce {
+                if current_nonce.low_u64() % CHECK_INTERVAL == 0 {
+                    thread::yield_now();
                 }
 
-                let (height, block_hash, _) =
-                    atomic_state.get_problem_details();
+                // Process batch and check for solutions
+                let hashes =
+                    active_state.get_hash_batch(&mut hasher, current_nonce);
 
-                while vm_manager.is_updating() {
-                    info!(
-                        "[{}] Thread {} waiting for VM update",
-                        worker_name, assignment.thread_id
-                    );
-                    thread::sleep(Duration::from_millis(1));
-                }
-
-                // Update VM if needed - use the assigned node_id from ThreadAssignment
-                {
-                    let mut vm_lock =
-                        vm_manager.get_vm_write(assignment.node_id);
-                    let block_hash_bytes: [u8; 32] =
-                        block_hash.as_bytes().try_into().unwrap();
-                    if let Err(e) = vm_lock.update_if_needed(&block_hash_bytes)
+                for (i, hash) in hashes.iter().enumerate() {
+                    match numa_vm.check_hash(hash, active_state.get_state_id())
                     {
-                        warn!("[{}] Failed to update VM: {}", worker_name, e);
-                        continue;
-                    }
-                }
-
-                // Calculate nonce range for this thread
-                let (start_nonce, end_nonce) = atomic_state
-                    .calculate_nonce_range(assignment.thread_id, num_threads);
-                let mut current_nonce = start_nonce;
-
-                while current_nonce < end_nonce {
-                    if current_nonce.low_u64() % CHECK_INTERVAL == 0 {
-                        thread::yield_now();
-                    }
-
-                    if atomic_state.get_generation() != current_generation {
-                        break;
-                    }
-
-                    // Process batch and check for solutions - use the assigned node_id
-                    debug!(
-                        "[{}] Thread {} attempting to get VM read lock for node {}",
-                        worker_name, assignment.thread_id, assignment.node_id
-                    );
-                    let vm = vm_manager.get_vm_read(assignment.node_id);
-                    debug!(
-                        "[{}] Thread {} acquired VM read lock for node {}",
-                        worker_name, assignment.thread_id, assignment.node_id
-                    );
-                    let hashes = hasher.compute_hash_batch(
-                        &*vm.get_vm(),
-                        current_nonce,
-                        &block_hash,
-                    );
-
-                    for (i, hash) in hashes.iter().enumerate() {
-                        if atomic_state.check_hash_simd(hash) {
-                            atomic_state.mark_solution_submitted();
+                        Some(true) => {
                             let solution = ProofOfWorkSolution {
                                 nonce: current_nonce + i,
                             };
-                            if let Err(e) =
-                                solution_sender.send((solution, height))
-                            {
+                            if let Err(e) = solution_sender.send((
+                                solution,
+                                active_state.get_problem_block_height(),
+                            )) {
                                 warn!(
                                     "[{}] Failed to send solution: {}",
                                     worker_name, e
                                 );
                             }
+                            break;
                         }
-                    }
-
-                    current_nonce =
-                        current_nonce.overflowing_add(U256::from(BATCH_SIZE)).0;
-
-                    if current_nonce.low_u64() % 100 == 0 {
-                        trace!(
-                            "[{}] Thread {} processed {} nonces",
-                            worker_name,
-                            assignment.thread_id,
-                            current_nonce.low_u64()
-                        );
+                        None => {
+                            // State changed, break inner loop
+                            break;
+                        }
+                        Some(false) => continue,
                     }
                 }
-            }
-            thread::yield_now();
-        }
-    }
 
-    fn spawn_mining_threads_legacy(&self) {
-        // Setup core affinity
-        let core_ids = Self::setup_core_affinity_legacy();
+                current_nonce =
+                    current_nonce.overflowing_add(U256::from(BATCH_SIZE)).0;
 
-        // Spawn threads
-        for thread_id in 0..self.num_threads {
-            self.spawn_mining_thread_legacy(thread_id, &core_ids);
-        }
-    }
-
-    fn setup_core_affinity_legacy() -> Vec<CoreId> {
-        core_affinity::get_core_ids().expect("Failed to get core IDs")
-    }
-
-    fn spawn_mining_thread_legacy(
-        &self, thread_id: usize, core_ids: &[CoreId],
-    ) {
-        let worker_name = self.worker_name.clone();
-        let num_threads = self.num_threads;
-        let solution_sender = self.solution_sender.clone();
-        let core_id = core_ids[thread_id % core_ids.len()];
-        let atomic_state = Arc::clone(&self.atomic_state);
-
-        info!(
-            "[{}] Spawning mining thread {} on core {}",
-            worker_name, thread_id, core_id.id
-        );
-
-        thread::spawn(move || {
-            #[cfg(target_os = "linux")]
-            unsafe {
-                libc::nice(1);
-            }
-
-            Miner::run_mining_thread_legacy(
-                thread_id,
-                core_id,
-                worker_name,
-                num_threads,
-                solution_sender,
-                atomic_state,
-            );
-        });
-    }
-
-    fn run_mining_thread_legacy(
-        thread_id: usize, core_id: CoreId, worker_name: String,
-        num_threads: usize,
-        solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
-        atomic_state: Arc<AtomicProblemState>,
-    ) {
-        let start = Instant::now();
-        debug!("Starting VM initialization...");
-
-        // Pin thread to core
-        Miner::setup_thread_affinit_legacy(core_id, &worker_name, thread_id);
-
-        // Initialize mining components
-        let mut flags = RandomXFlag::get_recommended_flags();
-        #[cfg(target_os = "linux")]
-        {
-            let hugepages_available =
-                std::fs::read_to_string("/proc/sys/vm/nr_hugepages")
-                    .map(|s| s.trim().parse::<i32>().unwrap_or(0) > 0)
-                    .unwrap_or(false);
-            if hugepages_available {
-                flags |= RandomXFlag::FLAG_LARGE_PAGES;
-            }
-        }
-
-        let mut vm = ThreadLocalVM::new(flags, &H256::zero());
-        let mut hasher = BatchHasher::new();
-        let mut current_generation = 0;
-
-        debug!("VM initialization took {:?}", start.elapsed());
-
-        // Main mining loop
-        loop {
-            let state_generation = atomic_state.get_generation();
-            if current_generation != state_generation {
-                let hash_start = Instant::now();
-                current_generation = state_generation;
-
-                if atomic_state.has_solution() {
+                if current_nonce.low_u64() % 100 == 0 {
                     trace!(
-                        "[{}] Solution already submitted for current block, waiting for next job",
-                        worker_name
+                        "[{}] Thread {} processed {} nonces",
+                        worker_name,
+                        assignment.thread_id,
+                        current_nonce.low_u64()
                     );
-                    thread::sleep(Duration::from_millis(10));
-                    continue;
-                }
-
-                let (height, block_hash, _) =
-                    atomic_state.get_problem_details();
-
-                vm.update_if_needed(&block_hash);
-
-                // Calculate nonce range for this thread
-                let (start_nonce, end_nonce) =
-                    atomic_state.calculate_nonce_range(thread_id, num_threads);
-                let mut current_nonce = start_nonce;
-
-                while current_nonce < end_nonce {
-                    // Check for new problem periodically
-                    if current_nonce.low_u64() % CHECK_INTERVAL == 0 {
-                        // Only break if there's a new generation
-                        thread::yield_now();
-                    }
-
-                    if atomic_state.get_generation() != current_generation {
-                        break;
-                    }
-
-                    // Process batch and check for solutions
-                    #[cfg(target_arch = "x86_64")]
-                    {
-                        let hashes = hasher.compute_hash_batch(
-                            &vm.vm,
-                            current_nonce,
-                            &block_hash,
-                        );
-                        trace!(
-                            "Batch of {} hashes took {:?}",
-                            hashes.len(),
-                            hash_start.elapsed()
-                        );
-                        debug!(
-                            "[{}] Thread {}: Processed {} hashes",
-                            worker_name,
-                            thread_id,
-                            hashes.len()
-                        );
-
-                        // Use SIMD comparison
-                        for (i, hash) in hashes.iter().enumerate() {
-                            if atomic_state.check_hash_simd(hash) {
-                                atomic_state.mark_solution_submitted();
-                                trace!(
-                                    "[{}] Thread {}: Solution found! {:?}",
-                                    worker_name,
-                                    thread_id,
-                                    current_nonce + i
-                                );
-                                let solution = ProofOfWorkSolution {
-                                    nonce: current_nonce + i,
-                                };
-                                if let Err(e) =
-                                    solution_sender.send((solution, height))
-                                {
-                                    warn!(
-                                    "[{}] Thread {}: Failed to send solution: {}",
-                                        worker_name, thread_id, e
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    #[cfg(not(target_arch = "x86_64"))]
-                    {
-                        let hashes = hasher.compute_hash_batch(
-                            &vm.vm,
-                            current_nonce,
-                            &block_hash,
-                        );
-                        hashes_processed += BATCH_SIZE as u64;
-
-                        let boundary = atomic_state.get_boundary();
-
-                        for (i, hash) in hashes.iter().enumerate() {
-                            let hash_u256 = U256::from(hash.as_bytes());
-                            if hash_u256 <= boundary {
-                                let solution = ProofOfWorkSolution {
-                                    nonce: current_nonce + i,
-                                };
-                                if let Err(e) =
-                                    solution_sender.send((solution, height))
-                                {
-                                    warn!(
-                                    "[{}] Thread {}: Failed to send solution: {}",
-                                        worker_name, thread_id, e
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    current_nonce =
-                        current_nonce.overflowing_add(U256::from(BATCH_SIZE)).0;
                 }
             }
-
             thread::yield_now();
         }
-    }
-
-    fn setup_thread_affinit_legacy(
-        core_id: CoreId, worker_name: &str, thread_id: usize,
-    ) {
-        core_affinity::set_for_current(core_id);
-        info!(
-            "[{}] Mining thread {} started on core {}",
-            worker_name, thread_id, core_id.id
-        );
     }
 
     fn spawn_solution_handler(
@@ -1009,107 +589,107 @@ mod tests {
         assert!(hash_u256 <= boundary, "Known valid nonce failed validation");
     }
 
-    #[test]
-    fn test_concurrent_mining() {
-        let (mut miner, _rx) = Miner::new_legacy(4, 1);
+    // #[test]
+    // fn test_concurrent_mining() {
+    //     let (mut miner, _rx) = Miner::new_legacy(4, 1);
 
-        // Create and submit a problem
-        let problem = ProofOfWorkProblem::new_from_boundary(
-            1,
-            H256::random(),
-            U256::from(1000000),
-        );
+    //     // Create and submit a problem
+    //     let problem = ProofOfWorkProblem::new_from_boundary(
+    //         1,
+    //         H256::random(),
+    //         U256::from(1000000),
+    //     );
 
-        miner.mine(&problem);
+    //     miner.mine(&problem);
 
-        // Let it mine for a bit
-        thread::sleep(Duration::from_secs(1));
+    //     // Let it mine for a bit
+    //     thread::sleep(Duration::from_secs(1));
 
-        // Submit a new problem
-        let new_problem = ProofOfWorkProblem::new_from_boundary(
-            2,
-            H256::random(),
-            U256::from(1000000),
-        );
+    //     // Submit a new problem
+    //     let new_problem = ProofOfWorkProblem::new_from_boundary(
+    //         2,
+    //         H256::random(),
+    //         U256::from(1000000),
+    //     );
 
-        miner.mine(&new_problem);
+    //     miner.mine(&new_problem);
 
-        // Verify all threads picked up the new problem
-        thread::sleep(Duration::from_millis(100));
+    //     // Verify all threads picked up the new problem
+    //     thread::sleep(Duration::from_millis(100));
 
-        let (height, _, _) = miner.atomic_state.get_problem_details();
-        assert_eq!(height, 2, "All threads should be mining the new problem");
-    }
+    //     let (height, _, _) = miner.atomic_state.get_problem_details();
+    //     assert_eq!(height, 2, "All threads should be mining the new problem");
+    // }
 
-    #[test]
-    fn test_single_mining_thread() {
-        // Setup basic components
-        let atomic_state = Arc::new(AtomicProblemState::default());
-        let (solution_tx, solution_rx) = mpsc::channel();
-        let core_id = core_affinity::get_core_ids().unwrap()[0];
-        let diff = U256::from(4);
-        let boundary = pow::difficulty_to_boundary(&diff);
+    // #[test]
+    // fn test_single_mining_thread() {
+    //     // Setup basic components
+    //     let atomic_state = Arc::new(AtomicProblemState::default());
+    //     let (solution_tx, solution_rx) = mpsc::channel();
+    //     let core_id = core_affinity::get_core_ids().unwrap()[0];
+    //     let diff = U256::from(4);
+    //     let boundary = pow::difficulty_to_boundary(&diff);
 
-        // Spawn the mining thread first
-        let atomic_state_clone = Arc::clone(&atomic_state);
-        let thread_handle = thread::spawn(move || {
-            // println!("Mining thread started");
-            Miner::run_mining_thread_legacy(
-                0,
-                core_id,
-                "test-worker".to_string(),
-                1,
-                solution_tx,
-                atomic_state_clone,
-            )
-        });
+    //     // Spawn the mining thread first
+    //     let atomic_state_clone = Arc::clone(&atomic_state);
+    //     let thread_handle = thread::spawn(move || {
+    //         // println!("Mining thread started");
+    //         Miner::run_mining_thread_legacy(
+    //             0,
+    //             core_id,
+    //             "test-worker".to_string(),
+    //             1,
+    //             solution_tx,
+    //             atomic_state_clone,
+    //         )
+    //     });
 
-        // Give thread time to initialize
-        thread::sleep(Duration::from_secs(2));
+    //     // Give thread time to initialize
+    //     thread::sleep(Duration::from_secs(2));
 
-        // Now create and send the problem
-        let problem =
-            ProofOfWorkProblem::new_from_boundary(1, H256::random(), boundary);
+    //     // Now create and send the problem
+    //     let problem =
+    //         ProofOfWorkProblem::new_from_boundary(1, H256::random(), boundary);
 
-        println!("Sending problem:");
-        println!("  Height: {}", problem.block_height);
-        println!("  Hash: {}", hex::encode(problem.block_hash.as_bytes()));
-        println!("  Boundary: {}", problem.boundary);
+    //     println!("Sending problem:");
+    //     println!("  Height: {}", problem.block_height);
+    //     println!("  Hash: {}", hex::encode(problem.block_hash.as_bytes()));
+    //     println!("  Boundary: {}", problem.boundary);
 
-        // Update atomic state with our problem
-        atomic_state.update(ProblemState::from(&problem));
-        atomic_state.update(ProblemState::from(
-            &ProofOfWorkProblem::new_from_boundary(2, H256::random(), boundary),
-        ));
+    //     // Update atomic state with our problem
+    //     atomic_state.update(ProblemState::from(&problem));
+    //     atomic_state.update(ProblemState::from(
+    //         &ProofOfWorkProblem::new_from_boundary(2, H256::random(), boundary),
+    //     ));
 
-        // Check for solutions
-        let timeout = Duration::from_secs(5);
-        let start = Instant::now();
-        let mut solutions_found = 0;
+    //     // Check for solutions
+    //     let timeout = Duration::from_secs(5);
+    //     let start = Instant::now();
+    //     let mut solutions_found = 0;
 
-        while start.elapsed() < timeout {
-            match solution_rx.try_recv() {
-                Ok((solution, height)) => {
-                    println!(
-                        "Found solution: nonce={}, height={}",
-                        solution.nonce, height
-                    );
-                    solutions_found += 1;
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    thread::sleep(Duration::from_millis(100));
-                    println!("Still mining... {:?}", start.elapsed());
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    panic!("Mining thread disconnected unexpectedly");
-                }
-            }
-        }
+    //     while start.elapsed() < timeout {
+    //         match solution_rx.try_recv() {
+    //             Ok((solution, height)) => {
+    //                 println!(
+    //                     "Found solution: nonce={}, height={}",
+    //                     solution.nonce, height
+    //                 );
+    //                 solutions_found += 1;
+    //             }
+    //             Err(mpsc::TryRecvError::Empty) => {
+    //                 thread::sleep(Duration::from_millis(100));
+    //                 println!("Still mining... {:?}", start.elapsed());
+    //             }
+    //             Err(mpsc::TryRecvError::Disconnected) => {
+    //                 panic!("Mining thread disconnected unexpectedly");
+    //             }
+    //         }
+    //     }
 
-        assert!(
-            solutions_found > 0,
-            "No solution found within timeout period"
-        );
-        println!("Found {} solutions", solutions_found);
-    }
+    //     assert!(
+    //         solutions_found > 0,
+    //         "No solution found within timeout period"
+    //     );
+    //     println!("Found {} solutions", solutions_found);
+    // }
 }

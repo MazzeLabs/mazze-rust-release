@@ -41,7 +41,6 @@ impl From<&ProofOfWorkProblem> for ProblemState {
 #[derive(Debug)]
 pub struct AtomicProblemState {
     state: AtomicPtr<ProblemState>,
-    generation: AtomicU64,
     solution_submitted: AtomicBool,
 }
 
@@ -54,7 +53,6 @@ impl Default for AtomicProblemState {
         };
         Self {
             state: AtomicPtr::new(Box::into_raw(Box::new(initial_state))),
-            generation: AtomicU64::new(0),
             solution_submitted: AtomicBool::new(false),
         }
     }
@@ -72,7 +70,6 @@ impl AtomicProblemState {
         };
         Self {
             state: AtomicPtr::new(Box::into_raw(Box::new(initial_state))),
-            generation: AtomicU64::new(0),
             solution_submitted: AtomicBool::new(false),
         }
     }
@@ -98,14 +95,13 @@ impl AtomicProblemState {
     pub fn update(&self, new_state: ProblemState) {
         let new_box = Box::into_raw(Box::new(new_state));
         let old_ptr = self.state.swap(new_box, Ordering::Release);
-        let gen = self.generation.fetch_add(1, Ordering::Release);
 
         // SAFETY: old_ptr was created by Box::into_raw and hasn't been freed
         unsafe {
             let _ = Box::from_raw(old_ptr);
         };
         self.solution_submitted.store(false, Ordering::Release);
-        info!("Updated atomic state to generation={}", gen);
+        info!("Updated atomic state");
     }
 
     pub fn get_problem_details(&self) -> (u64, H256, U256) {
@@ -136,10 +132,6 @@ impl AtomicProblemState {
         self.with_state(|state| U256::from_big_endian(&state.boundary))
     }
 
-    pub fn get_generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
-    }
-
     pub fn get_block_height(&self) -> u64 {
         self.with_state(|state| state.block_height)
     }
@@ -152,7 +144,7 @@ impl AtomicProblemState {
             let range_size = boundary / U256::from(num_threads);
             let start = range_size * U256::from(thread_id);
             let end = if thread_id == num_threads - 1 {
-                U256::from(u64::MAX)
+                U256::from(U256::MAX)
             } else {
                 start + range_size
             };

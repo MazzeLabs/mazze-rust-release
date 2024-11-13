@@ -32,6 +32,23 @@ impl BatchHasher {
         }
     }
 
+    pub fn get_hash(
+        &self, vm: &RandomXVM, nonce: U256, block_hash: &H256,
+    ) -> H256 {
+        let mut input = vec![0u8; 64];
+
+        // Copy block hash
+        input[..32].copy_from_slice(block_hash.as_bytes());
+
+        // Set nonce
+        nonce.to_little_endian(&mut input[32..64]);
+
+        // Calculate single hash
+        let hash = vm.calculate_hash(&input).expect("Failed to calculate hash");
+
+        H256::from_slice(&hash)
+    }
+
     pub fn compute_hash_batch(
         &mut self, vm: &RandomXVM, start_nonce: U256, block_hash: &H256,
     ) -> Vec<H256> {

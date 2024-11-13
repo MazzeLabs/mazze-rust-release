@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .format_timestamp_millis()
         .filter_module(
             "mazze_miner::core::atomic_state",
-            log::LevelFilter::Info,
+            log::LevelFilter::Debug,
         )
         .init();
 

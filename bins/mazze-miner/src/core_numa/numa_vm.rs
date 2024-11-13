@@ -75,6 +75,25 @@ impl NumaMiningState {
         )
     }
 
+    pub fn get_hash(&self, nonce: U256) -> H256 {
+        // Fixed-size array instead of Vec
+        let mut input = [0u8; 64];
+
+        // Copy block hash
+        input[..32].copy_from_slice(self.problem.get_block_hash().as_bytes());
+
+        // Set nonce
+        nonce.to_little_endian(&mut input[32..64]);
+
+        // Calculate single hash
+        let hash = self
+            .vm
+            .calculate_hash(&input)
+            .expect("Failed to calculate hash");
+
+        H256::from_slice(&hash)
+    }
+
     pub fn get_state_id(&self) -> u64 {
         self.state_id
     }
@@ -177,8 +196,17 @@ impl NumaVM {
         let active = unsafe { &*active_ptr };
 
         if active.problem.get_block_hash() != problem.block_hash {
+            debug!(
+                "Starting state update: active_ptr={:p}, active_state_id={}",
+                active_ptr, active.state_id
+            );
+
             let standby_ptr = self.standby_state.load(Ordering::Acquire);
             let standby = unsafe { &mut *standby_ptr };
+            debug!(
+                "Loaded standby: standby_ptr={:p}, standby_state_id={}",
+                standby_ptr, standby.state_id
+            );
 
             // Update standby state
             let new_cache =
@@ -190,16 +218,25 @@ impl NumaVM {
                 .map_err(NumaError::RandomXError)?;
 
             standby.problem.update(ProblemState::from(&problem));
+            debug!("Updated standby state with new problem");
 
             // Ensure all updates are complete before swap
             std::sync::atomic::fence(Ordering::Release);
 
-            // Atomic swap
-            self.active_state.store(standby_ptr, Ordering::Release);
-            self.standby_state.store(active_ptr, Ordering::Release);
+            // Single atomic swap to exchange the pointers
+            let old_active =
+                self.active_state.swap(standby_ptr, Ordering::AcqRel);
+            self.standby_state.store(old_active, Ordering::Release);
+
+            debug!(
+                "Completed state swap: new_active_ptr={:p}, new_standby_ptr={:p}",
+                standby_ptr,
+                old_active
+            );
         }
         Ok(())
     }
+
     pub fn check_node_memory(node_id: usize) -> Result<bool, NumaError> {
         debug!("Checking available memory for node {}", node_id);
 

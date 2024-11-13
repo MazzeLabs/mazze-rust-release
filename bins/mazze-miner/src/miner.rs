@@ -8,8 +8,8 @@ use mazzecore::pow::{
 use randomx_rs::RandomXFlag;
 use serde_json::Value;
 use std::str::FromStr;
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::{mpsc, Barrier};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -176,9 +176,12 @@ impl Miner {
             self.worker_name, self.num_threads
         );
 
+        let barrier = Arc::new(Barrier::new(self.num_threads));
+
         let mut handles = Vec::with_capacity(self.num_threads);
 
         for thread_id in 0..self.num_threads {
+            let barrier = Arc::clone(&barrier);
             let assignment = self.vm_manager.assign_thread(thread_id)?;
 
             info!(
@@ -189,7 +192,7 @@ impl Miner {
                 assignment.core_id
             );
 
-            let handle = self.spawn_mining_thread_numa(assignment)?;
+            let handle = self.spawn_mining_thread_numa(assignment, barrier)?;
 
             handles.push(handle);
         }
@@ -199,7 +202,7 @@ impl Miner {
     }
 
     fn spawn_mining_thread_numa(
-        &self, assignment: ThreadAssignment,
+        &self, assignment: ThreadAssignment, barrier: Arc<Barrier>,
     ) -> Result<thread::JoinHandle<()>, NumaError> {
         let worker_name = self.worker_name.clone();
         let solution_sender = self.solution_sender.clone();
@@ -213,12 +216,15 @@ impl Miner {
                 libc::nice(1);
             }
 
+            barrier.wait();
+
             Self::run_mining_thread_numa(
                 &assignment,
                 worker_name,
                 solution_sender,
                 vm_manager,
                 num_threads,
+                barrier,
             );
         });
 
@@ -229,6 +235,7 @@ impl Miner {
         assignment: &ThreadAssignment, worker_name: String,
         solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
         vm_manager: Arc<NewNumaVMManager>, num_threads: usize,
+        barrier: Arc<Barrier>,
     ) {
         info!(
             "[{}] Starting mining thread {} on NUMA node {} core {}",
@@ -252,14 +259,29 @@ impl Miner {
 
         let mut hasher = BatchHasher::new();
         let numa_vm = vm_manager.get_vm(assignment.node_id);
+        let mut has_mined = false;
 
         info!(
             "[{}] Thread {} starting mining loop",
             worker_name, assignment.thread_id
         );
 
+        barrier.wait();
+
         loop {
+            if has_mined {
+                debug!(
+                    "[{}] Thread {} about to get active state",
+                    worker_name, assignment.thread_id
+                );
+            }
             let active_state = numa_vm.get_active_state();
+            if has_mined {
+                debug!(
+                    "[{}] Thread {} got active state",
+                    worker_name, assignment.thread_id
+                );
+            }
 
             // Calculate nonce range for this thread
             let (start_nonce, end_nonce) = numa_vm
@@ -275,54 +297,92 @@ impl Miner {
             let mut current_nonce = start_nonce;
 
             while current_nonce < end_nonce {
+                has_mined = true;
                 if current_nonce.low_u64() % CHECK_INTERVAL == 0 {
+                    if !current_nonce.is_zero() {
+                        debug!(
+                            "[{}] Thread {} yielding",
+                            worker_name, assignment.thread_id
+                        );
+                    }
                     thread::yield_now();
                 }
 
                 // Process batch and check for solutions
-                let hashes =
-                    active_state.get_hash_batch(&mut hasher, current_nonce);
+                // let hashes =
+                //     active_state.get_hash_batch(&mut hasher, current_nonce);
+
+                let hash = active_state.get_hash(current_nonce);
 
                 let mut should_break = false;
 
-                for (i, hash) in hashes.iter().enumerate() {
-                    match numa_vm.check_hash(hash, active_state.get_state_id())
-                    {
-                        Some(true) => {
-                            let solution = ProofOfWorkSolution {
-                                nonce: current_nonce + i,
-                            };
-                            if let Err(e) = solution_sender.send((
-                                solution,
-                                active_state.get_problem_block_height(),
-                            )) {
-                                warn!(
-                                    "[{}] Failed to send solution: {}",
-                                    worker_name, e
-                                );
-                            }
-                            should_break = true;
-                            break;
-                        }
-                        None => {
-                            // State changed, break inner loop
-                            info!(
-                                "[{}] State changed, breaking inner loop",
-                                assignment.thread_id
+                // for (i, hash) in hashes.iter().enumerate() {
+                //     match numa_vm.check_hash(hash, active_state.get_state_id())
+                //     {
+                //         Some(true) => {
+                //             let solution = ProofOfWorkSolution {
+                //                 nonce: current_nonce + i,
+                //             };
+                //             if let Err(e) = solution_sender.send((
+                //                 solution,
+                //                 active_state.get_problem_block_height(),
+                //             )) {
+                //                 warn!(
+                //                     "[{}] Failed to send solution: {}",
+                //                     worker_name, e
+                //                 );
+                //             }
+                //             should_break = true;
+                //             break;
+                //         }
+                //         None => {
+                //             // State changed, break inner loop
+                //             info!(
+                //                 "[{}] State changed, breaking inner loop",
+                //                 assignment.thread_id
+                //             );
+                //             should_break = true;
+                //             break;
+                //         }
+                //         Some(false) => continue,
+                //     }
+                // }
+
+                match numa_vm.check_hash(&hash, active_state.get_state_id()) {
+                    Some(true) => {
+                        let solution = ProofOfWorkSolution {
+                            nonce: current_nonce,
+                        };
+                        if let Err(e) = solution_sender.send((
+                            solution,
+                            active_state.get_problem_block_height(),
+                        )) {
+                            warn!(
+                                "[{}] Failed to send solution: {}",
+                                worker_name, e
                             );
-                            should_break = true;
-                            break;
                         }
-                        Some(false) => continue,
+                        should_break = true;
+                        break;
                     }
+                    None => {
+                        // State changed, break inner loop
+                        info!(
+                            "[{}] State changed, breaking inner loop",
+                            assignment.thread_id
+                        );
+                        should_break = true;
+                        break;
+                    }
+                    _ => {}
                 }
 
                 if should_break {
+                    debug!("[{}] Thread {} breaking from inner loop, about to yield", worker_name, assignment.thread_id);
                     break;
                 }
 
-                current_nonce =
-                    current_nonce.overflowing_add(U256::from(BATCH_SIZE)).0;
+                current_nonce = current_nonce.overflowing_add(U256::from(1)).0;
 
                 if current_nonce.low_u64() % 100 == 0 {
                     trace!(
@@ -333,6 +393,21 @@ impl Miner {
                     );
                 }
             }
+
+            if current_nonce < end_nonce {
+                debug!(
+                    "[{}] Thread {} finished processing its slice, about to yield, current_nonce < end_nonce",
+                    worker_name, assignment.thread_id
+                );
+            }
+
+            if !current_nonce.is_zero() {
+                debug!(
+                    "[{}] Thread {} finished while loop, about to start outer loop",
+                    worker_name, assignment.thread_id
+                );
+            }
+
             thread::yield_now();
         }
     }

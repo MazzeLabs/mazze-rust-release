@@ -431,8 +431,21 @@ impl Miner {
         let mut current_generation = 0;
         let mut current_nonce = 0;
 
+        info!(
+            "[{}] Thread {} starting mining loop",
+            worker_name, assignment.thread_id
+        );
+
         loop {
+            // debug!(
+            //     "[{}] Thread {} attempting to access atomic state",
+            //     worker_name, assignment.thread_id
+            // );
             let state_generation = atomic_state.get_generation();
+            // debug!(
+            //     "[{}] Thread {} accessed atomic state successfully",
+            //     worker_name, assignment.thread_id
+            // );
             if current_nonce % 100_000 == 0 {
                 debug!(
                     "[{}] Thread {} checking gen: current={}, state={}, height={}",
@@ -460,8 +473,13 @@ impl Miner {
                     atomic_state.get_problem_details();
 
                 while vm_manager.is_updating() {
+                    info!(
+                        "[{}] Thread {} waiting for VM update",
+                        worker_name, assignment.thread_id
+                    );
                     thread::sleep(Duration::from_millis(1));
                 }
+
                 // Update VM if needed - use the assigned node_id from ThreadAssignment
                 {
                     let mut vm_lock =
@@ -490,7 +508,15 @@ impl Miner {
                     }
 
                     // Process batch and check for solutions - use the assigned node_id
+                    debug!(
+                        "[{}] Thread {} attempting to get VM read lock for node {}",
+                        worker_name, assignment.thread_id, assignment.node_id
+                    );
                     let vm = vm_manager.get_vm_read(assignment.node_id);
+                    debug!(
+                        "[{}] Thread {} acquired VM read lock for node {}",
+                        worker_name, assignment.thread_id, assignment.node_id
+                    );
                     let hashes = hasher.compute_hash_batch(
                         &*vm.get_vm(),
                         current_nonce,

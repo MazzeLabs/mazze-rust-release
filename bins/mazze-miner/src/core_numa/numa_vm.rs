@@ -105,7 +105,18 @@ impl NumaAwareVM {
     }
 
     pub fn get_vm(&self) -> parking_lot::RwLockReadGuard<'_, RandomXVM> {
-        self.vm.read()
+        debug!(
+            "Thread {:?} attempting to acquire inner VM read lock for node {}",
+            std::thread::current().id(),
+            self.node_id
+        );
+        let guard = self.vm.read();
+        debug!(
+            "Thread {:?} acquired inner VM read lock for node {}",
+            std::thread::current().id(),
+            self.node_id
+        );
+        guard
     }
 
     pub fn check_node_memory(node_id: usize) -> Result<bool, NumaError> {
@@ -153,7 +164,17 @@ impl NumaAwareVM {
 
             // Update standby VM in a separate scope
             {
+                debug!(
+                    "Thread {:?} attempting to acquire standby VM write lock for node {}",
+                    std::thread::current().id(),
+                    self.node_id
+                );
                 let mut standby = self.standby_vm.write();
+                debug!(
+                    "Thread {:?} acquired standby VM write lock for node {}",
+                    std::thread::current().id(),
+                    self.node_id
+                );
                 standby
                     .reinit_cache(new_cache)
                     .map_err(NumaError::RandomXError)?;
@@ -197,7 +218,18 @@ impl NumaVMManager {
     pub fn get_vm_read(
         &self, node_id: usize,
     ) -> parking_lot::RwLockReadGuard<'_, NumaAwareVM> {
-        self.vms[node_id].read()
+        debug!(
+            "Thread {:?} attempting to acquire VM read lock for node {}",
+            std::thread::current().id(),
+            node_id
+        );
+        let guard = self.vms[node_id].read();
+        debug!(
+            "Thread {:?} acquired VM read lock for node {}",
+            std::thread::current().id(),
+            node_id
+        );
+        guard
     }
 
     // For write access

@@ -1,5 +1,5 @@
 use crate::core::IntoChunks;
-use log::info;
+use log::{debug, info};
 use mazze_types::{H256, U256};
 use mazzecore::pow::ProofOfWorkProblem;
 use std::sync::atomic;
@@ -82,7 +82,15 @@ impl AtomicProblemState {
     where
         F: FnOnce(&ProblemState) -> R,
     {
+        // debug!(
+        //     "Thread {:?} attempting to access atomic state",
+        //     std::thread::current().id()
+        // );
         let ptr = self.state.load(Ordering::Acquire);
+        // debug!(
+        //     "Thread {:?} accessed atomic state successfully",
+        //     std::thread::current().id()
+        // );
         // SAFETY: ptr is always valid due to our update mechanism
         unsafe { f(&*ptr) }
     }

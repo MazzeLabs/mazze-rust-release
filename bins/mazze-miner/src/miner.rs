@@ -16,9 +16,9 @@ use std::time::Instant;
 use tokio::sync::broadcast;
 
 use crate::core::*;
-use crate::core_numa::NewNumaVMManager;
 use crate::core_numa::NumaError;
 use crate::core_numa::ThreadAssignment;
+use crate::core_numa::{NewNumaVMManager, THREAD_VM};
 use crate::mining_metrics::MiningMetrics;
 
 const CHECK_INTERVAL: u64 = 8 * BATCH_SIZE as u64; // Check for new problem every 32 nonces
@@ -38,7 +38,6 @@ pub struct Miner {
     pub worker_id: usize,
     pub worker_name: String,
     num_threads: usize,
-    atomic_state: Arc<AtomicProblemState>,
     solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
     metrics: Arc<MiningMetrics>,
     vm_manager: Arc<NewNumaVMManager>,
@@ -53,7 +52,6 @@ impl Miner {
     > {
         let (stratum_tx, rx) = broadcast::channel(32);
         let (solution_tx, solution_rx) = mpsc::channel();
-        let atomic_state = Arc::new(AtomicProblemState::default());
         let metrics = Arc::new(MiningMetrics::new());
         let vm_manager = Arc::new(NewNumaVMManager::new()?);
 
@@ -61,7 +59,6 @@ impl Miner {
             worker_id,
             worker_name: format!("worker-{}", worker_id),
             num_threads,
-            atomic_state: Arc::clone(&atomic_state),
             solution_sender: solution_tx,
             metrics: Arc::clone(&metrics),
             vm_manager: Arc::clone(&vm_manager),
@@ -69,12 +66,7 @@ impl Miner {
 
         // Spawn solution handler
         let worker_name = miner.worker_name.clone();
-        Self::spawn_solution_handler(
-            solution_rx,
-            stratum_tx,
-            atomic_state.clone(),
-            worker_name,
-        );
+        Self::spawn_solution_handler(solution_rx, stratum_tx, worker_name);
 
         // Spawn mining threads
         miner.spawn_numa_mining_threads()?;
@@ -84,37 +76,19 @@ impl Miner {
 
     pub fn mine(&mut self, problem: &ProofOfWorkProblem) {
         debug!(
-            "[{}] mine() called with new height={}, hash={:.8}, current height={}, current hash={:.8}",
+            "[{}] mine() called with new height={}, hash={:.8}",
             self.worker_name,
             problem.block_height,
-            hex::encode(&problem.block_hash.as_bytes()[..4]),
-            self.atomic_state.get_block_height(),
-            hex::encode(&self.atomic_state.get_block_hash().as_bytes()[..4])
+            hex::encode(&problem.block_hash.as_bytes()[..4])
         );
 
-        // Create new state (already handles endianness)
-        let new_state = ProblemState::from(problem);
-
-        // Update VMs before updating atomic state
-        if let Err(e) = self.vm_manager.update_all_vms(*problem) {
-            error!("Failed to update VMs: {:?}", e);
+        // Update VMs before mining
+        if let Err(e) = self.vm_manager.update_if_needed(problem) {
+            error!("[{}] Failed to update VMs: {:?}", self.worker_name, e);
             return;
         }
 
-        debug!(
-            "[{}] VMs updated successfully, calling mine()...",
-            self.worker_name
-        );
-
-        // Update atomic state after VMs are ready
-        debug!(
-            "[{}] Created new state, updating atomic state...",
-            self.worker_name
-        );
-
-        self.atomic_state.update(new_state);
-
-        debug!("[{}] Atomic state updated successfully", self.worker_name);
+        debug!("[{}] VMs updated successfully", self.worker_name);
     }
 
     pub fn parse_job(
@@ -160,11 +134,6 @@ impl Miner {
             boundary,
         );
 
-        debug!(
-            "[{}] Starting parse_job with height={}, hash={:.8}",
-            self.worker_name, block_height, pow_hash_str
-        );
-
         self.mine(&problem);
 
         Ok(problem)
@@ -178,11 +147,13 @@ impl Miner {
 
         let barrier = Arc::new(Barrier::new(self.num_threads));
 
-        let mut handles = Vec::with_capacity(self.num_threads);
-
         for thread_id in 0..self.num_threads {
             let barrier = Arc::clone(&barrier);
-            let assignment = self.vm_manager.assign_thread(thread_id)?;
+            let assignment = ThreadAssignment {
+                thread_id,
+                node_id: thread_id % self.vm_manager.topology.get_nodes().len(),
+                core_id: thread_id,
+            };
 
             info!(
                 "[{}] Assigning thread {} to NUMA node {} core {}",
@@ -192,12 +163,9 @@ impl Miner {
                 assignment.core_id
             );
 
-            let handle = self.spawn_mining_thread_numa(assignment, barrier)?;
-
-            handles.push(handle);
+            self.spawn_mining_thread_numa(assignment, barrier)?;
         }
 
-        // Store handles if needed for cleanup
         Ok(())
     }
 
@@ -207,7 +175,6 @@ impl Miner {
         let worker_name = self.worker_name.clone();
         let solution_sender = self.solution_sender.clone();
         let num_threads = self.num_threads;
-
         let vm_manager = self.vm_manager.clone();
 
         let handle = thread::spawn(move || {
@@ -258,154 +225,53 @@ impl Miner {
         }
 
         let mut hasher = BatchHasher::new();
-        let numa_vm = vm_manager.get_vm(assignment.node_id);
-        let mut has_mined = false;
-
-        info!(
-            "[{}] Thread {} starting mining loop",
-            worker_name, assignment.thread_id
-        );
-
         barrier.wait();
 
         loop {
-            if has_mined {
-                debug!(
-                    "[{}] Thread {} about to get active state",
-                    worker_name, assignment.thread_id
-                );
-            }
-            let active_state = numa_vm.get_active_state();
-            if has_mined {
-                debug!(
-                    "[{}] Thread {} got active state",
-                    worker_name, assignment.thread_id
-                );
-            }
+            let result = vm_manager.with_vm(assignment, |vm| {
+                let (start_nonce, end_nonce) =
+                    Self::calculate_nonce_range(assignment.thread_id, num_threads);
+                let mut current_nonce = start_nonce;
 
-            // Calculate nonce range for this thread
-            let (start_nonce, end_nonce) = numa_vm
-                .calculate_nonce_range(assignment.thread_id, num_threads);
-
-            if !end_nonce.is_zero() {
-                debug!(
-                    "[{}] Thread {} got range: start={}, end={}",
-                    worker_name, assignment.thread_id, start_nonce, end_nonce
-                );
-            }
-
-            let mut current_nonce = start_nonce;
-
-            while current_nonce < end_nonce {
-                has_mined = true;
-                if current_nonce.low_u64() % CHECK_INTERVAL == 0 {
-                    if !current_nonce.is_zero() {
-                        debug!(
-                            "[{}] Thread {} yielding",
-                            worker_name, assignment.thread_id
-                        );
+                while current_nonce < end_nonce {
+                    if current_nonce.low_u64() % CHECK_INTERVAL == 0 {
+                        thread::yield_now();
                     }
-                    thread::yield_now();
-                }
 
-                // Process batch and check for solutions
-                // let hashes =
-                //     active_state.get_hash_batch(&mut hasher, current_nonce);
-
-                let hash = active_state.get_hash(current_nonce);
-
-                let mut should_break = false;
-
-                // for (i, hash) in hashes.iter().enumerate() {
-                //     match numa_vm.check_hash(hash, active_state.get_state_id())
-                //     {
-                //         Some(true) => {
-                //             let solution = ProofOfWorkSolution {
-                //                 nonce: current_nonce + i,
-                //             };
-                //             if let Err(e) = solution_sender.send((
-                //                 solution,
-                //                 active_state.get_problem_block_height(),
-                //             )) {
-                //                 warn!(
-                //                     "[{}] Failed to send solution: {}",
-                //                     worker_name, e
-                //                 );
-                //             }
-                //             should_break = true;
-                //             break;
-                //         }
-                //         None => {
-                //             // State changed, break inner loop
-                //             info!(
-                //                 "[{}] State changed, breaking inner loop",
-                //                 assignment.thread_id
-                //             );
-                //             should_break = true;
-                //             break;
-                //         }
-                //         Some(false) => continue,
-                //     }
-                // }
-
-                match numa_vm.check_hash(&hash, active_state.get_state_id()) {
-                    Some(true) => {
-                        let solution = ProofOfWorkSolution {
-                            nonce: current_nonce,
-                        };
-                        if let Err(e) = solution_sender.send((
-                            solution,
-                            active_state.get_problem_block_height(),
-                        )) {
-                            warn!(
-                                "[{}] Failed to send solution: {}",
-                                worker_name, e
-                            );
-                        }
-                        should_break = true;
-                        break;
-                    }
-                    None => {
-                        // State changed, break inner loop
-                        info!(
-                            "[{}] State changed, breaking inner loop",
-                            assignment.thread_id
-                        );
-                        should_break = true;
-                        break;
-                    }
-                    _ => {}
-                }
-
-                if should_break {
-                    debug!("[{}] Thread {} breaking from inner loop, about to yield", worker_name, assignment.thread_id);
-                    break;
-                }
-
-                current_nonce = current_nonce.overflowing_add(U256::from(1)).0;
-
-                if current_nonce.low_u64() % 100 == 0 {
-                    trace!(
-                        "[{}] Thread {} processed {} nonces",
-                        worker_name,
-                        assignment.thread_id,
-                        current_nonce.low_u64()
+                    let hash = vm.calculate_hash(
+                        current_nonce,
+                        &vm.get_current_block_hash(),
                     );
+
+                    match vm.check_hash(&hash, &vm.get_current_block_hash()) {
+                        Some(true) => {
+                            let solution = ProofOfWorkSolution {
+                                nonce: current_nonce,
+                            };
+                            if let Err(e) = solution_sender
+                                .send((solution, vm.get_current_height()))
+                            {
+                                warn!(
+                                    "[{}] Failed to send solution: {}",
+                                    worker_name, e
+                                );
+                            }
+                            return true; // Signal found solution
+                        }
+                        None => return false, // Signal problem changed
+                        _ => {}
+                    }
+
+                    current_nonce =
+                        current_nonce.overflowing_add(U256::from(1)).0;
                 }
-            }
+                false
+            });
 
-            if current_nonce < end_nonce {
-                debug!(
-                    "[{}] Thread {} finished processing its slice, about to yield, current_nonce < end_nonce",
-                    worker_name, assignment.thread_id
-                );
-            }
-
-            if !current_nonce.is_zero() {
-                debug!(
-                    "[{}] Thread {} finished while loop, about to start outer loop",
-                    worker_name, assignment.thread_id
-                );
+            if let Err(e) = result {
+                error!("[{}] VM error: {}", worker_name, e);
+                thread::sleep(Duration::from_secs(1));
+                continue;
             }
 
             thread::yield_now();
@@ -415,11 +281,17 @@ impl Miner {
     fn spawn_solution_handler(
         solution_rx: mpsc::Receiver<(ProofOfWorkSolution, u64)>,
         stratum_tx: broadcast::Sender<(ProofOfWorkSolution, u64)>,
-        atomic_state: Arc<AtomicProblemState>, worker_name: String,
+        worker_name: String,
     ) {
         thread::spawn(move || {
             while let Ok((solution, solution_height)) = solution_rx.recv() {
-                let current_height = atomic_state.get_block_height();
+                // Get current height from thread-local VM
+                let current_height = THREAD_VM.with(|vm| {
+                    vm.borrow()
+                        .as_ref()
+                        .map(|vm| vm.get_current_height())
+                        .unwrap_or(0)
+                });
 
                 // Skip stale solutions
                 if solution_height < current_height {
@@ -439,6 +311,7 @@ impl Miner {
                     continue;
                 }
 
+                // Forward valid solutions to stratum
                 if let Err(e) = stratum_tx.send((solution, solution_height)) {
                     warn!(
                         "[{}] Failed to send solution to stratum: {}",
@@ -447,6 +320,19 @@ impl Miner {
                 }
             }
         });
+    }
+
+    pub fn calculate_nonce_range(
+        thread_id: usize, num_threads: usize,
+    ) -> (U256, U256) {
+        let nonce_range = U256::MAX / num_threads;
+        let start_nonce = nonce_range * thread_id;
+        let end_nonce = if thread_id == num_threads - 1 {
+            U256::MAX
+        } else {
+            start_nonce + nonce_range
+        };
+        (start_nonce, end_nonce)
     }
 }
 

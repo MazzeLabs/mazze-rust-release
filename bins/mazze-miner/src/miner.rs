@@ -21,7 +21,7 @@ use crate::core_numa::ThreadAssignment;
 use crate::core_numa::{NewNumaVMManager, THREAD_VM};
 use crate::mining_metrics::MiningMetrics;
 
-const CHECK_INTERVAL: u64 = 8 * BATCH_SIZE as u64; // Check for new problem every 32 nonces
+const CHECK_INTERVAL: u64 = 64 * BATCH_SIZE as u64;
 
 /*
 Flow:
@@ -224,27 +224,102 @@ impl Miner {
             }
         }
 
-        let mut hasher = BatchHasher::new();
         barrier.wait();
+        info!(
+            "[{}] Thread passed barrier, starting mining loop",
+            worker_name
+        );
 
         loop {
             let result = vm_manager.with_vm(assignment, |vm| {
-                let (start_nonce, end_nonce) =
-                    Self::calculate_nonce_range(assignment.thread_id, num_threads);
+                let (start_nonce, end_nonce) = Self::calculate_nonce_range(
+                    assignment.thread_id,
+                    num_threads,
+                );
+                debug!(
+                    "[{}] Mining range: start={}, end={}, block={}",
+                    worker_name,
+                    start_nonce,
+                    end_nonce,
+                    vm.get_current_height()
+                );
+
                 let mut current_nonce = start_nonce;
+                let mut hashes_computed = 0u64;
+                let start_time = Instant::now();
 
                 while current_nonce < end_nonce {
                     if current_nonce.low_u64() % CHECK_INTERVAL == 0 {
+                        let elapsed = start_time.elapsed();
+                        if elapsed.as_secs() > 0 {
+                            let hash_rate = hashes_computed as f64 / elapsed.as_secs_f64();
+                            trace!(
+                                "[{}] Hash rate: {:.2} H/s, current nonce: {}, block: {}",
+                                worker_name,
+                                hash_rate,
+                                current_nonce,
+                                vm.get_current_height()
+                            );
+                        }
+
+                        debug!(
+                            "[{}] Checking if block hash matches",
+                            worker_name
+                        );
+                        if !vm_manager.is_block_hash_matching(&vm.get_current_block_hash()) {
+                            debug!(
+                                "[{}] Block hash does not match, updating reference state",
+                                worker_name
+                            );
+                            vm.update(vm_manager.get_reference_state())
+                                .unwrap();
+
+                            debug!(
+                                "[{}] Reference state updated successfully to {}",
+                                worker_name,
+                                hex::encode(vm.get_current_block_hash().as_bytes())
+                            );
+                        } else {
+                            debug!(
+                                "[{}] Block hash matches, not updating reference state",
+                                worker_name
+                            );
+                        }
                         thread::yield_now();
                     }
 
-                    let hash = vm.calculate_hash(
-                        current_nonce,
-                        &vm.get_current_block_hash(),
-                    );
+                    let mut input = [0u8; 64];
+                    let block_hash = vm.get_current_block_hash();
+                    input[..32].copy_from_slice(block_hash.as_bytes());
+                    current_nonce.to_little_endian(&mut input[32..64]);
 
-                    match vm.check_hash(&hash, &vm.get_current_block_hash()) {
+                    let hash_bytes = match vm.vm.calculate_hash(&input) {
+                        Ok(hash) => hash,
+                        Err(e) => {
+                            error!("[{}] Failed to calculate hash: {}", worker_name, e);
+                            return false;
+                        }
+                    };
+                    let hash = H256::from_slice(&hash_bytes);
+                    hashes_computed += 1;
+
+                    // trace!(
+                    //     "[{}] Hash: {}, nonce: {}, block hash: {}",
+                    //     worker_name,
+                    //     hex::encode(hash),
+                    //     current_nonce,
+                    //     hex::encode(vm.get_current_block_hash().as_bytes())
+                    // );
+                    let mut should_continue = true;
+                    match vm.check_hash(&hash) {
                         Some(true) => {
+                            info!(
+                                "[{}] Found solution! nonce={}, block hash={}, hash={}",
+                                worker_name,
+                                current_nonce,
+                                hex::encode(vm.get_current_block_hash().as_bytes()),
+                                hex::encode(hash)
+                            );
                             let solution = ProofOfWorkSolution {
                                 nonce: current_nonce,
                             };
@@ -256,14 +331,23 @@ impl Miner {
                                     worker_name, e
                                 );
                             }
-                            return true; // Signal found solution
+                            should_continue = false;
                         }
-                        None => return false, // Signal problem changed
+                        None => {
+                            debug!(
+                                "[{}] THIS SHOULD HAVE NEVER HAPPENED: Problem changed while mining, restarting loop",
+                                worker_name
+                            );
+                            should_continue = false;
+                        }
                         _ => {}
+                    };
+
+                    if !should_continue {
+                        break;
                     }
 
-                    current_nonce =
-                        current_nonce.overflowing_add(U256::from(1)).0;
+                    current_nonce = current_nonce.overflowing_add(U256::from(1)).0;
                 }
                 false
             });

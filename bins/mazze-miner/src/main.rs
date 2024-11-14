@@ -91,6 +91,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
+    info!("Sleeping for 30 seconds to allow VMs to initialize...");
+    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+
     // Set up Ctrl+C handler
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     tokio::spawn(async move {

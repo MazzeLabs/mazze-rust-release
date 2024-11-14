@@ -279,6 +279,7 @@ impl Miner {
                                 worker_name,
                                 hex::encode(vm.get_current_block_hash().as_bytes())
                             );
+                            break;
                         } else {
                             debug!(
                                 "[{}] Block hash matches, not updating reference state",
@@ -303,48 +304,26 @@ impl Miner {
                     let hash = H256::from_slice(&hash_bytes);
                     hashes_computed += 1;
 
-                    // trace!(
-                    //     "[{}] Hash: {}, nonce: {}, block hash: {}",
-                    //     worker_name,
-                    //     hex::encode(hash),
-                    //     current_nonce,
-                    //     hex::encode(vm.get_current_block_hash().as_bytes())
-                    // );
-                    let mut should_continue = true;
-                    match vm.check_hash(&hash) {
-                        Some(true) => {
-                            info!(
-                                "[{}] Found solution! nonce={}, block hash={}, hash={}",
-                                worker_name,
-                                current_nonce,
-                                hex::encode(vm.get_current_block_hash().as_bytes()),
-                                hex::encode(hash)
+                    if vm.check_hash(&hash) {
+                        info!(
+                            "[{}] Found solution! nonce={}, block hash={}, hash={}",
+                            worker_name,
+                            current_nonce,
+                            hex::encode(vm.get_current_block_hash().as_bytes()),
+                            hex::encode(hash)
+                        );
+                        let solution = ProofOfWorkSolution {
+                            nonce: current_nonce,
+                        };
+                        if let Err(e) = solution_sender
+                            .send((solution, vm.get_current_height()))
+                        {
+                            warn!(
+                                "[{}] Failed to send solution: {}",
+                                worker_name, e
                             );
-                            let solution = ProofOfWorkSolution {
-                                nonce: current_nonce,
-                            };
-                            if let Err(e) = solution_sender
-                                .send((solution, vm.get_current_height()))
-                            {
-                                warn!(
-                                    "[{}] Failed to send solution: {}",
-                                    worker_name, e
-                                );
-                            }
-                            should_continue = false;
                         }
-                        None => {
-                            debug!(
-                                "[{}] THIS SHOULD HAVE NEVER HAPPENED: Problem changed while mining, restarting loop",
-                                worker_name
-                            );
-                            should_continue = false;
-                        }
-                        _ => {}
-                    };
-
-                    if !should_continue {
-                        break;
+                        return true;
                     }
 
                     current_nonce = current_nonce.overflowing_add(U256::from(1)).0;

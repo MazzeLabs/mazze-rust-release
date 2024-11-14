@@ -78,8 +78,8 @@ impl ThreadLocalVM {
         self.problem_state.get_block_height()
     }
 
-    pub fn check_hash(&self, hash: &H256) -> Option<bool> {
-        Some(self.problem_state.check_hash_simd(hash))
+    pub fn check_hash(&self, hash: &H256) -> bool {
+        self.problem_state.check_hash_simd(hash)
     }
 
     pub fn update(

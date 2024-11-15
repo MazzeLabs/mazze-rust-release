@@ -1,4 +1,5 @@
 use crate::core::IntoChunks;
+use log::{debug, info};
 use mazze_types::{H256, U256};
 use mazzecore::pow::ProofOfWorkProblem;
 use std::sync::atomic;
@@ -37,10 +38,21 @@ impl From<&ProofOfWorkProblem> for ProblemState {
     }
 }
 
+impl From<&AtomicProblemState> for ProblemState {
+    fn from(state: &AtomicProblemState) -> Self {
+        state.get_problem_details().into()
+    }
+}
+
+impl From<(u64, H256, U256)> for ProblemState {
+    fn from(details: (u64, H256, U256)) -> Self {
+        ProblemState::new(details.0, details.1, details.2)
+    }
+}
+
 #[derive(Debug)]
 pub struct AtomicProblemState {
     state: AtomicPtr<ProblemState>,
-    generation: AtomicU64,
     solution_submitted: AtomicBool,
 }
 
@@ -53,7 +65,6 @@ impl Default for AtomicProblemState {
         };
         Self {
             state: AtomicPtr::new(Box::into_raw(Box::new(initial_state))),
-            generation: AtomicU64::new(0),
             solution_submitted: AtomicBool::new(false),
         }
     }
@@ -71,7 +82,6 @@ impl AtomicProblemState {
         };
         Self {
             state: AtomicPtr::new(Box::into_raw(Box::new(initial_state))),
-            generation: AtomicU64::new(0),
             solution_submitted: AtomicBool::new(false),
         }
     }
@@ -81,19 +91,33 @@ impl AtomicProblemState {
     where
         F: FnOnce(&ProblemState) -> R,
     {
+        // debug!(
+        //     "Thread {:?} attempting to access atomic state",
+        //     std::thread::current().id()
+        // );
         let ptr = self.state.load(Ordering::Acquire);
+        // debug!(
+        //     "Thread {:?} accessed atomic state successfully",
+        //     std::thread::current().id()
+        // );
         // SAFETY: ptr is always valid due to our update mechanism
         unsafe { f(&*ptr) }
+    }
+
+    pub fn matches(&self, block_hash: &H256) -> bool {
+        self.get_block_hash() == *block_hash
     }
 
     pub fn update(&self, new_state: ProblemState) {
         let new_box = Box::into_raw(Box::new(new_state));
         let old_ptr = self.state.swap(new_box, Ordering::Release);
-        self.generation.fetch_add(1, Ordering::Release);
 
         // SAFETY: old_ptr was created by Box::into_raw and hasn't been freed
-        unsafe { Box::from_raw(old_ptr) };
+        unsafe {
+            let _ = Box::from_raw(old_ptr);
+        };
         self.solution_submitted.store(false, Ordering::Release);
+        info!("Updated atomic state");
     }
 
     pub fn get_problem_details(&self) -> (u64, H256, U256) {
@@ -124,10 +148,6 @@ impl AtomicProblemState {
         self.with_state(|state| U256::from_big_endian(&state.boundary))
     }
 
-    pub fn get_generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
-    }
-
     pub fn get_block_height(&self) -> u64 {
         self.with_state(|state| state.block_height)
     }
@@ -140,7 +160,7 @@ impl AtomicProblemState {
             let range_size = boundary / U256::from(num_threads);
             let start = range_size * U256::from(thread_id);
             let end = if thread_id == num_threads - 1 {
-                U256::from(u64::MAX)
+                U256::from(U256::MAX)
             } else {
                 start + range_size
             };
@@ -346,5 +366,77 @@ mod tests {
 
         let recovered_hash = atomic_state.get_block_hash();
         assert_eq!(block_hash, recovered_hash, "Block hash conversion failed");
+    }
+
+    #[test]
+    fn test_real_hash_checks() {
+        // Setup the problem state with known values from logs
+        let block_hash = H256::from_str(
+            "ef6e5a0dd08b7c8be526c5d6ce7d2fcf8e4dd2449d690af4023f4ea989fd2a4e",
+        )
+        .unwrap();
+        let boundary_hex =
+            "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let boundary = U256::from_str(boundary_hex).unwrap();
+        let atomic_state = AtomicProblemState::new(1, block_hash, boundary);
+
+        // Test a few hashes from the logs
+        let test_cases = [
+        ("198e31917468e557ef46f80ff185305b0958d68b7eda53bbd0df6da23a725bd1", true),  // 0x19 < 0x3f
+        ("1d61d4a5d95daf9ec58ee7072ea48100b0100dc85fc63bfe9f07ee022c8e58fd", true),  // 0x1d < 0x3f
+        ("63a5e5f3a46086df9d78224668ad5ce85581bb18147a0d4d135a35d892a01fa7", false), // 0x63 > 0x3f
+        ("73c588113916cad6fdd2146a5d72d4ebd45a26fe35ea6cd7cc1d8d014963d6db", false), // 0x73 > 0x3f
+        ("ea59e84b76ea17ecf06e03c880e82a56b976bbae8dfe600d1cbe5257ca199adf", false), // 0xea > 0x3f
+        ("6bb0008fbcc788b67e80359b8e728b43905f6acdec28b4376193d6f4c6f8408d", false), // 0x6b > 0x3f
+        ("ba35cd46b9c7a6079cd61d1461015eff377150837ae20bccd0d6e0ce9781aca6", false), // 0xba > 0x3f
+        ("1e7aa1a6b3c139dfdfa065e1aa711888c48fd862492585170c4e2feb797b5a83", true),  // 0x1e < 0x3f
+        ("a536802f5e26d5902994d7bb9e4eba3bcf8ce53af5d36cc56c2a85ba454e5bfc", false), // 0xa5 > 0x3f
+        ("deb8b119f5fa0e9f7c1ca07ff4fea11e51901b81f026a2c224e9c9072bba6e0d", false), // 0xde > 0x3f
+        ("9a8efed3c67219f791e2b2d9c5c861a8f0f604c8a3c908b75a9558a52f08e8b2", false), // 0x9a > 0x3f
+        ("21091fddd45ec55e01f14b98485ab4712994b60a9bd3f90600146ffbaed878dc", true),  // 0x21 < 0x3f
+        ("c3bb50a4da6ab90933b4b0994074f87b3bbc59489c56a4a99167adb029bcdf42", false), // 0xc3 > 0x3f
+        ("08d89890907ae6479457898d0e615971f159e26a6bf036463f08467322b6c881", true),  // 0x08 < 0x3f
+        ("8c3c88ac3e888779d03c95d8ba1710ebc70393eaedfb0d1526f98caaed0dad35", false), // 0x8c > 0x3f
+        ("e57cc9f23d85d66207ccc5be8da6788c64521531eb143b0a3dc5671a1d524c04", false), // 0xe5 > 0x3f
+        ("41c6af5542f170094a3609e7467d3ac87131d4648d24c08755881c754c91146c", false), // 0x41 > 0x3f
+        ("149983e823084caf5dd247ba6b0d98cef1aa1a3c1628f55127990a02c90baee2", true),  // 0x14 < 0x3f
+        ("a032f762518f1ff371b02db918834ba7f07648e665c3e732fd76839b81d749be", false), // 0xa0 > 0x3f
+        ("e04f76a5a408d57b2a2c403bb3f438be108b39484ca621d911a1988d7d48ed66", false), // 0xe0 > 0x3f
+        ("5195b8bbf91df660939fcf33a74ca6354844cc7ad9b3792e8b5df4e269c395b2", false), // 0x51 > 0x3f
+        ("1a3b61a06efa0d7a6f4db29089bec928b7672c1f87f9d568b8145949ecd20726", true),  // 0x1a < 0x3f
+        ("a85850ebbe4ccf742e7df538fb23466cc441f155b53213885e903415888914f9", false), // 0xa8 > 0x3f
+        ("274aa77473017dd44480a9752338786bd308d5f81725019ecefd4954b3367f34", true),  // 0x27 < 0x3f
+    ];
+
+        for (hash_hex, expected) in test_cases {
+            let hash = H256::from_str(hash_hex).unwrap();
+
+            // Test SIMD implementation
+            let simd_result = atomic_state.check_hash_simd(&hash);
+
+            // Test scalar comparison for verification
+            let scalar_result = U256::from(hash.as_bytes()) <= boundary;
+
+            println!("\nTesting hash: {}", hash_hex);
+            println!(
+                "SIMD result: {}, Scalar result: {}, Expected: {}",
+                simd_result, scalar_result, expected
+            );
+            println!("First byte: 0x{:02x}", hash.as_bytes()[0]);
+            println!("Boundary:   0x{:064x}", boundary);
+
+            assert_eq!(
+                simd_result,
+                expected,
+                "SIMD check failed for hash starting with 0x{:02x}",
+                hash.as_bytes()[0]
+            );
+            assert_eq!(
+                scalar_result,
+                expected,
+                "Scalar check failed for hash starting with 0x{:02x}",
+                hash.as_bytes()[0]
+            );
+        }
     }
 }

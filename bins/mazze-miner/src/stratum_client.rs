@@ -83,7 +83,7 @@ impl StratumClient {
         match self.miner.parse_job(params) {
             Ok(problem) => {
                 self.current_job = Some(problem.clone());
-                self.miner.mine(&problem);
+                // self.miner.mine(&problem);
                 Ok(())
             }
             Err(e) => {

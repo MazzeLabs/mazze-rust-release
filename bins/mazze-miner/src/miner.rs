@@ -247,16 +247,20 @@ impl Miner {
                 let mut current_nonce = start_nonce;
                 let mut hashes_computed = 0u64;
                 let start_time = Instant::now();
+                let mut blocks_processed = 0u64;
+                let mut last_block_height = vm.get_current_height();
 
+                // Mining loop
                 while current_nonce < end_nonce {
                     if current_nonce.low_u64() % CHECK_INTERVAL == 0 {
                         let elapsed = start_time.elapsed();
                         if elapsed.as_secs() > 0 {
                             let hash_rate = hashes_computed as f64 / elapsed.as_secs_f64();
                             trace!(
-                                "[{}] Hash rate: {:.2} H/s, current nonce: {}, block: {}",
+                                "[{}] Hash rate: {:.2} H/s, Blocks: {:.2} b/s, current nonce: {}, block: {}",
                                 worker_name,
                                 hash_rate,
+                                blocks_processed as f64 / elapsed.as_secs_f64(),
                                 current_nonce,
                                 vm.get_current_height()
                             );
@@ -279,7 +283,7 @@ impl Miner {
                                 worker_name,
                                 hex::encode(vm.get_current_block_hash().as_bytes())
                             );
-                            break;
+                            return false; // Exit closure to restart mining loop
                         } else {
                             debug!(
                                 "[{}] Block hash matches, not updating reference state",
@@ -287,6 +291,11 @@ impl Miner {
                             );
                         }
                         thread::yield_now();
+                    }
+
+                    if vm.get_current_height() != last_block_height {
+                        blocks_processed += 1;
+                        last_block_height = vm.get_current_height();
                     }
 
                     let mut input = [0u8; 64];
@@ -312,18 +321,21 @@ impl Miner {
                             hex::encode(vm.get_current_block_hash().as_bytes()),
                             hex::encode(hash)
                         );
-                        let solution = ProofOfWorkSolution {
-                            nonce: current_nonce,
-                        };
-                        if let Err(e) = solution_sender
-                            .send((solution, vm.get_current_height()))
-                        {
-                            warn!(
-                                "[{}] Failed to send solution: {}",
-                                worker_name, e
-                            );
+                        let solution = ProofOfWorkSolution { nonce: current_nonce };
+                        if let Err(e) = solution_sender.send((solution, vm.get_current_height())) {
+                            warn!("[{}] Failed to send solution: {}", worker_name, e);
                         }
-                        return true;
+                        // Wait for new block
+                        loop {
+                            thread::sleep(Duration::from_millis(50));
+                            if !vm_manager.is_block_hash_matching(&vm.get_current_block_hash()) {
+                                debug!("[{}] New block detected after solution, resuming mining", worker_name);
+                                vm.update(vm_manager.get_reference_state()).unwrap();
+                                return false; // Exit closure to restart mining loop
+                            } else {
+                                trace!("[{}] Waiting for new block", worker_name);
+                            }
+                        }
                     }
 
                     current_nonce = current_nonce.overflowing_add(U256::from(1)).0;
@@ -349,30 +361,30 @@ impl Miner {
         thread::spawn(move || {
             while let Ok((solution, solution_height)) = solution_rx.recv() {
                 // Get current height from thread-local VM
-                let current_height = THREAD_VM.with(|vm| {
-                    vm.borrow()
-                        .as_ref()
-                        .map(|vm| vm.get_current_height())
-                        .unwrap_or(0)
-                });
+                // let current_height = THREAD_VM.with(|vm| {
+                //     vm.borrow()
+                //         .as_ref()
+                //         .map(|vm| vm.get_current_height())
+                //         .unwrap_or(0)
+                // });
 
-                // Skip stale solutions
-                if solution_height < current_height {
-                    debug!(
-                        "[{}] Skipping stale solution for block {}, current height: {}",
-                        worker_name, solution_height, current_height
-                    );
-                    continue;
-                }
+                // // Skip stale solutions
+                // if solution_height < current_height {
+                //     debug!(
+                //         "[{}] Skipping stale solution for block {}, current height: {}",
+                //         worker_name, solution_height, current_height
+                //     );
+                //     continue;
+                // }
 
                 // Skip future solutions (shouldn't happen, but better be safe)
-                if solution_height > current_height {
-                    warn!(
-                        "[{}] Got solution for future block {} while at height {}",
-                        worker_name, solution_height, current_height
-                    );
-                    continue;
-                }
+                // if solution_height > current_height {
+                //     warn!(
+                //         "[{}] Got solution for future block {} while at height {}",
+                //         worker_name, solution_height, current_height
+                //     );
+                //     continue;
+                // }
 
                 // Forward valid solutions to stratum
                 if let Err(e) = stratum_tx.send((solution, solution_height)) {

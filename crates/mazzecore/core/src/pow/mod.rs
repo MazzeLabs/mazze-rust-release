@@ -305,7 +305,7 @@ impl PowComputer {
         }
     }
 
-    pub fn mine_range(
+    pub fn _mine_range(
         &self, problem: &ProofOfWorkProblem, start_nonce: U256,
         timeout: Duration,
     ) -> Option<ProofOfWorkSolution> {
@@ -381,7 +381,12 @@ pub fn validate(
     solution: &ProofOfWorkSolution,
 ) -> bool {
     let nonce = solution.nonce;
-    pow.initialize(&problem.block_hash);
+    // TODO: init with new seed hash
+    let temp_seed_hash: H256 = H256::from_str(
+        "ef6e5a0dd08b7c8be526c5d6ce7d2fcf8e4dd2449d690af4023f4ea989fd2a4e",
+    )
+    .expect("Invalid seed hash");
+    pow.initialize(&temp_seed_hash);
     let hash = pow.compute(&nonce, &problem.block_hash);
     ProofOfWorkProblem::validate_hash_against_boundary(
         &hash,
@@ -529,6 +534,16 @@ impl TargetDifficultyCache {
             inner.evict_one();
         }
         inner.insert(hash, difficulty);
+    }
+}
+
+impl Default for ProofOfWorkProblem {
+    fn default() -> Self {
+        ProofOfWorkProblem::new(
+            u64::default(),
+            H256::default(),
+            U256::default(),
+        )
     }
 }
 

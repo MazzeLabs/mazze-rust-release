@@ -33,7 +33,7 @@ use primitives::{
 use rlp::Encodable;
 use rlp_derive::{RlpDecodable, RlpEncodable};
 use serde_derive::{Deserialize, Serialize};
-use std::{collections::HashSet, convert::TryInto, sync::Arc};
+use std::{collections::HashSet, convert::TryInto, str::FromStr, sync::Arc};
 use unexpected::{Mismatch, OutOfBounds};
 
 #[derive(Clone)]
@@ -288,7 +288,13 @@ impl VerificationConfig {
 
     fn compute_pow_hash(pow: &PowComputer, header: &BlockHeader) -> H256 {
         let nonce = header.nonce();
-        pow.initialize(&header.problem_hash());
+        // TODO: init with new seed hash
+        let temp_seed_hash: H256 = H256::from_str(
+            "ef6e5a0dd08b7c8be526c5d6ce7d2fcf8e4dd2449d690af4023f4ea989fd2a4e",
+        )
+        .expect("Invalid seed hash");
+        // pow.initialize(&header.problem_hash());
+        pow.initialize(&temp_seed_hash);
         pow.compute(&nonce, &header.problem_hash())
     }
 

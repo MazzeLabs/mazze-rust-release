@@ -83,7 +83,7 @@ impl StratumClient {
         match self.miner.parse_job(params) {
             Ok(problem) => {
                 self.current_job = Some(problem.clone());
-                self.miner.mine(&problem);
+                // self.miner.mine(&problem);
                 Ok(())
             }
             Err(e) => {
@@ -127,6 +127,7 @@ impl StratumClient {
                     }
                 }
                 Ok((solution, block_height)) = solution_receiver.recv() => {
+                    info!("Received solution: {:?}, block_height: {}", solution.nonce, block_height);
                     if let Some(problem) = &self.current_job {
                         if block_height == problem.block_height {
                             self.submit_share(&solution).await?;

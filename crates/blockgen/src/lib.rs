@@ -27,6 +27,7 @@ use primitives::{pos::PosBlockId, *};
 use std::{
     cmp::max,
     collections::HashSet,
+    str::FromStr,
     sync::{
         mpsc::{self, TryRecvError},
         Arc,
@@ -103,7 +104,13 @@ impl Worker {
                             Err(TryRecvError::Disconnected) => return,
                             Ok(new_problem) => {
                                 problem = Some(new_problem);
-                                bg_pow.initialize(&problem.as_ref().unwrap().block_hash);
+                                // TODO: init with new seed hash
+                                let temp_seed_hash: H256 = H256::from_str(
+                                    "ef6e5a0dd08b7c8be526c5d6ce7d2fcf8e4dd2449d690af4023f4ea989fd2a4e",
+                                )
+                                .expect("Invalid seed hash");
+                                bg_pow.initialize(&temp_seed_hash);
+                                // bg_pow.initialize(&problem.as_ref().unwrap().block_hash);
                             }
                         }
                     }

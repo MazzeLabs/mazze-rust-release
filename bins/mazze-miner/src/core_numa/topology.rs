@@ -137,3 +137,24 @@ mod tests {
         }
     }
 }
+
+#[derive(Clone, Debug)]
+pub struct ThreadAssignment {
+    pub thread_id: usize,
+    pub node_id: usize,
+    pub core_id: usize,
+}
+
+impl ThreadAssignment {
+    pub fn new(thread_id: usize, node_id: usize, core_id: usize) -> Self {
+        debug!(
+            "Creating thread assignment: thread={}, node={}, core={}",
+            thread_id, node_id, core_id
+        );
+        Self {
+            thread_id,
+            node_id,
+            core_id,
+        }
+    }
+}

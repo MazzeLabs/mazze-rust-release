@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .format_timestamp_millis()
         .filter_module(
             "mazze_miner::core::atomic_state",
-            log::LevelFilter::Info,
+            log::LevelFilter::Debug,
         )
         .init();
 
@@ -90,6 +90,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // return Err(e.into());
             }
         };
+
+    info!("Sleeping for 30 seconds to allow VMs to initialize...");
+    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
 
     // Set up Ctrl+C handler
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);

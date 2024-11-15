@@ -381,11 +381,12 @@ pub fn validate(
     solution: &ProofOfWorkSolution,
 ) -> bool {
     let nonce = solution.nonce;
-    let GENESIS_BLOCK_HASH: H256 = H256::from_str(
+    // TODO: init with new seed hash
+    let temp_seed_hash: H256 = H256::from_str(
         "ef6e5a0dd08b7c8be526c5d6ce7d2fcf8e4dd2449d690af4023f4ea989fd2a4e",
     )
-    .expect("Invalid genesis hash");
-    pow.initialize(&GENESIS_BLOCK_HASH);
+    .expect("Invalid seed hash");
+    pow.initialize(&temp_seed_hash);
     let hash = pow.compute(&nonce, &problem.block_hash);
     ProofOfWorkProblem::validate_hash_against_boundary(
         &hash,

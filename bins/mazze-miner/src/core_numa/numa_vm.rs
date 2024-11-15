@@ -20,10 +20,11 @@ impl ThreadLocalVM {
         let topology = NumaTopology::detect()?;
         topology.bind_thread_to_node(node_id)?;
 
-        let GENESIS_BLOCK_HASH: H256 = H256::from_str(
+        // TODO: init with new seed hash
+        let temp_seed_hash: H256 = H256::from_str(
             "ef6e5a0dd08b7c8be526c5d6ce7d2fcf8e4dd2449d690af4023f4ea989fd2a4e",
         )
-        .expect("Invalid genesis hash");
+        .expect("Invalid seed hash");
 
         let mut flags = RandomXFlag::get_recommended_flags();
         flags |= RandomXFlag::FLAG_FULL_MEM;
@@ -32,9 +33,9 @@ impl ThreadLocalVM {
         // Initialize with genesis block
         info!(
             "Creating RandomX cache with genesis block: {}",
-            GENESIS_BLOCK_HASH
+            temp_seed_hash
         );
-        let cache = RandomXCache::new(flags, GENESIS_BLOCK_HASH.as_bytes())
+        let cache = RandomXCache::new(flags, temp_seed_hash.as_bytes())
             .map_err(|e| {
                 warn!("Failed to create RandomX cache: {}", e);
                 NumaError::RandomXError(e)
@@ -57,7 +58,7 @@ impl ThreadLocalVM {
         // Initialize with genesis state
         let problem_state = AtomicProblemState::new(
             0, // Initial height
-            GENESIS_BLOCK_HASH,
+            temp_seed_hash,
             U256::from(4), // Initial difficulty
         );
         debug!("Initialized problem state with genesis block");
@@ -88,36 +89,6 @@ impl ThreadLocalVM {
         self.problem_state.update(reference_state);
         Ok(())
     }
-
-    // pub fn update_if_needed(
-    //     &mut self, problem: &ProofOfWorkProblem,
-    // ) -> Result<(), NumaError> {
-    //     debug!(
-    //         "ThreadLocalVM.update_if_needed comparing blocks: current={}, new={}",
-    //         self.problem_state.get_block_hash(),
-    //         problem.block_hash
-    //     );
-    //     if problem.block_hash != self.problem_state.get_block_hash() {
-    //         // debug!("Updating VM for new block hash: {}", problem.block_hash);
-    //         // let flags = RandomXFlag::get_recommended_flags();
-
-    //         // let cache = RandomXCache::new(flags, problem.block_hash.as_bytes())
-    //         //     .map_err(NumaError::RandomXError)?;
-
-    //         // self.vm
-    //         //     .reinit_cache(cache)
-    //         //     .map_err(NumaError::RandomXError)?;
-
-    //         // Update problem state
-    //         self.problem_state.update(ProblemState::from(problem));
-    //     } else {
-    //         info!(
-    //             "VM already up to date for block hash: {}",
-    //             problem.block_hash
-    //         );
-    //     }
-    //     Ok(())
-    // }
 }
 
 thread_local! {
@@ -163,32 +134,6 @@ impl NewNumaVMManager {
     pub fn update_if_needed(
         &self, problem: &ProofOfWorkProblem,
     ) -> Result<(), NumaError> {
-        debug!(
-            "NewNumaVMManager.update_if_needed called with block {}",
-            problem.block_hash
-        );
-
-        // THREAD_VM.with(|vm| {
-        //     // Check existence without holding the borrow
-        //     let exists = vm.borrow().is_some();
-        //     debug!("THREAD_VM exists: {}", exists);
-
-        //     if exists {
-        //         // Now do the mutable borrow
-        //         if let Some(vm) = vm.borrow_mut().as_mut() {
-        //             debug!(
-        //                 "Calling vm.update_if_needed with block {} (current block: {})",
-        //                 problem.block_hash,
-        //                 vm.problem_state.get_block_hash()
-        //             );
-        //             vm.update_if_needed(problem)?;
-        //         }
-        //     } else {
-        //         debug!("No VM instance found in THREAD_VM");
-        //     }
-        //     Ok(())
-        // })
-
         debug!(
             "Updating reference state to new block hash: {}",
             problem.block_hash

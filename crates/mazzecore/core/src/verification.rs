@@ -288,29 +288,16 @@ impl VerificationConfig {
 
     fn compute_pow_hash(pow: &PowComputer, header: &BlockHeader) -> H256 {
         let nonce = header.nonce();
-        // TODO: init with new seed hash
-        let temp_seed_hash: H256 = H256::from_str(
-            "ef6e5a0dd08b7c8be526c5d6ce7d2fcf8e4dd2449d690af4023f4ea989fd2a4e",
-        )
-        .expect("Invalid seed hash");
-        // pow.initialize(&header.problem_hash());
-        pow.initialize(&temp_seed_hash);
-        pow.compute(&nonce, &header.problem_hash())
+        let hash = header.problem_hash();
+
+        pow.compute(&nonce, &hash)
     }
 
     #[inline]
     pub fn verify_pow(
         &self, pow: &PowComputer, header: &mut BlockHeader,
     ) -> Result<(), Error> {
-        let pow_hash = Self::get_or_fill_header_pow_hash(pow, header);
-        let nonce = header.nonce();
         let difficulty: U256 = header.difficulty().into();
-
-        info!(
-            "Verifying PoW: Hash: {:?}, Nonce: {:?}, Difficulty: {:?}",
-            pow_hash, nonce, difficulty
-        );
-
         if difficulty.is_zero() {
             return Err(BlockError::InvalidDifficulty(OutOfBounds {
                 min: Some(1.into()),
@@ -320,13 +307,11 @@ impl VerificationConfig {
             .into());
         }
 
-        let quality = pow::pow_hash_to_quality(&pow_hash, &nonce);
-        info!("Calculated PoW quality: {:?}", quality);
-
+        // TODO: add seed management - Simple hash computation without seed management for now
+        let nonce = header.nonce();
+        let hash = pow.compute(&nonce, &header.problem_hash());
+        let quality = pow::pow_hash_to_quality(&hash, &nonce);
         let boundary = pow::difficulty_to_boundary(&difficulty);
-        info!("Calculated boundary: {:?}", boundary);
-
-        assert!(quality >= difficulty);
 
         if quality <= boundary {
             Ok(())

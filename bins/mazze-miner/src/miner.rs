@@ -68,8 +68,10 @@ impl Miner {
         let worker_name = miner.worker_name.clone();
         Self::spawn_solution_handler(solution_rx, stratum_tx, worker_name);
 
+        let client_seed = Self::generate_client_seed();
+
         // Spawn mining threads
-        miner.spawn_numa_mining_threads()?;
+        miner.spawn_numa_mining_threads(client_seed)?;
 
         Ok((miner, rx))
     }
@@ -139,7 +141,9 @@ impl Miner {
         Ok(problem)
     }
 
-    fn spawn_numa_mining_threads(&self) -> Result<(), NumaError> {
+    fn spawn_numa_mining_threads(
+        &self, client_seed: H256,
+    ) -> Result<(), NumaError> {
         info!(
             "[{}] Spawning {} NUMA-aware mining threads",
             self.worker_name, self.num_threads
@@ -163,7 +167,7 @@ impl Miner {
                 assignment.core_id
             );
 
-            self.spawn_mining_thread_numa(assignment, barrier)?;
+            self.spawn_mining_thread_numa(assignment, barrier, client_seed)?;
         }
 
         Ok(())
@@ -171,6 +175,7 @@ impl Miner {
 
     fn spawn_mining_thread_numa(
         &self, assignment: ThreadAssignment, barrier: Arc<Barrier>,
+        client_seed: H256,
     ) -> Result<thread::JoinHandle<()>, NumaError> {
         let worker_name = self.worker_name.clone();
         let solution_sender = self.solution_sender.clone();
@@ -192,6 +197,7 @@ impl Miner {
                 vm_manager,
                 num_threads,
                 barrier,
+                client_seed.clone(),
             );
         });
 
@@ -202,7 +208,7 @@ impl Miner {
         assignment: &ThreadAssignment, worker_name: String,
         solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
         vm_manager: Arc<NewNumaVMManager>, num_threads: usize,
-        barrier: Arc<Barrier>,
+        barrier: Arc<Barrier>, client_seed: H256,
     ) {
         info!(
             "[{}] Starting mining thread {} on NUMA node {} core {}",
@@ -236,6 +242,7 @@ impl Miner {
                     assignment.thread_id,
                     num_threads,
                     Some(&vm.get_current_block_hash()),
+                    &client_seed,
                 );
                 debug!(
                     "[{}] Mining range: start={}, block={}",
@@ -257,8 +264,9 @@ impl Miner {
                         if elapsed.as_secs() > 0 {
                             let hash_rate = hashes_computed as f64 / elapsed.as_secs_f64();
                             info!(
-                                "[{}] Hash rate: {:.2} H/s, Blocks: {:.2} b/s, current nonce: {}, block: {}",
+                                "[{}][{}] Hash rate: {:.2} H/s, Blocks: {:.2} b/s, current nonce: {}, block: {}",
                                 worker_name,
+                                assignment.thread_id,
                                 hash_rate,
                                 blocks_processed as f64 / elapsed.as_secs_f64(),
                                 current_nonce,
@@ -400,13 +408,17 @@ impl Miner {
         thread_id: usize,
         num_threads: usize,
         block_hash: Option<&H256>, // Add block_hash parameter
+        client_seed: &H256,
     ) -> U256 {
         let slice_size = U256::MAX / num_threads;
 
         let offset = if let Some(hash) = block_hash {
-            // Use last 32 bits of block hash as offset
-            let offset_bytes = &hash.as_bytes()[28..32];
-            U256::from_little_endian(offset_bytes)
+            // Combine block hash with client seed
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(hash.as_bytes());
+            hasher.update(client_seed.as_bytes());
+            let result = hasher.finalize();
+            U256::from_little_endian(&result.as_bytes()[0..32])
         } else {
             U256::zero()
         };
@@ -414,6 +426,44 @@ impl Miner {
         let start_nonce = (slice_size * thread_id).overflowing_add(offset).0;
 
         start_nonce
+    }
+
+    pub fn generate_client_seed() -> H256 {
+        let mut hasher = blake3::Hasher::new();
+
+        // Add MAC address(es)
+        if let Ok(interfaces) = get_if_addrs::get_if_addrs() {
+            for interface in interfaces {
+                hasher.update(interface.addr.ip().to_string().as_bytes());
+            }
+        }
+
+        // Add hostname
+        if let Ok(hostname) = hostname::get() {
+            if let Ok(hostname_str) = hostname.into_string() {
+                hasher.update(hostname_str.as_bytes());
+            }
+        }
+
+        // Add timestamp for uniqueness
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        hasher.update(&timestamp.to_le_bytes());
+
+        // Add CPU info if available
+        #[cfg(target_os = "linux")]
+        if let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") {
+            hasher.update(cpuinfo.as_bytes());
+        }
+
+        // Could also add from config file if exists
+        if let Ok(config) = std::fs::read_to_string("miner_config.toml") {
+            hasher.update(config.as_bytes());
+        }
+
+        H256::from_slice(&hasher.finalize().as_bytes()[0..32])
     }
 }
 

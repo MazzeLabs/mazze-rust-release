@@ -1,4 +1,5 @@
 use parking_lot::Mutex;
+use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
 
 use super::{
     compute::Light,
@@ -8,11 +9,114 @@ use super::{
         get_cache_size, Node, NODE_BYTES, POW_CACHE_ROUNDS, POW_STAGE_LENGTH,
     },
 };
+use std::str::FromStr;
 
 use std::{collections::HashMap, slice, sync::Arc};
 
 pub type Cache = Vec<Node>;
 
+use crossbeam_deque::{Steal, Stealer, Worker};
+use parking_lot::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+const INITIAL_VMS_PER_STAGE: usize = 4;
+
+pub struct RandomXCacheBuilder {
+    global_queue: Worker<Arc<RandomXVM>>,
+    stealers: Vec<Stealer<Arc<RandomXVM>>>,
+    current_stage: AtomicU64,
+}
+
+pub struct VMHandle {
+    vm: Option<Arc<RandomXVM>>,
+    cache_builder: Arc<RandomXCacheBuilder>,
+}
+
+impl RandomXCacheBuilder {
+    pub fn new() -> Arc<Self> {
+        let global_queue = Worker::new_fifo();
+        let stealers = vec![global_queue.stealer()];
+
+        let builder = RandomXCacheBuilder {
+            global_queue,
+            stealers,
+            current_stage: AtomicU64::new(0),
+        };
+
+        // Initialize with some VMs
+        for _ in 0..INITIAL_VMS_PER_STAGE {
+            let vm = builder.initialize_new_vm(0);
+            builder.global_queue.push(vm);
+        }
+
+        Arc::new(builder)
+    }
+
+    fn initialize_new_vm(&self, block_height: u64) -> Arc<RandomXVM> {
+        let flags = RandomXFlag::get_recommended_flags();
+        let temp_seed_hash = [0u8; 32];
+        // let key = self.get_stage_key(block_height);
+        let cache = RandomXCache::new(flags, &temp_seed_hash)
+            .expect("Failed to create cache");
+        Arc::new(
+            RandomXVM::new(flags, Some(cache), None)
+                .expect("Failed to create VM"),
+        )
+    }
+
+    fn get_stage_key(&self, block_height: u64) -> Vec<u8> {
+        let stage = block_height / 2048;
+        format!("stage_{}", stage).into_bytes()
+    }
+
+    fn acquire_vm(&self) -> Arc<RandomXVM> {
+        if let Some(vm) = self.global_queue.pop() {
+            return vm;
+        }
+
+        for stealer in &self.stealers {
+            match stealer.steal() {
+                Steal::Success(vm) => return vm,
+                Steal::Empty => continue,
+                Steal::Retry => {
+                    if let Steal::Success(vm) = stealer.steal() {
+                        return vm;
+                    }
+                }
+            }
+        }
+
+        let current_stage = self.current_stage.load(Ordering::Acquire);
+        self.initialize_new_vm(current_stage)
+    }
+
+    fn return_vm_handler(&self, vm: Arc<RandomXVM>) {
+        self.global_queue.push(vm);
+    }
+
+    pub fn get_vm_handler(self: &Arc<Self>) -> VMHandle {
+        VMHandle {
+            vm: Some(self.acquire_vm()),
+            cache_builder: Arc::clone(self),
+        }
+    }
+}
+
+impl VMHandle {
+    pub fn get_vm(&self) -> &RandomXVM {
+        self.vm.as_ref().expect("VM should exist").as_ref()
+    }
+}
+
+impl Drop for VMHandle {
+    fn drop(&mut self) {
+        if let Some(vm) = self.vm.take() {
+            self.cache_builder.return_vm_handler(vm);
+        }
+    }
+}
+
+// Obsolete implementation of the cache builder - octopus specific.
 #[derive(Clone)]
 pub struct CacheBuilder {
     seedhash: Arc<Mutex<SeedHashCompute>>,

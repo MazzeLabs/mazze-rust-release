@@ -24,6 +24,9 @@ libc = "0.2.162"
 hwlocality = "1.0.0-alpha.6"
 parking_lot = "0.12" 
 thread_local = "1.1.4"
+blake3 = "1.4"
+get_if_addrs = "0.5.3"
+hostname = "0.3.1"
 
 [dev-dependencies]
 hex-literal = "0.4"

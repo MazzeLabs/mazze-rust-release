@@ -1,5 +1,5 @@
 use crate::core::IntoChunks;
-use log::{debug, info};
+use log::{debug, info, trace};
 use mazze_types::{H256, U256};
 use mazzecore::pow::ProofOfWorkProblem;
 use std::sync::atomic;
@@ -117,7 +117,7 @@ impl AtomicProblemState {
             let _ = Box::from_raw(old_ptr);
         };
         self.solution_submitted.store(false, Ordering::Release);
-        info!("Updated atomic state");
+        trace!("Updated atomic state");
     }
 
     pub fn get_problem_details(&self) -> (u64, H256, U256) {

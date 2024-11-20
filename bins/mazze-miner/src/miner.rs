@@ -232,15 +232,15 @@ impl Miner {
 
         loop {
             let result = vm_manager.with_vm(assignment, |vm| {
-                let (start_nonce, end_nonce) = Self::calculate_nonce_range(
+                let start_nonce = Self::get_nonce_range_start(
                     assignment.thread_id,
                     num_threads,
+                    Some(&vm.get_current_block_hash()),
                 );
                 debug!(
-                    "[{}] Mining range: start={}, end={}, block={}",
+                    "[{}] Mining range: start={}, block={}",
                     worker_name,
                     start_nonce,
-                    end_nonce,
                     vm.get_current_height()
                 );
 
@@ -251,7 +251,7 @@ impl Miner {
                 let mut last_block_height = vm.get_current_height();
 
                 // Mining loop
-                while current_nonce < end_nonce {
+                loop {
                     if current_nonce.low_u64() % CHECK_INTERVAL == 0 {
                         let elapsed = start_time.elapsed();
                         if elapsed.as_secs() > 0 {
@@ -340,7 +340,6 @@ impl Miner {
 
                     current_nonce = current_nonce.overflowing_add(U256::from(1)).0;
                 }
-                false
             });
 
             if let Err(e) = result {
@@ -397,17 +396,24 @@ impl Miner {
         });
     }
 
-    pub fn calculate_nonce_range(
-        thread_id: usize, num_threads: usize,
-    ) -> (U256, U256) {
-        let nonce_range = U256::MAX / num_threads;
-        let start_nonce = nonce_range * thread_id;
-        let end_nonce = if thread_id == num_threads - 1 {
-            U256::MAX
+    pub fn get_nonce_range_start(
+        thread_id: usize,
+        num_threads: usize,
+        block_hash: Option<&H256>, // Add block_hash parameter
+    ) -> U256 {
+        let slice_size = U256::MAX / num_threads;
+
+        let offset = if let Some(hash) = block_hash {
+            // Use last 32 bits of block hash as offset
+            let offset_bytes = &hash.as_bytes()[28..32];
+            U256::from_little_endian(offset_bytes)
         } else {
-            start_nonce + nonce_range
+            U256::zero()
         };
-        (start_nonce, end_nonce)
+
+        let start_nonce = (slice_size * thread_id).overflowing_add(offset).0;
+
+        start_nonce
     }
 }
 

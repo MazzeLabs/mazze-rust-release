@@ -11,6 +11,7 @@ mod shared;
 pub use self::{cache::CacheBuilder, shared::POW_STAGE_LENGTH};
 
 use crate::block_data_manager::BlockDataManager;
+use cache::RandomXCacheBuilder;
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_parameters::pow::*;
@@ -259,7 +260,7 @@ pub fn compute_inv_x_times_2_pow_256_floor(x: &U256) -> U256 {
 }
 
 pub struct PowComputer {
-    vm: Arc<RwLock<Option<RandomXVM>>>,
+    cache_builder: Arc<RandomXCacheBuilder>,
 }
 
 unsafe impl Send for PowComputer {}
@@ -268,110 +269,9 @@ unsafe impl Sync for PowComputer {}
 impl PowComputer {
     pub fn new() -> Self {
         PowComputer {
-            vm: Arc::new(RwLock::new(None)),
+            cache_builder: RandomXCacheBuilder::new(),
         }
     }
-
-    // pub fn get_vm(&self) -> RwLockReadGuard<'_, Option<RandomXVM>> {
-    //     let thread_id = std::thread::current().id();
-    //     let timestamp = std::time::SystemTime::now()
-    //         .duration_since(std::time::UNIX_EPOCH)
-    //         .unwrap()
-    //         .as_micros();
-
-    //     debug!(
-    //         "VM_ACCESS[{}] Thread {:?} entering get_vm for operation",
-    //         timestamp, thread_id
-    //     );
-
-    //     // Try write lock first if VM doesn't exist
-    //     {
-    //         match self.vm.try_write() {
-    //             Some(mut write_guard) => {
-    //                 if write_guard.as_ref().is_none() {
-    //                     debug!(
-    //                         "VM_INIT[{}] Thread {:?} initializing VM",
-    //                         timestamp, thread_id
-    //                     );
-    //                     let flags = RandomXFlag::get_recommended_flags();
-    //                     let temp_seed_hash: H256 = H256::from_str(
-    //                         "ef6e5a0dd08b7c8be526c5d6ce7d2fcf8e4dd2449d690af4023f4ea"
-    //                     )
-    //                     .expect("Invalid seed hash");
-    //                     let cache =
-    //                         RandomXCache::new(flags, temp_seed_hash.as_bytes())
-    //                             .expect("Failed to create RandomX cache");
-    //                     let new_vm = RandomXVM::new(flags, Some(cache), None)
-    //                         .expect("Failed to create RandomX VM");
-    //                     *write_guard = Some(new_vm);
-
-    //                     debug!(
-    //                         "VM_INIT[{}] Thread {:?} finished initialization",
-    //                         timestamp, thread_id
-    //                     );
-    //                 }
-    //             }
-    //             None => {
-    //                 debug!(
-    //                     "VM_WAIT[{}] Thread {:?} waiting for VM access",
-    //                     timestamp, thread_id
-    //                 );
-    //             }
-    //         }
-    //     }
-
-    //     debug!(
-    //         "VM_READ[{}] Thread {:?} acquiring read lock",
-    //         timestamp, thread_id
-    //     );
-    //     let guard = self.vm.read();
-    //     debug!(
-    //         "VM_READ[{}] Thread {:?} acquired read lock",
-    //         timestamp, thread_id
-    //     );
-
-    //     guard
-    // }
-    /**
-    // Try write lock first if no VM exists
-     *     
-     *
-     *
-     */
-    pub fn get_vm(&self) -> RwLockReadGuard<'_, Option<RandomXVM>> {
-        {
-            let mut write_guard = self.vm.write();
-            if write_guard.is_none() {
-                let flags = RandomXFlag::get_recommended_flags();
-                let temp_seed_hash: H256 = H256::from_str(
-                    "ef6e5a0dd08b7c8be526c5d6ce7d2fcf8e4dd2449d690af4023f4ea989fd2a4e",
-                )
-                .expect("Invalid seed hash");
-
-                let cache = RandomXCache::new(flags, temp_seed_hash.as_bytes())
-                    .expect("Failed to create RandomX cache");
-                let new_vm = RandomXVM::new(flags, Some(cache), None)
-                    .expect("Failed to create RandomX VM");
-
-                *write_guard = Some(new_vm);
-            }
-        } // write_guard dropped here
-
-        // Now we know VM exists, return read guard
-        self.vm.read()
-    }
-    // pub fn initialize(&self, block_hash: &H256) {
-    //     let flags = RandomXFlag::get_recommended_flags();
-    //     let key = block_hash.as_bytes();
-
-    //     let cache = RandomXCache::new(flags, key)
-    //         .expect("Failed to create RandomX cache");
-    //     let vm = RandomXVM::new(flags, Some(cache), None)
-    //         .expect("Failed to create RandomX VM");
-
-    //     let mut vm_guard = self.vm.lock().unwrap();
-    //     *vm_guard = Some(vm);
-    // }
 
     pub fn compute(&self, nonce: &U256, block_hash: &H256) -> H256 {
         let input = {
@@ -383,8 +283,8 @@ impl PowComputer {
             buf
         };
 
-        let guard = self.get_vm();
-        let vm = guard.as_ref().expect("VM should exist");
+        let handle = self.cache_builder.get_vm_handler();
+        let vm = handle.get_vm();
         let hash = vm.calculate_hash(&input).expect("Failed to compute hash");
 
         H256::from_slice(&hash)

@@ -21,25 +21,23 @@ impl ThreadLocalVM {
         topology.bind_thread_to_node(node_id)?;
 
         // TODO: init with new seed hash
-        let temp_seed_hash: H256 = H256::from_str(
-            "ef6e5a0dd08b7c8be526c5d6ce7d2fcf8e4dd2449d690af4023f4ea989fd2a4e",
-        )
-        .expect("Invalid seed hash");
+        let temp_seed_hash = [0u8; 32];
+
+        // let temp_seed_hash: H256 = H256::from_str(
+        //     "ef6e5a0dd08b7c8be526c5d6ce7d2fcf8e4dd2449d690af4023f4ea989fd2a4e",
+        // )
+        // .expect("Invalid seed hash");
 
         let mut flags = RandomXFlag::get_recommended_flags();
         flags |= RandomXFlag::FLAG_FULL_MEM;
         debug!("Initializing RandomX with flags: {:?}", flags);
 
         // Initialize with genesis block
-        info!(
-            "Creating RandomX cache with genesis block: {}",
-            temp_seed_hash
-        );
-        let cache = RandomXCache::new(flags, temp_seed_hash.as_bytes())
-            .map_err(|e| {
-                warn!("Failed to create RandomX cache: {}", e);
-                NumaError::RandomXError(e)
-            })?;
+        info!("Creating RandomX cache with genesis block");
+        let cache = RandomXCache::new(flags, &temp_seed_hash).map_err(|e| {
+            warn!("Failed to create RandomX cache: {}", e);
+            NumaError::RandomXError(e)
+        })?;
         debug!("RandomX cache created successfully");
 
         info!("Creating RandomX dataset...");
@@ -58,7 +56,7 @@ impl ThreadLocalVM {
         // Initialize with genesis state
         let problem_state = AtomicProblemState::new(
             0, // Initial height
-            temp_seed_hash,
+            H256::from_slice(&temp_seed_hash),
             U256::from(4), // Initial difficulty
         );
         debug!("Initialized problem state with genesis block");

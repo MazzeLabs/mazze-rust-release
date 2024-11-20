@@ -256,7 +256,7 @@ impl Miner {
                         let elapsed = start_time.elapsed();
                         if elapsed.as_secs() > 0 {
                             let hash_rate = hashes_computed as f64 / elapsed.as_secs_f64();
-                            trace!(
+                            info!(
                                 "[{}] Hash rate: {:.2} H/s, Blocks: {:.2} b/s, current nonce: {}, block: {}",
                                 worker_name,
                                 hash_rate,

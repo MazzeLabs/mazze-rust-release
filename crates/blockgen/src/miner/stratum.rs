@@ -42,6 +42,8 @@ use std::{
     sync::{mpsc, Arc},
 };
 
+use super::seedhash_notify::NotifySeedHash;
+
 /// Configures stratum server options.
 #[derive(Debug, PartialEq, Clone)]
 pub struct Options {
@@ -271,6 +273,16 @@ impl NotifyWork for Stratum {
             self.dispatcher.payload(prob.block_height, prob.block_hash, prob.boundary)
         ).unwrap_or_else(
             |e| warn!(target: "stratum", "Error while pushing work: {:?}", e)
+        );
+    }
+}
+
+impl NotifySeedHash for Stratum {
+    fn notify_seedhash(&self, seedhash: H256) {
+        trace!(target: "stratum", "Notify seedhash");
+        let hash = format!("0x{:064x}", seedhash);
+        self.service.push_seedhash_all(format!("[\"{}\"]", hash)).unwrap_or_else(
+            |e| warn!(target: "stratum", "Error while pushing seedhash: {:?}", e)
         );
     }
 }

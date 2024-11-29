@@ -2,5 +2,6 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
+pub mod seedhash_notify;
 pub mod stratum;
 pub mod work_notify;

@@ -93,6 +93,13 @@ impl StratumClient {
         }
     }
 
+    async fn handle_seed_notification(
+        &mut self, params: &[Value],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        info!("Received seed notification: {:?}", params);
+        Ok(())
+    }
+
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.subscribe().await?;
         let mut solution_receiver = self.solution_receiver.resubscribe();
@@ -110,6 +117,11 @@ impl StratumClient {
                                     "mining.notify" => {
                                         if let Some(params) = value.get("params").and_then(Value::as_array) {
                                             self.handle_job_notification(params).await?;
+                                        }
+                                    }
+                                    "mining.notify-new-seed" => {
+                                        if let Some(params) = value.get("params").and_then(Value::as_array) {
+                                            self.handle_seed_notification(params).await?;
                                         }
                                     }
                                     _ => debug!("Received unknown method: {}", method),

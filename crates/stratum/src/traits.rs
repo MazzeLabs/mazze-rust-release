@@ -55,6 +55,10 @@ pub trait PushWorkHandler: Send + Sync {
     /// push the same work package for all workers (`payload`: json of
     /// pow-specific set of work specification)
     fn push_work_all(&self, payload: String) -> Result<(), Error>;
+
+    /// push the same seedhash for all workers (`payload`: json of
+    /// pow-specific set of work specification)
+    fn push_seedhash_all(&self, payload: String) -> Result<(), Error>;
 }
 
 pub struct ServiceConfiguration {

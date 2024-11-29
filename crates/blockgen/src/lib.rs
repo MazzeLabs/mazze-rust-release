@@ -4,6 +4,7 @@
 pub mod miner;
 
 use crate::miner::{
+    seedhash_notify::NotifySeedHash,
     stratum::{Options as StratumOption, Stratum},
     work_notify::NotifyWork,
 };
@@ -112,10 +113,11 @@ impl Worker {
                         trace!("problem is {:?}", problem);
                         let boundary = problem.as_ref().unwrap().boundary;
                         let block_hash = problem.as_ref().unwrap().block_hash;
+                        let height = problem.as_ref().unwrap().block_height;
                         let mut nonce: u64 = rand::random();
                         for _i in 0..MINING_ITERATION {
                             let nonce_u256 = U256::from(nonce);
-                            let hash = bg_pow.compute(&nonce_u256, &block_hash);
+                            let hash = bg_pow.compute(&nonce_u256, &block_hash, height);
                             if ProofOfWorkProblem::validate_hash_against_boundary(&hash, &nonce_u256, &boundary) {
                                 // problem solved
                                 match solution_sender
@@ -202,6 +204,22 @@ impl BlockGenerator {
                         .send(problem)
                         .expect("Failed to send the PoW problem.")
                 }
+            }
+            MiningType::Disable => {
+                // No action needed for disabled mining
+                debug!("Mining is disabled. Ignoring PoW problem.");
+            }
+        }
+    }
+
+    pub fn send_new_seedhash(bg: Arc<BlockGenerator>, seedhash: H256) {
+        match bg.pow_config.mining_type {
+            MiningType::Stratum => {
+                let stratum = bg.stratum.read();
+                stratum.as_ref().unwrap().notify_seedhash(seedhash);
+            }
+            MiningType::CPU => {
+                debug!("node miner doesn't need to update seedhash");
             }
             MiningType::Disable => {
                 // No action needed for disabled mining
@@ -905,7 +923,11 @@ impl BlockGenerator {
         let mut hashes_checked = 0;
 
         while start_time.elapsed() < timeout {
-            let hash = pow_computer.compute(&nonce, &problem.block_hash);
+            let hash = pow_computer.compute(
+                &nonce,
+                &problem.block_hash,
+                problem.block_height,
+            );
             hashes_checked += 1;
 
             if ProofOfWorkProblem::validate_hash_against_boundary(
@@ -989,6 +1011,22 @@ impl BlockGenerator {
                     *current_difficulty,
                 );
                 last_assemble = SystemTime::now();
+                trace!("updating seed hash: {:?}", problem.block_height);
+                let seed_hash_updated = bg
+                    .pow
+                    .update_seedhash(&problem.block_hash, problem.block_height);
+                if seed_hash_updated {
+                    trace!(
+                        "seed hash updated at height {:?} with {:?}, updating miners",
+                        problem.block_height,
+                        problem.block_hash
+                    );
+                    BlockGenerator::send_new_seedhash(
+                        bg.clone(),
+                        problem.block_hash,
+                    );
+                }
+
                 trace!("send problem: {:?}", problem);
                 BlockGenerator::send_problem(bg.clone(), problem);
                 last_notify = SystemTime::now();

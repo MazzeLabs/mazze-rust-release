@@ -93,6 +93,8 @@ impl Miner {
         debug!("[{}] VMs updated successfully", self.worker_name);
     }
 
+    
+
     pub fn parse_job(
         &mut self, params: &[Value],
     ) -> Result<ProofOfWorkProblem, String> {

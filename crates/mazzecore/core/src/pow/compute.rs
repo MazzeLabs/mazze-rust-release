@@ -17,23 +17,23 @@ pub struct Light {
 }
 
 /// Light cache structure
-impl Light {
-    pub fn new_with_builder(builder: &CacheBuilder, block_height: u64) -> Self {
-        let cache = builder.new_cache(block_height);
+// impl Light {
+//     pub fn new_with_builder(builder: &CacheBuilder, block_height: u64) -> Self {
+//         let cache = builder.new_cache(block_height);
 
-        Light {
-            block_height,
-            cache,
-        }
-    }
+//         Light {
+//             block_height,
+//             cache,
+//         }
+//     }
 
-    /// Calculate the light boundary data
-    /// `header_hash` - The header hash to pack into the mix
-    /// `nonce` - The nonce to pack into the mix
-    pub fn compute(&self, header_hash: &H256, nonce: u64) -> H256 {
-        light_compute(self, header_hash, nonce)
-    }
-}
+//     /// Calculate the light boundary data
+//     /// `header_hash` - The header hash to pack into the mix
+//     /// `nonce` - The nonce to pack into the mix
+//     pub fn compute(&self, header_hash: &H256, nonce: u64) -> H256 {
+//         light_compute(self, header_hash, nonce)
+//     }
+// }
 
 #[allow(dead_code)]
 pub fn slow_hash_block_height(block_height: u64) -> H256 {

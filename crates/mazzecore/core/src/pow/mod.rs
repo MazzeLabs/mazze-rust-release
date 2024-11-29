@@ -11,7 +11,6 @@ mod shared;
 pub use self::{cache::CacheBuilder, shared::POW_STAGE_LENGTH};
 
 use crate::block_data_manager::BlockDataManager;
-use cache::RandomXCacheBuilder;
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_parameters::pow::*;
@@ -260,7 +259,7 @@ pub fn compute_inv_x_times_2_pow_256_floor(x: &U256) -> U256 {
 }
 
 pub struct PowComputer {
-    cache_builder: Arc<RandomXCacheBuilder>,
+    cache_builder: Arc<CacheBuilder>,
 }
 
 unsafe impl Send for PowComputer {}
@@ -269,11 +268,13 @@ unsafe impl Sync for PowComputer {}
 impl PowComputer {
     pub fn new() -> Self {
         PowComputer {
-            cache_builder: RandomXCacheBuilder::new(),
+            cache_builder: Arc::new(CacheBuilder::new()),
         }
     }
 
-    pub fn compute(&self, nonce: &U256, block_hash: &H256) -> H256 {
+    pub fn compute(
+        &self, nonce: &U256, block_hash: &H256, block_height: u64,
+    ) -> H256 {
         let input = {
             let mut buf = [0u8; 64];
             for i in 0..32 {
@@ -283,11 +284,17 @@ impl PowComputer {
             buf
         };
 
-        let handle = self.cache_builder.get_vm_handler();
-        let vm = handle.get_vm();
+        let vm = self.cache_builder.get_vm(block_height);
         let hash = vm.calculate_hash(&input).expect("Failed to compute hash");
 
         H256::from_slice(&hash)
+    }
+
+    pub fn update_seedhash(
+        &self, block_hash: &H256, block_height: u64,
+    ) -> bool {
+        self.cache_builder
+            .update_seedhash(block_hash.as_fixed_bytes(), block_height)
     }
 }
 
@@ -297,7 +304,7 @@ pub fn validate(
 ) -> bool {
     let nonce = solution.nonce;
 
-    let hash = pow.compute(&nonce, &problem.block_hash);
+    let hash = pow.compute(&nonce, &problem.block_hash, problem.block_height);
     ProofOfWorkProblem::validate_hash_against_boundary(
         &hash,
         &nonce,
@@ -492,5 +499,5 @@ fn test_pow() {
             .unwrap();
 
     let start_nonce = 0x2333333333u64 & (!0x1f);
-    pow.compute(&U256::from(start_nonce), &block_hash);
+    pow.compute(&U256::from(start_nonce), &block_hash, 0);
 }

@@ -289,8 +289,9 @@ impl VerificationConfig {
     fn compute_pow_hash(pow: &PowComputer, header: &BlockHeader) -> H256 {
         let nonce = header.nonce();
         let hash = header.problem_hash();
+        let height = header.height();
 
-        pow.compute(&nonce, &hash)
+        pow.compute(&nonce, &hash, height)
     }
 
     #[inline]
@@ -309,7 +310,8 @@ impl VerificationConfig {
 
         // TODO: add seed management - Simple hash computation without seed management for now
         let nonce = header.nonce();
-        let hash = pow.compute(&nonce, &header.problem_hash());
+        let height = header.height();
+        let hash = pow.compute(&nonce, &header.problem_hash(), height);
         let quality = pow::pow_hash_to_quality(&hash, &nonce);
         let boundary = pow::difficulty_to_boundary(&difficulty);
 

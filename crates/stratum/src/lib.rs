@@ -126,6 +126,13 @@ impl PushWorkHandler for Stratum {
         self.implementation
             .push_work_all(payload, &self.tcp_dispatcher)
     }
+
+    fn push_seedhash_all(&self, payload: String) -> Result<(), Error> {
+        debug!("Pushing seedhash {} to miners", payload);
+
+        self.implementation
+            .push_seedhash_all(payload, &self.tcp_dispatcher)
+    }
 }
 
 impl Drop for Stratum {
@@ -223,6 +230,76 @@ impl StratumImpl {
                 match tcp_dispatcher.push_message(addr, workers_msg.clone()) {
                     Err(PushMessageError::NoSuchPeer) => {
                         debug!(target: "stratum", "Worker no longer connected: {} addr {}", &worker_id, &addr);
+                        hup_peers.insert(**addr);
+                    }
+                    Err(e) => {
+                        warn!(target: "stratum", "Unexpected transport error: {:?}", e);
+                    }
+                    Ok(_) => {}
+                }
+            }
+            hup_peers
+        };
+
+        if !hup_peers.is_empty() {
+            let mut workers = self.workers.write();
+            for hup_peer in hup_peers {
+                workers.remove(&hup_peer);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn push_seedhash_all(
+        &self, payload: String, tcp_dispatcher: &Dispatcher,
+    ) -> Result<(), Error> {
+        let hup_peers = {
+            let workers = self.workers.read();
+            let next_request_id = {
+                let mut counter = self.notify_counter.write();
+                if *counter == ::std::u32::MAX {
+                    *counter = NOTIFY_COUNTER_INITIAL;
+                } else {
+                    *counter += 1
+                }
+                *counter
+            };
+
+            let mut hup_peers = HashSet::with_capacity(0); // most of the cases won't be needed, hence avoid allocation
+            let workers_msg = format!(
+                "{{ \"id\": {}, \"method\": \"mining.notify-new-seed\", \"params\": {} }}",
+                next_request_id, payload
+            );
+
+            info!(
+                // target: "stratum",
+                "Pushing seedhash for {} workers (payload: '{}')",
+                workers.len(),
+                &workers_msg
+            );
+
+            trace!(
+                target: "stratum",
+                "Pushing seedhash for {} workers (payload: '{}')",
+                workers.len(),
+                &workers_msg
+            );
+            for (ref addr, worker_id) in workers.iter() {
+                trace!(
+                    target: "stratum",
+                    "Pushing seedhash to {} at addr {}",
+                    &worker_id,
+                    &addr
+                );
+                match tcp_dispatcher.push_message(addr, workers_msg.clone()) {
+                    Err(PushMessageError::NoSuchPeer) => {
+                        debug!(
+                            target: "stratum",
+                            "Worker no longer connected: {} addr {}",
+                            &worker_id,
+                            &addr
+                        );
                         hup_peers.insert(**addr);
                     }
                     Err(e) => {

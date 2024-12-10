@@ -1,0 +1,34 @@
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update && \
+    apt-get install -y \
+    libssl-dev \
+    libhwloc15 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG BINARY_PATH
+WORKDIR /app
+COPY ${BINARY_PATH} /app/mazze-miner
+COPY config/ /app/config/
+COPY start-miner.sh /app/start.sh
+RUN chmod +x /app/mazze-miner /app/start.sh
+
+# Expose necessary ports
+EXPOSE 32525
+
+ENTRYPOINT ["/app/start.sh"]
+
+# FROM debian:bookworm-slim
+
+# ARG BINARY_PATH
+# WORKDIR /app
+
+# COPY ${BINARY_PATH} /app/mazze-miner
+# COPY config/ /app/config/
+# COPY start-miner.sh /app/start.sh
+
+# RUN chmod +x /app/mazze-miner /app/start.sh
+
+# ENTRYPOINT ["/app/start.sh"]

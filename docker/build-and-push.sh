@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Configuration
-DOCKER_USERNAME="0xnotadev"
-REPO_NAME="mazze-node"
+DOCKER_USERNAME="mazzelabs"
+REPO_NAME="mazze-chain"
 DOCKER_REGISTRY="${DOCKER_USERNAME}/${REPO_NAME}"
 BASE_DIR=$(pwd)
 
@@ -185,10 +185,10 @@ echo "CPU targets: ${TARGETS[*]}" >> version.txt
 echo "
 Next steps:
 1. Test the images:
-   docker run -d --name test-node ${DOCKER_REGISTRY}:node-x86-64-v2
-   docker run -d --name test-miner ${DOCKER_REGISTRY}:miner-x86-64-v2
+   docker run -d --name test-node ${DOCKER_REGISTRY}:node-x86-64
+   docker run -d --name test-miner ${DOCKER_REGISTRY}:miner-x86-64
 
 2. Update your deployment scripts to use:
-   ${DOCKER_REGISTRY}:node-x86-64-v2
-   ${DOCKER_REGISTRY}:miner-x86-64-v2
+   ${DOCKER_REGISTRY}:node-x86-64
+   ${DOCKER_REGISTRY}:miner-x86-64
 "

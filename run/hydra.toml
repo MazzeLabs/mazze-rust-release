@@ -3,7 +3,7 @@
 # The command line parameter `--full`, `--archive`, or `--light` will overwrite this parameter.
 #
 
-bootnodes="mazzenode://ae262af50c6f50d2839172e6bdca55231c2597c0b7c2408ac6dcfea83ad0c4e66e14df560b08ed8fb7fe7202575ae4f4cf274cb07838eeee05754c0a6c65e740@135.181.225.144:55555"
+bootnodes="mazzenode://ec9f4570fab69ca41d53ddbb9fc298308afac79a30d30894af6f5d457b753f3aafb061a6bd34cd3b08a810eab7965b41fe8639374d0eccb8ca15361d110b5f92@213.239.196.134:55555,mazzenode://c96bc4c20a67631b07f2103bd3c09d9e09d679be7867c3a425da5e6bac4da96d74914038c5ee41bcc04497a762c4de7346be562da9dabf8072dcfb2b7e8a09f6@65.109.20.32:55555,mazzenode://fca6f7d5db9e5af3d96eeacb7afbc06ef8a8c06ae56f4170d2dcb6edb136b1c5882b8f5118ee5f177727d01816a83d82ec3794a9f8b5691f25f30222305fc7fe@65.109.31.54:55555,mazzenode://9208202436865c52385d7e40691c14c2fcb4f6b8a8921a5fcec7871e6da9d90f8ebffa3ca785c24ac537d924a5b63520f0dd4481a6a12aae274ff24a571ba384@65.109.34.231:55555,mazzenode://2f72e303ddc8ed2e0402a1b8984dd7bf2d809e1e95ce829c83e1169b06a09a4c971c51b8a5d29ac61604bc2d8fedeb092194cc9356f522922425dbffb3a7b0ca@37.27.140.163:55555,mazzenode://8643a97bd0531a1fd4a2939879bec173c84ce7e369995622c80ce2aada80d5ea60aaaec4f4f5d135a2bed1bddddb8d6a082920a5323369a26c684cc7d1dece0b@37.27.140.162:55555,mazzenode://a781917862300eb258b313e42a22c0262d7e849620cb9c0472b727e6e3c4b4ba66974945cd7eb69394f713ee43918f9f27cedc43cbd485ddc4e477a198887c1d@37.27.140.161:55555"
 
 node_type = "full"
 
@@ -62,7 +62,8 @@ mining_author="0x1e4eaf458e93ad4331e046c72fafc78c1bbba7b5"
 
 # Listen address for stratum
 #
- stratum_listen_address = "0.0.0.0"
+stratum_listen_address = "0.0.0.0"
+# stratum_listen_address = "213.239.196.134"
 
 # Port for stratum.
 #
@@ -355,6 +356,8 @@ request_block_with_public = false
 # Note, 0 represents unlimited.
 #
 # session_ip_limits="1,8,4,2"
+
+session_ip_limits="1,32,16,4"
 
 # `subnet_quota` limits the number of nodes for a subnet B (e.g. 192.168.xxx.xxx/16) stored in database.
 # Nodes in database are used to establish outgoing TCP connections for P2P communications.

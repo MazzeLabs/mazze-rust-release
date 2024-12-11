@@ -61,9 +61,8 @@ mining_author="0x1e4eaf458e93ad4331e046c72fafc78c1bbba7b5"
 #  mining_type = "stratum"
 
 # Listen address for stratum
-#
+
 stratum_listen_address = "0.0.0.0"
-# stratum_listen_address = "213.239.196.134"
 
 # Port for stratum.
 #

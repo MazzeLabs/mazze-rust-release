@@ -91,15 +91,8 @@ impl AtomicProblemState {
     where
         F: FnOnce(&ProblemState) -> R,
     {
-        // debug!(
-        //     "Thread {:?} attempting to access atomic state",
-        //     std::thread::current().id()
-        // );
         let ptr = self.state.load(Ordering::Acquire);
-        // debug!(
-        //     "Thread {:?} accessed atomic state successfully",
-        //     std::thread::current().id()
-        // );
+        
         // SAFETY: ptr is always valid due to our update mechanism
         unsafe { f(&*ptr) }
     }

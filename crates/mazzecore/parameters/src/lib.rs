@@ -66,7 +66,7 @@ pub mod consensus_internal {
     /// The maximum number of blocks to be executed in each epoch
     pub const EPOCH_EXECUTED_BLOCK_BOUND: usize = 200;
     // The initial base mining reward in uMAZZE.
-    pub const INITIAL_BASE_MINING_REWARD_IN_UMAZZE: u64 = 4_000_000;
+    pub const INITIAL_BASE_MINING_REWARD_IN_UMAZZE: u64 = 2_000_000;
     // The average number of blocks mined per quarter.
     pub const MINED_BLOCK_COUNT_PER_QUARTER: u64 = 15_768_000;
 
@@ -214,7 +214,7 @@ pub mod pow {
 
     // TODO: compute a more appropriate initial difficulty
     // previous initial difficulty: 20_000_000_000;
-    pub const INITIAL_DIFFICULTY: u64 = 20_000;
+    pub const INITIAL_DIFFICULTY: u64 = 500;
 }
 
 pub mod tx_pool {

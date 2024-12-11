@@ -195,12 +195,8 @@ pub mod pow {
     // where D is the old difficulty.
     pub const DIFFICULTY_ADJUSTMENT_FACTOR: usize = 2;
 
-    // Default values:
-    // pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD: u64 = 5000;
-    // pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD_CIP: u64 = 250;
-    // TODO: revert to default difficulty adjustment period
-    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD: u64 = 20;
-    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD_CIP: u64 = 10;
+    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD: u64 = 500;
+    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD_CIP: u64 = 25;
     // Time unit is micro-second (usec)
     // We target two blocks per second. This strikes a good balance between the
     // growth of the metadata, the memory consumption of the consensus graph,

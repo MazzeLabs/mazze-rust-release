@@ -6,6 +6,7 @@ RUN apt-get update && \
     libssl-dev \
     libhwloc15 \
     ca-certificates \
+    libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 
 ARG BINARY_PATH
@@ -19,16 +20,3 @@ RUN chmod +x /app/mazze-miner /app/start.sh
 EXPOSE 32525
 
 ENTRYPOINT ["/app/start.sh"]
-
-# FROM debian:bookworm-slim
-
-# ARG BINARY_PATH
-# WORKDIR /app
-
-# COPY ${BINARY_PATH} /app/mazze-miner
-# COPY config/ /app/config/
-# COPY start-miner.sh /app/start.sh
-
-# RUN chmod +x /app/mazze-miner /app/start.sh
-
-# ENTRYPOINT ["/app/start.sh"]

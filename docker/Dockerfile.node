@@ -6,6 +6,7 @@ RUN apt-get update && \
     libssl-dev \
     libhwloc15 \
     ca-certificates \
+    libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 
 ARG BINARY_PATH
@@ -20,17 +21,3 @@ RUN chmod +x /app/mazze /app/start.sh
 EXPOSE 55555 52535 52536 52537 58545 58546
 
 ENTRYPOINT ["/app/start.sh"]
-
-
-# FROM debian:bookworm-slim
-
-# ARG BINARY_PATH
-# WORKDIR /app
-
-# COPY ${BINARY_PATH} /app/mazze
-# COPY config/ /app/config/
-# COPY start-node.sh /app/start.sh
-
-# RUN chmod +x /app/mazze /app/start.sh
-
-# ENTRYPOINT ["/app/start.sh"]

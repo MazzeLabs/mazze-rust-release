@@ -161,19 +161,27 @@ git clone https://github.com/MazzeLabs/mazze-rust-release.git
 cd mazze-rust-release
 ```
 
+2. Install dependencies:
+```bash
+sudo apt-get update
+sudo apt-get install build-essential pkg-config libssl-dev cmake hwloc libhwloc-dev libudev-dev
+# Install Rust: https://www.rust-lang.org/tools/install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
-2. Build the project:
+
+3. Build the project:
 ```bash
 cargo build --release
 ```
 
 
-3. Configure the node:
+4. Configure the node:
    - Edit `run/hydra.toml`
    - Set your VM's IP address
    - Configure your mining author address
 
-4. Start the node and miner:
+5. Start the node and miner:
 ```bash
 ./start-node.sh
 ./start-miner.sh

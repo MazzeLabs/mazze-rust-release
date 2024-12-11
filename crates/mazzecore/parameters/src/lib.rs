@@ -66,7 +66,7 @@ pub mod consensus_internal {
     /// The maximum number of blocks to be executed in each epoch
     pub const EPOCH_EXECUTED_BLOCK_BOUND: usize = 200;
     // The initial base mining reward in uMAZZE.
-    pub const INITIAL_BASE_MINING_REWARD_IN_UMAZZE: u64 = 7_000_000;
+    pub const INITIAL_BASE_MINING_REWARD_IN_UMAZZE: u64 = 2_000_000;
     // The average number of blocks mined per quarter.
     pub const MINED_BLOCK_COUNT_PER_QUARTER: u64 = 15_768_000;
 
@@ -195,23 +195,22 @@ pub mod pow {
     // where D is the old difficulty.
     pub const DIFFICULTY_ADJUSTMENT_FACTOR: usize = 2;
 
-    // Default values:
-    // pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD: u64 = 5000;
-    // pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD_CIP: u64 = 250;
-    // TODO: revert to default difficulty adjustment period
-    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD: u64 = 20;
-    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD_CIP: u64 = 10;
+    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD: u64 = 500;
+    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD_CIP: u64 = 25;
     // Time unit is micro-second (usec)
     // We target two blocks per second. This strikes a good balance between the
     // growth of the metadata, the memory consumption of the consensus graph,
     // and the confirmation speed
-    // Current value is 1 second, raised from 0.5 seconds
+    // Current value is 0.250 seconds (250000 usec), lowered from 0.5 seconds (500000 usec)
     // This value is being used to compute the number of blocks per hour, day, year.
-    pub const TARGET_AVERAGE_BLOCK_GENERATION_PERIOD: u64 = 10000000;
+    // One second is 1000000 usec
+
+    pub const ONE_SECOND_IN_USEC: u64 = 1000000;
+    pub const TARGET_AVERAGE_BLOCK_GENERATION_PERIOD: u64 = 250000;
 
     // TODO: compute a more appropriate initial difficulty
     // previous initial difficulty: 20_000_000_000;
-    pub const INITIAL_DIFFICULTY: u64 = 100;
+    pub const INITIAL_DIFFICULTY: u64 = 500;
 }
 
 pub mod tx_pool {
@@ -259,13 +258,17 @@ pub mod block {
 }
 
 pub mod staking {
-    use super::pow::TARGET_AVERAGE_BLOCK_GENERATION_PERIOD;
+    use super::pow::{TARGET_AVERAGE_BLOCK_GENERATION_PERIOD, ONE_SECOND_IN_USEC};
     use crate::consensus::ONE_MAZZE_IN_MAZZY;
     use mazze_types::U256;
 
+    pub const BLOCKS_PER_SECOND: u64 = ONE_SECOND_IN_USEC / TARGET_AVERAGE_BLOCK_GENERATION_PERIOD;
+
+    // 8 blocks per second
+    pub const BLOCKS_PER_MINUTE: u64 = BLOCKS_PER_SECOND * 60;
+
     /// This is the number of blocks per hour.
-    pub const BLOCKS_PER_HOUR: u64 =
-        3600 * 1000000 / TARGET_AVERAGE_BLOCK_GENERATION_PERIOD;
+    pub const BLOCKS_PER_HOUR: u64 = BLOCKS_PER_MINUTE * 60;
     /// This is the number of blocks per day.
     pub const BLOCKS_PER_DAY: u64 = BLOCKS_PER_HOUR * 24;
     /// This is the number of blocks per year.

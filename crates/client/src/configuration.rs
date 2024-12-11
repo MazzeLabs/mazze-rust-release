@@ -233,8 +233,7 @@ build_config! {
         (max_peers_tx_propagation, (usize), 128)
         (max_unprocessed_block_size_mb, (usize), (128))
         (min_peers_tx_propagation, (usize), 8)
-        // TODO: increase to 3
-        (min_phase_change_normal_peer_count, (usize), 1)
+        (min_phase_change_normal_peer_count, (usize), 3)
         (received_tx_index_maintain_timeout_ms, (u64), 300_000)
         (request_block_with_public, (bool), false)
         (send_tx_period_ms, (u64), 1300)

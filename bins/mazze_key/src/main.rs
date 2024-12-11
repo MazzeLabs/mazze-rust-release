@@ -20,6 +20,7 @@
 
 extern crate docopt;
 extern crate env_logger;
+extern crate mazze_addr;
 extern crate mazzekey;
 extern crate panic_hook;
 extern crate parity_wordlist;
@@ -33,6 +34,7 @@ extern crate serde_derive;
 use std::{env, fmt, io, num::ParseIntError, process, sync};
 
 use docopt::Docopt;
+use mazze_addr::{mazze_addr_encode, EncodingOptions, Network};
 use mazzekey::{
     brain_recover, sign, verify_address, verify_public, Brain, BrainPrefix,
     Error as EthkeyError, Generator, KeyPair, Prefix, Random,
@@ -58,6 +60,7 @@ Options:
     -p, --public       Display only the public key.
     -a, --address      Display only the address.
     -b, --brain        Use parity brain wallet algorithm. Not recommended.
+    -n, --network <network-id>  Display base32 formatted address with network prefix.
 
 Commands:
     info               Display public key and address of the secret.
@@ -91,6 +94,7 @@ struct Args {
     flag_public: bool,
     flag_address: bool,
     flag_brain: bool,
+    flag_network: Option<String>,
 }
 
 #[derive(Debug)]
@@ -179,16 +183,48 @@ fn main() {
     }
 }
 
-fn display(result: (KeyPair, Option<String>), mode: DisplayMode) -> String {
+fn display(
+    result: (KeyPair, Option<String>), mode: DisplayMode,
+    network_id: Option<&str>,
+) -> String {
     let keypair = result.0;
+    let hex_address = format!("{:x}", keypair.address());
+    let network = match network_id {
+        Some("main") => Network::Main,
+        Some("test") => Network::Test,
+        Some(id) => Network::Id(id.parse().unwrap_or(0)),
+        None => Network::Main,
+    };
+    let base32_address = mazze_addr_encode(
+        &hex::decode(&hex_address).unwrap(),
+        network,
+        EncodingOptions::Simple,
+    )
+    .unwrap();
+
     match mode {
-        DisplayMode::KeyPair => match result.1 {
-            Some(extra_data) => format!("{}\n{}", extra_data, keypair),
-            None => format!("{}", keypair),
-        },
+        DisplayMode::KeyPair => {
+            let keypair_info = format!("{}", keypair);
+            let address_info = format!(
+                "Hex address: {}\nBase32 address: {}",
+                hex_address, base32_address
+            );
+            match result.1 {
+                Some(extra_data) => format!(
+                    "{}\n{}\n{}",
+                    extra_data, keypair_info, address_info
+                ),
+                None => format!("{}\n{}", keypair_info, address_info),
+            }
+        }
         DisplayMode::Secret => format!("{:x}", keypair.secret()),
         DisplayMode::Public => format!("{:x}", keypair.public()),
-        DisplayMode::Address => format!("{:x}", keypair.address()),
+        DisplayMode::Address => {
+            format!(
+                "Hex address: {}\nBase32 address: {}",
+                hex_address, base32_address
+            )
+        }
     }
 }
 
@@ -202,6 +238,7 @@ where
 
     if args.cmd_info {
         let display_mode = DisplayMode::new(&args);
+        let network_id = args.flag_network.as_deref();
 
         let result = if args.flag_brain {
             let phrase = args.arg_secret_or_phrase;
@@ -217,9 +254,11 @@ where
                 .map_err(|_| EthkeyError::InvalidSecret)?;
             (KeyPair::from_secret(secret)?, None)
         };
-        Ok(display(result, display_mode))
+        Ok(display(result, display_mode, network_id))
     } else if args.cmd_generate {
         let display_mode = DisplayMode::new(&args);
+        let network_id = args.flag_network.as_deref();
+
         let result = if args.cmd_random {
             if args.flag_brain {
                 let mut brain =
@@ -256,7 +295,7 @@ where
         } else {
             return Ok(USAGE.to_string());
         };
-        Ok(display(result, display_mode))
+        Ok(display(result, display_mode, network_id))
     } else if args.cmd_sign {
         let secret = args
             .arg_secret
@@ -295,6 +334,8 @@ where
         Ok(format!("{}", ok))
     } else if args.cmd_recover {
         let display_mode = DisplayMode::new(&args);
+        let network_id = args.flag_network.as_deref();
+
         let known_phrase = args.arg_known_phrase;
         let address = args
             .arg_address
@@ -322,7 +363,7 @@ where
                 Err(EthkeyError::Custom("Couldn't find any results.".into()))
             }
         })?;
-        Ok(display((keypair, Some(phrase)), display_mode))
+        Ok(display((keypair, Some(phrase)), display_mode, network_id))
     } else {
         Ok(USAGE.to_string())
     }

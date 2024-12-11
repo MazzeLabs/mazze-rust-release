@@ -113,7 +113,7 @@ fn decoding_errors() {
     assert!(mazze_addr_decode("acc7uawf5ubtnmezvhu9dhc6sghea0403y2dgpyfjp").is_err());
     assert!(mazze_addr_decode("bch:acc7uawf5ubtnmezvhu9dhc6sghea0403y2dgpyfjp").is_err());
     assert!(mazze_addr_decode("mazze1:acc7uawf5ubtnmezvhu9dhc6sghea0403y2dgpyfjp").is_err());
-    assert!(mazze_addr_decode("mazze1029:acc7uawf5ubtnmezvhu9dhc6sghea0403y2dgpyfjp").is_err());
+    assert!(mazze_addr_decode("mazze1990:acc7uawf5ubtnmezvhu9dhc6sghea0403y2dgpyfjp").is_err());
 
     // optional address type
     assert!(mazze_addr_decode("mazze:type.contract:acc7uawf5ubtnmezvhu9dhc6sghea0403y2dgpyfjp").is_ok());

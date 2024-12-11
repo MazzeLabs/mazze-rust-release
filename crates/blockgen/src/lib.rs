@@ -27,6 +27,7 @@ use primitives::{pos::PosBlockId, *};
 use std::{
     cmp::max,
     collections::HashSet,
+    str::FromStr,
     sync::{
         mpsc::{self, TryRecvError},
         Arc,
@@ -103,7 +104,6 @@ impl Worker {
                             Err(TryRecvError::Disconnected) => return,
                             Ok(new_problem) => {
                                 problem = Some(new_problem);
-                                bg_pow.initialize(&problem.as_ref().unwrap().block_hash);
                             }
                         }
                     }
@@ -855,7 +855,7 @@ impl BlockGenerator {
                     new_block.block_header.problem_hash(),
                     *new_block.block_header.difficulty(),
                 );
-                pow_computer.initialize(&problem.block_hash);
+
                 current_mining_block = Some(new_block);
                 current_problem = Some(problem);
                 last_assemble = SystemTime::now();

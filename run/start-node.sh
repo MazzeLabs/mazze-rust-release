@@ -8,8 +8,12 @@ PID_FILE="node_pid.txt"
 # Create logs directory if it doesn't exist
 mkdir -p logs
 
-MAZZE_NODE_LOG_FILE="./logs/mazze-node-$(date +%Y-%m-%d_%H:%M:%S).txt"
-$EXECUTABLE --config hydra.toml > "$MAZZE_NODE_LOG_FILE" 2>&1 &
+MAZZE_NODE_LOG_FILE="./logs/mazze-node.log"
+
+# Add a timestamp line to the log file
+echo "-------$(date '+%Y-%m-%d %H:%M:%S')-------" >> "$MAZZE_NODE_LOG_FILE"
+
+$EXECUTABLE --config hydra.toml >> "$MAZZE_NODE_LOG_FILE" 2>&1 &
 
 PID=$!
 

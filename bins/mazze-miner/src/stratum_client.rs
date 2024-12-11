@@ -1,5 +1,6 @@
 use futures::{SinkExt, StreamExt};
 use log::{debug, error, info, trace, warn};
+use mazze_types::U256;
 use mazzecore::pow::{ProofOfWorkProblem, ProofOfWorkSolution};
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
@@ -8,18 +9,22 @@ use tokio_util::codec::{Framed, LinesCodec};
 
 use crate::miner::Miner;
 
-// TODO: Remove this
-#[allow(dead_code)]
 pub struct StratumClient {
     framed: Framed<TcpStream, LinesCodec>,
     miner: Miner,
     current_job: Option<ProofOfWorkProblem>,
     stratum_secret: String,
+    solution_receiver:
+        tokio::sync::broadcast::Receiver<(ProofOfWorkSolution, u64)>,
 }
 
 impl StratumClient {
     pub async fn connect(
         addr: &str, stratum_secret: &str, miner: Miner,
+        solution_receiver: tokio::sync::broadcast::Receiver<(
+            ProofOfWorkSolution,
+            u64,
+        )>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         info!("Attempting to connect to {}", addr);
         let stream = TcpStream::connect(addr).await?;
@@ -30,6 +35,7 @@ impl StratumClient {
             miner,
             current_job: None,
             stratum_secret: stratum_secret.to_string(),
+            solution_receiver,
         })
     }
 
@@ -77,11 +83,7 @@ impl StratumClient {
         match self.miner.parse_job(params) {
             Ok(problem) => {
                 self.current_job = Some(problem.clone());
-                if let Some(solution) =
-                    self.miner.mine(&problem, Duration::from_secs(60))
-                {
-                    self.submit_share(&solution).await?;
-                }
+                // self.miner.mine(&problem);
                 Ok(())
             }
             Err(e) => {
@@ -93,38 +95,44 @@ impl StratumClient {
 
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.subscribe().await?;
+        let mut solution_receiver = self.solution_receiver.resubscribe();
 
         loop {
-            match self.receive_message().await? {
-                Some(message) => {
-                    debug!("Received message: {}", message);
-                    let value: Value = serde_json::from_str(&message)?;
+            tokio::select! {
+                message_result = self.receive_message() => {
+                    match message_result? {
+                        Some(message) => {
+                            debug!("Received message: {}", message);
+                            let value: Value = serde_json::from_str(&message)?;
 
-                    if let Some(method) =
-                        value.get("method").and_then(Value::as_str)
-                    {
-                        match method {
-                            "mining.notify" => {
-                                if let Some(params) = value
-                                    .get("params")
-                                    .and_then(Value::as_array)
-                                {
-                                    self.handle_job_notification(params)
-                                        .await?;
+                            if let Some(method) = value.get("method").and_then(Value::as_str) {
+                                match method {
+                                    "mining.notify" => {
+                                        if let Some(params) = value.get("params").and_then(Value::as_array) {
+                                            self.handle_job_notification(params).await?;
+                                        }
+                                    }
+                                    _ => debug!("Received unknown method: {}", method),
                                 }
+                            } else if let Some(result) = value.get("result") {
+                                debug!("Received result: {:?}", result);
+                            } else {
+                                debug!("Received unknown message: {}", message);
                             }
-                            _ => debug!("Received unknown method: {}", method),
                         }
-                    } else if let Some(result) = value.get("result") {
-                        // This might be a response to our subscription or share submission
-                        debug!("Received result: {:?}", result);
-                    } else {
-                        debug!("Received unknown message: {}", message);
+                        None => {
+                            info!("Server closed the connection");
+                            break;
+                        }
                     }
                 }
-                None => {
-                    info!("Server closed the connection");
-                    break;
+                Ok((solution, block_height)) = solution_receiver.recv() => {
+                    info!("Received solution: {:?}, block_height: {}", solution.nonce, block_height);
+                    if let Some(problem) = &self.current_job {
+                        if block_height == problem.block_height {
+                            self.submit_share(&solution).await?;
+                        }
+                    }
                 }
             }
         }
@@ -148,7 +156,7 @@ impl StratumClient {
         if let Some(problem) = &self.current_job {
             info!("Submitting share for job: {}", problem.block_height);
             let request = json!({
-                "id": 4,
+                "id": format!("{}-{}", solution.nonce, problem.block_height),
                 "method": "mining.submit",
                 "params": [
                     self.miner.worker_name, // Worker names

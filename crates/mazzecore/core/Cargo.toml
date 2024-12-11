@@ -140,6 +140,7 @@ mazze-packing-pool = { path = "../packing-pool" }
 alloy-rpc-types-trace = { workspace = true }
 geth-tracer = { path = "../geth-tracer" }
 randomx-rs = "1.3.0"
+crossbeam-deque = "0.7.3"
 
 [dev-dependencies]
 criterion = "0.3"

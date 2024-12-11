@@ -33,7 +33,7 @@ use primitives::{
 use rlp::Encodable;
 use rlp_derive::{RlpDecodable, RlpEncodable};
 use serde_derive::{Deserialize, Serialize};
-use std::{collections::HashSet, convert::TryInto, sync::Arc};
+use std::{collections::HashSet, convert::TryInto, str::FromStr, sync::Arc};
 use unexpected::{Mismatch, OutOfBounds};
 
 #[derive(Clone)]
@@ -288,23 +288,16 @@ impl VerificationConfig {
 
     fn compute_pow_hash(pow: &PowComputer, header: &BlockHeader) -> H256 {
         let nonce = header.nonce();
-        pow.initialize(&header.problem_hash());
-        pow.compute(&nonce, &header.problem_hash())
+        let hash = header.problem_hash();
+
+        pow.compute(&nonce, &hash)
     }
 
     #[inline]
     pub fn verify_pow(
         &self, pow: &PowComputer, header: &mut BlockHeader,
     ) -> Result<(), Error> {
-        let pow_hash = Self::get_or_fill_header_pow_hash(pow, header);
-        let nonce = header.nonce();
         let difficulty: U256 = header.difficulty().into();
-
-        info!(
-            "Verifying PoW: Hash: {:?}, Nonce: {:?}, Difficulty: {:?}",
-            pow_hash, nonce, difficulty
-        );
-
         if difficulty.is_zero() {
             return Err(BlockError::InvalidDifficulty(OutOfBounds {
                 min: Some(1.into()),
@@ -314,13 +307,11 @@ impl VerificationConfig {
             .into());
         }
 
-        let quality = pow::pow_hash_to_quality(&pow_hash, &nonce);
-        info!("Calculated PoW quality: {:?}", quality);
-
+        // TODO: add seed management - Simple hash computation without seed management for now
+        let nonce = header.nonce();
+        let hash = pow.compute(&nonce, &header.problem_hash());
+        let quality = pow::pow_hash_to_quality(&hash, &nonce);
         let boundary = pow::difficulty_to_boundary(&difficulty);
-        info!("Calculated boundary: {:?}", boundary);
-
-        assert!(quality >= difficulty);
 
         if quality <= boundary {
             Ok(())

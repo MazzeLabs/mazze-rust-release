@@ -66,7 +66,7 @@ pub mod consensus_internal {
     /// The maximum number of blocks to be executed in each epoch
     pub const EPOCH_EXECUTED_BLOCK_BOUND: usize = 200;
     // The initial base mining reward in uMAZZE.
-    pub const INITIAL_BASE_MINING_REWARD_IN_UMAZZE: u64 = 4_000_000;
+    pub const INITIAL_BASE_MINING_REWARD_IN_UMAZZE: u64 = 2_000_000;
     // The average number of blocks mined per quarter.
     pub const MINED_BLOCK_COUNT_PER_QUARTER: u64 = 15_768_000;
 
@@ -195,12 +195,8 @@ pub mod pow {
     // where D is the old difficulty.
     pub const DIFFICULTY_ADJUSTMENT_FACTOR: usize = 2;
 
-    // Default values:
-    // pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD: u64 = 5000;
-    // pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD_CIP: u64 = 250;
-    // TODO: revert to default difficulty adjustment period
-    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD: u64 = 20;
-    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD_CIP: u64 = 10;
+    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD: u64 = 500;
+    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD_CIP: u64 = 25;
     // Time unit is micro-second (usec)
     // We target two blocks per second. This strikes a good balance between the
     // growth of the metadata, the memory consumption of the consensus graph,
@@ -214,7 +210,7 @@ pub mod pow {
 
     // TODO: compute a more appropriate initial difficulty
     // previous initial difficulty: 20_000_000_000;
-    pub const INITIAL_DIFFICULTY: u64 = 20_000;
+    pub const INITIAL_DIFFICULTY: u64 = 500;
 }
 
 pub mod tx_pool {

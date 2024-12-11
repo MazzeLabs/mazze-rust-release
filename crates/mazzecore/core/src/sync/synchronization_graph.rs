@@ -2113,6 +2113,49 @@ impl SynchronizationGraph {
             }
         }
     }
+
+    pub fn get_current_randomx_epoch(&self) -> u64 {
+        let best_info = self.consensus.best_info();
+        let best_epoch_height = best_info.best_epoch_number;
+
+        // TODO: move this to config
+        let RANDOMX_EPOCH_SIZE: u64 = 2048;
+
+        best_epoch_height / RANDOMX_EPOCH_SIZE
+    }
+
+    pub fn get_randomx_epoch_transition_height(&self, epoch: u64) -> u64 {
+        if epoch == 0 {
+            return 0;
+        }
+
+        // TODO: move this to config
+        let RANDOMX_EPOCH_SIZE: u64 = 2048;
+
+        epoch * RANDOMX_EPOCH_SIZE
+    }
+
+    pub fn get_randomx_epoch_seed_hash(&self, epoch: u64) -> H256 {
+        if epoch == 0 {
+            return H256::zero();
+        }
+
+        // TODO: move this to config
+        let SEED_OFFSET: u64 = 64;
+
+        let transition_epoch = self.get_randomx_epoch_transition_height(epoch);
+        let seed_epoch = transition_epoch - SEED_OFFSET;
+
+        self.consensus
+            .get_hash_from_epoch_number(EpochNumber::Number(seed_epoch.into()))
+            .expect("get_hash_from_epoch_number should not fail")
+    }
+
+    pub fn get_current_randomx_epoch_seed(&self) -> H256 {
+        let current_epoch = self.get_current_randomx_epoch();
+
+        self.get_randomx_epoch_seed_hash(current_epoch)
+    }
 }
 
 impl Graph for SynchronizationGraphInner {

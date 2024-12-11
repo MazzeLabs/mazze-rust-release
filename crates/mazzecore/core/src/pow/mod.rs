@@ -11,11 +11,12 @@ mod shared;
 pub use self::{cache::CacheBuilder, shared::POW_STAGE_LENGTH};
 
 use crate::block_data_manager::BlockDataManager;
+use cache::RandomXCacheBuilder;
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_parameters::pow::*;
 use mazze_types::{BigEndianHash, H256, U256, U512};
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockReadGuard};
 use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
 use static_assertions::_core::str::FromStr;
 use std::{
@@ -259,7 +260,7 @@ pub fn compute_inv_x_times_2_pow_256_floor(x: &U256) -> U256 {
 }
 
 pub struct PowComputer {
-    vm: Arc<Mutex<Option<RandomXVM>>>,
+    cache_builder: Arc<RandomXCacheBuilder>,
 }
 
 unsafe impl Send for PowComputer {}
@@ -268,21 +269,8 @@ unsafe impl Sync for PowComputer {}
 impl PowComputer {
     pub fn new() -> Self {
         PowComputer {
-            vm: Arc::new(Mutex::new(None)),
+            cache_builder: RandomXCacheBuilder::new(),
         }
-    }
-
-    pub fn initialize(&self, block_hash: &H256) {
-        let flags = RandomXFlag::get_recommended_flags();
-        let key = block_hash.as_bytes();
-
-        let cache = RandomXCache::new(flags, key)
-            .expect("Failed to create RandomX cache");
-        let vm = RandomXVM::new(flags, Some(cache), None)
-            .expect("Failed to create RandomX VM");
-
-        let mut vm_guard = self.vm.lock().unwrap();
-        *vm_guard = Some(vm);
     }
 
     pub fn compute(&self, nonce: &U256, block_hash: &H256) -> H256 {
@@ -295,83 +283,10 @@ impl PowComputer {
             buf
         };
 
-        let vm_guard = self.vm.lock().unwrap();
-        if let Some(vm) = &*vm_guard {
-            let hash =
-                vm.calculate_hash(&input).expect("Failed to calculate hash");
-            H256::from_slice(&hash)
-        } else {
-            H256::zero()
-        }
-    }
+        let handle = self.cache_builder.get_vm_handler();
+        let vm = handle.get_vm();
+        let hash = vm.calculate_hash(&input).expect("Failed to compute hash");
 
-    pub fn mine_range(
-        &self, problem: &ProofOfWorkProblem, start_nonce: U256,
-        timeout: Duration,
-    ) -> Option<ProofOfWorkSolution> {
-        let start_time = Instant::now();
-        let mut nonce = start_nonce;
-        let mut iterations = 0;
-        let mut last_log_time = Instant::now();
-
-        // Initialize RandomX VM for this thread
-        let flags = RandomXFlag::get_recommended_flags();
-        let key = problem.block_hash.as_bytes();
-        let cache = RandomXCache::new(flags, key)
-            .expect("Failed to create RandomX cache");
-        let vm = RandomXVM::new(flags, Some(cache), None)
-            .expect("Failed to create RandomX VM");
-
-        let mut boundary_bytes = [0u8; 32];
-        problem.boundary.to_big_endian(&mut boundary_bytes);
-
-        let boundary_u256 = problem.boundary;
-        while start_time.elapsed() < timeout {
-            iterations += 1;
-            let hash = self.compute_with_vm(&vm, &nonce, &problem.block_hash);
-            let hash_u256 = U256::from(hash.as_bytes());
-
-            if hash_u256 <= boundary_u256 {
-                info!(
-                    "Solution found: nonce = {}, iterations = {}",
-                    nonce, iterations
-                );
-                return Some(ProofOfWorkSolution { nonce });
-            }
-
-            if last_log_time.elapsed() >= Duration::from_secs(1) {
-                trace!(
-                    "Mining progress: nonce = {}, iterations = {}",
-                    nonce,
-                    iterations
-                );
-                last_log_time = Instant::now();
-            }
-
-            nonce = nonce.overflowing_add(U256::one()).0;
-        }
-
-        info!(
-            "Mining timeout reached. Last nonce: {}, total iterations: {}",
-            nonce, iterations
-        );
-        None
-    }
-
-    // TODO: drop the vm parameter here if we decide to use self.vm
-    pub fn compute_with_vm(
-        &self, vm: &RandomXVM, nonce: &U256, block_hash: &H256,
-    ) -> H256 {
-        let input = {
-            let mut buf = [0u8; 64];
-            for i in 0..32 {
-                buf[i] = block_hash[i];
-            }
-            nonce.to_little_endian(&mut buf[32..64]);
-            buf
-        };
-
-        let hash = vm.calculate_hash(&input).expect("Failed to calculate hash");
         H256::from_slice(&hash)
     }
 }
@@ -381,7 +296,7 @@ pub fn validate(
     solution: &ProofOfWorkSolution,
 ) -> bool {
     let nonce = solution.nonce;
-    pow.initialize(&problem.block_hash);
+
     let hash = pow.compute(&nonce, &problem.block_hash);
     ProofOfWorkProblem::validate_hash_against_boundary(
         &hash,
@@ -532,6 +447,16 @@ impl TargetDifficultyCache {
     }
 }
 
+impl Default for ProofOfWorkProblem {
+    fn default() -> Self {
+        ProofOfWorkProblem::new(
+            u64::default(),
+            H256::default(),
+            U256::default(),
+        )
+    }
+}
+
 //FIXME: Add logic for persisting entries
 /// This is a data structure to cache the computed target difficulty
 /// of a adjustment period. Each element is indexed by the hash of
@@ -565,8 +490,6 @@ fn test_pow() {
         "4d99d0b41c7eb0dd1a801c35aae2df28ae6b53bc7743f0818a34b6ec97f5b4ae"
             .parse()
             .unwrap();
-
-    pow.initialize(&block_hash);
 
     let start_nonce = 0x2333333333u64 & (!0x1f);
     pow.compute(&U256::from(start_nonce), &block_hash);

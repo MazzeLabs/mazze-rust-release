@@ -94,7 +94,7 @@ stratum_listen_address = "0.0.0.0"
 # `log_level` is the printed log level.
 # The value should be one of "error", "warn", "info", "debug", "trace", "off"
 #
-log_level="debug"
+log_level="info"
 
 # -------------- Network Configuration -------------
 

@@ -61,6 +61,8 @@ setup_node() {
         -v /opt/mazze/blockchain_data:/app/blockchain_data \
         -e PUBLIC_ADDRESS="$public_ip" \
         -e MINING_AUTHOR="$MINING_AUTHOR" \
+        --log-opt max-size=10m \
+        --log-opt max-file=3 \
         mazzelabs/mazze-chain:node-x86-64
 
     # Start miner container
@@ -71,6 +73,8 @@ setup_node() {
         -e WORKER_ID="$WORKER_ID" \
         -e NUM_THREADS="$NUM_THREADS" \
         -e STRATUM_HOST="$public_ip" \
+        --log-opt max-size=10m \
+        --log-opt max-file=3 \
         mazzelabs/mazze-chain:miner-x86-64
         
     # Wait for node to start and extract node ID
@@ -134,6 +138,8 @@ For advanced users who need more control over the configuration:
         -v /opt/mazze/blockchain_data:/app/blockchain_data \
         -e PUBLIC_ADDRESS="$public_ip" \
         -e MINING_AUTHOR="$MINING_AUTHOR" \
+        --log-opt max-size=10m \
+        --log-opt max-file=3 \
         mazzelabs/mazze-chain:node-x86-64
 ```
 
@@ -146,6 +152,8 @@ For advanced users who need more control over the configuration:
         -e WORKER_ID="$WORKER_ID" \
         -e NUM_THREADS="$NUM_THREADS" \
         -e STRATUM_HOST="$public_ip" \
+        --log-opt max-size=10m \
+        --log-opt max-file=3 \
         mazzelabs/mazze-chain:miner-x86-64
 ```
 
@@ -186,6 +194,17 @@ cargo build --release
 ./start-node.sh
 ./start-miner.sh
 ```
+
+## Important Notes
+If you are using Docker and want to change the log level, you can do so by editing the container's `hydra.toml` file, or, alternatively, by running 
+
+```bash
+docker exec mazze-node sed -i 's/log_level="<current_level>"/log_level="<target_level>"/' /app/config/hydra.toml
+```
+
+Possible log levels are: `error`, `warn`, `info`, `debug`.
+
+If you already have a node running, you should make sure the container is running with `--log-opt` options. For this, you have to recreate the container with the new options. If you don't want to, you can also set this up in your [docker settings](https://docs.docker.com/config/containers/logging/configure/).
 
 ## Additional Notes
 

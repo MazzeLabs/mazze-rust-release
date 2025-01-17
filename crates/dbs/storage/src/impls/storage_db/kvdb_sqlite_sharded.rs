@@ -522,7 +522,7 @@ impl<
         self.ordered_iter_ids.get(0).cloned()
     }
 
-    fn kv_pop_and_push(
+    fn kv_pop_and_push_old(
         &mut self, iter_id: u8, kv: Option<(Key, Value)>,
     ) -> std::result::Result<Option<(Key, Value)>, ShardIter::Error> {
         let mut i;
@@ -581,6 +581,50 @@ impl<
             self.ordered_key_prefixes_to_map.remove(0);
             Ok(self.maybe_next_key_values.remove(0))
         }
+    }
+
+    fn kv_pop_and_push(
+        &mut self,
+        iter_id: u8,
+        kv: Option<(Key, Value)>,
+    ) -> std::result::Result<Option<(Key, Value)>, ShardIter::Error> {
+        if self.maybe_next_key_values.is_empty() {
+            return Ok(None);
+        }
+
+        let popped = self.maybe_next_key_values[0].take();
+
+        if let Some(kv) = kv {
+            let this_key_prefix_to_map = kv.0.key_prefix_to_map();
+            
+            // Find insertion position
+            let mut insert_pos = 1; // Start at 1 since we just popped index 0
+            while insert_pos < self.maybe_next_key_values.len() && 
+                  self.maybe_next_key_values[insert_pos].is_some() &&
+                  this_key_prefix_to_map >= self.ordered_key_prefixes_to_map[insert_pos] {
+                insert_pos += 1;
+            }
+
+            // Shift elements left by 1
+            for i in 1..insert_pos {
+                self.ordered_iter_ids[i-1] = self.ordered_iter_ids[i];
+                self.ordered_key_prefixes_to_map[i-1] = self.ordered_key_prefixes_to_map[i];
+                self.maybe_next_key_values[i-1] = self.maybe_next_key_values[i].take();
+            }
+
+            // Insert new values at insert_pos-1
+            let final_pos = insert_pos - 1;
+            self.ordered_iter_ids[final_pos] = iter_id;
+            self.ordered_key_prefixes_to_map[final_pos] = this_key_prefix_to_map;
+            self.maybe_next_key_values[final_pos] = Some(kv);
+        } else {
+            // Just remove the first element from all vectors
+            self.ordered_iter_ids.remove(0);
+            self.ordered_key_prefixes_to_map.remove(0);
+            self.maybe_next_key_values.remove(0);
+        }
+
+        Ok(popped)
     }
 }
 

@@ -100,7 +100,7 @@ bls-signatures = {git = "https://github.com/MazzeLabs/bls-signatures.git", rev =
 tiny-keccak = {version = "2.0",  features = ["keccak"]}
 bcs = "0.1.2"
 async-trait = "0.1"
-num-derive = { version = "0.3.3", default-features = false }
+num-derive = { version = "0.4", default-features = false }
 thiserror = "1.0.24"
 fallible = { path = "src/pos/common/fallible" }
 mirai-annotations = { version = "1.10.1", default-features = false }

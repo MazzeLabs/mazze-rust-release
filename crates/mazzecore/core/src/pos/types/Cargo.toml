@@ -48,3 +48,7 @@ move-core-types = { path = "move-core-types", features = ["fuzzing"]  }
 [features]
 default = []
 fuzzing = ["proptest", "proptest-derive", "diem-crypto/fuzzing", "move-core-types/fuzzing"]
+mirai = []
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

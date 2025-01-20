@@ -67,6 +67,9 @@ u32 = ["curve25519-dalek/u32_backend", "ed25519-dalek/u32_backend", "x25519-dale
 bls-blst = ["bls-signatures/blst"]
 bls-pairing = ["bls-signatures/pairing"]
 blst-portable = ["bls-signatures/blst-portable"]
+batch = []
+mirai = []
+
 
 [[bench]]
 name = "noise"
@@ -83,3 +86,6 @@ harness = false
 [[bench]]
 name = "vrf"
 harness = false
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

@@ -31,7 +31,7 @@ dag = {path = "../../util/dag" }
 derivative = "2.0.2"
 db = { path = "../../dbs/db" }
 either = "1.5.3"
-error-chain = { version = "0.12", default-features = false }
+error-chain = { version = "0.12.4", default-features = false }
 fallible-iterator = "0.2"
 fs_extra = "1.1.0"
 futures = {version="0.3.3", features = ["compat"]}
@@ -165,3 +165,6 @@ fuzzing = ["proptest", "proptest-derive"]
 bls-blst = ["bls-signatures/blst", "diem-crypto/bls-blst"]
 bls-pairing = ["bls-signatures/pairing", "diem-crypto/bls-pairing"]
 blst-portable = ["bls-signatures/blst-portable", "diem-crypto/blst-portable"]
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

@@ -14,7 +14,7 @@ mazze-internal-common = { path = "../../mazzecore/internal_common" }
 mazze-types = { path = "../../mazze_types" }
 delegate = "0.5.0"
 derivative = "2.0.2"
-error-chain = { version = "0.12", default-features = false }
+error-chain = { version = "0.12.4", default-features = false }
 fallible-iterator = "0.2"
 fs_extra = "1.1.0"
 futures = { version = "0.3.3", features = ["compat"] }
@@ -58,3 +58,6 @@ default = ["primitives"]
 # https://users.rust-lang.org/t/cfg-test-doesnt-propagate-to-external-crates/13046
 testonly_code = []
 u64_mpt_db_key = []
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

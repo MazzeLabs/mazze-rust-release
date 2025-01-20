@@ -564,7 +564,7 @@ impl<PosT: PrimitiveNum, CacheIndexT: CacheIndexTrait>
     >(
         &'a mut self, cache_store_util: &'b mut CacheStoreUtilT,
     ) -> (
-        &mut RemovableHeap<PosT, RecentLFUMetadata<PosT, CacheIndexT>>,
+        &'a mut RemovableHeap<PosT, RecentLFUMetadata<PosT, CacheIndexT>>,
         MetadataHeapUtil<'a, 'b, PosT, CacheIndexT, CacheStoreUtilT>,
     ) {
         (

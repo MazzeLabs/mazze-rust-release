@@ -522,67 +522,6 @@ impl<
         self.ordered_iter_ids.get(0).cloned()
     }
 
-    fn kv_pop_and_push_old(
-        &mut self, iter_id: u8, kv: Option<(Key, Value)>,
-    ) -> std::result::Result<Option<(Key, Value)>, ShardIter::Error> {
-        let mut i;
-        if kv.is_some() {
-            i = 0;
-            let this_key_prefix_to_map =
-                kv.as_ref().unwrap().0.key_prefix_to_map();
-            while self.maybe_next_key_values[i].is_some() {
-                if this_key_prefix_to_map < self.ordered_key_prefixes_to_map[i]
-                {
-                    break;
-                }
-                i += 1;
-            }
-            // i is at least 1, because key_prefix_to_map[0] is the smallest,
-            // and kv is the next element, which has to be >=
-            // key_prefix_to_map[0]. Have to use memmove, etc.
-            debug_assert!(i > 0);
-            unsafe {
-                let pos = i - 1;
-                std::ptr::copy(
-                    self.ordered_iter_ids.get_unchecked(1),
-                    self.ordered_iter_ids.get_unchecked_mut(0),
-                    pos,
-                );
-                std::ptr::write(
-                    self.ordered_iter_ids.get_unchecked_mut(pos),
-                    iter_id,
-                );
-                std::ptr::copy(
-                    self.ordered_key_prefixes_to_map.get_unchecked(1),
-                    self.ordered_key_prefixes_to_map.get_unchecked_mut(0),
-                    pos,
-                );
-                std::ptr::write(
-                    self.ordered_key_prefixes_to_map.get_unchecked_mut(pos),
-                    this_key_prefix_to_map,
-                );
-                let popped = Ok(std::ptr::read(
-                    self.maybe_next_key_values.get_unchecked(0),
-                ));
-                std::ptr::copy(
-                    self.maybe_next_key_values.get_unchecked(1),
-                    self.maybe_next_key_values.get_unchecked_mut(0),
-                    pos,
-                );
-                std::ptr::write(
-                    self.maybe_next_key_values.get_unchecked_mut(pos),
-                    kv,
-                );
-
-                popped
-            }
-        } else {
-            self.ordered_iter_ids.remove(0);
-            self.ordered_key_prefixes_to_map.remove(0);
-            Ok(self.maybe_next_key_values.remove(0))
-        }
-    }
-
     fn kv_pop_and_push(
         &mut self,
         iter_id: u8,

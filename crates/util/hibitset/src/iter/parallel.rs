@@ -215,7 +215,7 @@ mod test_bit_producer {
 
         let usize_bits = ::std::mem::size_of::<usize>() * 8;
 
-        let mut c = ::BitSet::new();
+        let mut c = crate::BitSet::new();
         for i in 0..(usize_bits.pow(3) * 2) {
             assert!(!c.add(i as u32));
         }

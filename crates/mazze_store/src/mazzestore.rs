@@ -901,10 +901,10 @@ mod tests {
 
     use self::tempdir::TempDir;
     use super::{MazzeMultiStore, MazzeStore};
-    use accounts_dir::{KeyDirectory, MemoryDirectory, RootDiskDirectory};
+    use crate::accounts_dir::{KeyDirectory, MemoryDirectory, RootDiskDirectory};
     use mazze_types::H256;
     use mazzekey::{Generator, KeyPair, Random};
-    use secret_store::{
+    use crate::secret_store::{
         Derivation, SecretStore, SecretVaultRef, SimpleSecretStore,
         StoreAccountRef,
     };

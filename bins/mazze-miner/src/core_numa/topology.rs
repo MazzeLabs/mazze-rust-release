@@ -34,7 +34,7 @@ impl NumaTopology {
         nodes
     }
 
-    pub fn _get_cores_for_node(
+    pub fn get_cores_for_node(
         &self, node_id: usize,
     ) -> Result<Vec<usize>, NumaError> {
         self.topology

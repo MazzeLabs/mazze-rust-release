@@ -38,7 +38,7 @@ impl PresaleWallet {
 
 #[cfg(test)]
 mod tests {
-    use json::{PresaleWallet, H160};
+    use crate::json::{PresaleWallet, H160};
     use serde_json;
     use std::str::FromStr;
 

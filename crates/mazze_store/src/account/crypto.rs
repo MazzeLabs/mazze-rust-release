@@ -14,14 +14,14 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity Ethereum.  If not, see <http://www.gnu.org/licenses/>.
 
-use account::{Aes128Ctr, Cipher, Kdf, Pbkdf2, Prf};
-use crypto::{self, Keccak256};
-use json;
-use mazzekey::{Password, Secret};
-use random::Random;
+use crate::account::{Aes128Ctr, Cipher, Kdf, Pbkdf2, Prf};
+use crate::crypto::{self, Keccak256};
+use crate::json;
+use crate::mazzekey::{Password, Secret};
+use crate::random::Random;
 use smallvec::SmallVec;
 use std::str;
-use Error;
+use crate::Error;
 
 /// Encrypted data
 #[derive(Debug, PartialEq, Clone)]

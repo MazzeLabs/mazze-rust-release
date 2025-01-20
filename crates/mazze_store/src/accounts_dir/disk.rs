@@ -18,7 +18,7 @@ use super::{
     vault::{VaultDiskDirectory, VAULT_FILE_NAME},
     KeyDirectory, VaultKey, VaultKeyDirectory, VaultKeyDirectoryProvider,
 };
-use json::{self, Uuid};
+use crate::json::{self, Uuid};
 use mazzekey::Password;
 use std::{
     collections::HashMap,
@@ -27,8 +27,8 @@ use std::{
     path::{Path, PathBuf},
 };
 use time;
-use Error;
-use SafeAccount;
+use crate::Error;
+use crate::SafeAccount;
 
 const IGNORED_FILES: &[&str] = &[
     "thumbs.db",
@@ -58,7 +58,7 @@ pub fn find_unique_filename_using_random_suffix(
                 ));
             }
 
-            let suffix = ::random::random_string(4);
+            let suffix = crate::random::random_string(4);
             deduped_filename = format!("{}-{}", original_filename, suffix);
             path.set_file_name(&deduped_filename);
             retries += 1;
@@ -443,7 +443,7 @@ mod test {
 
     use self::tempdir::TempDir;
     use super::{KeyDirectory, RootDiskDirectory, VaultKey};
-    use account::SafeAccount;
+    use crate::account::SafeAccount;
     use mazzekey::{Generator, Random};
     use std::{env, fs};
 

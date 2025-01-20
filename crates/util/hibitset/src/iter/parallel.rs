@@ -5,8 +5,8 @@ use rayon::iter::{
     ParallelIterator,
 };
 
-use iter::{BitIter, BitSetLike, Index, BITS, LAYERS};
-use util::average_ones;
+use crate::iter::{BitIter, BitSetLike, Index, BITS, LAYERS};
+use crate::util::average_ones;
 
 /// A `ParallelIterator` over a [`BitSetLike`] structure.
 ///
@@ -186,8 +186,8 @@ mod test_bit_producer {
     use rayon::iter::plumbing::UnindexedProducer;
 
     use super::BitProducer;
-    use iter::BitSetLike;
-    use util::BITS;
+    use crate::iter::BitSetLike;
+    use crate::util::BITS;
 
     fn test_splitting(split_levels: u8) {
         fn visit<T>(

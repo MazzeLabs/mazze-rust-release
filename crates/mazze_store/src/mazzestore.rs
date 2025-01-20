@@ -21,23 +21,23 @@ use std::{
     time::{Duration, Instant},
 };
 
-use account::SafeAccount;
-use accounts_dir::{KeyDirectory, SetKeyError, VaultKey, VaultKeyDirectory};
-use crypto::KEY_ITERATIONS;
-use import;
-use json::{self, OpaqueKeyFile, Uuid};
-use mazzekey::{
+use crate::account::SafeAccount;
+use crate::accounts_dir::{KeyDirectory, SetKeyError, VaultKey, VaultKeyDirectory};
+use crate::crypto::KEY_ITERATIONS;
+use crate::import;
+use crate::json::{self, OpaqueKeyFile, Uuid};
+use crate::mazzekey::{
     self, Address, ExtendedKeyPair, KeyPair, Message, Password, Public, Secret,
     Signature,
 };
-use random::Random;
-use Derivation;
-use Error;
-use OpaqueSecret;
-use SecretStore;
-use SecretVaultRef;
-use SimpleSecretStore;
-use StoreAccountRef;
+use crate::random::Random;
+use crate::Derivation;
+use crate::Error;
+use crate::OpaqueSecret;
+use crate::SecretStore;
+use crate::SecretVaultRef;
+use crate::SimpleSecretStore;
+use crate::StoreAccountRef;
 
 /// Accounts store.
 pub struct MazzeStore {

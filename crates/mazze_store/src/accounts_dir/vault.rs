@@ -20,14 +20,14 @@ use super::{
     KeyDirectory, SetKeyError, VaultKey, VaultKeyDirectory,
 };
 use crypto::Keccak256;
-use json;
+use crate::json;
 use parking_lot::Mutex;
 use std::{
     fs, io,
     path::{Path, PathBuf},
 };
-use Error;
-use SafeAccount;
+use crate::Error;
+use crate::SafeAccount;
 
 /// Name of vault metadata file
 pub const VAULT_FILE_NAME: &str = "vault.json";

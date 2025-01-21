@@ -27,7 +27,6 @@ use primitives::{pos::PosBlockId, *};
 use std::{
     cmp::max,
     collections::HashSet,
-    str::FromStr,
     sync::{
         mpsc::{self, TryRecvError},
         Arc,

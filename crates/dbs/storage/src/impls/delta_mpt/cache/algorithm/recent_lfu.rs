@@ -199,7 +199,7 @@ impl<
 
     fn get_key_for_comparison<'x>(
         &'x self, value: &'x RecentLFUMetadata<PosT, CacheIndexT>,
-    ) -> &Self::KeyType {
+    ) -> &'x Self::KeyType {
         &value.frequency
     }
 }

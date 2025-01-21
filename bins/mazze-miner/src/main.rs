@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+#![allow(unused_imports)]
+
 use log::{error, info};
 use mazzecore::pow::ProofOfWorkSolution;
 use miner_config::MinerConfig;

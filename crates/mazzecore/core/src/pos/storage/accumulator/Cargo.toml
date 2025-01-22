@@ -25,3 +25,7 @@ diem-crypto = { path = "../../crypto/crypto", features = ["fuzzing"] }
 [features]
 default = []
 fuzzing = ["proptest", "diem-crypto/fuzzing", "diem-types/fuzzing"]
+mirai = []
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

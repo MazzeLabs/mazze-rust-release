@@ -21,3 +21,6 @@ rustc-hex = "2.1"
 
 [dev-dependencies]
 mazze-vm-types = { path = "../vm-types", features = ["testonly_code"] }
+
+[features]
+evm-debug = []

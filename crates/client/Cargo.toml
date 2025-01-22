@@ -34,7 +34,7 @@ jsonrpc-derive = "15.1.0"
 jsonrpc-core-client = "15.1.0"
 jsonrpc-pubsub = "15.1.0"
 jsonrpc-ws-server = "15.1.0"
-error-chain = { version = "0.12" }
+error-chain = { version = "0.12.4" }
 lazy_static = "1.4"
 log = "0.4"
 mazze-types = { path = "../mazze_types" }
@@ -120,3 +120,6 @@ u64_mpt_db_key = ["mazze-storage/u64_mpt_db_key"]
 [[bench]]
 name = "benchmark"
 harness = false
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

@@ -18,8 +18,8 @@
 
 use mazzekey::Password;
 use std::path::PathBuf;
-use Error;
-use SafeAccount;
+use crate::Error;
+use crate::SafeAccount;
 
 mod disk;
 mod memory;

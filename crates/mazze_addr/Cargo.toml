@@ -3,6 +3,7 @@ name = "mazze-addr"
 version = "0.1.0"
 license = "GPL-3.0"
 description = "Mazze Address Encoder/Decoder"
+edition = "2021"
 
 [dependencies]
 mazze-types = { path = "../mazze_types" }

@@ -21,7 +21,6 @@ pub use crate::{
 
 use crossbeam::thread;
 use proptest::sample::Index as PropIndex;
-use proptest_derive::Arbitrary;
 use std::{
     any::Any,
     collections::BTreeSet,
@@ -120,8 +119,21 @@ pub fn pick_slice_idxs(
 /// There is no blanket `impl<T> AsRef<T> for T`, so `&[PropIndex]` doesn't work
 /// with `&[impl AsRef<PropIndex>]` (unless an impl gets added upstream).
 /// `Index` does.
-#[derive(Arbitrary, Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Index(PropIndex);
+
+use proptest::prelude::{Arbitrary, BoxedStrategy};
+use proptest::strategy::Strategy;
+
+// Manual implementation of Arbitrary
+impl Arbitrary for Index {
+    type Parameters = ();
+    type Strategy = BoxedStrategy<Self>;
+
+    fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+        PropIndex::arbitrary().prop_map(Index).boxed()
+    }
+}
 
 impl AsRef<PropIndex> for Index {
     fn as_ref(&self) -> &PropIndex {

@@ -12,7 +12,7 @@ mazze-parameters = { path = "../../mazzecore/parameters" }
 mazze-db-errors = { path = "../db-errors" }
 mazze-storage = { path = "../storage" }
 mazze-types = { path = "../../mazze_types" }
-error-chain = { version = "0.12", default-features = false }
+error-chain = { version = "0.12.4", default-features = false }
 hashbrown = "0.7.1"
 log = "0.4"
 parking_lot = "0.11"
@@ -30,3 +30,6 @@ default = ["primitives"]
 # we have to define a feature for test code.
 # https://users.rust-lang.org/t/cfg-test-doesnt-propagate-to-external-crates/13046
 testonly_code = []
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

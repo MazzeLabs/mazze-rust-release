@@ -112,7 +112,7 @@ pub trait HeapValueUtil<ValueType, PosT: PrimitiveNum> {
 
     fn get_key_for_comparison<'a>(
         &'a self, value: &'a ValueType,
-    ) -> &Self::KeyType;
+    ) -> &'a Self::KeyType;
 }
 
 /// A demo of heap value util for heap which directly maintains value where the
@@ -167,7 +167,7 @@ impl<PosT: PrimitiveNum, ValueType: Ord + Clone>
 
     fn get_key_for_comparison<'a>(
         &'a self, value: &'a TrivialValueWithHeapHandle<ValueType, PosT>,
-    ) -> &ValueType {
+    ) -> &'a ValueType {
         value.as_ref()
     }
 }

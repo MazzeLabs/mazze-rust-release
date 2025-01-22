@@ -16,12 +16,12 @@
 
 use std::{collections::HashSet, fs, path::Path};
 
-use accounts_dir::{
+use crate::accounts_dir::{
     DiskKeyFileManager, KeyDirectory, KeyFileManager, RootDiskDirectory,
 };
-use dir;
-use mazzekey::Address;
-use Error;
+use crate::dir;
+use crate::mazzekey::Address;
+use crate::Error;
 
 /// Import an account from a file.
 pub fn import_account(

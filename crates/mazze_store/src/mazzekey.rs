@@ -20,7 +20,7 @@
 
 //! mazzekey reexport to make documentation look pretty.
 pub use _mazzekey::*;
-use json;
+use crate::json;
 
 impl Into<json::H160> for Address {
     fn into(self) -> json::H160 {

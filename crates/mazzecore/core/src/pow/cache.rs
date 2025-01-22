@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+#![allow(unused_imports)]
+
 use parking_lot::Mutex;
 use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
 
@@ -52,7 +55,7 @@ impl RandomXCacheBuilder {
         Arc::new(builder)
     }
 
-    fn initialize_new_vm(&self, block_height: u64) -> Arc<RandomXVM> {
+    fn initialize_new_vm(&self, _block_height: u64) -> Arc<RandomXVM> {
         let flags = RandomXFlag::get_recommended_flags();
         let temp_seed_hash = [0u8; 32];
         // let key = self.get_stage_key(block_height);

@@ -19,7 +19,7 @@ mazze-vm-tracer-derive = { path= "../../util/mazze-vm-tracer-derive" }
 mazze-types = { path = "../../mazze_types" }
 mazze-vm-types = { path = "../vm-types" }
 mazze-vm-interpreter = { path = "../vm-interpreter" }
-error-chain = { version = "0.12", default-features = false }
+error-chain = { version = "0.12.4", default-features = false }
 keccak-hash = "0.5"
 lazy_static = "1.4"
 log = "0.4"
@@ -60,3 +60,6 @@ mazze-vm-types = { path = "../vm-types", features = ["testonly_code"]}
 
 [features]
 testonly_code = []
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

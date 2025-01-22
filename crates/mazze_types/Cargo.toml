@@ -3,6 +3,7 @@ name = "mazze-types"
 version = "0.2.0"
 license = "GPL-3.0"
 description = "Mazze types"
+edition = "2021"
 
 [dependencies]
 ethereum-types = "0.9"

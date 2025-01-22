@@ -15,8 +15,9 @@
 // along with Parity Ethereum.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{Generator, KeyPair, Secret};
-use keccak::Keccak256;
+use crate::{keccak::Keccak256, Void};
 use parity_wordlist;
+use crate::WordlistError;
 
 /// Simple brainwallet.
 pub struct Brain(String);
@@ -28,13 +29,13 @@ impl Brain {
 
     pub fn validate_phrase(
         phrase: &str, expected_words: usize,
-    ) -> Result<(), ::WordlistError> {
+    ) -> Result<(), WordlistError> {
         parity_wordlist::validate_phrase(phrase, expected_words)
     }
 }
 
 impl Generator for Brain {
-    type Error = ::Void;
+    type Error = Void;
 
     fn generate(&mut self) -> Result<KeyPair, Self::Error> {
         let seed = self.0.clone();
@@ -67,8 +68,8 @@ impl Generator for Brain {
 
 #[cfg(test)]
 mod tests {
-    use Brain;
-    use Generator;
+    use crate::Brain;
+    use crate::Generator;
 
     #[test]
     fn test_brain() {

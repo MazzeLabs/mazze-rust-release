@@ -16,14 +16,12 @@ use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_parameters::pow::*;
 use mazze_types::{BigEndianHash, H256, U256, U512};
-use parking_lot::{RwLock, RwLockReadGuard};
-use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
+use parking_lot::RwLock;
 use static_assertions::_core::str::FromStr;
 use std::{
     collections::{HashMap, VecDeque},
     convert::TryFrom,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    sync::Arc,
 };
 
 #[cfg(target_endian = "big")]

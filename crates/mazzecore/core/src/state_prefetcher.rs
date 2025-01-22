@@ -299,6 +299,7 @@ impl Drop for ExecutionStatePrefetcher {
     }
 }
 
+#[allow(dead_code)]
 pub struct PrefetchTaskHandle<'a> {
     pub prefetcher: Option<&'a ExecutionStatePrefetcher>,
     pub state: &'a State,

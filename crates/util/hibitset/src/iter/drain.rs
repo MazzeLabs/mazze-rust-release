@@ -1,6 +1,6 @@
-use iter::BitIter;
-use util::*;
-use DrainableBitSet;
+use crate::iter::BitIter;
+use crate::util::*;
+use crate::DrainableBitSet;
 
 /// A draining `Iterator` over a [`DrainableBitSet`] structure.
 ///
@@ -40,8 +40,8 @@ where
 
 #[test]
 fn drain_all() {
-    use BitSet;
-    use BitSetLike;
+    use crate::BitSet;
+    use crate::BitSetLike;
     let mut bit_set: BitSet = (0..10000).filter(|i| i % 2 == 0).collect();
     bit_set.drain().for_each(|_| {});
     assert_eq!(0, bit_set.iter().count());

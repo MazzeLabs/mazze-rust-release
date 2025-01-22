@@ -4,7 +4,6 @@
 
 use mazze_parameters::internal_contract_addresses::PARAMS_CONTROL_CONTRACT_ADDRESS;
 use mazze_types::{Address, U256};
-use solidity_abi_derive::ABIVariable;
 
 use mazze_vm_interpreter::GasPriceTier;
 
@@ -122,16 +121,48 @@ impl SimpleExecutionTrait for PosStakeForVotes {
     }
 }
 
-#[derive(ABIVariable, Clone, Eq, PartialEq, Default)]
+#[derive(Clone, Eq, PartialEq, Default)]
 pub struct Vote {
     pub index: u16,
     pub votes: [U256; OPTION_INDEX_MAX],
 }
 
-#[test]
-fn test_vote_abi_length() {
-    use solidity_abi::ABIVariable;
-    assert_eq!(Vote::STATIC_LENGTH, Some(32 * (1 + OPTION_INDEX_MAX)));
+impl solidity_abi::ABIVariable for Vote {
+    const STATIC_LENGTH: Option<usize> = Some(32 * (1 + OPTION_INDEX_MAX));
+    const BASIC_TYPE: bool = false;
+
+    fn from_abi(data: &[u8]) -> Result<Self, solidity_abi::ABIDecodeError> {
+        if data.len() < Self::STATIC_LENGTH.unwrap() {
+            return Err(solidity_abi::ABIDecodeError("Invalid data length"));
+        }
+
+        let index = u16::from_be_bytes([data[0], data[1]]);
+        let mut votes = [U256::zero(); OPTION_INDEX_MAX];
+
+        for (i, vote) in votes.iter_mut().enumerate() {
+            let start = 2 + i * 32;
+            let end = start + 32;
+            *vote = U256::from_big_endian(&data[start..end]);
+        }
+
+        Ok(Vote { index, votes })
+    }
+
+    fn to_abi(&self) -> solidity_abi::LinkedBytes {
+        let mut result = Vec::new();
+        result.extend_from_slice(&self.index.to_be_bytes());
+        for vote in &self.votes {
+            let mut bytes = [0u8; 32];
+            vote.to_big_endian(&mut bytes);
+            result.extend_from_slice(&bytes);
+        }
+
+        solidity_abi::LinkedBytes::from_bytes(result)
+    }
+
+    fn to_packed_abi(&self) -> solidity_abi::LinkedBytes {
+        self.to_abi()
+    }
 }
 
 pub const POW_BASE_REWARD_INDEX: u8 = 0;

@@ -583,9 +583,9 @@ mod tests {
     fn iter_clusters() {
         let mut set = BitSet::new();
         for x in 0..8 {
-            let x = (x * 3) << (::BITS * 2); // scale to the last slot
+            let x = (x * 3) << (crate::BITS * 2); // scale to the last slot
             for y in 0..8 {
-                let y = (y * 3) << (::BITS);
+                let y = (y * 3) << (crate::BITS);
                 for z in 0..8 {
                     let z = z * 2;
                     set.add(x + y + z);
@@ -707,9 +707,9 @@ mod test_parallel {
         let mut set = BitSet::new();
         let mut check_set = HashSet::new();
         for x in 0..8 {
-            let x = (x * 3) << (::BITS * 2); // scale to the last slot
+            let x = (x * 3) << (crate::BITS * 2); // scale to the last slot
             for y in 0..8 {
-                let y = (y * 3) << (::BITS);
+                let y = (y * 3) << (crate::BITS);
                 for z in 0..8 {
                     let z = z * 2;
                     let index = x + y + z;

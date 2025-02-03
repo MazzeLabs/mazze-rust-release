@@ -7,10 +7,7 @@ use mazze_internal_common::{ChainIdParams, ChainIdParamsInner};
 use mazze_parameters::{
     block::{EVM_TRANSACTION_BLOCK_RATIO, EVM_TRANSACTION_GAS_RATIO},
     consensus::{
-        CIP112_HEADER_CUSTOM_FIRST_ELEMENT,
-        DAO_VOTE_HEADER_CUSTOM_FIRST_ELEMENT,
         NEXT_HARDFORK_HEADER_CUSTOM_FIRST_ELEMENT, ONE_UMAZZE_IN_MAZZY,
-        TANZANITE_HEADER_CUSTOM_FIRST_ELEMENT,
     },
     consensus_internal::{
         DAO_PARAMETER_VOTE_PERIOD, INITIAL_BASE_MINING_REWARD_IN_UMAZZE,
@@ -128,7 +125,7 @@ pub struct TransitionsEpochHeight {
     /// CIP-90: Introduce a Fully EVM-Compatible Space
     // pub cip90a: BlockHeight,
     /// CIP-94: On-Chain DAO Vote for Chain Parameters
-    pub cip94h: BlockHeight,
+    // pub cip94h: BlockHeight,
     /// CIP-112: Fix Block Headers `custom` Field Serde
     pub cip112: BlockHeight,
     /// CIP-130: Aligning Gas Limit with Transaction Size
@@ -220,25 +217,8 @@ impl CommonParams {
         U512::from(start_base_ward) * U512::from(ONE_UMAZZE_IN_MAZZY)
     }
 
-    pub fn custom_prefix(&self, height: BlockHeight) -> Option<Vec<Bytes>> {
-        // if height >= self.transition_heights.cip40
-        //     && height < self.transition_heights.cip94h
-        if height < self.transition_heights.cip94h
-        {
-            Some(vec![TANZANITE_HEADER_CUSTOM_FIRST_ELEMENT.to_vec()])
-        } else if height >= self.transition_heights.cip94h
-            && height < self.transition_heights.cip112
-        {
-            Some(vec![DAO_VOTE_HEADER_CUSTOM_FIRST_ELEMENT.to_vec()])
-        } else if height >= self.transition_heights.cip112
-            && height < self.transition_heights.cip1559
-        {
-            Some(vec![CIP112_HEADER_CUSTOM_FIRST_ELEMENT.to_vec()])
-        } else if height >= self.transition_heights.cip1559 {
-            Some(vec![NEXT_HARDFORK_HEADER_CUSTOM_FIRST_ELEMENT.to_vec()])
-        } else {
-            None
-        }
+    pub fn custom_prefix(&self, _height: BlockHeight) -> Option<Vec<Bytes>> {
+        Some(vec![NEXT_HARDFORK_HEADER_CUSTOM_FIRST_ELEMENT.to_vec()])
     }
 
     pub fn can_pack_evm_transaction(&self, height: BlockHeight) -> bool {

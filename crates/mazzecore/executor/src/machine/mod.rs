@@ -169,7 +169,7 @@ fn new_builtin_map(
             Box::new(Linear::new(40_000, 0)),
             builtin_factory("alt_bn128_mul"),
             // params.transition_numbers.cip62,
-            0
+            0,
         ),
     );
     btree.insert(
@@ -178,7 +178,7 @@ fn new_builtin_map(
             Box::new(AltBn128PairingPricer::new(100_000, 80_000)),
             builtin_factory("alt_bn128_pairing"),
             // params.transition_numbers.cip62,
-            0
+            0,
         ),
     );
     btree.insert(
@@ -194,7 +194,7 @@ fn new_builtin_map(
         Builtin::new(
             Box::new(Linear::new(50000, 0)),
             builtin_factory("kzg_point_eval"),
-            params.transition_numbers.cip144,
+            0,
         ),
     );
     btree

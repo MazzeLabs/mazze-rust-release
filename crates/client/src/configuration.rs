@@ -1335,10 +1335,10 @@ impl Configuration {
         //
         // Hydra hardfork (V2.0)
         //
-        set_conf!(
-            self.raw_conf.hydra_transition_number.unwrap_or(default_transition_time);
-            params.transition_numbers => { cip64 }
-        );
+        // set_conf!(
+        //     self.raw_conf.hydra_transition_number.unwrap_or(default_transition_time);
+        //     params.transition_numbers => { cip64 }
+        // );
         // set_conf!(
         //     self.raw_conf.hydra_transition_height.unwrap_or(default_transition_time);
         //     params.transition_heights => { cip76, cip86 }
@@ -1421,10 +1421,10 @@ impl Configuration {
         //
         // 1559 hardfork (V2.4)
         //
-        set_conf!(
-            self.raw_conf.next_hardfork_transition_number.unwrap_or(default_transition_time);
-            params.transition_numbers => { cip137, cip144, cip145 }
-        );
+        // set_conf!(
+        //     self.raw_conf.next_hardfork_transition_number.unwrap_or(default_transition_time);
+        //     params.transition_numbers => { cip137, cip144, cip145 }
+        // );
         // set_conf!(
         //     self.raw_conf.next_hardfork_transition_height.unwrap_or(default_transition_time);
         //     params.transition_heights => { cip130, cip133e }
@@ -1435,11 +1435,11 @@ impl Configuration {
             .cip1559_transition_height
             .or(self.raw_conf.next_hardfork_transition_height)
             .unwrap_or(non_genesis_default_transition_time);
-        params.transition_numbers.cancun_opcodes = self
-            .raw_conf
-            .cancun_opcodes_transition_number
-            .or(self.raw_conf.next_hardfork_transition_number)
-            .unwrap_or(default_transition_time);
+        // params.transition_numbers.cancun_opcodes = self
+        //     .raw_conf
+        //     .cancun_opcodes_transition_number
+        //     .or(self.raw_conf.next_hardfork_transition_number)
+        //     .unwrap_or(default_transition_time);
 
         if params.transition_heights.cip1559
             < self.raw_conf.pos_reference_enable_height

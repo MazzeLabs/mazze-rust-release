@@ -781,18 +781,13 @@ impl VerificationConfig {
     }
 
     fn check_eip155_transaction(
-        tx: &TransactionWithSignature, mode: &VerifyTxMode,
+        tx: &TransactionWithSignature, _mode: &VerifyTxMode,
     ) -> bool {
         if tx.space() == Space::Native {
             return true;
         }
 
-        use VerifyTxLocalMode::*;
-        match mode {
-            VerifyTxMode::Local(Full, spec) => spec.cip90,
-            VerifyTxMode::Local(MaybeLater, _spec) => true,
-            VerifyTxMode::Remote => true,
-        }
+        true
     }
 
     fn check_eip1559_transaction(

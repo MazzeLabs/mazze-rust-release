@@ -148,7 +148,7 @@ pub struct Spec {
     /// CIP-78: Correct `is_sponsored` fields in receipt
     pub cip78b: bool,
     /// CIP-90: A Space that Fully EVM Compatible
-    pub cip90: bool,
+    // pub cip90: bool,
     /// CIP-94: On-chain Parameter DAO Vote
     pub cip94: bool,
     pub cip94_activation_block_number: u64,
@@ -171,9 +171,9 @@ pub struct Spec {
     /// CIP-132: Fix Static Context Check for Internal Contracts
     pub cip132: bool,
     /// CIP-133: Enhanced Block Hash Query
-    pub cip133_b: BlockNumber,
-    pub cip133_e: BlockHeight,
-    pub cip133_core: bool,
+    // pub cip133_b: BlockNumber,
+    // pub cip133_e: BlockHeight,
+    // pub cip133_core: bool,
     /// CIP-137: Base Fee Sharing in CIP-1559
     pub cip137: bool,
     pub cip1559: bool,
@@ -316,7 +316,7 @@ impl Spec {
             cip62: false,
             cip64: false,
             cip71: false,
-            cip90: false,
+            // cip90: false,
             cip78a: false,
             cip78b: false,
             cip94: false,
@@ -332,9 +332,9 @@ impl Spec {
             cip119: false,
             cip131: false,
             cip132: false,
-            cip133_b: u64::MAX,
-            cip133_e: u64::MAX,
-            cip133_core: false,
+            // cip133_b: u64::MAX,
+            // cip133_e: u64::MAX,
+            // cip133_core: false,
             cip137: false,
             cip145: false,
             cip1559: false,

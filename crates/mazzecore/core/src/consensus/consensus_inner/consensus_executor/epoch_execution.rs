@@ -442,12 +442,10 @@ impl ConsensusExecutionHandler {
             initialize_cip107(state)?;
         }
 
-        if block_number >= transition_numbers.cip133b {
-            state.set_system_storage(
-                block_hash_slot(block_number).into(),
-                U256::from_big_endian(&block.hash().0),
-            )?;
-        }
+        state.set_system_storage(
+            block_hash_slot(block_number).into(),
+            U256::from_big_endian(&block.hash().0),
+        )?;
 
         if block_number == transition_numbers.cip137 {
             initialize_cip137(state);

@@ -101,7 +101,7 @@ pub struct TransitionsBlockNumber {
     /// CIP-132: Fix Static Context Check for Internal Contracts
     pub cip132: BlockNumber,
     /// CIP-133: Enhanced Block Hash Query
-    pub cip133b: BlockNumber,
+    // pub cip133b: BlockNumber,
     /// CIP-137: Base Fee Sharing in CIP-1559
     pub cip137: BlockNumber,
     /// CIP-141: Disable Subroutine Opcodes
@@ -170,7 +170,7 @@ impl CommonParams {
         spec.cip62 = number >= self.transition_numbers.cip62;
         spec.cip64 = number >= self.transition_numbers.cip64;
         spec.cip71 = number >= self.transition_numbers.cip71;
-        spec.cip90 = number >= self.transition_numbers.cip90b;
+        // spec.cip90 = number >= self.transition_numbers.cip90b;
         spec.cip78a = number >= self.transition_numbers.cip78a;
         spec.cip78b = number >= self.transition_numbers.cip78b;
         spec.cip94 = number >= self.transition_numbers.cip94n;
@@ -185,9 +185,9 @@ impl CommonParams {
         spec.cip119 = number >= self.transition_numbers.cip119;
         spec.cip131 = number >= self.transition_numbers.cip131;
         spec.cip132 = number >= self.transition_numbers.cip132;
-        spec.cip133_b = self.transition_numbers.cip133b;
+        // spec.cip133_b = self.transition_numbers.cip133b;
         // spec.cip133_e = self.transition_heights.cip133e;
-        spec.cip133_core = number >= self.transition_numbers.cip133b;
+        // spec.cip133_core = number >= self.transition_numbers.cip133b;
         spec.cip137 = number >= self.transition_numbers.cip137;
         spec.cip144 = number >= self.transition_numbers.cip144;
         spec.cip145 = number >= self.transition_numbers.cip145;

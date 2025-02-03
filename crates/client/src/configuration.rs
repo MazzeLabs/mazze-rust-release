@@ -1325,8 +1325,7 @@ impl Configuration {
         // params.transition_heights.cip40 =
         //     self.raw_conf.tanzanite_transition_height;
         let mut base_block_rewards = BTreeMap::new();
-        base_block_rewards
-            .insert(0, MINING_REWARD_TANZANITE_IN_UMAZZE.into());
+        base_block_rewards.insert(0, MINING_REWARD_TANZANITE_IN_UMAZZE.into());
         // base_block_rewards.insert(
         //     params.transition_heights.cip40,
         //     MINING_REWARD_TANZANITE_IN_UMAZZE.into(),
@@ -1424,7 +1423,7 @@ impl Configuration {
         //
         set_conf!(
             self.raw_conf.next_hardfork_transition_number.unwrap_or(default_transition_time);
-            params.transition_numbers => { cip131, cip132, cip133b, cip137, cip144, cip145 }
+            params.transition_numbers => { cip131, cip132, cip137, cip144, cip145 }
         );
         // set_conf!(
         //     self.raw_conf.next_hardfork_transition_height.unwrap_or(default_transition_time);

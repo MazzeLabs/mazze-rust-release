@@ -140,7 +140,6 @@ impl<'a> Context<'a> {
 
         let state_res = match self.space {
             Space::Native => {
-                return_if!(number < self.spec.cip133_b);
                 return_if!(number > self.env.number);
                 return_if!(number
                     .checked_add(65536)
@@ -148,7 +147,6 @@ impl<'a> Context<'a> {
                 self.state.get_system_storage(&block_hash_slot(number))?
             }
             Space::Ethereum => {
-                return_if!(number < self.spec.cip133_e);
                 return_if!(number > self.env.epoch_height);
                 return_if!(number
                     .checked_add(65536)
@@ -559,15 +557,7 @@ impl<'a> ContextTrait for Context<'a> {
     }
 
     fn blockhash_source(&self) -> vm::BlockHashSource {
-        let from_state = match self.space {
-            Space::Native => self.env.number >= self.spec.cip133_b,
-            Space::Ethereum => self.env.epoch_height >= self.spec.cip133_e,
-        };
-        if from_state {
-            BlockHashSource::State
-        } else {
-            BlockHashSource::Env
-        }
+        BlockHashSource::State
     }
 }
 

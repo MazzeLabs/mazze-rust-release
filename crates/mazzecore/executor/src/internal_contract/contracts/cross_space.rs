@@ -16,7 +16,7 @@ type Bytes = Vec<u8>;
 type Bytes20 = [u8; 20];
 
 make_solidity_contract! {
-    pub struct CrossSpaceCall(CROSS_SPACE_CONTRACT_ADDRESS, generate_fn_table, initialize: |params: &CommonParams| params.transition_numbers.cip90b, is_active: |spec: &Spec| spec.cip90);
+    pub struct CrossSpaceCall(CROSS_SPACE_CONTRACT_ADDRESS, generate_fn_table, initialize: |params: &CommonParams| params.transition_numbers.cip90b, is_active: |_spec: &Spec| true);
 }
 
 fn generate_fn_table() -> SolFnTable {
@@ -33,7 +33,7 @@ fn generate_fn_table() -> SolFnTable {
 }
 
 group_impl_is_active!(
-    |spec: &Spec| spec.cip90,
+    |_spec: &Spec| true,
     CreateToEVM,
     TransferToEVM,
     CallToEVM,

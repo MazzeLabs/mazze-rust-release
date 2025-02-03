@@ -1409,8 +1409,8 @@ impl Configuration {
             .raw_conf
             .cip107_transition_number
             .unwrap_or(default_transition_time);
-        params.transition_heights.cip112 =
-            *CIP112_TRANSITION_HEIGHT.get().expect("initialized");
+        // params.transition_heights.cip112 =
+        //     *CIP112_TRANSITION_HEIGHT.get().expect("initialized");
         params.transition_numbers.cip118 = self
             .raw_conf
             .cip118_transition_number

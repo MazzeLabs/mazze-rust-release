@@ -127,7 +127,7 @@ pub struct TransitionsEpochHeight {
     /// CIP-94: On-Chain DAO Vote for Chain Parameters
     // pub cip94h: BlockHeight,
     /// CIP-112: Fix Block Headers `custom` Field Serde
-    pub cip112: BlockHeight,
+    // pub cip112: BlockHeight,
     /// CIP-130: Aligning Gas Limit with Transaction Size
     pub cip130: BlockHeight,
     /// CIP-133: Enhanced Block Hash Query

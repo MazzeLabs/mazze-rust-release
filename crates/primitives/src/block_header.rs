@@ -303,13 +303,9 @@ impl BlockHeader {
         }
 
         for b in &self.custom {
-            if self.height
-                >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
-            {
-                stream.append(b);
-            } else {
-                stream.append_raw(b, 1);
-            }
+            stream.append(b);
+            // TODO: validate if above line is correct, else use this
+            // stream.append_raw(b, 1);
         }
     }
 
@@ -344,13 +340,7 @@ impl BlockHeader {
             stream.append(&self.base_price);
         }
         for b in &self.custom {
-            if self.height
-                >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
-            {
-                stream.append(b);
-            } else {
-                stream.append_raw(b, 1);
-            }
+            stream.append(b);
         }
     }
 
@@ -389,13 +379,7 @@ impl BlockHeader {
         }
 
         for b in &self.custom {
-            if self.height
-                >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
-            {
-                stream.append(b);
-            } else {
-                stream.append_raw(b, 1);
-            }
+            stream.append(b);
         }
     }
 
@@ -427,13 +411,7 @@ impl BlockHeader {
             + rlp_part.base_price.is_some() as usize)
             ..r.item_count()?
         {
-            if rlp_part.height
-                >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
-            {
-                rlp_part.custom.push(r.val_at(i)?);
-            } else {
-                rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
-            }
+            rlp_part.custom.push(r.val_at(i)?);
         }
 
         let mut header = BlockHeader {

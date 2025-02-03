@@ -47,7 +47,6 @@ use mazzecore::{
 };
 use metrics::MetricsConfiguration;
 use network::DiscoveryConfiguration;
-use primitives::block_header::CIP112_TRANSITION_HEIGHT;
 use txgen::TransactionGeneratorConfig;
 
 use crate::rpc::{
@@ -454,9 +453,9 @@ impl Configuration {
             config.raw_conf.node_type = Some(NodeType::Light);
         }
 
-        CIP112_TRANSITION_HEIGHT
-            .set(config.raw_conf.cip112_transition_height.unwrap_or(u64::MAX))
-            .expect("called once");
+        // CIP112_TRANSITION_HEIGHT
+        //     .set(config.raw_conf.cip112_transition_height.unwrap_or(u64::MAX))
+        //     .expect("called once");
 
         Ok(config)
     }

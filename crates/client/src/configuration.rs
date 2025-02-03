@@ -1362,11 +1362,11 @@ impl Configuration {
             .raw_conf
             .cip78_patch_transition_number
             .unwrap_or(params.transition_numbers.cip78a);
-        params.transition_heights.cip90a = self
-            .raw_conf
-            .cip90_transition_height
-            .or(self.raw_conf.hydra_transition_height)
-            .unwrap_or(default_transition_time);
+        // params.transition_heights.cip90a = self
+        //     .raw_conf
+        //     .cip90_transition_height
+        //     .or(self.raw_conf.hydra_transition_height)
+        //     .unwrap_or(default_transition_time);
         params.transition_numbers.cip90b = self
             .raw_conf
             .cip90_transition_number

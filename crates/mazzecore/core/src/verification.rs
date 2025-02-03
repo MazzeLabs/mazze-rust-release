@@ -670,7 +670,6 @@ impl VerificationConfig {
         &self, tx: &TransactionWithSignature, height: BlockHeight,
         transitions: &TransitionsEpochHeight, spec: &Spec,
     ) -> PackingCheckResult {
-        let cip90a = height >= transitions.cip90a;
         let cip1559 = height >= transitions.cip1559;
 
         let (can_pack, later_pack) =
@@ -688,7 +687,7 @@ impl VerificationConfig {
                     )
                     .is_ok()
                 } else {
-                    Self::check_eip155_transaction(tx, cip90a, mode)
+                    Self::check_eip155_transaction(tx, mode)
                 }
             });
 
@@ -755,7 +754,7 @@ impl VerificationConfig {
         // implemented in a seperated function.
         // ******************************************
         // let cip76 = height >= transitions.cip76;
-        let cip90a = height >= transitions.cip90a;
+        // let cip90a = height >= transitions.cip90a;
         let cip130 = height >= transitions.cip130;
         let cip1559 = height >= transitions.cip1559;
 
@@ -768,7 +767,7 @@ impl VerificationConfig {
             )?;
         }
 
-        if !Self::check_eip155_transaction(tx, cip90a, &mode) {
+        if !Self::check_eip155_transaction(tx, &mode) {
             bail!(TransactionError::FutureTransactionType);
         }
 
@@ -782,7 +781,7 @@ impl VerificationConfig {
     }
 
     fn check_eip155_transaction(
-        tx: &TransactionWithSignature, cip90a: bool, mode: &VerifyTxMode,
+        tx: &TransactionWithSignature, mode: &VerifyTxMode,
     ) -> bool {
         if tx.space() == Space::Native {
             return true;
@@ -790,9 +789,9 @@ impl VerificationConfig {
 
         use VerifyTxLocalMode::*;
         match mode {
-            VerifyTxMode::Local(Full, spec) => cip90a && spec.cip90,
+            VerifyTxMode::Local(Full, spec) => spec.cip90,
             VerifyTxMode::Local(MaybeLater, _spec) => true,
-            VerifyTxMode::Remote => cip90a,
+            VerifyTxMode::Remote => true,
         }
     }
 

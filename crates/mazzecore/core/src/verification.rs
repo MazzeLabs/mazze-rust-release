@@ -754,7 +754,7 @@ impl VerificationConfig {
         // Each constraint depends on a mode or a CIP should be
         // implemented in a seperated function.
         // ******************************************
-        let cip76 = height >= transitions.cip76;
+        // let cip76 = height >= transitions.cip76;
         let cip90a = height >= transitions.cip90a;
         let cip130 = height >= transitions.cip130;
         let cip1559 = height >= transitions.cip1559;
@@ -776,7 +776,7 @@ impl VerificationConfig {
             bail!(TransactionError::FutureTransactionType)
         }
 
-        Self::check_gas_limit(tx, cip76, &mode)?;
+        Self::check_gas_limit(tx, &mode)?;
         Self::check_gas_limit_with_calldata(tx, cip130)?;
         Ok(())
     }
@@ -813,15 +813,11 @@ impl VerificationConfig {
 
     /// Check transaction intrinsic gas. Influenced by CIP-76.
     fn check_gas_limit(
-        tx: &TransactionWithSignature, cip76: bool, mode: &VerifyTxMode,
+        tx: &TransactionWithSignature, mode: &VerifyTxMode,
     ) -> Result<(), TransactionError> {
-        const GENESIS_SPEC: Spec = Spec::genesis_spec();
         let maybe_spec = if let VerifyTxMode::Local(_, spec) = mode {
             // In local mode, we check gas limit as usual.
             Some(*spec)
-        } else if !cip76 {
-            // In remote mode, we only check gas limit before cip-76 activated.
-            Some(&GENESIS_SPEC)
         } else {
             None
         };

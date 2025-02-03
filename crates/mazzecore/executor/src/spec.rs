@@ -122,9 +122,9 @@ pub struct TransitionsEpochHeight {
     /// CIP-40: Reduce Block Base Reward to 2 MAZZE
     // pub cip40: BlockHeight,
     /// CIP-76: Remove VM-Related Constraints in Syncing Blocks
-    pub cip76: BlockHeight,
+    // pub cip76: BlockHeight,
     /// CIP-86: Update Difficulty Adjustment Algorithm
-    pub cip86: BlockHeight,
+    // pub cip86: BlockHeight,
     /// CIP-90: Introduce a Fully EVM-Compatible Space
     pub cip90a: BlockHeight,
     /// CIP-94: On-Chain DAO Vote for Chain Parameters

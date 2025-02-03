@@ -710,7 +710,8 @@ impl Configuration {
             self.raw_conf.stratum_port,
             stratum_secret,
             self.raw_conf.pow_problem_window_size,
-            self.common_params().transition_heights.cip86,
+            // self.common_params().transition_heights.cip86,
+            0 // TODO: remove this (cip_height)
         )
     }
 
@@ -1342,10 +1343,10 @@ impl Configuration {
             self.raw_conf.hydra_transition_number.unwrap_or(default_transition_time);
             params.transition_numbers => { cip43a, cip64, cip71, cip78a, cip92 }
         );
-        set_conf!(
-            self.raw_conf.hydra_transition_height.unwrap_or(default_transition_time);
-            params.transition_heights => { cip76, cip86 }
-        );
+        // set_conf!(
+        //     self.raw_conf.hydra_transition_height.unwrap_or(default_transition_time);
+        //     params.transition_heights => { cip76, cip86 }
+        // );
         params.transition_numbers.cip43b = self
             .raw_conf
             .cip43_init_end_number

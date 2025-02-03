@@ -68,7 +68,7 @@ pub struct TransitionsBlockNumber {
     // pub cip43a: BlockNumber,
     // pub cip43b: BlockNumber,
     /// CIP-62: Enable EC-Related Builtin Contracts
-    pub cip62: BlockNumber,
+    // pub cip62: BlockNumber,
     /// CIP-64: Get Current Epoch Number via Internal Contract
     pub cip64: BlockNumber,
     /// CIP-71: Disable Anti-Reentrancy
@@ -164,7 +164,7 @@ impl Default for CommonParams {
 impl CommonParams {
     pub fn spec(&self, number: BlockNumber, height: BlockHeight) -> Spec {
         let mut spec = Spec::genesis_spec();
-        spec.cip62 = number >= self.transition_numbers.cip62;
+        // spec.cip62 = number >= self.transition_numbers.cip62;
         spec.cip64 = number >= self.transition_numbers.cip64;
         spec.cip71 = number >= self.transition_numbers.cip71;
         // spec.cip90 = number >= self.transition_numbers.cip90b;

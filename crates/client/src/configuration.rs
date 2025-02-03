@@ -710,8 +710,6 @@ impl Configuration {
             self.raw_conf.stratum_port,
             stratum_secret,
             self.raw_conf.pow_problem_window_size,
-            // self.common_params().transition_heights.cip86,
-            0 // TODO: remove this (cip_height)
         )
     }
 

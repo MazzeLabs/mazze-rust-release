@@ -120,7 +120,7 @@ pub struct TransitionsBlockNumber {
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsEpochHeight {
     /// CIP-40: Reduce Block Base Reward to 2 MAZZE
-    pub cip40: BlockHeight,
+    // pub cip40: BlockHeight,
     /// CIP-76: Remove VM-Related Constraints in Syncing Blocks
     pub cip76: BlockHeight,
     /// CIP-86: Update Difficulty Adjustment Algorithm
@@ -221,8 +221,9 @@ impl CommonParams {
     }
 
     pub fn custom_prefix(&self, height: BlockHeight) -> Option<Vec<Bytes>> {
-        if height >= self.transition_heights.cip40
-            && height < self.transition_heights.cip94h
+        // if height >= self.transition_heights.cip40
+        //     && height < self.transition_heights.cip94h
+        if height < self.transition_heights.cip94h
         {
             Some(vec![TANZANITE_HEADER_CUSTOM_FIRST_ELEMENT.to_vec()])
         } else if height >= self.transition_heights.cip94h

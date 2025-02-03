@@ -1324,15 +1324,15 @@ impl Configuration {
         //
         // Tanzanite hardfork
         //
-        params.transition_heights.cip40 =
-            self.raw_conf.tanzanite_transition_height;
+        // params.transition_heights.cip40 =
+        //     self.raw_conf.tanzanite_transition_height;
         let mut base_block_rewards = BTreeMap::new();
         base_block_rewards
-            .insert(0, INITIAL_BASE_MINING_REWARD_IN_UMAZZE.into());
-        base_block_rewards.insert(
-            params.transition_heights.cip40,
-            MINING_REWARD_TANZANITE_IN_UMAZZE.into(),
-        );
+            .insert(0, MINING_REWARD_TANZANITE_IN_UMAZZE.into());
+        // base_block_rewards.insert(
+        //     params.transition_heights.cip40,
+        //     MINING_REWARD_TANZANITE_IN_UMAZZE.into(),
+        // );
         params.base_block_rewards = base_block_rewards;
 
         //

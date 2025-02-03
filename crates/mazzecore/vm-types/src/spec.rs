@@ -20,7 +20,6 @@
 
 //! Cost spec and other parameterisations for the EVM.
 use mazze_types::{address_util::AddressUtil, Address};
-use primitives::{block::BlockHeight, BlockNumber};
 
 /// Definition of the cost spec and other parameterisations for the VM.
 #[derive(Debug, Clone)]
@@ -135,8 +134,8 @@ pub struct Spec {
     /// The magnification of gas storage occupying related operaions.
     pub evm_gas_ratio: usize,
     /// CIP-43: Introduce Finality via Voting Among Staked
-    pub cip43_init: bool,
-    pub cip43_contract: bool,
+    // pub cip43_init: bool,
+    // pub cip43_contract: bool,
     /// CIP-62: Enable EC-related builtin contract
     pub cip62: bool,
     /// CIP-64: Get current epoch number through internal contract
@@ -311,8 +310,8 @@ impl Spec {
             kill_dust: CleanDustMode::Off,
             keep_unsigned_nonce: false,
             wasm: None,
-            cip43_init: false,
-            cip43_contract: false,
+            // cip43_init: false,
+            // cip43_contract: false,
             cip62: false,
             cip64: false,
             cip71: false,

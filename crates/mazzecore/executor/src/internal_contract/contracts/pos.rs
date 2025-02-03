@@ -12,8 +12,9 @@ type BlsPubKey = Bytes;
 type VrfPubKey = Bytes;
 type BlsProof = [Bytes; 2];
 
+// TODO: deal with this
 make_solidity_contract! {
-    pub struct PoSRegister(POS_REGISTER_CONTRACT_ADDRESS, generate_fn_table, initialize: |params: &CommonParams| params.transition_numbers.cip43a, is_active: |spec: &Spec| spec.cip43_contract);
+    pub struct PoSRegister(POS_REGISTER_CONTRACT_ADDRESS, generate_fn_table, initialize: |_params: &CommonParams| 0, is_active: |_spec: &Spec| true);
 }
 fn generate_fn_table() -> SolFnTable {
     make_function_table!(
@@ -26,7 +27,7 @@ fn generate_fn_table() -> SolFnTable {
     )
 }
 group_impl_is_active!(
-    |spec: &Spec| spec.cip43_contract,
+    |_spec: &Spec| true,
     Register,
     IncreaseStake,
     GetStatus,
@@ -86,11 +87,11 @@ impl SimpleExecutionTrait for Register {
         &self, inputs: (H256, u64, BlsPubKey, VrfPubKey, BlsProof),
         params: &ActionParams, context: &mut InternalRefContext,
     ) -> vm::Result<()> {
-        if !context.spec.cip43_init && context.env.pos_view.is_none() {
-            return Err(vm::Error::InternalContract(
-                "Cannot register after initialization stage and before the PoS chain launched".into(),
-            ));
-        }
+        // if !context.spec.cip43_init && context.env.pos_view.is_none() {
+        //     return Err(vm::Error::InternalContract(
+        //         "Cannot register after initialization stage and before the PoS chain launched".into(),
+        //     ));
+        // }
         let (identifier, vote_power, bls_pubkey, vrf_pubkey, bls_proof) =
             inputs;
         register(
@@ -129,11 +130,11 @@ impl SimpleExecutionTrait for IncreaseStake {
         &self, inputs: u64, params: &ActionParams,
         context: &mut InternalRefContext,
     ) -> vm::Result<()> {
-        if !context.spec.cip43_init && context.env.pos_view.is_none() {
-            return Err(vm::Error::InternalContract(
-                "Cannot increase stake after initialization stage and before the PoS chain launched".into(),
-            ));
-        }
+        // if !context.spec.cip43_init && context.env.pos_view.is_none() {
+        //     return Err(vm::Error::InternalContract(
+        //         "Cannot increase stake after initialization stage and before the PoS chain launched".into(),
+        //     ));
+        // }
         increase_stake(params.sender, inputs, params, context)
     }
 }

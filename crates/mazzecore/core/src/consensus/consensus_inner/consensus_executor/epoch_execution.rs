@@ -451,9 +451,9 @@ impl ConsensusExecutionHandler {
             initialize_cip137(state);
         }
 
-        if block_number < transition_numbers.cip43a {
-            state.bump_block_number_accumulate_interest();
-        }
+        // if block_number < transition_numbers.cip43a {
+        //     state.bump_block_number_accumulate_interest();
+        // }
 
         let secondary_reward = state.secondary_reward();
 

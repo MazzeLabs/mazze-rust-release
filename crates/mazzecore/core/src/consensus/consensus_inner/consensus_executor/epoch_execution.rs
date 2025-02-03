@@ -407,17 +407,13 @@ impl ConsensusExecutionHandler {
     fn before_epoch_execution(
         &self, state: &mut State, main_block: &Block,
     ) -> DbResult<()> {
-        let params = self.machine.params();
-
         let epoch_number = main_block.block_header.height();
         let hash = main_block.hash();
 
-        if epoch_number >= params.transition_heights.cip133e {
-            state.set_system_storage(
-                epoch_hash_slot(epoch_number).into(),
-                U256::from_big_endian(&hash.0),
-            )?;
-        }
+        state.set_system_storage(
+            epoch_hash_slot(epoch_number).into(),
+            U256::from_big_endian(&hash.0),
+        )?;
         Ok(())
     }
 

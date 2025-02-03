@@ -129,9 +129,9 @@ pub struct TransitionsEpochHeight {
     /// CIP-112: Fix Block Headers `custom` Field Serde
     // pub cip112: BlockHeight,
     /// CIP-130: Aligning Gas Limit with Transaction Size
-    pub cip130: BlockHeight,
+    // pub cip130: BlockHeight,
     /// CIP-133: Enhanced Block Hash Query
-    pub cip133e: BlockHeight,
+    // pub cip133e: BlockHeight,
     pub cip1559: BlockHeight,
 }
 
@@ -186,7 +186,7 @@ impl CommonParams {
         spec.cip131 = number >= self.transition_numbers.cip131;
         spec.cip132 = number >= self.transition_numbers.cip132;
         spec.cip133_b = self.transition_numbers.cip133b;
-        spec.cip133_e = self.transition_heights.cip133e;
+        // spec.cip133_e = self.transition_heights.cip133e;
         spec.cip133_core = number >= self.transition_numbers.cip133b;
         spec.cip137 = number >= self.transition_numbers.cip137;
         spec.cip144 = number >= self.transition_numbers.cip144;

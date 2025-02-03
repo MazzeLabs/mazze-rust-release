@@ -487,9 +487,7 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
         };
 
         let fees_value = gas_charged.saturating_mul(cost.gas_price);
-        let burnt_fees_value = spec
-            .cip1559
-            .then(|| gas_charged.saturating_mul(cost.burnt_gas_price));
+        let burnt_fees_value = Some(gas_charged.saturating_mul(cost.burnt_gas_price));
 
         let refund_value = gas_refunded.saturating_mul(cost.gas_price);
 

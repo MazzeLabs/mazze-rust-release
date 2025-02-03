@@ -325,16 +325,12 @@ impl BlockGenerator {
 
         let machine = self.txpool.machine();
         let params = machine.params();
-        let cip1559_height = params.transition_heights.cip1559;
+        // let cip1559_height = params.transition_heights.cip1559;
         let pack_height = best_info.best_epoch_number + 1;
 
-        let block_gas_limit = if pack_height >= cip1559_height {
-            (block_gas_target * ELASTICITY_MULTIPLIER as u64).into()
-        } else {
-            block_gas_target.into()
-        };
+        let block_gas_limit = (block_gas_target * ELASTICITY_MULTIPLIER as u64).into();
 
-        let (transactions, maybe_base_price) = if pack_height < cip1559_height {
+        let (transactions, maybe_base_price) = if false {
             let txs = self.txpool.pack_transactions(
                 num_txs,
                 block_gas_limit,
@@ -345,7 +341,7 @@ impl BlockGenerator {
             );
             (txs, None)
         } else {
-            let parent_base_price = if cip1559_height == pack_height {
+            let parent_base_price = if 0 == pack_height {
                 params.init_base_price()
             } else {
                 parent_block.base_price().unwrap()

@@ -203,7 +203,7 @@ impl<'a, O: ExecutiveObserver> FreshExecutive<'a, O> {
 
         let check_base_price = self.settings.check_base_price;
 
-        let gas_price = if !spec.cip1559 || !check_base_price {
+        let gas_price = if !check_base_price {
             *tx.gas_price()
         } else {
             // actual_base_gas >= tx gas_price >= burnt_base_price

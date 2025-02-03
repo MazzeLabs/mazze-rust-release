@@ -116,23 +116,23 @@ pub struct TransitionsBlockNumber {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsEpochHeight {
-    /// CIP-40: Reduce Block Base Reward to 2 MAZZE
+    // / CIP-40: Reduce Block Base Reward to 2 MAZZE
     // pub cip40: BlockHeight,
-    /// CIP-76: Remove VM-Related Constraints in Syncing Blocks
+    // / CIP-76: Remove VM-Related Constraints in Syncing Blocks
     // pub cip76: BlockHeight,
-    /// CIP-86: Update Difficulty Adjustment Algorithm
+    // / CIP-86: Update Difficulty Adjustment Algorithm
     // pub cip86: BlockHeight,
-    /// CIP-90: Introduce a Fully EVM-Compatible Space
+    // / CIP-90: Introduce a Fully EVM-Compatible Space
     // pub cip90a: BlockHeight,
-    /// CIP-94: On-Chain DAO Vote for Chain Parameters
+    // / CIP-94: On-Chain DAO Vote for Chain Parameters
     // pub cip94h: BlockHeight,
-    /// CIP-112: Fix Block Headers `custom` Field Serde
+    // / CIP-112: Fix Block Headers `custom` Field Serde
     // pub cip112: BlockHeight,
-    /// CIP-130: Aligning Gas Limit with Transaction Size
+    // / CIP-130: Aligning Gas Limit with Transaction Size
     // pub cip130: BlockHeight,
-    /// CIP-133: Enhanced Block Hash Query
+    // / CIP-133: Enhanced Block Hash Query
     // pub cip133e: BlockHeight,
-    pub cip1559: BlockHeight,
+    // pub cip1559: BlockHeight,
 }
 
 impl Default for CommonParams {
@@ -188,7 +188,7 @@ impl CommonParams {
         // spec.cip137 = number >= self.transition_numbers.cip137;
         // spec.cip144 = number >= self.transition_numbers.cip144;
         // spec.cip145 = number >= self.transition_numbers.cip145;
-        spec.cip1559 = height >= self.transition_heights.cip1559;
+        // spec.cip1559 = height >= self.transition_heights.cip1559;
         // spec.cancun_opcodes = number >= self.transition_numbers.cancun_opcodes;
         // if spec.cancun_opcodes {
         // }

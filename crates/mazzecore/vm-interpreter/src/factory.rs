@@ -47,28 +47,16 @@ impl Factory {
             VMType::Interpreter => {}
         };
 
-        match (Self::can_fit_in_usize(&params.gas), spec.cancun_opcodes) {
-            (true, true) => Box::new(Interpreter::<usize, true>::new(
+        match Self::can_fit_in_usize(&params.gas) {
+            true => Box::new(Interpreter::<usize, true>::new(
                 params,
                 self.evm_cache_cancun.clone(),
                 spec,
                 depth,
             )),
-            (true, false) => Box::new(Interpreter::<usize, false>::new(
-                params,
-                self.evm_cache.clone(),
-                spec,
-                depth,
-            )),
-            (false, true) => Box::new(Interpreter::<U256, true>::new(
+            false => Box::new(Interpreter::<U256, true>::new(
                 params,
                 self.evm_cache_cancun.clone(),
-                spec,
-                depth,
-            )),
-            (false, false) => Box::new(Interpreter::<U256, false>::new(
-                params,
-                self.evm_cache.clone(),
                 spec,
                 depth,
             )),

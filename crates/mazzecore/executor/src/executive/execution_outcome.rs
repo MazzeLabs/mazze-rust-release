@@ -195,10 +195,8 @@ impl ExecutionOutcome {
     pub fn burnt_fee(&self, spec: &Spec) -> Option<U256> {
         if let Some(e) = self.try_as_executed() {
             e.burnt_fee
-        } else if spec.cip1559 {
-            Some(U256::zero())
         } else {
-            None
+            Some(U256::zero())
         }
     }
 

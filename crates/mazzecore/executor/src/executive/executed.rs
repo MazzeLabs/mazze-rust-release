@@ -85,10 +85,8 @@ impl Executed {
         let gas_sponsor_paid = cost.gas_sponsored;
         let storage_sponsor_paid = cost.storage_sponsored;
 
-        let burnt_fee = spec.cip1559.then(|| {
-            let target_burnt = tx.gas().saturating_mul(cost.burnt_gas_price);
-            U256::min(*actual_gas_cost, target_burnt)
-        });
+        let target_burnt = tx.gas().saturating_mul(cost.burnt_gas_price);
+        let burnt_fee = Some(U256::min(*actual_gas_cost, target_burnt));
 
         Self {
             gas_used: *tx.gas(),
@@ -112,17 +110,11 @@ impl Executed {
         spec: &Spec,
     ) -> Self {
         let storage_sponsor_paid = cost.storage_sponsored;
-        let mut gas_sponsor_paid = cost.gas_sponsored;
-
-        if spec.cip145 {
-            gas_sponsor_paid = false;
-        }
+        let gas_sponsor_paid = cost.gas_sponsored; // TODO: check if it shoud be "false", CIP-145
 
         let fee = tx.gas().saturating_mul(cost.gas_price);
 
-        let burnt_fee = spec
-            .cip1559
-            .then(|| tx.gas().saturating_mul(cost.burnt_gas_price));
+        let burnt_fee = Some(tx.gas().saturating_mul(cost.burnt_gas_price));
 
         Self {
             gas_used: *tx.gas(),

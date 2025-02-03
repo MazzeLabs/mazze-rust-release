@@ -364,14 +364,8 @@ impl VerificationConfig {
             }
         }
 
-        if header.height() >= self.machine.params().transition_heights.cip1559 {
-            if header.base_price().is_none() {
-                bail!(BlockError::MissingBaseFee);
-            }
-        } else {
-            if header.base_price().is_some() {
-                bail!(BlockError::UnexpectedBaseFee);
-            }
+        if header.base_price().is_none() {
+            bail!(BlockError::MissingBaseFee);
         }
 
         // Note that this is just used to rule out deprecated blocks, so the
@@ -500,13 +494,8 @@ impl VerificationConfig {
             total_gas[t.space()] += *t.gas_limit();
         }
 
-        if block.block_header.height()
-            >= self.machine.params().transition_heights.cip1559
-        {
-            self.check_base_fee(block, parent, total_gas)?;
-        } else {
-            self.check_hard_gas_limit(block, total_gas)?;
-        }
+        self.check_base_fee(block, parent, total_gas)?;
+
         Ok(())
     }
 
@@ -555,10 +544,7 @@ impl VerificationConfig {
         use Space::*;
 
         let params = self.machine.params();
-        let cip1559_init = params.transition_heights.cip1559;
         let block_height = block.block_header.height();
-
-        assert!(block_height >= cip1559_init);
 
         let core_gas_limit = block.block_header.gas_limit() * 9 / 10;
         let espace_gas_limit =
@@ -588,7 +574,7 @@ impl VerificationConfig {
             )));
         }
 
-        let parent_base_price = if block_height == cip1559_init {
+        let parent_base_price = if block_height == 0 {
             params.init_base_price()
         } else {
             parent.base_price().unwrap()
@@ -670,14 +656,10 @@ impl VerificationConfig {
         &self, tx: &TransactionWithSignature, height: BlockHeight,
         transitions: &TransitionsEpochHeight, spec: &Spec,
     ) -> PackingCheckResult {
-        let cip1559 = height >= transitions.cip1559;
+        // let cip1559 = height >= 0;
 
         let (can_pack, later_pack) =
             Self::fast_recheck_inner(spec, |mode: &VerifyTxMode| {
-                if !Self::check_eip1559_transaction(tx, cip1559, mode) {
-                    return false;
-                }
-
                 if let Transaction::Native(ref tx) = tx.unsigned {
                     Self::verify_transaction_epoch_height(
                         tx,
@@ -756,7 +738,7 @@ impl VerificationConfig {
         // let cip76 = height >= transitions.cip76;
         // let cip90a = height >= transitions.cip90a;
         // let cip130 = height >= transitions.cip130;
-        let cip1559 = height >= transitions.cip1559;
+        // let cip1559 = height >= transitions.cip1559;
 
         if let Transaction::Native(ref tx) = tx.unsigned {
             Self::verify_transaction_epoch_height(
@@ -771,9 +753,9 @@ impl VerificationConfig {
             bail!(TransactionError::FutureTransactionType);
         }
 
-        if !Self::check_eip1559_transaction(tx, cip1559, &mode) {
-            bail!(TransactionError::FutureTransactionType)
-        }
+        // if !Self::check_eip1559_transaction(tx, cip1559, &mode) {
+        //     bail!(TransactionError::FutureTransactionType)
+        // }
 
         Self::check_gas_limit(tx, &mode)?;
         Self::check_gas_limit_with_calldata(tx)?;
@@ -788,21 +770,6 @@ impl VerificationConfig {
         }
 
         true
-    }
-
-    fn check_eip1559_transaction(
-        tx: &TransactionWithSignature, cip1559: bool, mode: &VerifyTxMode,
-    ) -> bool {
-        if tx.is_legacy() {
-            return true;
-        }
-
-        use VerifyTxLocalMode::*;
-        match mode {
-            VerifyTxMode::Local(Full, _spec) => cip1559,
-            VerifyTxMode::Local(MaybeLater, _spec) => true,
-            VerifyTxMode::Remote => cip1559,
-        }
     }
 
     /// Check transaction intrinsic gas. Influenced by CIP-76.
@@ -835,7 +802,7 @@ impl VerificationConfig {
     }
 
     fn check_gas_limit_with_calldata(
-        tx: &TransactionWithSignature
+        tx: &TransactionWithSignature,
     ) -> Result<(), TransactionError> {
         let data_length = tx.data().len();
         let min_gas_limit = data_length.saturating_mul(100);

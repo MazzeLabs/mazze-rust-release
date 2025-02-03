@@ -207,17 +207,17 @@ impl<Gas: CostType> Gasometer<Gas> {
                 mem_needed(stack.peek(0), stack.peek(2))?,
                 Gas::from_u256(*stack.peek(2))?,
             ),
-            instructions::JUMPSUB_MCOPY if spec.cancun_opcodes => {
+            instructions::JUMPSUB_MCOPY => {
                 Request::GasMemCopy(
                     default_gas,
                     mem_needed(stack.peek(0), stack.peek(2))?,
                     Gas::from_u256(*stack.peek(2))?,
                 )
             }
-            instructions::BEGINSUB_TLOAD if spec.cancun_opcodes => {
+            instructions::BEGINSUB_TLOAD => {
                 Request::Gas(Gas::from(spec.tload_gas))
             }
-            instructions::RETURNSUB_TSTORE if spec.cancun_opcodes => {
+            instructions::RETURNSUB_TSTORE => {
                 Request::Gas(Gas::from(spec.tstore_gas))
             }
             instructions::EXTCODECOPY => Request::GasMemCopy(

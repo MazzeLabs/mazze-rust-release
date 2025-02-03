@@ -133,57 +133,57 @@ pub struct Spec {
     pub wasm: Option<WasmCosts>,
     /// The magnification of gas storage occupying related operaions.
     pub evm_gas_ratio: usize,
-    /// CIP-43: Introduce Finality via Voting Among Staked
+    // / CIP-43: Introduce Finality via Voting Among Staked
     // pub cip43_init: bool,
     // pub cip43_contract: bool,
-    /// CIP-62: Enable EC-related builtin contract
+    // / CIP-62: Enable EC-related builtin contract
     // pub cip62: bool,
-    /// CIP-64: Get current epoch number through internal contract
+    // / CIP-64: Get current epoch number through internal contract
     // pub cip64: bool,
-    /// CIP-71: Disable anti-reentrancy
+    // / CIP-71: Disable anti-reentrancy
     // pub cip71: bool,
-    /// CIP-78: Correct `is_sponsored` fields in receipt
+    // / CIP-78: Correct `is_sponsored` fields in receipt
     // pub cip78a: bool,
-    /// CIP-78: Correct `is_sponsored` fields in receipt
+    // / CIP-78: Correct `is_sponsored` fields in receipt
     // pub cip78b: bool,
-    /// CIP-90: A Space that Fully EVM Compatible
+    // / CIP-90: A Space that Fully EVM Compatible
     // pub cip90: bool,
-    /// CIP-94: On-chain Parameter DAO Vote
+    // / CIP-94: On-chain Parameter DAO Vote
     // pub cip94: bool,
     // pub cip94_activation_block_number: u64,
     // pub params_dao_vote_period: u64,
-    /// CIP-97: Remove staking list
+    // / CIP-97: Remove staking list
     // pub cip97: bool,
-    /// CIP-98: Fix espace bug
+    // / CIP-98: Fix espace bug
     // pub cip98: bool,
-    /// CIP-105: Minimal DAO votes requirement based on PoS votes.
+    // / CIP-105: Minimal DAO votes requirement based on PoS votes.
     // pub cip105: bool,
     // pub cip_sigma_fix: bool,
-    /// CIP-107: Reduce storage collateral refund.
+    // / CIP-107: Reduce storage collateral refund.
     // pub cip107: bool,
-    /// CIP-118: Query Unused Storage Points in Internal Contract
+    // / CIP-118: Query Unused Storage Points in Internal Contract
     // pub cip118: bool,
-    /// CIP-119: PUSH0 instruction
+    // / CIP-119: PUSH0 instruction
     // pub cip119: bool,
-    /// CIP-131: Retain Whitelist on Contract Deletion
+    // / CIP-131: Retain Whitelist on Contract Deletion
     // pub cip131: bool,  
-    /// CIP-132: Fix Static Context Check for Internal Contracts
+    // / CIP-132: Fix Static Context Check for Internal Contracts
     // pub cip132: bool,
-    /// CIP-133: Enhanced Block Hash Query
+    // / CIP-133: Enhanced Block Hash Query
     // pub cip133_b: BlockNumber,
     // pub cip133_e: BlockHeight,
     // pub cip133_core: bool,
-    /// CIP-137: Base Fee Sharing in CIP-1559
-    pub cip137: bool,
-    pub cip1559: bool,
-    /// CIP-141: Disable Subroutine Opcodes
-    /// CIP-142: Transient Storage Opcodes
-    /// CIP-143: MCOPY (0x5e) Opcode for Efficient Memory Copy
-    pub cancun_opcodes: bool,
-    /// CIP-144: Point Evaluation Precompile from EIP-4844
-    pub cip144: bool,
-    /// CIP-145: Fix Receipts upon `NotEnoughBalance` Error
-    pub cip145: bool,
+    // / CIP-137: Base Fee Sharing in CIP-1559
+    // pub cip137: bool,
+    // pub cip1559: bool,
+    // / CIP-141: Disable Subroutine Opcodes
+    // / CIP-142: Transient Storage Opcodes
+    // / CIP-143: MCOPY (0x5e) Opcode for Efficient Memory Copy
+    // pub cancun_opcodes: bool,
+    // / CIP-144: Point Evaluation Precompile from EIP-4844
+    // pub cip144: bool,
+    // / CIP-145: Fix Receipts upon `NotEnoughBalance` Error
+    // pub cip145: bool,
 }
 
 /// Wasm cost table
@@ -334,11 +334,11 @@ impl Spec {
             // cip133_b: u64::MAX,
             // cip133_e: u64::MAX,
             // cip133_core: false,
-            cip137: false,
-            cip145: false,
-            cip1559: false,
-            cancun_opcodes: false,
-            cip144: false,
+            // cip137: false,
+            // cip145: false,
+            // cip1559: false,
+            // cancun_opcodes: false,
+            // cip144: false,
         }
     }
 

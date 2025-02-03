@@ -185,7 +185,6 @@ pub fn initialize_synchronization_graph_with_data_manager(
     era_epoch_count: u64, pow: Arc<PowComputer>, vm: VmFactory,
 ) -> (Arc<SynchronizationGraph>, Arc<ConsensusGraph>) {
     let mut params = CommonParams::default();
-    params.transition_heights.cip1559 = u64::MAX;
     let machine = Arc::new(new_machine_with_builtin(params, vm));
     let mut rng = StdRng::from_seed([0u8; 32]);
     let pos_verifier = Arc::new(PosVerifier::new(

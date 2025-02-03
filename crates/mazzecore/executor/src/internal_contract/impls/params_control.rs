@@ -458,11 +458,7 @@ pub fn settle_current_votes(state: &mut State, cip105: bool) -> DbResult<()> {
 }
 
 pub fn params_index_max(spec: &Spec) -> usize {
-    let mut max = PARAMETER_INDEX_MAX;
-    if !spec.cip1559 {
-        max -= 1;
-    }
-    max
+    PARAMETER_INDEX_MAX
 }
 
 /// Solidity variable sequences.

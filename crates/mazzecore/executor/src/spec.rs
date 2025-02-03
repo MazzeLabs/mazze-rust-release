@@ -165,7 +165,7 @@ impl CommonParams {
     pub fn spec(&self, number: BlockNumber, height: BlockHeight) -> Spec {
         let mut spec = Spec::genesis_spec();
         // spec.cip62 = number >= self.transition_numbers.cip62;
-        spec.cip64 = number >= self.transition_numbers.cip64;
+        // spec.cip64 = number >= self.transition_numbers.cip64;
         spec.cip71 = number >= self.transition_numbers.cip71;
         // spec.cip90 = number >= self.transition_numbers.cip90b;
         spec.cip78a = number >= self.transition_numbers.cip78a;

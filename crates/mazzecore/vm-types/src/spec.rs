@@ -139,7 +139,7 @@ pub struct Spec {
     /// CIP-62: Enable EC-related builtin contract
     // pub cip62: bool,
     /// CIP-64: Get current epoch number through internal contract
-    pub cip64: bool,
+    // pub cip64: bool,
     /// CIP-71: Disable anti-reentrancy
     pub cip71: bool,
     /// CIP-78: Correct `is_sponsored` fields in receipt
@@ -313,7 +313,7 @@ impl Spec {
             // cip43_init: false,
             // cip43_contract: false,
             // cip62: false,
-            cip64: false,
+            // cip64: false,
             cip71: false,
             // cip90: false,
             cip78a: false,

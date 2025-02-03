@@ -72,34 +72,34 @@ pub struct TransitionsBlockNumber {
     /// CIP-64: Get Current Epoch Number via Internal Contract
     pub cip64: BlockNumber,
     /// CIP-71: Disable Anti-Reentrancy
-    pub cip71: BlockNumber,
+    // pub cip71: BlockNumber,
     /// CIP-78: Correct `is_sponsored` Fields in Receipt
-    pub cip78a: BlockNumber,
-    pub cip78b: BlockNumber,
+    // pub cip78a: BlockNumber,
+    // pub cip78b: BlockNumber,
     /// CIP-90: Introduce a Fully EVM-Compatible Space
-    pub cip90b: BlockNumber,
+    // pub cip90b: BlockNumber,
     /// CIP-92: Enable Blake2F Builtin Function
-    pub cip92: BlockNumber,
+    // pub cip92: BlockNumber,
     /// CIP-94: On-Chain DAO Vote for Chain Parameters
-    pub cip94n: BlockNumber,
+    // pub cip94n: BlockNumber,
     /// CIP-97: Clear Staking Lists
-    pub cip97: BlockNumber,
+    // pub cip97: BlockNumber,
     /// CIP-98: Fix BLOCKHASH Opcode Bug in eSpace
-    pub cip98: BlockNumber,
+    // pub cip98: BlockNumber,
     /// CIP-105: Minimal DAO Vote Count Based on PoS Staking
-    pub cip105: BlockNumber,
+    // pub cip105: BlockNumber,
     /// CIP-107: DAO-Adjustable Burn of Storage Collateral
-    pub cip107: BlockNumber,
+    // pub cip107: BlockNumber,
     /// A security fix without a publicly submitted CIP
-    pub cip_sigma_fix: BlockNumber,
+    // pub cip_sigma_fix: BlockNumber,
     /// CIP-118: Query Unused Storage Points in Internal Contract
-    pub cip118: BlockNumber,
+    // pub cip118: BlockNumber,
     /// CIP-119: PUSH0 instruction
-    pub cip119: BlockNumber,
+    // pub cip119: BlockNumber,
     /// CIP-131: Retain Whitelist on Contract Deletion
-    pub cip131: BlockNumber,
+    // pub cip131: BlockNumber,
     /// CIP-132: Fix Static Context Check for Internal Contracts
-    pub cip132: BlockNumber,
+    // pub cip132: BlockNumber,
     /// CIP-133: Enhanced Block Hash Query
     // pub cip133b: BlockNumber,
     /// CIP-137: Base Fee Sharing in CIP-1559
@@ -166,22 +166,22 @@ impl CommonParams {
         let mut spec = Spec::genesis_spec();
         // spec.cip62 = number >= self.transition_numbers.cip62;
         // spec.cip64 = number >= self.transition_numbers.cip64;
-        spec.cip71 = number >= self.transition_numbers.cip71;
+        // spec.cip71 = number >= self.transition_numbers.cip71;
         // spec.cip90 = number >= self.transition_numbers.cip90b;
-        spec.cip78a = number >= self.transition_numbers.cip78a;
-        spec.cip78b = number >= self.transition_numbers.cip78b;
-        spec.cip94 = number >= self.transition_numbers.cip94n;
-        spec.cip94_activation_block_number = self.transition_numbers.cip94n;
-        spec.cip97 = number >= self.transition_numbers.cip97;
-        spec.cip98 = number >= self.transition_numbers.cip98;
-        spec.cip105 = number >= self.transition_numbers.cip105;
-        spec.cip_sigma_fix = number >= self.transition_numbers.cip_sigma_fix;
-        spec.params_dao_vote_period = self.params_dao_vote_period;
-        spec.cip107 = number >= self.transition_numbers.cip107;
-        spec.cip118 = number >= self.transition_numbers.cip118;
-        spec.cip119 = number >= self.transition_numbers.cip119;
-        spec.cip131 = number >= self.transition_numbers.cip131;
-        spec.cip132 = number >= self.transition_numbers.cip132;
+        // spec.cip78a = number >= self.transition_numbers.cip78a;
+        // spec.cip78b = number >= self.transition_numbers.cip78b;
+        // spec.cip94 = number >= self.transition_numbers.cip94n;
+        // spec.cip94_activation_block_number = self.transition_numbers.cip94n;
+        // spec.cip97 = number >= self.transition_numbers.cip97;
+        // spec.cip98 = number >= self.transition_numbers.cip98;
+        // spec.cip105 = number >= self.transition_numbers.cip105;
+        // spec.cip_sigma_fix = number >= self.transition_numbers.cip_sigma_fix;
+        // spec.params_dao_vote_period = self.params_dao_vote_period;
+        // spec.cip107 = number >= self.transition_numbers.cip107;
+        // spec.cip118 = number >= self.transition_numbers.cip118;
+        // spec.cip119 = number >= self.transition_numbers.cip119;
+        // spec.cip131 = number >= self.transition_numbers.cip131;
+        // spec.cip132 = number >= self.transition_numbers.cip132;
         // spec.cip133_b = self.transition_numbers.cip133b;
         // spec.cip133_e = self.transition_heights.cip133e;
         // spec.cip133_core = number >= self.transition_numbers.cip133b;

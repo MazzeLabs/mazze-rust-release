@@ -421,16 +421,15 @@ impl ConsensusExecutionHandler {
         &self, state: &mut State, block_number: BlockNumber, block: &Block,
     ) -> DbResult<U256> {
         let params = self.machine.params();
-        let transition_numbers = &params.transition_numbers;
+        // let transition_numbers = &params.transition_numbers;
 
-        let cip94_start = transition_numbers.cip94n;
+        // let cip94_start = transition_numbers.cip94n;
         let period = params.params_dao_vote_period;
         // Update/initialize parameters before processing rewards.
-        if block_number >= cip94_start
-            && (block_number - cip94_start) % period == 0
+        if block_number % period == 0
         {
-            let set_pos_staking = block_number > transition_numbers.cip105;
-            initialize_or_update_dao_voted_params(state, set_pos_staking)?;
+            // let set_pos_staking = block_number > transition_numbers.cip105;
+            initialize_or_update_dao_voted_params(state, true)?;
         }
 
         // Initialize old_storage_point_prop_ratio in the state.
@@ -438,7 +437,7 @@ impl ConsensusExecutionHandler {
         // integrated with `initialize_or_update_dao_voted_params`, but
         // that function will update the value after cip107 is enabled
         // here.
-        if block_number == transition_numbers.cip107 {
+        if block_number == 0 {
             initialize_cip107(state)?;
         }
 
@@ -447,13 +446,9 @@ impl ConsensusExecutionHandler {
             U256::from_big_endian(&block.hash().0),
         )?;
 
-        if block_number == transition_numbers.cip137 {
+        if block_number == 0 {
             initialize_cip137(state);
         }
-
-        // if block_number < transition_numbers.cip43a {
-        //     state.bump_block_number_accumulate_interest();
-        // }
 
         let secondary_reward = state.secondary_reward();
 

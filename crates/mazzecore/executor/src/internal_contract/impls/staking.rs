@@ -16,7 +16,7 @@ use mazze_vm_types::{self as vm, ActionParams, Env, Spec};
 
 /// Implementation of `deposit(uint256)`.
 pub fn deposit(
-    amount: U256, params: &ActionParams, env: &Env, spec: &Spec,
+    amount: U256, params: &ActionParams, env: &Env, _spec: &Spec,
     state: &mut State, tracer: &mut dyn TracerTrait,
 ) -> vm::Result<()> {
     if amount < U256::from(ONE_MAZZE_IN_MAZZY) {
@@ -32,13 +32,13 @@ pub fn deposit(
         AddressPocket::StakingBalance(params.sender),
         amount,
     );
-    state.deposit(&params.sender, &amount, env.number, spec.cip97)?;
+    state.deposit(&params.sender, &amount, env.number)?;
     Ok(())
 }
 
 /// Implementation of `withdraw(uint256)`.
 pub fn withdraw(
-    amount: U256, params: &ActionParams, env: &Env, spec: &Spec,
+    amount: U256, params: &ActionParams, env: &Env, _spec: &Spec,
     state: &mut State, tracer: &mut dyn TracerTrait,
 ) -> vm::Result<()> {
     state.remove_expired_vote_stake_info(&params.sender, env.number)?;
@@ -58,8 +58,7 @@ pub fn withdraw(
         AddressPocket::Balance(params.sender.with_space(params.space)),
         amount,
     );
-    let interest_amount =
-        state.withdraw(&params.sender, &amount, spec.cip97)?;
+    let interest_amount = state.withdraw(&params.sender, &amount)?;
     tracer.trace_internal_transfer(
         AddressPocket::MintBurn,
         AddressPocket::Balance(params.sender.with_space(params.space)),

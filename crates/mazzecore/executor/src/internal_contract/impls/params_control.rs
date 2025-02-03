@@ -30,10 +30,7 @@ pub fn cast_vote(
     // If this is called, `env.number` must be larger than the activation
     // number. And version starts from 1 to tell if an account has ever voted in
     // the first version.
-    let current_voting_version = (context.env.number
-        - context.spec.cip94_activation_block_number)
-        / context.spec.params_dao_vote_period
-        + 1;
+    let current_voting_version = context.env.number + 1;
     if version != current_voting_version {
         internal_bail!(
             "vote version unmatch: current={} voted={}",
@@ -179,10 +176,7 @@ pub fn cast_vote_gas(length: usize, spec: &Spec) -> usize {
 pub fn read_vote(
     address: Address, params: &ActionParams, context: &mut InternalRefContext,
 ) -> vm::Result<Vec<Vote>> {
-    let current_voting_version = (context.env.number
-        - context.spec.cip94_activation_block_number)
-        / context.spec.params_dao_vote_period
-        + 1;
+    let current_voting_version = context.env.number + 1;
     let version = context
         .storage_at(params, &storage_key::versions(&address))?
         .as_u64();
@@ -211,10 +205,7 @@ pub fn read_vote(
 pub fn total_votes(
     version: u64, context: &mut InternalRefContext,
 ) -> vm::Result<Vec<Vote>> {
-    let current_voting_version = (context.env.number
-        - context.spec.cip94_activation_block_number)
-        / context.spec.params_dao_vote_period
-        + 1;
+    let current_voting_version = context.env.number + 1;
 
     let state = &context.state;
 
@@ -255,10 +246,7 @@ pub fn total_votes(
 pub fn pos_stake_for_votes(
     version: u64, context: &mut InternalRefContext,
 ) -> vm::Result<U256> {
-    let current_voting_version = (context.env.number
-        - context.spec.cip94_activation_block_number)
-        / context.spec.params_dao_vote_period
-        + 1;
+    let current_voting_version = context.env.number + 1;
 
     let state = &context.state;
     let pos_stake_entry = if version + 1 == current_voting_version {
@@ -472,9 +460,6 @@ pub fn settle_current_votes(state: &mut State, cip105: bool) -> DbResult<()> {
 pub fn params_index_max(spec: &Spec) -> usize {
     let mut max = PARAMETER_INDEX_MAX;
     if !spec.cip1559 {
-        max -= 1;
-    }
-    if !spec.cip107 {
         max -= 1;
     }
     max

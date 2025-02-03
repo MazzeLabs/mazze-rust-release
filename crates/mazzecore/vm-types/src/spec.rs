@@ -141,34 +141,34 @@ pub struct Spec {
     /// CIP-64: Get current epoch number through internal contract
     // pub cip64: bool,
     /// CIP-71: Disable anti-reentrancy
-    pub cip71: bool,
+    // pub cip71: bool,
     /// CIP-78: Correct `is_sponsored` fields in receipt
-    pub cip78a: bool,
+    // pub cip78a: bool,
     /// CIP-78: Correct `is_sponsored` fields in receipt
-    pub cip78b: bool,
+    // pub cip78b: bool,
     /// CIP-90: A Space that Fully EVM Compatible
     // pub cip90: bool,
     /// CIP-94: On-chain Parameter DAO Vote
-    pub cip94: bool,
-    pub cip94_activation_block_number: u64,
-    pub params_dao_vote_period: u64,
+    // pub cip94: bool,
+    // pub cip94_activation_block_number: u64,
+    // pub params_dao_vote_period: u64,
     /// CIP-97: Remove staking list
-    pub cip97: bool,
+    // pub cip97: bool,
     /// CIP-98: Fix espace bug
-    pub cip98: bool,
+    // pub cip98: bool,
     /// CIP-105: Minimal DAO votes requirement based on PoS votes.
-    pub cip105: bool,
-    pub cip_sigma_fix: bool,
+    // pub cip105: bool,
+    // pub cip_sigma_fix: bool,
     /// CIP-107: Reduce storage collateral refund.
-    pub cip107: bool,
+    // pub cip107: bool,
     /// CIP-118: Query Unused Storage Points in Internal Contract
-    pub cip118: bool,
+    // pub cip118: bool,
     /// CIP-119: PUSH0 instruction
-    pub cip119: bool,
+    // pub cip119: bool,
     /// CIP-131: Retain Whitelist on Contract Deletion
-    pub cip131: bool,
+    // pub cip131: bool,  
     /// CIP-132: Fix Static Context Check for Internal Contracts
-    pub cip132: bool,
+    // pub cip132: bool,
     /// CIP-133: Enhanced Block Hash Query
     // pub cip133_b: BlockNumber,
     // pub cip133_e: BlockHeight,
@@ -314,23 +314,23 @@ impl Spec {
             // cip43_contract: false,
             // cip62: false,
             // cip64: false,
-            cip71: false,
+            // cip71: false,
             // cip90: false,
-            cip78a: false,
-            cip78b: false,
-            cip94: false,
+            // cip78a: false,
+            // cip78b: false,
+            // cip94: false,
             evm_gas_ratio: 2,
-            cip94_activation_block_number: u64::MAX,
-            params_dao_vote_period: 0,
-            cip97: false,
-            cip98: false,
-            cip105: false,
-            cip_sigma_fix: false,
-            cip107: false,
-            cip118: false,
-            cip119: false,
-            cip131: false,
-            cip132: false,
+            // cip94_activation_block_number: u64::MAX,
+            // params_dao_vote_period: 0,
+            // cip97: false,
+            // cip98: false,
+            // cip105: false,
+            // cip_sigma_fix: false,
+            // cip107: false,
+            // cip118: false,
+            // cip119: false,
+            // cip131: false,
+            // cip132: false,
             // cip133_b: u64::MAX,
             // cip133_e: u64::MAX,
             // cip133_core: false,

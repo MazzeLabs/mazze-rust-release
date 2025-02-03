@@ -1337,7 +1337,7 @@ impl Configuration {
         //
         set_conf!(
             self.raw_conf.hydra_transition_number.unwrap_or(default_transition_time);
-            params.transition_numbers => { cip64, cip71, cip78a, cip92 }
+            params.transition_numbers => { cip64 }
         );
         // set_conf!(
         //     self.raw_conf.hydra_transition_height.unwrap_or(default_transition_time);
@@ -1356,74 +1356,74 @@ impl Configuration {
         // } else {
         //     BN128_ENABLE_NUMBER
         // };
-        params.transition_numbers.cip78b = self
-            .raw_conf
-            .cip78_patch_transition_number
-            .unwrap_or(params.transition_numbers.cip78a);
+        // params.transition_numbers.cip78b = self
+        //     .raw_conf
+        //     .cip78_patch_transition_number
+        //     .unwrap_or(params.transition_numbers.cip78a);
         // params.transition_heights.cip90a = self
         //     .raw_conf
         //     .cip90_transition_height
         //     .or(self.raw_conf.hydra_transition_height)
         //     .unwrap_or(default_transition_time);
-        params.transition_numbers.cip90b = self
-            .raw_conf
-            .cip90_transition_number
-            .or(self.raw_conf.hydra_transition_number)
-            .unwrap_or(default_transition_time);
+        // params.transition_numbers.cip90b = self
+        //     .raw_conf
+        //     .cip90_transition_number
+        //     .or(self.raw_conf.hydra_transition_number)
+        //     .unwrap_or(default_transition_time);
 
         //
         // DAO vote hardfork (V2.1)
         //
-        set_conf!(
-            self.raw_conf.dao_vote_transition_number.unwrap_or(default_transition_time);
-            params.transition_numbers => { cip97, cip98 }
-        );
-        params.transition_numbers.cip94n = self
-            .raw_conf
-            .dao_vote_transition_number
-            .unwrap_or(non_genesis_default_transition_time);
+        // set_conf!(
+        //     self.raw_conf.dao_vote_transition_number.unwrap_or(default_transition_time);
+        //     params.transition_numbers => { cip97, cip98 }
+        // );
+        // params.transition_numbers.cip94n = self
+        //     .raw_conf
+        //     .dao_vote_transition_number
+        //     .unwrap_or(non_genesis_default_transition_time);
         // params.transition_heights.cip94h = self
         //     .raw_conf
         //     .dao_vote_transition_height
         //     .unwrap_or(non_genesis_default_transition_time);
-        params.transition_numbers.cip105 = self
-            .raw_conf
-            .cip105_transition_number
-            .or(self.raw_conf.dao_vote_transition_number)
-            .unwrap_or(default_transition_time);
+        // params.transition_numbers.cip105 = self
+        //     .raw_conf
+        //     .cip105_transition_number
+        //     .or(self.raw_conf.dao_vote_transition_number)
+        //     .unwrap_or(default_transition_time);
 
         //
         // Sigma protocol fix hardfork (V2.2)
         //
-        params.transition_numbers.cip_sigma_fix = self
-            .raw_conf
-            .sigma_fix_transition_number
-            .unwrap_or(default_transition_time);
+        // params.transition_numbers.cip_sigma_fix = self
+        //     .raw_conf
+        //     .sigma_fix_transition_number
+        //     .unwrap_or(default_transition_time);
 
         //
         // Burn collateral hardfork (V2.3)
         //
-        params.transition_numbers.cip107 = self
-            .raw_conf
-            .cip107_transition_number
-            .unwrap_or(default_transition_time);
+        // params.transition_numbers.cip107 = self
+        //     .raw_conf
+        //     .cip107_transition_number
+        //     .unwrap_or(default_transition_time);
         // params.transition_heights.cip112 =
         //     *CIP112_TRANSITION_HEIGHT.get().expect("initialized");
-        params.transition_numbers.cip118 = self
-            .raw_conf
-            .cip118_transition_number
-            .unwrap_or(default_transition_time);
-        params.transition_numbers.cip119 = self
-            .raw_conf
-            .cip119_transition_number
-            .unwrap_or(default_transition_time);
+        // params.transition_numbers.cip118 = self
+        //     .raw_conf
+        //     .cip118_transition_number
+        //     .unwrap_or(default_transition_time);
+        // params.transition_numbers.cip119 = self
+        //     .raw_conf
+        //     .cip119_transition_number
+        //     .unwrap_or(default_transition_time);
 
         //
         // 1559 hardfork (V2.4)
         //
         set_conf!(
             self.raw_conf.next_hardfork_transition_number.unwrap_or(default_transition_time);
-            params.transition_numbers => { cip131, cip132, cip137, cip144, cip145 }
+            params.transition_numbers => { cip137, cip144, cip145 }
         );
         // set_conf!(
         //     self.raw_conf.next_hardfork_transition_height.unwrap_or(default_transition_time);

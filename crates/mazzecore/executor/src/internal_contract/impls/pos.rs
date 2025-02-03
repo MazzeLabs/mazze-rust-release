@@ -166,7 +166,7 @@ pub fn register(
     let verified_bls_pubkey = match verify_bls_pubkey(
         bls_pubkey,
         bls_proof,
-        !context.spec.cip_sigma_fix,
+        false,
     ) {
         Err(e) => {
             internal_bail!("Crypto decoding error {:?}", e);

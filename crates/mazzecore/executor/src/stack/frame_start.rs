@@ -170,7 +170,6 @@ fn transfer_exec_balance_and_init_contract(
             &admin,
             val.saturating_add(prev_balance),
             storage_layout,
-            spec.cip107,
         )?;
     } else {
         // In contract creation, the `params.value` should never be

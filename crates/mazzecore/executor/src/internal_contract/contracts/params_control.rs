@@ -10,7 +10,7 @@ use mazze_vm_interpreter::GasPriceTier;
 use super::{super::impls::params_control::*, preludes::*};
 
 make_solidity_contract! {
-    pub struct ParamsControl(PARAMS_CONTROL_CONTRACT_ADDRESS, generate_fn_table, initialize: |params: &CommonParams| params.transition_numbers.cip94n, is_active: |spec: &Spec| spec.cip94);
+    pub struct ParamsControl(PARAMS_CONTROL_CONTRACT_ADDRESS, generate_fn_table, initialize: |_params: &CommonParams| 0, is_active: |_spec: &Spec| true);
 }
 fn generate_fn_table() -> SolFnTable {
     make_function_table!(
@@ -22,13 +22,13 @@ fn generate_fn_table() -> SolFnTable {
     )
 }
 group_impl_is_active!(
-    |spec: &Spec| spec.cip94,
+    |_spec: &Spec| true,
     CastVote,
     ReadVote,
     CurrentRound,
     TotalVotes
 );
-group_impl_is_active!(|spec: &Spec| spec.cip105, PosStakeForVotes,);
+group_impl_is_active!(|_spec: &Spec| true, PosStakeForVotes,);
 
 make_solidity_event! {
     pub struct VoteEvent("Vote(uint64,address,uint16,uint256[3])", indexed: (u64,Address,u16), non_indexed: [U256;3]);
@@ -85,11 +85,7 @@ impl SimpleExecutionTrait for CurrentRound {
         &self, _input: (), _params: &ActionParams,
         context: &mut InternalRefContext,
     ) -> vm::Result<u64> {
-        Ok(
-            (context.env.number - context.spec.cip94_activation_block_number)
-                / context.spec.params_dao_vote_period
-                + 1,
-        )
+        Ok(context.env.number + 1)
     }
 }
 

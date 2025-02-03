@@ -1261,14 +1261,7 @@ impl ConsensusExecutionHandler {
         // This is the total primary tokens issued in this epoch.
         let mut total_base_reward: U256 = 0.into();
 
-        let base_reward_per_block = if spec.cip94 {
-            U512::from(state.pow_base_reward())
-        } else {
-            self.compute_block_base_reward(
-                reward_info.past_block_count,
-                main_block.block_header.height(),
-            )
-        };
+        let base_reward_per_block = U512::from(state.pow_base_reward());
         debug!("base_reward: {}", base_reward_per_block);
 
         // Base reward and outlier penalties.

@@ -47,7 +47,7 @@ group_impl_is_active!(
     RemovePrivilegeByAdmin,
 );
 
-group_impl_is_active!(|spec: &Spec| spec.cip118, AvailableStoragePoints);
+group_impl_is_active!(|_spec: &Spec| true, AvailableStoragePoints);
 
 make_solidity_function! {
     struct SetSponsorForGas((Address, U256), "setSponsorForGas(address,uint256)");

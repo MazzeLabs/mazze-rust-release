@@ -174,7 +174,7 @@ impl<T: PreExecCheckConfTrait> PreExecCheckTrait for T {
         let mut static_context = context.callstack.in_reentrancy(spec)
             || params.call_type == CallType::StaticCall;
         // Add the lost constraint after CIP-132
-        static_context |= spec.cip132 && context.static_flag;
+        static_context |= context.static_flag;
 
         if Self::HAS_WRITE_OP && static_context {
             return Err(vm::Error::MutableCallInStaticContext);

@@ -204,7 +204,6 @@ pub fn set_sponsor_for_collateral(
             &contract_address,
             sponsor,
             &(sponsor_balance - collateral_for_storage),
-            spec.cip107,
         )?
     } else {
         context.tracer.trace_internal_transfer(
@@ -221,7 +220,6 @@ pub fn set_sponsor_for_collateral(
             &contract_address,
             sponsor,
             &(sponsor_balance + prev_sponsor_balance),
-            spec.cip107,
         )?
     };
     if !converted_storage_point.is_zero() {

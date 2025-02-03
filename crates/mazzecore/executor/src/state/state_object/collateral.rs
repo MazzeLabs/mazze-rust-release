@@ -156,7 +156,7 @@ impl State {
 /// Charges or refund storage collateral and update `total_storage_tokens`.
 fn settle_collateral_for_address(
     state: &mut State, addr: &Address, substate: &Substate,
-    tracer: &mut dyn TracerTrait, spec: &Spec, dry_run: bool,
+    tracer: &mut dyn TracerTrait, _spec: &Spec, dry_run: bool,
 ) -> DbResult<CollateralCheckResult> {
     let addr_with_space = addr.with_native_space();
     let (inc_collaterals, sub_collaterals) =
@@ -168,11 +168,7 @@ fn settle_collateral_for_address(
 
     let is_contract = state.is_contract_with_code(&addr_with_space)?;
 
-    // Initialize CIP-107
-    if spec.cip107
-        && addr.is_contract_address()
-        && (!sub.is_zero() || !inc.is_zero())
-    {
+    if addr.is_contract_address() && (!sub.is_zero() || !inc.is_zero()) {
         let (from_balance, from_collateral) = state.initialize_cip107(addr)?;
         tracer.trace_convert_storage_points(
             *addr,

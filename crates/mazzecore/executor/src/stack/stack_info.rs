@@ -62,19 +62,19 @@ impl CallStackInfo {
         self.address_counter.contains_key(key)
     }
 
-    pub fn in_reentrancy(&self, spec: &Spec) -> bool {
-        if spec.cip71 {
-            // After CIP-71, anti-reentrancy will closed.
-            false
-        } else {
-            // Consistent with old behaviour
-            // The old (unexpected) behaviour is equivalent to the top element
-            // is lost.
-            self.first_reentrancy_depth.map_or(false, |depth| {
-                (depth as isize)
-                    < self.call_stack_recipient_addresses.len() as isize - 1
-            })
-        }
+    pub fn in_reentrancy(&self, _spec: &Spec) -> bool {
+        false
+        // if spec.cip71 {
+        //     // After CIP-71, anti-reentrancy will closed.
+        // } else {
+        //     // Consistent with old behaviour
+        //     // The old (unexpected) behaviour is equivalent to the top element
+        //     // is lost.
+        //     self.first_reentrancy_depth.map_or(false, |depth| {
+        //         (depth as isize)
+        //             < self.call_stack_recipient_addresses.len() as isize - 1
+        //     })
+        // }
     }
 
     pub fn contract_in_creation(&self) -> Option<&AddressWithSpace> {

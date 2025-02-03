@@ -95,7 +95,7 @@ impl State {
 
     pub fn set_sponsor_for_collateral(
         &mut self, address: &Address, sponsor: &Address,
-        sponsor_balance: &U256, is_cip107: bool,
+        sponsor_balance: &U256
     ) -> DbResult<U256> {
         let sponsor_not_change = *sponsor
             == self.sponsor_for_collateral(address)?.unwrap_or_default();
@@ -103,11 +103,7 @@ impl State {
             *sponsor_balance == self.sponsor_balance_for_collateral(address)?;
         return_if!(sponsor_not_change && balance_not_change);
 
-        let prop = if is_cip107 {
-            self.storage_point_prop()?
-        } else {
-            U256::zero()
-        };
+        let prop = self.storage_point_prop()?;
 
         let converted_storage_points = self
             .write_native_account_lock(&address)?
@@ -205,16 +201,8 @@ impl State {
     }
 
     pub fn record_storage_and_whitelist_entries_release(
-        &mut self, address: &Address, substate: &mut Substate, cip131: bool,
+        &mut self, address: &Address, substate: &mut Substate,
     ) -> DbResult<()> {
-        if !cip131 {
-            storage_range_deletion_for_account(
-                self,
-                &SPONSOR_WHITELIST_CONTROL_CONTRACT_ADDRESS,
-                address.as_ref(),
-                substate,
-            )?;
-        }
         storage_range_deletion_for_account(self, address, &vec![], substate)?;
         Ok(())
     }

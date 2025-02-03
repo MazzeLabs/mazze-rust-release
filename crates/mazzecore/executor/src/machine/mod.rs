@@ -186,7 +186,7 @@ fn new_builtin_map(
         Builtin::new(
             Box::new(Blake2FPricer::new(1)),
             builtin_factory("blake2_f"),
-            params.transition_numbers.cip92,
+            0,
         ),
     );
     btree.insert(

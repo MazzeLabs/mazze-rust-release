@@ -70,14 +70,10 @@ impl_function_type!(Withdraw, "non_payable_write");
 
 impl UpfrontPaymentTrait for Withdraw {
     fn upfront_gas_payment(
-        &self, _input: &Self::Input, params: &ActionParams,
+        &self, _input: &Self::Input, _params: &ActionParams,
         context: &InternalRefContext,
     ) -> DbResult<U256> {
-        if context.spec.cip97 {
-            return Ok(U256::from(2 * context.spec.sload_gas));
-        }
-        let length = context.state.deposit_list_length(&params.sender)?;
-        Ok(U256::from(2 * context.spec.sstore_reset_gas) * U256::from(length))
+        Ok(U256::from(2 * context.spec.sload_gas))
     }
 }
 

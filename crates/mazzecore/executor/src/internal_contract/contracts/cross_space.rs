@@ -16,7 +16,7 @@ type Bytes = Vec<u8>;
 type Bytes20 = [u8; 20];
 
 make_solidity_contract! {
-    pub struct CrossSpaceCall(CROSS_SPACE_CONTRACT_ADDRESS, generate_fn_table, initialize: |params: &CommonParams| params.transition_numbers.cip90b, is_active: |_spec: &Spec| true);
+    pub struct CrossSpaceCall(CROSS_SPACE_CONTRACT_ADDRESS, generate_fn_table, initialize: |_params: &CommonParams| 0, is_active: |_spec: &Spec| true);
 }
 
 fn generate_fn_table() -> SolFnTable {
@@ -259,7 +259,6 @@ impl SimpleExecutionTrait for DeployEip1820 {
             /* admin */ &Address::zero(),
             /* balance */ U256::zero(),
             Some(STORAGE_LAYOUT_REGULAR_V0),
-            context.spec.cip107,
         )?;
         context.state.init_code(
             &address,

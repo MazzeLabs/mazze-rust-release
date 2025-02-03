@@ -87,7 +87,6 @@ impl State {
 
     pub fn deposit(
         &mut self, address: &Address, amount: &U256, current_block_number: u64,
-        cip_97: bool,
     ) -> DbResult<()> {
         return_if!(amount.is_zero());
 
@@ -101,14 +100,14 @@ impl State {
             *amount,
             acc_interest_rate,
             current_block_number,
-            cip_97,
+            true,
         );
         *self.global_stat.val::<TotalStaking>() += *amount;
         Ok(())
     }
 
     pub fn withdraw(
-        &mut self, address: &Address, amount: &U256, cip_97: bool,
+        &mut self, address: &Address, amount: &U256,
     ) -> DbResult<U256> {
         return_if!(amount.is_zero());
 
@@ -119,7 +118,7 @@ impl State {
                 &address.with_native_space(),
                 RequireFields::DepositList,
             )?
-            .withdraw(*amount, accumulated_interest_rate, cip_97);
+            .withdraw(*amount, accumulated_interest_rate, true);
 
         // the interest will be put in balance.
         self.add_total_issued(interest);

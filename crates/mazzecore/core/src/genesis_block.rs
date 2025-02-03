@@ -343,7 +343,7 @@ pub fn genesis_block(
                 )
                 .unwrap();
             state
-                .deposit(&node.address, &stake_balance, 0, false)
+                .deposit(&node.address, &stake_balance, 0)
                 .unwrap();
             let signed_tx = node
                 .register_tx

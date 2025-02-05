@@ -302,9 +302,8 @@ impl BlockHeader {
         }
 
         for b in &self.custom {
-            stream.append(b);
-            // TODO: validate if above line is correct, else use this
-            // stream.append_raw(b, 1);
+            // stream.append(b);
+            stream.append_raw(b, 1);
         }
     }
 
@@ -339,7 +338,8 @@ impl BlockHeader {
             stream.append(&self.base_price);
         }
         for b in &self.custom {
-            stream.append(b);
+            // stream.append(b);
+            stream.append_raw(b, 1);
         }
     }
 
@@ -378,7 +378,8 @@ impl BlockHeader {
         }
 
         for b in &self.custom {
-            stream.append(b);
+            // stream.append(b);
+            stream.append_raw(b, 1);
         }
     }
 
@@ -410,7 +411,8 @@ impl BlockHeader {
             + rlp_part.base_price.is_some() as usize)
             ..r.item_count()?
         {
-            rlp_part.custom.push(r.val_at(i)?);
+            // rlp_part.custom.push(r.val_at(i)?);
+            rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
         }
 
         let mut header = BlockHeader {
@@ -686,7 +688,8 @@ impl Decodable for BlockHeader {
             + rlp_part.base_price.is_some() as usize)
             ..r.item_count()?
         {
-            rlp_part.custom.push(r.val_at(i)?);
+            // rlp_part.custom.push(r.val_at(i)?);
+            rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
         }
 
         let mut header = BlockHeader {

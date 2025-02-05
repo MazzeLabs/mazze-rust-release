@@ -1018,7 +1018,7 @@ impl TransactionPool {
             // The parent block must exists.
             .expect(&concat!(file!(), ":", line!(), ":", column!()));
         let parent_block_gas_limit = *parent_block.gas_limit()
-            * if 0 == pack_height {
+            * if 1 == pack_height {
                 ELASTICITY_MULTIPLIER
             } else {
                 1
@@ -1046,7 +1046,7 @@ impl TransactionPool {
         let (transactions_from_pool, maybe_base_price) = if false {
             (vec![], None)
         } else {
-            let parent_base_price = if pack_height == 0 {
+            let parent_base_price = if pack_height <= 1 {
                 params.init_base_price()
             } else {
                 parent_block.base_price().unwrap()

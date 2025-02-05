@@ -574,7 +574,7 @@ impl VerificationConfig {
             )));
         }
 
-        let parent_base_price = if block_height == 0 {
+        let parent_base_price = if block_height <= 1 {
             params.init_base_price()
         } else {
             parent.base_price().unwrap()

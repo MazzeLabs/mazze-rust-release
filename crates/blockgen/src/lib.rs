@@ -341,7 +341,7 @@ impl BlockGenerator {
             );
             (txs, None)
         } else {
-            let parent_base_price = if 0 == pack_height {
+            let parent_base_price = if 1 == pack_height {
                 params.init_base_price()
             } else {
                 parent_block.base_price().unwrap()

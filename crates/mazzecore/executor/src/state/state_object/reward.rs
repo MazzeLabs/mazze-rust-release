@@ -1,6 +1,9 @@
 use super::State;
 use mazze_parameters::{
-    consensus::ONE_MAZZE_IN_MAZZY, consensus_internal::CIP137_BASEFEE_PROP_INIT,
+    consensus::{ONE_MAZZE_IN_MAZZY, ONE_UMAZZE_IN_MAZZY},
+    consensus_internal::{
+        CIP137_BASEFEE_PROP_INIT, INITIAL_BASE_MINING_REWARD_IN_UMAZZE,
+    },
 };
 use mazze_types::U256;
 
@@ -31,6 +34,11 @@ impl State {
 
     pub fn pow_base_reward(&self) -> U256 {
         let base_reward = self.global_stat.get::<PowBaseReward>();
+        if base_reward.is_zero() {
+            // if no base reward, default to initial
+            return U256::from(INITIAL_BASE_MINING_REWARD_IN_UMAZZE)
+                * U256::from(ONE_UMAZZE_IN_MAZZY);
+        }
         assert!(!base_reward.is_zero());
         base_reward
     }

@@ -19,15 +19,15 @@
 // along with Parity Ethereum.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::crypto::Crypto;
-use account::Version;
-use crypto;
-use json;
-use mazze_types::address_util::AddressUtil;
-use mazzekey::{
+use crate::account::Version;
+use crate::crypto;
+use crate::json;
+use crate::mazze_types::address_util::AddressUtil;
+use crate::mazzekey::{
     self, crypto::ecdh::agree, sign, Address, KeyPair, Message, Password,
     Public, Secret, Signature,
 };
-use Error;
+use crate::Error;
 
 /// Account representation.
 #[derive(Debug, PartialEq, Clone)]

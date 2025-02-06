@@ -19,8 +19,8 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 
 use super::KeyDirectory;
-use Error;
-use SafeAccount;
+use crate::Error;
+use crate::SafeAccount;
 
 /// Accounts in-memory storage.
 #[derive(Default)]

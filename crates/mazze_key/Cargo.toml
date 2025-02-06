@@ -3,6 +3,7 @@ description = "Mazze Keys Generator"
 name = "mazzekey"
 version = "0.3.0"
 authors = ["Mazze Foundation"]
+edition = "2021"
 
 [dependencies]
 mazze-types = { path = "../mazze_types" }

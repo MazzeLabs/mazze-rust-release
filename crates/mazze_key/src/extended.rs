@@ -18,8 +18,8 @@
 
 pub use self::derivation::Error as DerivationError;
 use mazze_types::H256;
-use secret::Secret;
-use Public;
+use crate::secret::Secret;
+use crate::Public;
 
 /// Represents label that can be stored as a part of key derivation
 pub trait Label {
@@ -224,13 +224,13 @@ impl ExtendedKeyPair {
 // https://github.com/bitcoin/bips/blob/master/bip-0032.mediawiki
 mod derivation {
     use super::{Derivation, Label};
-    use keccak;
-    use math::curve_order;
+    use crate::keccak;
+    use crate::math::curve_order;
     use mazze_types::{BigEndianHash, H256, H512, U256, U512};
     use parity_crypto::hmac;
     use secp256k1::key::{PublicKey, SecretKey};
     use std::convert::TryInto;
-    use SECP256K1;
+    use crate::SECP256K1;
 
     #[derive(Debug)]
     pub enum Error {
@@ -432,7 +432,7 @@ mod tests {
         derivation, Derivation, ExtendedKeyPair, ExtendedPublic, ExtendedSecret,
     };
     use mazze_types::{H128, H256, H512};
-    use secret::Secret;
+    use crate::secret::Secret;
     use std::str::FromStr;
 
     fn master_chain_basic() -> (H256, H256) {

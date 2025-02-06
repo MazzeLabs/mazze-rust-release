@@ -23,3 +23,7 @@ mazze-executor = { path = "../executor" }
 typemap = { package = "typemap-ors", version = "1.0"}
 mazze-vm-interpreter = { path = "../vm-interpreter" }
 primitives = { path = "../../primitives" }
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+[features]
+serde = ["dep:serde"]

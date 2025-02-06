@@ -4,13 +4,13 @@ use std::{
     usize,
 };
 
-use util::*;
+use crate::util::*;
 
-use AtomicBitSet;
-use BitIter;
-use BitSet;
-use BitSetLike;
-use DrainableBitSet;
+use crate::AtomicBitSet;
+use crate::BitIter;
+use crate::BitSet;
+use crate::BitSetLike;
+use crate::DrainableBitSet;
 
 /// `BitSetAnd` takes two [`BitSetLike`] items, and merges the masks
 /// returning a new virtual set, which represents an intersection of the
@@ -359,10 +359,10 @@ iterator!(AtomicBitSet);
 
 #[cfg(test)]
 mod tests {
-    use BitSet;
-    use BitSetLike;
-    use BitSetXor;
-    use Index;
+    use crate::BitSet;
+    use crate::BitSetLike;
+    use crate::BitSetXor;
+    use crate::Index;
 
     #[test]
     fn operators() {

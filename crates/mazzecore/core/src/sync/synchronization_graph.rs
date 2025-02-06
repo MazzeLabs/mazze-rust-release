@@ -2119,9 +2119,9 @@ impl SynchronizationGraph {
         let best_epoch_height = best_info.best_epoch_number;
 
         // TODO: move this to config
-        let RANDOMX_EPOCH_SIZE: u64 = 2048;
+        let randomx_epoch_size: u64 = 2048;
 
-        best_epoch_height / RANDOMX_EPOCH_SIZE
+        best_epoch_height / randomx_epoch_size
     }
 
     pub fn get_randomx_epoch_transition_height(&self, epoch: u64) -> u64 {
@@ -2130,9 +2130,9 @@ impl SynchronizationGraph {
         }
 
         // TODO: move this to config
-        let RANDOMX_EPOCH_SIZE: u64 = 2048;
+        let randomx_epoch_size: u64 = 2048;
 
-        epoch * RANDOMX_EPOCH_SIZE
+        epoch * randomx_epoch_size
     }
 
     pub fn get_randomx_epoch_seed_hash(&self, epoch: u64) -> H256 {
@@ -2141,10 +2141,10 @@ impl SynchronizationGraph {
         }
 
         // TODO: move this to config
-        let SEED_OFFSET: u64 = 64;
+        let seed_offset: u64 = 64;
 
         let transition_epoch = self.get_randomx_epoch_transition_height(epoch);
-        let seed_epoch = transition_epoch - SEED_OFFSET;
+        let seed_epoch = transition_epoch - seed_offset;
 
         self.consensus
             .get_hash_from_epoch_number(EpochNumber::Number(seed_epoch.into()))

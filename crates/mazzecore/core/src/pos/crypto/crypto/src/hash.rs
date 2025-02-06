@@ -200,6 +200,7 @@ impl HashValue {
         HashValue::from_keccak(sha3)
     }
 
+    /// Creates a hash from an iterator of byte slices. Test only.
     #[cfg(test)]
     pub fn from_iter_sha3<'a, I>(buffers: I) -> Self
     where

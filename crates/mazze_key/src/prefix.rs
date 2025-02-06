@@ -45,8 +45,8 @@ impl Generator for Prefix {
 
 #[cfg(test)]
 mod tests {
-    use Generator;
-    use Prefix;
+    use crate::Generator;
+    use crate::Prefix;
 
     #[test]
     fn prefix_generator() {

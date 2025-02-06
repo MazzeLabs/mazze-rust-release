@@ -166,12 +166,12 @@ trap cleanup EXIT
 # Process each target
 for target in "${TARGETS[@]}"; do
     echo "Processing target: $target"
-   if build_binaries "$target"; then
+#    if build_binaries "$target"; then
         build_docker_images "$target"
         push_images "$target"
-   else
-       echo "Skipping Docker build for $target due to binary build failure"
-   fi
+#    else
+#        echo "Skipping Docker build for $target due to binary build failure"
+#    fi
 done
 
 echo "Build process complete!"echo "Available images:"

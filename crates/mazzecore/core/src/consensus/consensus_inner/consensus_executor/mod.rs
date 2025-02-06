@@ -191,7 +191,7 @@ impl ConsensusExecutor {
         consensus_inner: Arc<RwLock<ConsensusGraphInner>>,
         config: ConsensusExecutionConfiguration,
         verification_config: VerificationConfig, bench_mode: bool,
-        pos_verifier: Arc<PosVerifier>,
+        // pos_verifier: Arc<PosVerifier>,
     ) -> Arc<Self> {
         let machine = tx_pool.machine();
         let handler = Arc::new(ConsensusExecutionHandler::new(
@@ -200,7 +200,7 @@ impl ConsensusExecutor {
             config,
             verification_config,
             machine,
-            pos_verifier,
+            // pos_verifier,
         ));
         let (sender, receiver) = channel();
 
@@ -828,7 +828,7 @@ pub struct ConsensusExecutionHandler {
     config: ConsensusExecutionConfiguration,
     verification_config: VerificationConfig,
     machine: Arc<Machine>,
-    pos_verifier: Arc<PosVerifier>,
+    // pos_verifier: Arc<PosVerifier>,
     execution_state_prefetcher: Option<Arc<ExecutionStatePrefetcher>>,
 }
 
@@ -837,7 +837,7 @@ impl ConsensusExecutionHandler {
         tx_pool: SharedTransactionPool, data_man: Arc<BlockDataManager>,
         config: ConsensusExecutionConfiguration,
         verification_config: VerificationConfig, machine: Arc<Machine>,
-        pos_verifier: Arc<PosVerifier>,
+        // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         ConsensusExecutionHandler {
             tx_pool,
@@ -845,7 +845,7 @@ impl ConsensusExecutionHandler {
             config,
             verification_config,
             machine,
-            pos_verifier,
+            // pos_verifier,
             execution_state_prefetcher: if DEFAULT_EXECUTION_PREFETCH_THREADS
                 > 0
             {
@@ -968,7 +968,7 @@ impl ConsensusExecutionHandler {
             on_local_main,
             self.config.executive_trace,
             reward_execution_info,
-            self.pos_verifier.as_ref(),
+            // self.pos_verifier.as_ref(),
             evm_chain_id,
         )
     }
@@ -1157,51 +1157,51 @@ impl ConsensusExecutionHandler {
     ) -> DbResult<()> {
         // TODO(peilun): Specify if we unlock before or after executing the
         // transactions.
-        let maybe_parent_pos_ref = self
-            .data_man
-            .block_header_by_hash(&main_block.block_header.parent_hash()) // `None` only for genesis.
-            .and_then(|parent| parent.pos_reference().clone());
-        if self
-            .pos_verifier
-            .is_enabled_at_height(main_block.block_header.height())
-            && maybe_parent_pos_ref.is_some()
-            && *main_block.block_header.pos_reference() != maybe_parent_pos_ref
-        {
-            let current_pos_ref = main_block
-                .block_header
-                .pos_reference()
-                .as_ref()
-                .expect("checked before sync graph insertion");
-            let parent_pos_ref = &maybe_parent_pos_ref.expect("checked");
-            // The pos_reference is continuous, so after seeing a new
-            // pos_reference, we only need to process the new
-            // unlock_txs in it.
-            for (unlock_node_id, votes) in self
-                .pos_verifier
-                .get_unlock_nodes(current_pos_ref, parent_pos_ref)
-            {
-                debug!("unlock node: {:?} {}", unlock_node_id, votes);
-                update_pos_status(state, unlock_node_id, votes)?;
-            }
-            if let Some((pos_epoch, reward_event)) = self
-                .pos_verifier
-                .get_reward_distribution_event(current_pos_ref, parent_pos_ref)
-                .as_ref()
-                .and_then(|x| x.first())
-            {
-                debug!("distribute_pos_interest: {:?}", reward_event);
-                let account_rewards: Vec<(H160, H256, U256)> =
-                    distribute_pos_interest(
-                        state,
-                        reward_event.rewards(),
-                        current_block_number,
-                    )?;
-                self.data_man.insert_pos_reward(
-                    *pos_epoch,
-                    &PosRewardInfo::new(account_rewards, main_block.hash()),
-                )
-            }
-        }
+        // let maybe_parent_pos_ref = self
+        //     .data_man
+        //     .block_header_by_hash(&main_block.block_header.parent_hash()) // `None` only for genesis.
+        //     .and_then(|parent| parent.pos_reference().clone());
+        // if self
+        //     .pos_verifier
+        //     .is_enabled_at_height(main_block.block_header.height())
+        //     && maybe_parent_pos_ref.is_some()
+        //     && *main_block.block_header.pos_reference() != maybe_parent_pos_ref
+        // {
+        //     let current_pos_ref = main_block
+        //         .block_header
+        //         .pos_reference()
+        //         .as_ref()
+        //         .expect("checked before sync graph insertion");
+        //     let parent_pos_ref = &maybe_parent_pos_ref.expect("checked");
+        //     // The pos_reference is continuous, so after seeing a new
+        //     // pos_reference, we only need to process the new
+        //     // unlock_txs in it.
+        //     for (unlock_node_id, votes) in self
+        //         .pos_verifier
+        //         .get_unlock_nodes(current_pos_ref, parent_pos_ref)
+        //     {
+        //         debug!("unlock node: {:?} {}", unlock_node_id, votes);
+        //         update_pos_status(state, unlock_node_id, votes)?;
+        //     }
+        //     if let Some((pos_epoch, reward_event)) = self
+        //         .pos_verifier
+        //         .get_reward_distribution_event(current_pos_ref, parent_pos_ref)
+        //         .as_ref()
+        //         .and_then(|x| x.first())
+        //     {
+        //         debug!("distribute_pos_interest: {:?}", reward_event);
+        //         let account_rewards: Vec<(H160, H256, U256)> =
+        //             distribute_pos_interest(
+        //                 state,
+        //                 reward_event.rewards(),
+        //                 current_block_number,
+        //             )?;
+        //         self.data_man.insert_pos_reward(
+        //             *pos_epoch,
+        //             &PosRewardInfo::new(account_rewards, main_block.hash()),
+        //         )
+        //     }
+        // }
         Ok(())
     }
 
@@ -1588,12 +1588,12 @@ impl ConsensusExecutionHandler {
         let block_height = best_block_header.height() + 1;
 
         let pos_id = best_block_header.pos_reference().as_ref();
-        let pos_view_number =
-            pos_id.and_then(|id| self.pos_verifier.get_pos_view(id));
-        let main_decision_epoch = pos_id
-            .and_then(|id| self.pos_verifier.get_main_decision(id))
-            .and_then(|hash| self.data_man.block_header_by_hash(&hash))
-            .map(|header| header.height());
+        // let pos_view_number =
+        //     pos_id.and_then(|id| self.pos_verifier.get_pos_view(id));
+        // let main_decision_epoch = pos_id
+        //     .and_then(|id| self.pos_verifier.get_main_decision(id))
+        //     .and_then(|hash| self.data_man.block_header_by_hash(&hash))
+        //     .map(|header| header.height());
 
         let start_block_number = match self.data_man.get_epoch_execution_context(epoch_id) {
             Some(v) => v.start_block_number + epoch_size as u64,
@@ -1666,8 +1666,8 @@ impl ConsensusExecutionHandler {
             last_hash: epoch_id.clone(),
             gas_limit: tx.gas().clone(),
             epoch_height: block_height,
-            pos_view: pos_view_number,
-            finalized_epoch: main_decision_epoch,
+            pos_view: Some(0), // TODO: safely drop `pos_view`
+            finalized_epoch: Some(0), // TODO: safely drop/implement `finalized_epoch`, check routine
             transaction_epoch_bound: self
                 .verification_config
                 .transaction_epoch_bound,

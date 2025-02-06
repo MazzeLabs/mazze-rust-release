@@ -277,7 +277,7 @@ impl ConsensusGraph {
             execution_conf,
             verification_config,
             conf.bench_mode,
-            pos_verifier.clone(),
+            // pos_verifier.clone(),
         );
         let confirmation_meter = ConfirmationMeter::new();
 

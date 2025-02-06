@@ -1227,7 +1227,8 @@ impl BlockDataManager {
         &self, epoch_hash: &H256, epoch_block_hashes: &Vec<H256>,
         on_local_main: bool, update_trace: bool,
         reward_execution_info: &Option<RewardExecutionInfo>,
-        pos_verifier: &PosVerifier, evm_chain_id: u32,
+        // pos_verifier: &PosVerifier,
+        evm_chain_id: u32,
     ) -> bool {
         if !self.epoch_executed(epoch_hash) {
             return false;
@@ -1347,21 +1348,21 @@ impl BlockDataManager {
                 }
             }
             let me_height = self.block_height_by_hash(epoch_hash).unwrap();
-            if pos_verifier.pos_option().is_some() && me_height != 0 {
-                trace!(
-                    "staking events update: height={}, new={}",
-                    me_height,
-                    epoch_hash,
-                );
-                if let Err(e) = pos_verifier.consensus_db().put_staking_events(
-                    me_height,
-                    *epoch_hash,
-                    epoch_staking_events,
-                ) {
-                    error!("epoch_executed err={:?}", e);
-                    return false;
-                }
-            }
+            // if pos_verifier.pos_option().is_some() && me_height != 0 {
+            //     trace!(
+            //         "staking events update: height={}, new={}",
+            //         me_height,
+            //         epoch_hash,
+            //     );
+            //     if let Err(e) = pos_verifier.consensus_db().put_staking_events(
+            //         me_height,
+            //         *epoch_hash,
+            //         epoch_staking_events,
+            //     ) {
+            //         error!("epoch_executed err={:?}", e);
+            //         return false;
+            //     }
+            // }
         }
         true
     }

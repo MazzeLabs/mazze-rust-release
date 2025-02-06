@@ -386,16 +386,17 @@ fn setup_rpc_apis(
                 );
             }
             Api::Pos => {
-                let pos = PosHandler::new(
-                    common.pos_handler.clone(),
-                    rpc.consensus.get_data_manager().clone(),
-                    *rpc.sync.network.get_network_type(),
-                    rpc.consensus.clone(),
-                )
-                .to_delegate();
-                let pos_interceptor =
-                    PoSInterceptor::new(common.pos_handler.clone());
-                handler.extend_with(RpcProxy::new(pos, pos_interceptor));
+                todo!("pos_verifier is being dropped");
+                // let pos = PosHandler::new(
+                //     common.pos_handler.clone(),
+                //     rpc.consensus.get_data_manager().clone(),
+                //     *rpc.sync.network.get_network_type(),
+                //     rpc.consensus.clone(),
+                // )
+                // .to_delegate();
+                // let pos_interceptor =
+                //     PoSInterceptor::new(common.pos_handler.clone());
+                // handler.extend_with(RpcProxy::new(pos, pos_interceptor));
             }
         }
     }

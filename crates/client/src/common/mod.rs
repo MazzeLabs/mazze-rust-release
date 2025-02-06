@@ -494,7 +494,7 @@ pub fn initialize_common_modules(
         network.clone(),
         txpool.clone(),
         accounts.clone(),
-        pos_verifier.clone(),
+        // pos_verifier.clone(),
     ));
 
     let runtime = Runtime::with_default_thread_count();

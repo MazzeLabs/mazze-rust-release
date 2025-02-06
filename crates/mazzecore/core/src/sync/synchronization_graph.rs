@@ -190,7 +190,7 @@ pub struct SynchronizationGraphInner {
     /// `CatchUpFillBlockBodyPhase`.
     pub block_to_fill_set: HashSet<H256>,
     machine: Arc<Machine>,
-    pub pos_verifier: Arc<PosVerifier>,
+    // pub pos_verifier: Arc<PosVerifier>,
 }
 
 impl MallocSizeOf for SynchronizationGraphInner {
@@ -213,7 +213,7 @@ impl SynchronizationGraphInner {
         genesis_header: Arc<BlockHeader>, pow_config: ProofOfWorkConfig,
         pow: Arc<PowComputer>, config: SyncGraphConfig,
         data_man: Arc<BlockDataManager>, machine: Arc<Machine>,
-        pos_verifier: Arc<PosVerifier>,
+        // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         let mut inner = SynchronizationGraphInner {
             arena: Slab::new(),
@@ -231,7 +231,7 @@ impl SynchronizationGraphInner {
             block_to_fill_set: Default::default(),
             locked_for_catchup: false,
             machine,
-            pos_verifier,
+            // pos_verifier,
         };
         let genesis_hash = genesis_header.hash();
         let genesis_block_index = inner.insert(genesis_header);
@@ -575,26 +575,26 @@ impl SynchronizationGraphInner {
             }
         }
 
-        if !self.is_pos_reference_graph_ready(
-            index,
-            genesis_seq_num,
-            minimal_status,
-        ) {
-            debug!(
-                "Block {:?} not ready for its pos_reference: {:?}",
-                self.arena[index].block_header.hash(),
-                self.pos_verifier.get_main_decision(
-                    self.arena[index]
-                        .block_header
-                        .pos_reference()
-                        .as_ref()
-                        .unwrap()
-                )
-            );
-            // All its future will remain not ready.
-            self.pos_not_ready_blocks_frontier.insert(index);
-            return false;
-        }
+        // if !self.is_pos_reference_graph_ready(
+        //     index,
+        //     genesis_seq_num,
+        //     minimal_status,
+        // ) {
+        //     debug!(
+        //         "Block {:?} not ready for its pos_reference: {:?}",
+        //         self.arena[index].block_header.hash(),
+        //         self.pos_verifier.get_main_decision(
+        //             self.arena[index]
+        //                 .block_header
+        //                 .pos_reference()
+        //                 .as_ref()
+        //                 .unwrap()
+        //         )
+        //     );
+        //     // All its future will remain not ready.
+        //     self.pos_not_ready_blocks_frontier.insert(index);
+        //     return false;
+        // }
 
         // parent and referees are all header graph ready.
         true
@@ -612,31 +612,33 @@ impl SynchronizationGraphInner {
     fn is_pos_reference_graph_ready(
         &self, index: usize, genesis_seq_num: u64, minimal_status: u8,
     ) -> bool {
+        false
         // Check if the pos reference is committed.
-        match self.arena[index].block_header.pos_reference() {
-            // TODO(lpl): Should we check if the pos reference will never be
-            // committed?
-            Some(pos_reference) => {
-                match self.pos_verifier.get_main_decision(pos_reference) {
-                    // The pos reference has not been committed.
-                    None => false,
-                    Some(main_decision) => {
-                        // Check if this main_decision is graph_ready.
-                        match self.hash_to_arena_indices.get(&main_decision) {
-                            None => self.is_graph_ready_in_db(
-                                &main_decision,
-                                genesis_seq_num,
-                            ),
-                            Some(index) => {
-                                self.arena[*index].graph_status
-                                    >= minimal_status
-                            }
-                        }
-                    }
-                }
-            }
-            None => true,
-        }
+
+        // match self.arena[index].block_header.pos_reference() {
+        //     // TODO(lpl): Should we check if the pos reference will never be
+        //     // committed?
+        //     Some(pos_reference) => {
+        //         match self.pos_verifier.get_main_decision(pos_reference) {
+        //             // The pos reference has not been committed.
+        //             None => false,
+        //             Some(main_decision) => {
+        //                 // Check if this main_decision is graph_ready.
+        //                 match self.hash_to_arena_indices.get(&main_decision) {
+        //                     None => self.is_graph_ready_in_db(
+        //                         &main_decision,
+        //                         genesis_seq_num,
+        //                     ),
+        //                     Some(index) => {
+        //                         self.arena[*index].graph_status
+        //                             >= minimal_status
+        //                     }
+        //                 }
+        //             }
+        //         }
+        //     }
+        //     None => true,
+        // }
     }
 
     // Get parent (height, timestamp, gas_limit, difficulty,
@@ -847,22 +849,23 @@ impl SynchronizationGraphInner {
             }
         }
 
-        if let Some(pos_reference) =
-            self.arena[index].block_header.pos_reference()
-        {
-            let mut pred_pos_ref_list = Vec::new();
-            for maybe_pos_ref in predecessor_pos_references {
-                if let Some(pos_ref) = maybe_pos_ref {
-                    pred_pos_ref_list.push(pos_ref);
-                }
-            }
-            if !self
-                .pos_verifier
-                .verify_against_predecessors(pos_reference, &pred_pos_ref_list)
-            {
-                bail!(BlockError::InvalidPosReference);
-            }
-        }
+        // TODO: investigate the need of "verify_against_predecessors"
+        // if let Some(pos_reference) =
+        //     self.arena[index].block_header.pos_reference()
+        // {
+        //     let mut pred_pos_ref_list = Vec::new();
+        //     for maybe_pos_ref in predecessor_pos_references {
+        //         if let Some(pos_ref) = maybe_pos_ref {
+        //             pred_pos_ref_list.push(pos_ref);
+        //         }
+        //     }
+        //     if !self
+        //         .pos_verifier
+        //         .verify_against_predecessors(pos_reference, &pred_pos_ref_list)
+        //     {
+        //         bail!(BlockError::InvalidPosReference);
+        //     }
+        // }
 
         Ok(())
     }
@@ -1044,7 +1047,7 @@ impl SynchronizationGraph {
         verification_config: VerificationConfig, pow_config: ProofOfWorkConfig,
         pow: Arc<PowComputer>, sync_config: SyncGraphConfig,
         notifications: Arc<Notifications>, machine: Arc<Machine>,
-        pos_verifier: Arc<PosVerifier>,
+        // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         let data_man = consensus.get_data_manager().clone();
         let genesis_hash = data_man.get_cur_consensus_era_genesis_hash();
@@ -1064,7 +1067,7 @@ impl SynchronizationGraph {
                 sync_config,
                 data_man.clone(),
                 machine.clone(),
-                pos_verifier.clone(),
+                // pos_verifier.clone(),
             ),
         ));
         let sync_graph = SynchronizationGraph {
@@ -1142,12 +1145,12 @@ impl SynchronizationGraph {
                                         cnt += 1;
                                     }
                                 }
-                                if let Some(main_decision) = header.pos_reference().as_ref().and_then(|pos_reference| pos_verifier.get_main_decision(pos_reference)) {
-                                    if let Some(v) = reverse_map.get_mut(&main_decision) {
-                                        v.push(hash.clone());
-                                        cnt += 1;
-                                    }
-                                }
+                                // if let Some(main_decision) = header.pos_reference().as_ref().and_then(|pos_reference| pos_verifier.get_main_decision(pos_reference)) {
+                                //     if let Some(v) = reverse_map.get_mut(&main_decision) {
+                                //         v.push(hash.clone());
+                                //         cnt += 1;
+                                //     }
+                                // }
                                 reverse_map.insert(hash.clone(), Vec::new());
                                 if cnt == 0 {
                                     let epoch_number = consensus.get_block_epoch_number(parent_hash).unwrap_or(0);

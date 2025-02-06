@@ -449,7 +449,7 @@ pub fn initialize_common_modules(
         conf.execution_config(),
         verification_config.clone(),
         node_type,
-        pos_verifier.clone(),
+        // pos_verifier.clone(),
     ));
 
     // for terminal in data_man
@@ -474,7 +474,7 @@ pub fn initialize_common_modules(
         sync_config,
         notifications.clone(),
         machine.clone(),
-        pos_verifier.clone(),
+        // pos_verifier.clone(),
     ));
     let refresh_time =
         Duration::from_millis(conf.raw_conf.account_provider_refresh_time_ms);

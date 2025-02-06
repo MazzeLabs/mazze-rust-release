@@ -411,27 +411,27 @@ impl ConsensusGraph {
         blame_info: &mut StateBlameInfo, pos_reference: Option<PosBlockId>,
     ) {
         let correct_parent_hash = {
-            if let Some(pos_ref) = &pos_reference {
-                loop {
-                    let inner = self.inner.read();
-                    let main_decision = inner
-                        .pos_verifier
-                        .get_main_decision(pos_ref)
-                        .expect("pos ref committed");
-                    if inner.hash_to_arena_indices.contains_key(&main_decision)
-                        || inner.main_block_processed(&main_decision)
-                    {
-                        // If this pos ref is processed in catching-up, its
-                        // main decision may have not been processed
-                        break;
-                    } else {
-                        // Wait without holding consensus inner lock.
-                        drop(inner);
-                        warn!("Wait for PoW to catch up with PoS");
-                        sleep(Duration::from_secs(1));
-                    }
-                }
-            }
+            // if let Some(pos_ref) = &pos_reference {
+            //     loop {
+            //         let inner = self.inner.read();
+            //         let main_decision = inner
+            //             .pos_verifier
+            //             .get_main_decision(pos_ref)
+            //             .expect("pos ref committed");
+            //         if inner.hash_to_arena_indices.contains_key(&main_decision)
+            //             || inner.main_block_processed(&main_decision)
+            //         {
+            //             // If this pos ref is processed in catching-up, its
+            //             // main decision may have not been processed
+            //             break;
+            //         } else {
+            //             // Wait without holding consensus inner lock.
+            //             drop(inner);
+            //             warn!("Wait for PoW to catch up with PoS");
+            //             sleep(Duration::from_secs(1));
+            //         }
+            //     }
+            // }
             // recompute `blame_info` needs locking `self.inner`, so we limit
             // the lock scope here.
             let mut inner = self.inner.write();

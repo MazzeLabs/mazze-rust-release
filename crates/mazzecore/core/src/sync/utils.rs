@@ -187,21 +187,21 @@ pub fn initialize_synchronization_graph_with_data_manager(
     let mut params = CommonParams::default();
     params.transition_heights.cip1559 = u64::MAX;
     let machine = Arc::new(new_machine_with_builtin(params, vm));
-    let mut rng = StdRng::from_seed([0u8; 32]);
-    let pos_verifier = Arc::new(PosVerifier::new(
-        None,
-        // These configurations will not be used.
-        PosConfiguration {
-            bls_key: ConfigKey::new(ConsensusPrivateKey::generate(&mut rng)),
-            vrf_key: ConfigKey::new(ConsensusVRFPrivateKey::generate(&mut rng)),
-            diem_conf_path: Default::default(),
-            protocol_conf: Default::default(),
-            pos_initial_nodes_path: "".to_string(),
-            vrf_proposal_threshold: Default::default(),
-            pos_state_config: Default::default(),
-        },
-        u64::MAX,
-    ));
+    // let mut rng = StdRng::from_seed([0u8; 32]);
+    // let pos_verifier = Arc::new(PosVerifier::new(
+    //     None,
+    //     // These configurations will not be used.
+    //     PosConfiguration {
+    //         bls_key: ConfigKey::new(ConsensusPrivateKey::generate(&mut rng)),
+    //         vrf_key: ConfigKey::new(ConsensusVRFPrivateKey::generate(&mut rng)),
+    //         diem_conf_path: Default::default(),
+    //         protocol_conf: Default::default(),
+    //         pos_initial_nodes_path: "".to_string(),
+    //         vrf_proposal_threshold: Default::default(),
+    //         pos_state_config: Default::default(),
+    //     },
+    //     u64::MAX,
+    // ));
 
     let verification_config = VerificationConfig::new(
         true, /* test_mode */
@@ -290,7 +290,7 @@ pub fn initialize_synchronization_graph_with_data_manager(
         sync_config,
         notifications,
         machine,
-        pos_verifier.clone(),
+        // pos_verifier.clone(),
     ));
 
     (sync, consensus)

@@ -39,7 +39,7 @@ pub struct ConsensusNewBlockHandler {
     txpool: SharedTransactionPool,
     data_man: Arc<BlockDataManager>,
     executor: Arc<ConsensusExecutor>,
-    pos_verifier: Arc<PosVerifier>,
+    // pos_verifier: Arc<PosVerifier>,
     statistics: SharedStatistics,
 
     /// Channel used to send epochs to PubSub
@@ -61,14 +61,14 @@ impl ConsensusNewBlockHandler {
         conf: ConsensusConfig, txpool: SharedTransactionPool,
         data_man: Arc<BlockDataManager>, executor: Arc<ConsensusExecutor>,
         statistics: SharedStatistics, notifications: Arc<Notifications>,
-        node_type: NodeType, pos_verifier: Arc<PosVerifier>,
+        node_type: NodeType, // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         let epochs_sender = notifications.epochs_ordered.clone();
         let blame_verifier =
             Mutex::new(BlameVerifier::new(data_man.clone(), notifications));
 
         Self {
-            pos_verifier,
+            // pos_verifier,
             conf,
             txpool,
             data_man,

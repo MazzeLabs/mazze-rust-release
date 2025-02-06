@@ -295,7 +295,7 @@ impl ConsensusGraph {
                 statistics,
                 notifications,
                 node_type,
-                pos_verifier,
+                // pos_verifier,
             ),
             confirmation_meter,
             best_info: RwLock::new(Arc::new(Default::default())),
@@ -2488,7 +2488,7 @@ impl ConsensusGraphTrait for ConsensusGraph {
         let new_consensus_inner = ConsensusGraphInner::with_era_genesis(
             old_consensus_inner.pow_config.clone(),
             old_consensus_inner.pow.clone(),
-            old_consensus_inner.pos_verifier.clone(),
+            // old_consensus_inner.pos_verifier.clone(),
             self.data_man.clone(),
             old_consensus_inner.inner_conf.clone(),
             &cur_era_genesis_hash,

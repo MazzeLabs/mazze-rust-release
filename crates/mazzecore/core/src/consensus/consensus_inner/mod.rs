@@ -447,7 +447,7 @@ impl Default for ConsensusGraphMainData {
 pub struct ConsensusGraphInner {
     /// data_man is the handle to access raw block data
     pub data_man: Arc<BlockDataManager>,
-    pub pos_verifier: Arc<PosVerifier>,
+    // pub pos_verifier: Arc<PosVerifier>,
     pub inner_conf: ConsensusInnerConfig,
     pub pow_config: ProofOfWorkConfig,
     pub pow: Arc<PowComputer>,
@@ -605,7 +605,8 @@ impl ConsensusGraphNode {
 impl ConsensusGraphInner {
     pub fn with_era_genesis(
         pow_config: ProofOfWorkConfig, pow: Arc<PowComputer>,
-        pos_verifier: Arc<PosVerifier>, data_man: Arc<BlockDataManager>,
+        // pos_verifier: Arc<PosVerifier>,
+        data_man: Arc<BlockDataManager>,
         inner_conf: ConsensusInnerConfig, cur_era_genesis_block_hash: &H256,
         cur_era_stable_block_hash: &H256,
     ) -> Self {
@@ -647,7 +648,7 @@ impl ConsensusGraphInner {
             pow,
             current_difficulty: initial_difficulty.into(),
             data_man: data_man.clone(),
-            pos_verifier,
+            // pos_verifier,
             inner_conf,
             outlier_cache: OutlierCache::new(),
             pastset_cache: Default::default(),
@@ -1696,24 +1697,26 @@ impl ConsensusGraphInner {
         } else {
             self.cur_era_genesis_block_arena_index
         };
-        match pos_reference {
-            None => timer_chain_choice,
-            Some(pos_reference) => {
-                let pos_main_decision = self
-                    .pos_verifier
-                    .get_main_decision(&pos_reference)
-                    .expect("pos_reference checked");
-                self.compute_force_confirm(
-                    timer_chain_choice,
-                    &(
-                        pos_main_decision,
-                        self.data_man
-                            .block_height_by_hash(&pos_main_decision)
-                            .expect("pos main decision checked"),
-                    ),
-                )
-            }
-        }
+        // match pos_reference {
+        //     None => timer_chain_choice,
+        //     Some(pos_reference) => {
+        //         let pos_main_decision = self
+        //             .pos_verifier
+        //             .get_main_decision(&pos_reference)
+        //             .expect("pos_reference checked");
+        //         self.compute_force_confirm(
+        //             timer_chain_choice,
+        //             &(
+        //                 pos_main_decision,
+        //                 self.data_man
+        //                     .block_height_by_hash(&pos_main_decision)
+        //                     .expect("pos main decision checked"),
+        //             ),
+        //         )
+        //     }
+        // }
+
+        timer_chain_choice
     }
 
     fn compute_force_confirm(
@@ -3959,14 +3962,15 @@ impl ConsensusGraphInner {
     fn get_pos_reference_main_decision(
         &self, block_hash: &H256,
     ) -> Result<H256, String> {
-        let pos_reference = self
-            .data_man
-            .pos_reference_by_hash(block_hash)
-            .ok_or("header exist".to_string())?
-            .ok_or("pos reference checked in sync graph".to_string())?;
-        self.pos_verifier
-            .get_main_decision(&pos_reference)
-            .ok_or("pos validity checked in sync graph".to_string())
+        // let pos_reference = self
+        //     .data_man
+        //     .pos_reference_by_hash(block_hash)
+        //     .ok_or("header exist".to_string())?
+        //     .ok_or("pos reference checked in sync graph".to_string())?;
+        // self.pos_verifier
+        //     .get_main_decision(&pos_reference)
+        //     .ok_or("pos validity checked in sync graph".to_string())
+        Err("pos reference not supported".to_string())
     }
 
     fn update_pos_main_decision(&mut self, me: usize) {

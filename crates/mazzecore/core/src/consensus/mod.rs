@@ -258,13 +258,13 @@ impl ConsensusGraph {
         notifications: Arc<Notifications>,
         execution_conf: ConsensusExecutionConfiguration,
         verification_config: VerificationConfig, node_type: NodeType,
-        pos_verifier: Arc<PosVerifier>,
+        // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         let inner =
             Arc::new(RwLock::new(ConsensusGraphInner::with_era_genesis(
                 pow_config,
                 pow.clone(),
-                pos_verifier.clone(),
+                // pos_verifier.clone(),
                 data_man.clone(),
                 conf.inner_conf.clone(),
                 era_genesis_block_hash,
@@ -322,7 +322,7 @@ impl ConsensusGraph {
         notifications: Arc<Notifications>,
         execution_conf: ConsensusExecutionConfiguration,
         verification_conf: VerificationConfig, node_type: NodeType,
-        pos_verifier: Arc<PosVerifier>,
+        // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         let genesis_hash = data_man.get_cur_consensus_era_genesis_hash();
         let stable_hash = data_man.get_cur_consensus_era_stable_hash();
@@ -339,7 +339,7 @@ impl ConsensusGraph {
             execution_conf,
             verification_conf,
             node_type,
-            pos_verifier,
+            // pos_verifier,
         )
     }
 

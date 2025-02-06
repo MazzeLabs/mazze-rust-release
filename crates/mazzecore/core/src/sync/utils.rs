@@ -279,7 +279,7 @@ pub fn initialize_synchronization_graph_with_data_manager(
         },
         verification_config.clone(),
         NodeType::Archive,
-        pos_verifier.clone(),
+        // pos_verifier.clone(),
     ));
 
     let sync = Arc::new(SynchronizationGraph::new(

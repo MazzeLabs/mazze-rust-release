@@ -18,3 +18,9 @@ thiserror = "1.0.24"
 [dev-dependencies]
 hex = "0.4.3"
 proptest = "1.0.0"
+
+[features]
+mirai = []
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

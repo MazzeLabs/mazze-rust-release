@@ -110,8 +110,8 @@ impl KeyPair {
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
-    use KeyPair;
-    use Secret;
+    use crate::KeyPair;
+    use crate::Secret;
 
     #[test]
     fn from_secret() {

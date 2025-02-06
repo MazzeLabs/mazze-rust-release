@@ -28,3 +28,4 @@ tokio-test = "0.4.1"
 default = []
 async = ["futures", "pin-project", "tokio"]
 testing = ["async"]
+fuzzing = []

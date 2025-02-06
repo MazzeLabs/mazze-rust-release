@@ -2,6 +2,7 @@ use std::{sync::atomic::{AtomicU64, Ordering}, time::{Duration, Instant}};
 
 use log::info;
 
+#[allow(dead_code)]
 pub struct MiningMetrics {
     total_hashes: AtomicU64,
     total_blocks: AtomicU64,
@@ -9,6 +10,7 @@ pub struct MiningMetrics {
     last_block_report: Instant,
 }
 
+#[allow(dead_code)]
 impl MiningMetrics {
     pub fn new() -> Self {
         Self {

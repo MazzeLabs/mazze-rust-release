@@ -30,3 +30,7 @@ diem-types = { path = "../../types", features = ["fuzzing"] }
 [features]
 default = []
 fuzzing = ["proptest", "diem-types/fuzzing", "diem-crypto/fuzzing"]
+mirai = []
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

@@ -1,5 +1,4 @@
 target
-**/Cargo.lock
 **/target
 **/*.rs.bk
 **/__pycache__

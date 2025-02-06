@@ -3,6 +3,7 @@ name = "mazze-bytes"
 version = "0.1.0"
 license = "GPL-3.0"
 description = "Mazze bytes"
+edition = "2021"
 
 [dependencies]
 ethcore-bytes = "0.1.1"

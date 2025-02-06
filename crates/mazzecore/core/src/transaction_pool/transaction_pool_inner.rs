@@ -474,7 +474,7 @@ impl DeferredPool {
 
     fn ready_transactions_by_address<'a>(
         &'a self, address: AddressWithSpace,
-    ) -> Option<&[Arc<SignedTransaction>]> {
+    ) -> Option<&'a [Arc<SignedTransaction>]> {
         self.packing_pool
             .in_space(address.space)
             .get_transactions(&address)

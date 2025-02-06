@@ -210,7 +210,7 @@ pub fn initialize_synchronization_graph_with_data_manager(
         TRANSACTION_DEFAULT_EPOCH_BOUND,
         TXPOOL_DEFAULT_NONCE_BITS,
         machine.clone(),
-        pos_verifier.clone(),
+        // pos_verifier.clone(),
     );
 
     let txpool = Arc::new(TransactionPool::new(

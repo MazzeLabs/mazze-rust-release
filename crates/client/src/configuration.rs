@@ -715,7 +715,7 @@ impl Configuration {
     }
 
     pub fn verification_config(
-        &self, machine: Arc<Machine>, pos_verifier: Arc<PosVerifier>,
+        &self, machine: Arc<Machine>,
     ) -> VerificationConfig {
         VerificationConfig::new(
             self.is_test_mode(),
@@ -724,7 +724,7 @@ impl Configuration {
             self.raw_conf.transaction_epoch_bound,
             self.raw_conf.tx_pool_nonce_bits,
             machine,
-            pos_verifier,
+            // pos_verifier,
         )
     }
 

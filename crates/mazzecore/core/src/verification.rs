@@ -3,7 +3,6 @@
 // See http://www.gnu.org/licenses/
 
 use crate::{
-    consensus::pos_handler::PosVerifier,
     error::{BlockError, Error},
     pow::{self, PowComputer},
     sync::{Error as SyncError, ErrorKind as SyncErrorKind},
@@ -44,7 +43,7 @@ pub struct VerificationConfig {
     pub transaction_epoch_bound: u64,
     pub max_nonce: Option<U256>,
     machine: Arc<Machine>,
-    pos_verifier: Arc<PosVerifier>,
+    // pos_verifier: Arc<PosVerifier>,
 }
 
 /// Create an MPT from the ordered list of block transactions.
@@ -223,7 +222,7 @@ impl VerificationConfig {
     pub fn new(
         test_mode: bool, referee_bound: usize, max_block_size_in_bytes: usize,
         transaction_epoch_bound: u64, tx_pool_nonce_bits: usize,
-        machine: Arc<Machine>, pos_verifier: Arc<PosVerifier>,
+        machine: Arc<Machine>,
     ) -> Self {
         let max_nonce = if tx_pool_nonce_bits < 256 {
             Some((U256::one() << tx_pool_nonce_bits) - 1)
@@ -237,7 +236,6 @@ impl VerificationConfig {
                 max_block_size_in_bytes,
                 transaction_epoch_bound,
                 machine,
-                pos_verifier,
                 max_nonce,
             }
         } else {
@@ -247,7 +245,6 @@ impl VerificationConfig {
                 max_block_size_in_bytes,
                 transaction_epoch_bound,
                 machine,
-                pos_verifier,
                 max_nonce,
             }
         }
@@ -354,14 +351,19 @@ impl VerificationConfig {
             )));
         }
 
-        if self.pos_verifier.is_enabled_at_height(header.height()) {
-            if header.pos_reference().is_none() {
-                bail!(BlockError::MissingPosReference);
-            }
-        } else {
-            if header.pos_reference().is_some() {
-                bail!(BlockError::UnexpectedPosReference);
-            }
+        // if self.pos_verifier.is_enabled_at_height(header.height()) {
+        //     if header.pos_reference().is_none() {
+        //         bail!(BlockError::MissingPosReference);
+        //     }
+        // } else {
+        //     if header.pos_reference().is_some() {
+        //         bail!(BlockError::UnexpectedPosReference);
+        //     }
+        // }
+
+        // TODO: remove this after pos is removed
+        if header.pos_reference().is_some() {
+            bail!(BlockError::UnexpectedPosReference);
         }
 
         if header.height() >= self.machine.params().transition_heights.cip1559 {

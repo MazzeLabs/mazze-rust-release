@@ -22,10 +22,6 @@ impl State {
             self.global_stat.refr::<TotalIssued>().saturating_sub(v);
     }
 
-    pub fn add_total_pos_staking(&mut self, v: U256) {
-        *self.global_stat.val::<TotalPosStaking>() += v;
-    }
-
     pub fn add_total_evm_tokens(&mut self, v: U256) {
         *self.global_stat.val::<TotalEvmToken>() += v;
     }
@@ -53,15 +49,6 @@ impl State {
 
     pub fn converted_storage_points(&self) -> U256 {
         self.global_stat.get::<ConvertedStoragePoints>()
-    }
-
-    pub fn total_pos_staking_tokens(&self) -> U256 {
-        self.global_stat.get::<TotalPosStaking>()
-    }
-
-    pub fn sub_total_pos_staking(&mut self, v: U256) {
-        *self.global_stat.val::<TotalPosStaking>() =
-            self.global_stat.refr::<TotalPosStaking>().saturating_sub(v)
     }
 
     pub fn total_circulating_tokens(&self) -> DbResult<U256> {

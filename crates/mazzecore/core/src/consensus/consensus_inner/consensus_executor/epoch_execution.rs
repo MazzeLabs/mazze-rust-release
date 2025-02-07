@@ -3,7 +3,6 @@ use std::{convert::From, sync::Arc};
 
 use alloy_rpc_types_trace::geth::GethDebugTracingOptions;
 use geth_tracer::{GethTraceWithHash, GethTracer, TxExecContext};
-use pow_types::StakingEvent;
 
 use mazze_statedb::Result as DbResult;
 use mazze_types::{Space, SpaceMap, H256, U256};
@@ -27,10 +26,7 @@ use mazze_executor::{
     internal_contract::{
         block_hash_slot, epoch_hash_slot, initialize_internal_contract_accounts,
     },
-    state::{
-        initialize_cip107, initialize_cip137,
-        initialize_or_update_dao_voted_params, State,
-    },
+    state::{initialize_cip107, initialize_cip137, State},
 };
 use mazze_vm_types::Env;
 
@@ -415,15 +411,15 @@ impl ConsensusExecutionHandler {
         let params = self.machine.params();
         let transition_numbers = &params.transition_numbers;
 
-        let cip94_start = transition_numbers.cip94n;
-        let period = params.params_dao_vote_period;
-        // Update/initialize parameters before processing rewards.
-        if block_number >= cip94_start
-            && (block_number - cip94_start) % period == 0
-        {
-            let set_pos_staking = block_number > transition_numbers.cip105;
-            initialize_or_update_dao_voted_params(state, set_pos_staking)?;
-        }
+        // let cip94_start = transition_numbers.cip94n;
+        // let period = params.params_dao_vote_period;
+        // // Update/initialize parameters before processing rewards.
+        // if block_number >= cip94_start
+        //     && (block_number - cip94_start) % period == 0
+        // {
+        //     let set_pos_staking = block_number > transition_numbers.cip105;
+        //     initialize_or_update_dao_voted_params(state, set_pos_staking)?;
+        // }
 
         // Initialize old_storage_point_prop_ratio in the state.
         // The time may not be in the vote period boundary, so this is not
@@ -450,8 +446,6 @@ impl ConsensusExecutionHandler {
         }
 
         let secondary_reward = state.secondary_reward();
-
-        state.inc_distributable_pos_interest(block_number)?;
 
         initialize_internal_contract_accounts(
             state,
@@ -508,7 +502,7 @@ impl<'a, 'b> BlockProcessContext<'a, 'b> {
 #[derive(Default)]
 struct EpochProcessRecorder {
     receipts: Vec<Arc<BlockReceipts>>,
-    staking_events: Vec<StakingEvent>,
+    // staking_events: Vec<StakingEvent>,
     repack_tx: Vec<Arc<SignedTransaction>>,
     geth_traces: Vec<GethTraceWithHash>,
 
@@ -527,7 +521,7 @@ struct BlockProcessRecorder {
     traces: Vec<TransactionExecTraces>,
     geth_traces: Vec<GethTraceWithHash>,
     repack_tx: Vec<Arc<SignedTransaction>>,
-    staking_events: Vec<StakingEvent>,
+    // staking_events: Vec<StakingEvent>,
 
     tx_idx: SpaceMap<usize>,
 }
@@ -542,7 +536,7 @@ impl BlockProcessRecorder {
             traces: vec![],
             geth_traces: vec![],
             repack_tx: vec![],
-            staking_events: vec![],
+            // staking_events: vec![],
             tx_idx,
         }
     }
@@ -569,7 +563,6 @@ impl BlockProcessRecorder {
 
         self.receipt.push(r.receipt);
         self.tx_error_msg.push(r.tx_exec_error_msg);
-        self.staking_events.extend(r.tx_staking_events);
 
         if let Some(trace) = r.geth_trace {
             self.geth_traces.push(GethTraceWithHash {
@@ -619,7 +612,7 @@ impl BlockProcessRecorder {
         });
 
         epoch_recorder.receipts.push(block_receipts.clone());
-        epoch_recorder.staking_events.extend(self.staking_events);
+        // epoch_recorder.staking_events.extend(self.staking_events);
         epoch_recorder.repack_tx.extend(self.repack_tx);
         epoch_recorder.geth_traces.extend(self.geth_traces);
 

@@ -27,7 +27,7 @@ use crate::{
         ConsensusConfig, ConsensusInnerConfig,
     },
     db::NUM_COLUMNS,
-    genesis_block::{genesis_block, GenesisPosState},
+    genesis_block::genesis_block,
     pow::{self, PowComputer, ProofOfWorkConfig},
     statistics::Statistics,
     sync::{SyncGraphConfig, SynchronizationGraph},
@@ -148,11 +148,6 @@ pub fn initialize_data_manager(
         machine.clone(),
         false, /* need_to_execute */
         None,
-        &Some(GenesisPosState {
-            initial_nodes: vec![],
-            initial_committee: vec![],
-            initial_seed: Default::default(),
-        }),
     ));
 
     let data_man = Arc::new(BlockDataManager::new(

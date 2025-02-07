@@ -22,14 +22,6 @@ pub use self::{
         admin::suicide,
         context::{block_hash_slot, epoch_hash_slot},
         cross_space::{evm_map, Resume},
-        params_control::{
-            get_settled_param_vote_count, get_settled_pos_staking_for_votes,
-            settle_current_votes, storage_point_prop, AllParamsVoteCount,
-            ParamVoteCount,
-        },
-        pos::{
-            decode_register_info, entries as pos_internal_entries,
-            make_staking_events, IndexStatus,
-        },
+        params_control::storage_point_prop,
     },
 };

@@ -18,17 +18,12 @@ use rand_08::{prelude::StdRng, rngs::OsRng, SeedableRng};
 use threadpool::ThreadPool;
 
 use blockgen::BlockGenerator;
-use diem_crypto::{PrivateKey, Uniform};
-use diem_types::validator_config::{
-    ConsensusPrivateKey, ConsensusVRFPrivateKey,
-};
 use keylib::KeyPair;
 use malloc_size_of::{new_malloc_size_ops, MallocSizeOf, MallocSizeOfOps};
 use mazze_executor::machine::{new_machine_with_builtin, Machine, VmFactory};
 use mazze_parameters::genesis::DEV_GENESIS_KEY_PAIR_2;
 use mazze_storage::StorageManager;
 use mazze_types::{address_util::AddressUtil, Address, Space, U256};
-pub use mazzecore::pos::pos::PosDropHandle;
 use mazzecore::{
     block_data_manager::BlockDataManager,
     genesis_block::{self as genesis, genesis_block},
@@ -368,7 +363,6 @@ pub fn initialize_common_modules(
         machine.clone(),
         conf.raw_conf.execute_genesis, /* need_to_execute */
         conf.raw_conf.chain_id,
-        &None, // &initial_nodes,
     );
     storage_manager.notify_genesis_hash(genesis_block.hash());
     let mut genesis_accounts = genesis_accounts;
@@ -396,16 +390,8 @@ pub fn initialize_common_modules(
     ));
 
     let network = {
-        let mut rng = StdRng::from_rng(OsRng).unwrap();
-        let private_key = ConsensusPrivateKey::generate(&mut rng);
-        let vrf_private_key = ConsensusVRFPrivateKey::generate(&mut rng);
         let mut network = NetworkService::new(network_config.clone());
-        network
-            .initialize((
-                private_key.public_key(),
-                vrf_private_key.public_key(),
-            ))
-            .unwrap();
+        network.initialize().unwrap();
         Arc::new(network)
     };
 

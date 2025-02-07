@@ -15,8 +15,6 @@ mod filter;
 mod index;
 mod log;
 pub mod mazze;
-pub mod pos;
-mod pos_economics;
 mod provenance;
 pub mod pubsub;
 mod receipt;
@@ -56,7 +54,6 @@ pub use self::{
         },
         MazzeFeeHistory,
     },
-    pos_economics::PoSEconomics,
     provenance::Origin,
     receipt::Receipt,
     reward_info::RewardInfo,

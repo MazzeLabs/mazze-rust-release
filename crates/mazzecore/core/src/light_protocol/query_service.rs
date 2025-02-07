@@ -580,31 +580,6 @@ impl QueryService {
             .map(|opt| opt.unwrap_or_default())
     }
 
-    pub async fn get_pos_economics(
-        &self, epoch: EpochNumber,
-    ) -> Result<[U256; 3], Error> {
-        debug!("get_PoSEconomics epoch={:?}", epoch);
-
-        let epoch = self.get_height_from_epoch_number(epoch)?;
-
-        let key1 = global_params::TotalPosStaking::STORAGE_KEY.to_key_bytes();
-        let key2 =
-            global_params::DistributablePoSInterest::STORAGE_KEY.to_key_bytes();
-        let key3 =
-            global_params::LastDistributeBlock::STORAGE_KEY.to_key_bytes();
-
-        let total_pos_staking = try_join!(
-            self.retrieve_state_entry::<U256>(epoch, key1),
-            self.retrieve_state_entry::<U256>(epoch, key2),
-            self.retrieve_state_entry::<U256>(epoch, key3)
-        )?;
-        Ok([
-            total_pos_staking.0.unwrap_or_default(),
-            total_pos_staking.1.unwrap_or_default(),
-            total_pos_staking.2.unwrap_or_default(),
-        ])
-    }
-
     pub async fn get_tx_info(&self, hash: H256) -> Result<TxInfo, Error> {
         debug!("get_tx_info hash={:?}", hash);
 

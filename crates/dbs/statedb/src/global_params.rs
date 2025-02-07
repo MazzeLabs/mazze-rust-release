@@ -44,9 +44,6 @@ macro_rules! for_all_global_param_keys {
         $f::<TotalEvmToken>($($args),*);
         $f::<UsedStoragePoints>($($args),*);
         $f::<ConvertedStoragePoints>($($args),*);
-        $f::<TotalPosStaking>($($args),*);
-        $f::<DistributablePoSInterest>($($args),*);
-        $f::<LastDistributeBlock>($($args),*);
         $f::<PowBaseReward>($($args),*);
         $f::<TotalBurnt1559>($($args),*);
         $f::<BaseFeeProp>($($args),*);
@@ -60,9 +57,6 @@ macro_rules! for_all_global_param_keys {
         $f::<TotalEvmToken>($($args),*)?;
         $f::<UsedStoragePoints>($($args),*)?;
         $f::<ConvertedStoragePoints>($($args),*)?;
-        $f::<TotalPosStaking>($($args),*)?;
-        $f::<DistributablePoSInterest>($($args),*)?;
-        $f::<LastDistributeBlock>($($args),*)?;
         $f::<PowBaseReward>($($args),*)?;
         $f::<TotalBurnt1559>($($args),*)?;
         $f::<BaseFeeProp>($($args),*)?;
@@ -133,27 +127,10 @@ impl GlobalParamKey for ConvertedStoragePoints {
     const KEY: &'static [u8] = b"converted_storage_points_key";
 }
 
-pub struct TotalPosStaking;
-impl GlobalParamKey for TotalPosStaking {
-    const ID: usize = ConvertedStoragePoints::ID + 1;
-    const KEY: &'static [u8] = b"total_pos_staking_tokens";
-}
-
-pub struct DistributablePoSInterest;
-impl GlobalParamKey for DistributablePoSInterest {
-    const ID: usize = TotalPosStaking::ID + 1;
-    const KEY: &'static [u8] = b"distributable_pos_interest";
-}
-pub struct LastDistributeBlock;
-impl GlobalParamKey for LastDistributeBlock {
-    const ID: usize = DistributablePoSInterest::ID + 1;
-    const KEY: &'static [u8] = b"last_distribute_block";
-}
-
 pub struct PowBaseReward;
 impl GlobalParamKey for PowBaseReward {
     const ADDRESS: Address = PARAMS_CONTROL_CONTRACT_ADDRESS;
-    const ID: usize = LastDistributeBlock::ID + 1;
+    const ID: usize = ConvertedStoragePoints::ID + 1;
     const KEY: &'static [u8] = b"pow_base_reward";
 }
 

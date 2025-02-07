@@ -27,14 +27,8 @@ mod commit;
 /// Implements access functions global statistic variables of `State`.
 mod global_statistics;
 
-/// Implements functions for the PoS rewarding of `State`.
-mod pos;
-
 /// Implements functions for the sponsorship mechanism of `State`.
 mod sponsor;
-
-/// Implements functions for the staking mechanism of `State`.
-mod staking;
 
 /// Implements access functions for the account storage entries of `State`.
 mod storage_entry;
@@ -47,10 +41,8 @@ mod tests;
 pub use self::{
     collateral::{initialize_cip107, settle_collateral_for_all},
     commit::StateCommitResult,
-    pos::{distribute_pos_interest, update_pos_status},
     reward::initialize_cip137,
     sponsor::COMMISSION_PRIVILEGE_SPECIAL_KEY,
-    staking::initialize_or_update_dao_voted_params,
 };
 #[cfg(test)]
 pub use tests::get_state_for_genesis_write;

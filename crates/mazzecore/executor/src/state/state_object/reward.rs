@@ -35,20 +35,6 @@ impl State {
         base_reward
     }
 
-    pub fn distributable_pos_interest(&self) -> U256 {
-        self.global_stat.get::<DistributablePoSInterest>()
-    }
-
-    pub fn last_distribute_block(&self) -> u64 {
-        self.global_stat.refr::<LastDistributeBlock>().as_u64()
-    }
-
-    pub fn reset_pos_distribute_info(&mut self, current_block_number: u64) {
-        *self.global_stat.val::<DistributablePoSInterest>() = U256::zero();
-        *self.global_stat.val::<LastDistributeBlock>() =
-            U256::from(current_block_number);
-    }
-
     pub fn burn_by_cip1559(&mut self, by: U256) {
         // This function is called after transaction exeuction. At this time,
         // the paid transaction fee has already been in the core space.

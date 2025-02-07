@@ -6,9 +6,9 @@ use crate::rpc::{
     error_codes::{internal_error_msg, invalid_params_msg},
     types::{
         call_request::rpc_call_request_network,
-        errors::check_rpc_address_network,
-        MazzeFeeHistory, PoSEconomics, RpcAddress, SponsorInfo, StatOnGasLoad,
-        TokenSupplyInfo, VoteParamsInfo, WrapTransaction, U64 as HexU64,
+        errors::check_rpc_address_network, MazzeFeeHistory, RpcAddress,
+        SponsorInfo, StatOnGasLoad, TokenSupplyInfo, VoteParamsInfo,
+        WrapTransaction, U64 as HexU64,
     },
 };
 use blockgen::BlockGenerator;
@@ -21,9 +21,8 @@ use mazze_executor::{
 };
 use mazze_statedb::{
     global_params::{
-        AccumulateInterestRate, BaseFeeProp, DistributablePoSInterest,
-        InterestRate, LastDistributeBlock, PowBaseReward, TotalBurnt1559,
-        TotalPosStaking,
+        AccumulateInterestRate, BaseFeeProp, InterestRate, PowBaseReward,
+        TotalBurnt1559,
     },
     StateDbExt,
 };
@@ -72,8 +71,8 @@ use crate::{
         },
         traits::{debug::LocalRpc, mazze::Mazze, test::TestRpc},
         types::{
-            eth::Transaction as EthTransaction,
-            sign_call, Account as RpcAccount, AccountPendingInfo,
+            eth::Transaction as EthTransaction, sign_call,
+            Account as RpcAccount, AccountPendingInfo,
             AccountPendingTransactions, BlameInfo, Block as RpcBlock,
             BlockHashOrEpochNumber, Bytes, CallRequest,
             CheckBalanceAgainstTransactionResponse, ConsensusGraphStates,
@@ -438,26 +437,6 @@ impl RpcImpl {
         Ok(state_db
             .get_global_param::<AccumulateInterestRate>()?
             .into())
-    }
-
-    /// Returns accumulate interest rate of the given epoch
-    fn pos_economics(
-        &self, epoch_num: Option<EpochNumber>,
-    ) -> RpcResult<PoSEconomics> {
-        let epoch_num = epoch_num.unwrap_or(EpochNumber::LatestState).into();
-        let state_db = self
-            .consensus
-            .get_state_db_by_epoch_number(epoch_num, "epoch_num")?;
-
-        Ok(PoSEconomics {
-            total_pos_staking_tokens: state_db
-                .get_global_param::<TotalPosStaking>()?,
-            distributable_pos_interest: state_db
-                .get_global_param::<DistributablePoSInterest>()?,
-            last_distribute_block: U64::from(
-                state_db.get_global_param::<LastDistributeBlock>()?.as_u64(),
-            ),
-        })
     }
 
     fn send_raw_transaction(&self, raw: Bytes) -> RpcResult<H256> {
@@ -2287,7 +2266,6 @@ impl Mazze for MazzeHandler {
             fn account(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<RpcAccount>;
             fn interest_rate(&self, num: Option<EpochNumber>) -> BoxFuture<U256>;
             fn accumulate_interest_rate(&self, num: Option<EpochNumber>) -> BoxFuture<U256>;
-            fn pos_economics(&self, num: Option<EpochNumber>) -> BoxFuture<PoSEconomics>;
             fn admin(&self, address: RpcAddress, num: Option<EpochNumber>)
                 -> BoxFuture<Option<RpcAddress>>;
             fn sponsor_info(&self, address: RpcAddress, num: Option<EpochNumber>)

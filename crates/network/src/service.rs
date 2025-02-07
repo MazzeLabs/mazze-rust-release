@@ -21,14 +21,6 @@ use parity_path::restrict_permissions_owner;
 use parking_lot::{Mutex, RwLock};
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 
-use diem_crypto::ValidCryptoMaterialStringExt;
-use diem_types::{
-    account_address::from_consensus_public_key,
-    validator_config::{
-        ConsensusPrivateKey, ConsensusPublicKey, ConsensusVRFPrivateKey,
-        ConsensusVRFPublicKey,
-    },
-};
 use keylib::{sign, Generator, KeyPair, Random, Secret};
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use mazze_addr::Network;
@@ -217,9 +209,7 @@ impl NetworkService {
     }
 
     /// Create and start the event loop inside the NetworkService
-    pub fn initialize(
-        &mut self, pos_pub_keys: (ConsensusPublicKey, ConsensusVRFPublicKey),
-    ) -> Result<(), Error> {
+    pub fn initialize(&mut self) -> Result<(), Error> {
         let raw_io_service =
             IoService::<NetworkIoMessage>::start(self.network_poll.clone())?;
         self.io_service = Some(raw_io_service);
@@ -230,11 +220,8 @@ impl NetworkService {
             }
 
             let inner = Arc::new(match self.config.test_mode {
-                true => NetworkServiceInner::new_with_latency(
-                    &self.config,
-                    pos_pub_keys,
-                )?,
-                false => NetworkServiceInner::new(&self.config, pos_pub_keys)?,
+                true => NetworkServiceInner::new_with_latency(&self.config)?,
+                false => NetworkServiceInner::new(&self.config)?,
             });
             self.io_service
                 .as_ref()
@@ -348,14 +335,6 @@ impl NetworkService {
             Ok(inner.metadata.keys.clone())
         } else {
             Err("Network service not started yet!".into())
-        }
-    }
-
-    pub fn pos_public_key(&self) -> Option<ConsensusPublicKey> {
-        if let Some(ref inner) = self.inner {
-            inner.sessions.self_pos_public_key.clone().map(|k| k.0)
-        } else {
-            None
         }
     }
 
@@ -531,7 +510,6 @@ impl DelayedQueue {
 impl NetworkServiceInner {
     pub fn new(
         config: &NetworkConfiguration,
-        pos_pub_keys: (ConsensusPublicKey, ConsensusVRFPublicKey),
     ) -> Result<NetworkServiceInner, Error> {
         let mut listen_address = match config.listen_address {
             None => SocketAddr::V4(SocketAddrV4::new(
@@ -564,7 +542,6 @@ impl NetworkServiceInner {
                     },
                 )
         };
-        info!("Self pos public key: {:?}", pos_pub_keys);
 
         info!("Self node id: {:?}", *keys.public());
 
@@ -650,7 +627,6 @@ impl NetworkServiceInner {
                 MAX_SESSIONS,
                 config.max_incoming_peers,
                 &config.session_ip_limit_config,
-                Some(pos_pub_keys),
             ),
             handlers: RwLock::new(HashMap::new()),
             timers: RwLock::new(HashMap::new()),
@@ -681,9 +657,8 @@ impl NetworkServiceInner {
 
     pub fn new_with_latency(
         config: &NetworkConfiguration,
-        pos_pub_keys: (ConsensusPublicKey, ConsensusVRFPublicKey),
     ) -> Result<NetworkServiceInner, Error> {
-        let r = NetworkServiceInner::new(config, pos_pub_keys);
+        let r = NetworkServiceInner::new(config);
         if r.is_err() {
             return r;
         }
@@ -1084,7 +1059,6 @@ impl NetworkServiceInner {
             // We check dropped_nodes first to make sure we stop processing
             // communications from any dropped peers
             let mut session_node_id = session.read().id().map(|id| *id);
-            let mut pos_public_key_opt = None;
             if let Some(node_id) = session_node_id {
                 let to_drop = self.dropped_nodes.read().contains(&node_id);
                 self.drop_peers(io);
@@ -1104,15 +1078,9 @@ impl NetworkServiceInner {
                                 session_data.token_to_disconnect;
                         }
                         match session_data.session_data {
-                            SessionData::Ready { pos_public_key } => {
-                                debug!(
-                                    "receive Ready with pos_public_key={:?} account={:?}",
-                                    pos_public_key,
-                                    pos_public_key.as_ref().map(|k| from_consensus_public_key(&k.0, &k.1)),
-                                );
+                            SessionData::Ready => {
                                 handshake_done = true;
                                 session_node_id = Some(*sess.id().unwrap());
-                                pos_public_key_opt = pos_public_key;
                             }
                             SessionData::Message { data, protocol } => {
                                 drop(sess);
@@ -1185,7 +1153,6 @@ impl NetworkServiceInner {
                                     &network_context,
                                     session_node_id.as_ref().unwrap(),
                                     protocol.version,
-                                    pos_public_key_opt.clone(),
                                 );
                         }
                     }
@@ -2141,49 +2108,6 @@ fn load_key(path: &Path) -> Option<Secret> {
             None
         }
     }
-}
-
-pub fn load_pos_private_key(
-    path: &Path,
-) -> Option<(ConsensusPrivateKey, Option<ConsensusVRFPrivateKey>)> {
-    let mut path_buf = PathBuf::from(path);
-    path_buf.push("pos_key");
-    let mut file = match fs::File::open(path_buf.as_path()) {
-        Ok(file) => file,
-        Err(e) => {
-            debug!("failed to open key file: {:?}", e);
-            return None;
-        }
-    };
-    let mut buf = String::new();
-    match file.read_to_string(&mut buf) {
-        Ok(_) => {}
-        Err(e) => {
-            warn!("Error reading key file: {:?}", e);
-            return None;
-        }
-    }
-    let key_str: Vec<_> = buf.split(",").collect();
-    let private_key =
-        match ConsensusPrivateKey::from_encoded_string(&key_str[0]) {
-            Ok(key) => Some(key),
-            Err(e) => {
-                warn!("Error parsing key file: {:?}", e);
-                None
-            }
-        }?;
-    if key_str.len() <= 1 {
-        return Some((private_key, None));
-    }
-    let vrf_private_key =
-        match ConsensusVRFPrivateKey::from_encoded_string(&key_str[1]) {
-            Ok(key) => Some(key),
-            Err(e) => {
-                warn!("Error parsing key file: {:?}", e);
-                None
-            }
-        }?;
-    Some((private_key, Some(vrf_private_key)))
 }
 
 impl std::fmt::Display for ProtocolVersion {

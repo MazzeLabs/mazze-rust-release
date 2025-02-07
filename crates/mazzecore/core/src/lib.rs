@@ -36,7 +36,6 @@ pub mod error;
 pub mod genesis_block;
 pub mod light_protocol;
 pub mod node_type;
-pub mod pos;
 pub mod pow;
 pub mod rpc_errors;
 pub mod state_exposer;

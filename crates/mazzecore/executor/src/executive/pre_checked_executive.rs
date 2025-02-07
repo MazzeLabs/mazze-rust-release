@@ -435,18 +435,6 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
         }
 
         for contract_address in &parent_substate.suicides {
-            if contract_address.space == Space::Native {
-                let contract_address = contract_address.address;
-                let staking_balance =
-                    state.staking_balance(&contract_address)?;
-                tracer.trace_internal_transfer(
-                    AddressPocket::StakingBalance(contract_address),
-                    AddressPocket::MintBurn,
-                    staking_balance.clone(),
-                );
-                state.sub_total_issued(staking_balance);
-            }
-
             let contract_balance = state.balance(contract_address)?;
             tracer.trace_internal_transfer(
                 AddressPocket::Balance(*contract_address),

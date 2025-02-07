@@ -39,7 +39,6 @@ use crate::{
     verification::{compute_epoch_receipt_proof, compute_transaction_proof},
     TransactionPool,
 };
-use diem_types::validator_config::{ConsensusPublicKey, ConsensusVRFPublicKey};
 use io::TimerToken;
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_internal_common::ChainIdParamsDeprecated;
@@ -1048,7 +1047,6 @@ impl NetworkProtocolHandler for Provider {
     fn on_peer_connected(
         &self, _io: &dyn NetworkContext, node_id: &NodeId,
         peer_protocol_version: ProtocolVersion,
-        _pos_public_key: Option<(ConsensusPublicKey, ConsensusVRFPublicKey)>,
     ) {
         debug!(
             "on_peer_connected: peer={:?} version={}",

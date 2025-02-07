@@ -7,7 +7,7 @@ use crate::rpc::types::{
     Block, BlockHashOrEpochNumber, Bytes, CallRequest,
     CheckBalanceAgainstTransactionResponse, EpochNumber,
     EstimateGasAndCollateralResponse, Log as RpcLog, MazzeFeeHistory,
-    MazzeFilterChanges, MazzeRpcLogFilter, PoSEconomics, Receipt as RpcReceipt,
+    MazzeFilterChanges, MazzeRpcLogFilter, Receipt as RpcReceipt,
     RewardInfo as RpcRewardInfo, RpcAddress, SponsorInfo, Status as RpcStatus,
     StorageCollateralInfo, TokenSupplyInfo, Transaction, VoteParamsInfo,
     U64 as HexU64,
@@ -247,12 +247,6 @@ pub trait Mazze {
     fn accumulate_interest_rate(
         &self, epoch_number: Option<EpochNumber>,
     ) -> BoxFuture<U256>;
-
-    /// Returns accumulate interest rate of the given epoch
-    #[rpc(name = "mazze_getPoSEconomics")]
-    fn pos_economics(
-        &self, epoch_number: Option<EpochNumber>,
-    ) -> BoxFuture<PoSEconomics>;
 
     #[rpc(name = "mazze_getConfirmationRiskByHash")]
     fn confirmation_risk_by_hash(

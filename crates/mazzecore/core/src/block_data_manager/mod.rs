@@ -11,7 +11,6 @@ use crate::{
 };
 use malloc_size_of::{new_malloc_size_ops, MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
-use mazze_executor::internal_contract::make_staking_events;
 use mazze_storage::{
     state_manager::StateIndex, utils::guarded_value::*, StorageManager,
     StorageManagerTrait,
@@ -34,10 +33,8 @@ pub mod block_data_types;
 pub mod db_gc_manager;
 pub mod db_manager;
 pub mod tx_data_manager;
-use crate::{
-    block_data_manager::{
-        db_manager::DBManager, tx_data_manager::TransactionDataManager,
-    },
+use crate::block_data_manager::{
+    db_manager::DBManager, tx_data_manager::TransactionDataManager,
 };
 pub use block_data_types::*;
 use db_gc_manager::GCProgress;
@@ -1200,8 +1197,11 @@ impl BlockDataManager {
 
     /// Check if all executed results of an epoch exist
     pub fn epoch_executed_and_recovered(
-        &self, epoch_hash: &H256, epoch_block_hashes: &Vec<H256>,
-        on_local_main: bool, update_trace: bool,
+        &self,
+        epoch_hash: &H256,
+        epoch_block_hashes: &Vec<H256>,
+        on_local_main: bool,
+        update_trace: bool,
         reward_execution_info: &Option<RewardExecutionInfo>,
         // pos_verifier: &PosVerifier,
         evm_chain_id: u32,
@@ -1213,7 +1213,6 @@ impl BlockDataManager {
         if on_local_main {
             // Check if all blocks receipts and traces are from this epoch
             let mut epoch_receipts = Vec::new();
-            let mut epoch_staking_events = Vec::new();
             for h in epoch_block_hashes {
                 if let Some(r) = self.block_execution_result_by_hash_with_epoch(
                     h, epoch_hash, true, /* update_main_assumption */
@@ -1302,9 +1301,6 @@ impl BlockDataManager {
 
                                 evm_tx_index += 1;
                             }
-
-                            epoch_staking_events
-                                .extend(make_staking_events(logs));
                         }
                         _ => {}
                     }

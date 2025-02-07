@@ -8,10 +8,6 @@ use lazy_static::*;
 use parking_lot::RwLock;
 use rand::Rng;
 
-use diem_types::term_state::{
-    pos_state_config::PosStateConfig, IN_QUEUE_LOCKED_VIEWS,
-    OUT_QUEUE_LOCKED_VIEWS, ROUND_PER_TERM, TERM_ELECTED_SIZE, TERM_MAX_SIZE,
-};
 use mazze_addr::{mazze_addr_decode, Network};
 use mazze_executor::{machine::Machine, spec::CommonParams};
 use mazze_internal_common::{
@@ -342,19 +338,19 @@ build_config! {
         (pos_reference_enable_height, (u64), u64::MAX)
         (pos_initial_nodes_path, (String), "./pos_config/initial_nodes.json".to_string())
         (pos_private_key_path, (String), "./pos_config/pos_key".to_string())
-        (pos_round_per_term, (u64), ROUND_PER_TERM)
-        (pos_term_max_size, (usize), TERM_MAX_SIZE)
-        (pos_term_elected_size, (usize), TERM_ELECTED_SIZE)
-        (pos_in_queue_locked_views, (u64), IN_QUEUE_LOCKED_VIEWS)
-        (pos_out_queue_locked_views, (u64), OUT_QUEUE_LOCKED_VIEWS)
+        // (pos_round_per_term, (u64), ROUND_PER_TERM)
+        // (pos_term_max_size, (usize), TERM_MAX_SIZE)
+        // (pos_term_elected_size, (usize), TERM_ELECTED_SIZE)
+        // (pos_in_queue_locked_views, (u64), IN_QUEUE_LOCKED_VIEWS)
+        // (pos_out_queue_locked_views, (u64), OUT_QUEUE_LOCKED_VIEWS)
         (pos_cip99_transition_view, (u64), u64::MAX)
-        (pos_cip99_in_queue_locked_views, (u64), IN_QUEUE_LOCKED_VIEWS)
-        (pos_cip99_out_queue_locked_views, (u64), OUT_QUEUE_LOCKED_VIEWS)
+        // (pos_cip99_in_queue_locked_views, (u64), IN_QUEUE_LOCKED_VIEWS)
+        // (pos_cip99_out_queue_locked_views, (u64), OUT_QUEUE_LOCKED_VIEWS)
         (nonce_limit_transition_view, (u64), u64::MAX)
         (pos_cip136_transition_view, (u64), u64::MAX)
-        (pos_cip136_in_queue_locked_views, (u64), IN_QUEUE_LOCKED_VIEWS)
-        (pos_cip136_out_queue_locked_views, (u64), OUT_QUEUE_LOCKED_VIEWS)
-        (pos_cip136_round_per_term, (u64), ROUND_PER_TERM)
+        // (pos_cip136_in_queue_locked_views, (u64), IN_QUEUE_LOCKED_VIEWS)
+        // (pos_cip136_out_queue_locked_views, (u64), OUT_QUEUE_LOCKED_VIEWS)
+        // (pos_cip136_round_per_term, (u64), ROUND_PER_TERM)
         (dev_pos_private_key_encryption_password, (Option<String>), None)
         (pos_started_as_voter, (bool), true)
 
@@ -1273,28 +1269,6 @@ impl Configuration {
 
     pub fn node_type(&self) -> NodeType {
         self.raw_conf.node_type.unwrap_or(NodeType::Full)
-    }
-
-    pub fn pos_state_config(&self) -> PosStateConfig {
-        // The current implementation requires the round number to be an even
-        // number.
-        assert_eq!(self.raw_conf.pos_round_per_term % 2, 0);
-        PosStateConfig::new(
-            self.raw_conf.pos_round_per_term,
-            self.raw_conf.pos_term_max_size,
-            self.raw_conf.pos_term_elected_size,
-            self.raw_conf.pos_in_queue_locked_views,
-            self.raw_conf.pos_out_queue_locked_views,
-            self.raw_conf.pos_cip99_transition_view,
-            self.raw_conf.pos_cip99_in_queue_locked_views,
-            self.raw_conf.pos_cip99_out_queue_locked_views,
-            self.raw_conf.nonce_limit_transition_view,
-            20_000, // 2 * 10^7 MAZZE
-            self.raw_conf.pos_cip136_transition_view,
-            self.raw_conf.pos_cip136_in_queue_locked_views,
-            self.raw_conf.pos_cip136_out_queue_locked_views,
-            self.raw_conf.pos_cip136_round_per_term,
-        )
     }
 
     fn set_cips(&self, params: &mut CommonParams) {

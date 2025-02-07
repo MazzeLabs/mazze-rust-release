@@ -17,7 +17,6 @@ use crate::{
         debug_recompute::log_invalid_state_root, outlier_cache::OutlierCache,
         pastset_cache::PastSetCache, MaybeExecutedTxExtraInfo, TransactionInfo,
     },
-    pos::pow_handler::POS_TERM_EPOCHS,
     pow::{target_difficulty, PowComputer, ProofOfWorkConfig},
     state_exposer::{ConsensusGraphBlockExecutionState, STATE_EXPOSER},
     verification::VerificationConfig,
@@ -3820,68 +3819,71 @@ impl ConsensusGraphInner {
         Some(subtree)
     }
 
+    // TODO: investigate if needed after removing pos
     pub fn get_next_main_decision(
         &self, parent_decision_hash: &H256, confirmed_height: u64,
     ) -> Option<(u64, H256)> {
-        let r = match self.hash_to_arena_indices.get(parent_decision_hash) {
-            None => {
-                // parent_decision is before the current checkpoint, so we just
-                // choose the latest block as a new main
-                // decision.
-                let new_decision_height = (confirmed_height.saturating_sub(
-                    self.inner_conf
-                        .pos_main_decision_defer_epoch_count(confirmed_height),
-                )) / POS_TERM_EPOCHS
-                    * POS_TERM_EPOCHS;
-                if new_decision_height <= self.cur_era_genesis_height {
-                    None
-                } else {
-                    let new_decision_arena_index =
-                        self.get_main_block_arena_index(new_decision_height);
-                    Some((
-                        self.arena[new_decision_arena_index].height,
-                        self.arena[new_decision_arena_index].hash,
-                    ))
-                }
-            }
-            Some(parent_decision) => {
-                let parent_decision_height =
-                    self.arena[*parent_decision].height;
-                assert_eq!(parent_decision_height % POS_TERM_EPOCHS, 0);
-                // `parent` should be on the main chain.
-                if self.get_main_block_arena_index(parent_decision_height)
-                    == *parent_decision
-                {
-                    // TODO(lpl): Use confirmed epoch with a delay in
-                    // pos-finality spec.
-                    let new_decision_height =
-                        (confirmed_height.saturating_sub(
-                            self.inner_conf
-                                .pos_main_decision_defer_epoch_count(
-                                    confirmed_height,
-                                ),
-                        )) / POS_TERM_EPOCHS
-                            * POS_TERM_EPOCHS;
-                    if new_decision_height <= parent_decision_height {
-                        None
-                    } else {
-                        let new_decision_arena_index = self
-                            .get_main_block_arena_index(new_decision_height);
-                        Some((
-                            self.arena[new_decision_arena_index].height,
-                            self.arena[new_decision_arena_index].hash,
-                        ))
-                    }
-                } else {
-                    None
-                }
-            }
-        };
-        debug!(
-            "next_main_decision: parent={:?} return={:?}",
-            parent_decision_hash, r
-        );
-        r
+        // let r = match self.hash_to_arena_indices.get(parent_decision_hash) {
+        //     None => {
+        //         // parent_decision is before the current checkpoint, so we just
+        //         // choose the latest block as a new main
+        //         // decision.
+        //         let new_decision_height = (confirmed_height.saturating_sub(
+        //             self.inner_conf
+        //                 .pos_main_decision_defer_epoch_count(confirmed_height),
+        //         )) / POS_TERM_EPOCHS
+        //             * POS_TERM_EPOCHS;
+        //         if new_decision_height <= self.cur_era_genesis_height {
+        //             None
+        //         } else {
+        //             let new_decision_arena_index =
+        //                 self.get_main_block_arena_index(new_decision_height);
+        //             Some((
+        //                 self.arena[new_decision_arena_index].height,
+        //                 self.arena[new_decision_arena_index].hash,
+        //             ))
+        //         }
+        //     }
+        //     Some(parent_decision) => {
+        //         let parent_decision_height =
+        //             self.arena[*parent_decision].height;
+        //         assert_eq!(parent_decision_height % POS_TERM_EPOCHS, 0);
+        //         // `parent` should be on the main chain.
+        //         if self.get_main_block_arena_index(parent_decision_height)
+        //             == *parent_decision
+        //         {
+        //             // TODO(lpl): Use confirmed epoch with a delay in
+        //             // pos-finality spec.
+        //             let new_decision_height =
+        //                 (confirmed_height.saturating_sub(
+        //                     self.inner_conf
+        //                         .pos_main_decision_defer_epoch_count(
+        //                             confirmed_height,
+        //                         ),
+        //                 )) / POS_TERM_EPOCHS
+        //                     * POS_TERM_EPOCHS;
+        //             if new_decision_height <= parent_decision_height {
+        //                 None
+        //             } else {
+        //                 let new_decision_arena_index = self
+        //                     .get_main_block_arena_index(new_decision_height);
+        //                 Some((
+        //                     self.arena[new_decision_arena_index].height,
+        //                     self.arena[new_decision_arena_index].hash,
+        //                 ))
+        //             }
+        //         } else {
+        //             None
+        //         }
+        //     }
+        // };
+        // debug!(
+        //     "next_main_decision: parent={:?} return={:?}",
+        //     parent_decision_hash, r
+        // );
+        // r
+
+        todo!("pos is being dropped")
     }
 
     pub fn validate_main_decision(
@@ -3899,11 +3901,13 @@ impl ConsensusGraphInner {
             self.hash_to_arena_indices.get(me_hash),
         ) {
             (Some(ancestor), Some(me)) => {
-                if self.arena[*me].height % POS_TERM_EPOCHS != 0 {
-                    return false;
-                }
+                // if self.arena[*me].height % POS_TERM_EPOCHS != 0 {
+                //     return false;
+                // }
+
                 // Both in memory. Just use Link-Cut-Tree.
-                self.ancestor_at(*me, self.arena[*ancestor].height) == *ancestor
+                // self.ancestor_at(*me, self.arena[*ancestor].height) == *ancestor
+                todo!("pos is being dropped") // check how relevant the POS_TERM_EPOCHS is for decision validation; still needed?
             }
             // TODO(lpl): Check if it's possible to go beyond checkpoint.
             // TODO(lpl): If we want to check ancestor and me are both on main

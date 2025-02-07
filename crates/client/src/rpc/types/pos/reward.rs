@@ -3,9 +3,7 @@
 // See http://www.gnu.org/licenses/
 
 use super::super::RpcAddress;
-use mazze_addr::Network;
 use mazze_types::{H256, U256};
-use std::collections::HashMap;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,14 +16,14 @@ pub struct Reward {
     pub reward: U256,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PoSEpochReward {
-    //
-    pub pow_epoch_hash: H256,
-    //
-    pub account_rewards: Vec<Reward>,
-}
+// #[derive(Debug, Serialize)]
+// #[serde(rename_all = "camelCase")]
+// pub struct PoSEpochReward {
+//     //
+//     pub pow_epoch_hash: H256,
+//     //
+//     pub account_rewards: Vec<Reward>,
+// }
 
 // impl PoSEpochReward {
 //     pub fn try_from(

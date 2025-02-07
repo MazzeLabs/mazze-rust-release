@@ -23,7 +23,7 @@ pub use self::{
     epoch_state::EpochState,
     ledger_info::LedgerInfoWithSignatures,
     node_lock_status::{NodeLockStatus, VotePowerState},
-    reward::{PoSEpochReward, Reward},
+    reward::Reward,
     status::Status,
     transaction::{
         tx_type, RpcTransactionStatus, RpcTransactionType, Transaction,

@@ -611,38 +611,6 @@ impl SynchronizationGraphInner {
             && self.arena[index].block_ready
     }
 
-    fn is_pos_reference_graph_ready(
-        &self, index: usize, genesis_seq_num: u64, minimal_status: u8,
-    ) -> bool {
-        false
-        // Check if the pos reference is committed.
-
-        // match self.arena[index].block_header.pos_reference() {
-        //     // TODO(lpl): Should we check if the pos reference will never be
-        //     // committed?
-        //     Some(pos_reference) => {
-        //         match self.pos_verifier.get_main_decision(pos_reference) {
-        //             // The pos reference has not been committed.
-        //             None => false,
-        //             Some(main_decision) => {
-        //                 // Check if this main_decision is graph_ready.
-        //                 match self.hash_to_arena_indices.get(&main_decision) {
-        //                     None => self.is_graph_ready_in_db(
-        //                         &main_decision,
-        //                         genesis_seq_num,
-        //                     ),
-        //                     Some(index) => {
-        //                         self.arena[*index].graph_status
-        //                             >= minimal_status
-        //                     }
-        //                 }
-        //             }
-        //         }
-        //     }
-        //     None => true,
-        // }
-    }
-
     // Get parent (height, timestamp, gas_limit, difficulty)
     // This function assumes that the
     // parent and referee information MUST exist in memory or in disk.
@@ -679,16 +647,6 @@ impl SynchronizationGraphInner {
         for referee in self.arena[index].referees.iter() {
             referee_hash_in_mem
                 .insert(self.arena[*referee].block_header.hash());
-        }
-
-        for referee_hash in self.arena[index].block_header.referee_hashes() {
-            if !referee_hash_in_mem.contains(referee_hash) {
-                let referee_header = self
-                    .data_man
-                    .block_header_by_hash(referee_hash)
-                    .unwrap()
-                    .clone();
-            }
         }
 
         (

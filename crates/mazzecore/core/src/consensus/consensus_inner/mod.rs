@@ -3932,36 +3932,6 @@ impl ConsensusGraphInner {
         }
     }
 
-    /// Return error if the header does not exist or the header does not have
-    /// pos_reference or the pos_reference does not exist.
-    fn get_pos_reference_main_decision(
-        &self, block_hash: &H256,
-    ) -> Result<H256, String> {
-        // let pos_reference = self
-        //     .data_man
-        //     .pos_reference_by_hash(block_hash)
-        //     .ok_or("header exist".to_string())?
-        //     .ok_or("pos reference checked in sync graph".to_string())?;
-        // self.pos_verifier
-        //     .get_main_decision(&pos_reference)
-        //     .ok_or("pos validity checked in sync graph".to_string())
-        Err("pos reference not supported".to_string())
-    }
-
-    fn update_pos_main_decision(&mut self, me: usize) {
-        let h = self.arena[me].hash;
-        if let Ok(main_decision) = self.get_pos_reference_main_decision(&h) {
-            let main_decision_height = self
-                .data_man
-                .block_height_by_hash(&main_decision)
-                .expect("pos_reference checked");
-            if main_decision_height > self.best_pos_main_decision.1 {
-                self.best_pos_main_decision =
-                    (main_decision, main_decision_height);
-            }
-        }
-    }
-
     // TODO(lpl): Copied from `check_mining_adaptive_block`.
     /// Return possibly new parent.
     pub fn choose_correct_parent(

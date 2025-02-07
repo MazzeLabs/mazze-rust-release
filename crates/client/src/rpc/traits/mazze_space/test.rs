@@ -2,13 +2,10 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-use crate::rpc::types::{pos::Block as PosBlock, BlameInfo, Block, Bytes};
-use diem_types::{
-    account_address::AccountAddress, transaction::TransactionPayload,
-};
+use crate::rpc::types::{BlameInfo, Block, Bytes};
 use jsonrpc_core::Result as RpcResult;
 use jsonrpc_derive::rpc;
-use mazze_types::{H256, U256, U64};
+use mazze_types::{H256, U256};
 use mazzecore::PeerInfo;
 use network::node_table::NodeId;
 use std::net::SocketAddr;
@@ -113,49 +110,4 @@ pub trait TestRpc {
 
     #[rpc(name = "save_node_db")]
     fn save_node_db(&self) -> RpcResult<()>;
-
-    #[rpc(name = "pos_register")]
-    fn pos_register(
-        &self, voting_power: U64, version: Option<u8>,
-    ) -> RpcResult<(Bytes, AccountAddress)>;
-
-    #[rpc(name = "pos_update_voting_power")]
-    fn pos_update_voting_power(
-        &self, pos_account: AccountAddress, increased_voting_power: U64,
-    ) -> RpcResult<()>;
-
-    #[rpc(name = "pos_stop_election")]
-    fn pos_stop_election(&self) -> RpcResult<Option<u64>>;
-
-    #[rpc(name = "pos_start_voting")]
-    fn pos_start_voting(&self, initialize: bool) -> RpcResult<()>;
-
-    #[rpc(name = "pos_stop_voting")]
-    fn pos_stop_voting(&self) -> RpcResult<()>;
-
-    #[rpc(name = "pos_voting_status")]
-    fn pos_voting_status(&self) -> RpcResult<bool>;
-
-    #[rpc(name = "pos_start")]
-    fn pos_start(&self) -> RpcResult<()>;
-
-    #[rpc(name = "pos_force_vote_proposal")]
-    fn pos_force_vote_proposal(&self, block_id: H256) -> RpcResult<()>;
-
-    #[rpc(name = "pos_force_propose")]
-    fn pos_force_propose(
-        &self, round: U64, parent_block_id: H256,
-        payload: Vec<TransactionPayload>,
-    ) -> RpcResult<()>;
-
-    #[rpc(name = "pos_trigger_timeout")]
-    fn pos_trigger_timeout(&self, timeout_type: String) -> RpcResult<()>;
-
-    #[rpc(name = "pos_force_sign_main_decision")]
-    fn pos_force_sign_main_decision(
-        &self, block_hash: H256, height: U64,
-    ) -> RpcResult<()>;
-
-    #[rpc(name = "pos_get_chosen_proposal")]
-    fn pos_get_chosen_proposal(&self) -> RpcResult<Option<PosBlock>>;
 }

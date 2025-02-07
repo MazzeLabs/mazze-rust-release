@@ -11,14 +11,14 @@ use std::{
 
 use crate::rpc::{
     types::{
-        errors::check_rpc_address_network, pos::PoSEpochReward,
-        AccountPendingInfo, AccountPendingTransactions, Block as RpcBlock,
-        BlockHashOrEpochNumber, Bytes, CheckBalanceAgainstTransactionResponse,
-        EpochNumber, FeeHistory, MazzeFeeHistory, RpcAddress,
-        Status as RpcStatus, Transaction as RpcTransaction,
-        TxPoolPendingNonceRange, TxPoolStatus, TxWithPoolInfo, U64 as HexU64,
+        errors::check_rpc_address_network, AccountPendingInfo,
+        AccountPendingTransactions, Block as RpcBlock, BlockHashOrEpochNumber,
+        Bytes, CheckBalanceAgainstTransactionResponse, EpochNumber, FeeHistory,
+        MazzeFeeHistory, RpcAddress, Status as RpcStatus,
+        Transaction as RpcTransaction, TxPoolPendingNonceRange, TxPoolStatus,
+        TxWithPoolInfo, U64 as HexU64,
     },
-    RpcErrorKind, RpcResult,
+    RpcResult,
 };
 
 use bigdecimal::BigDecimal;
@@ -30,13 +30,6 @@ use keccak_hash::keccak;
 use num_bigint::{BigInt, ToBigInt};
 use parking_lot::{Condvar, Mutex};
 
-use crate::rpc::types::pos::{Block as RpcPosBlock, Decision};
-use diem_crypto::hash::HashValue;
-use diem_types::{
-    account_address::{from_consensus_public_key, AccountAddress},
-    block_info::MainBlockDecision,
-    transaction::TransactionPayload,
-};
 use mazze_addr::Network;
 use mazze_parameters::{
     rpc::GAS_PRICE_DEFAULT_VALUE, staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
@@ -45,7 +38,7 @@ use mazze_types::{
     Address, AddressSpaceUtil, Space, H160, H256, H520, U128, U256, U512, U64,
 };
 use mazzecore::{
-    genesis_block::register_transaction, rpc_errors::invalid_params_check,
+    rpc_errors::invalid_params_check,
     BlockDataManager, ConsensusGraph, ConsensusGraphTrait, PeerInfo,
     SharedConsensusGraph, SharedTransactionPool,
 };
@@ -57,7 +50,6 @@ use network::{
     NetworkService, SessionDetails, UpdateNodeOperation,
 };
 use primitives::{Account, Action, Block, SignedTransaction, Transaction};
-use storage_interface::DBReaderForPoW;
 
 fn grouped_txs<T, F>(
     txs: Vec<Arc<SignedTransaction>>, converter: F,
@@ -158,14 +150,15 @@ pub struct RpcImpl {
     network: Arc<NetworkService>,
     tx_pool: SharedTransactionPool,
     accounts: Arc<AccountProvider>,
-    // pub pos_handler: Arc<PosVerifier>,
 }
 
 impl RpcImpl {
     pub fn new(
-        exit: Arc<(Mutex<bool>, Condvar)>, consensus: SharedConsensusGraph,
-        network: Arc<NetworkService>, tx_pool: SharedTransactionPool,
-        accounts: Arc<AccountProvider>, // pos_verifier: Arc<PosVerifier>,
+        exit: Arc<(Mutex<bool>, Condvar)>,
+        consensus: SharedConsensusGraph,
+        network: Arc<NetworkService>,
+        tx_pool: SharedTransactionPool,
+        accounts: Arc<AccountProvider>,
     ) -> Self {
         let data_man = consensus.get_data_manager().clone();
 
@@ -176,7 +169,6 @@ impl RpcImpl {
             network,
             tx_pool,
             accounts,
-            // pos_handler: pos_verifier,
         }
     }
 
@@ -262,7 +254,8 @@ impl RpcImpl {
         }
     }
 
-    fn primitive_block_by_epoch_number(
+    // TODO: is this still needed?
+    fn _primitive_block_by_epoch_number(
         &self, epoch_num: EpochNumber,
     ) -> Option<Arc<Block>> {
         let consensus_graph = self.consensus_graph();
@@ -815,187 +808,6 @@ impl RpcImpl {
         self.exit.1.notify_all();
 
         Ok(())
-    }
-
-    pub fn pos_register(
-        &self, voting_power: U64, version: Option<u8>,
-    ) -> JsonRpcResult<(Bytes, AccountAddress)> {
-        // let legacy = version.map_or(false, |x| x == 0);
-        // let tx = register_transaction(
-        //     self.pos_handler.config().bls_key.private_key(),
-        //     self.pos_handler.config().vrf_key.public_key(),
-        //     voting_power.as_u64(),
-        //     0,
-        //     legacy,
-        // );
-        // let identifier = from_consensus_public_key(
-        //     &self.pos_handler.config().bls_key.public_key(),
-        //     &self.pos_handler.config().vrf_key.public_key(),
-        // );
-        // Ok((tx.data.into(), identifier))
-        Err(RpcError::method_not_found())
-    }
-
-    pub fn pos_update_voting_power(
-        &self, _pos_account: AccountAddress, _increased_voting_power: U64,
-    ) -> JsonRpcResult<()> {
-        unimplemented!()
-    }
-
-    pub fn pos_stop_election(&self) -> JsonRpcResult<Option<u64>> {
-        // self.pos_handler.stop_election().map_err(|e| {
-        //     warn!("stop_election: err={:?}", e);
-        //     RpcError::internal_error().into()
-        // })
-        Err(RpcError::method_not_found())
-    }
-
-    pub fn pos_start_voting(&self, initialize: bool) -> RpcResult<()> {
-        info!("RPC Request: pos_start_voting, initialize={}", initialize);
-        // self.pos_handler.start_voting(initialize).map_err(|e| {
-        //     warn!("start_voting: err={:?}", e);
-        //     RpcErrorKind::Custom(e.to_string()).into()
-        // })
-        todo!("pos_verifier is being dropped");
-    }
-
-    pub fn pos_stop_voting(&self) -> RpcResult<()> {
-        info!("RPC Request: pos_stop_voting");
-        // self.pos_handler.stop_voting().map_err(|e| {
-        //     warn!("stop_voting: err={:?}", e);
-        //     RpcErrorKind::Custom(e.to_string()).into()
-        // })
-        todo!("pos_verifier is being dropped");
-    }
-
-    pub fn pos_voting_status(&self) -> RpcResult<bool> {
-        // self.pos_handler.voting_status().map_err(|e| {
-        //     warn!("voting_status: err={:?}", e);
-        //     RpcErrorKind::Custom(e.to_string()).into()
-        // })
-        todo!("pos_verifier is being dropped");
-    }
-
-    pub fn pos_start(&self) -> RpcResult<()> {
-        // self.pos_handler
-        //     .initialize(self.consensus.clone().to_arc_consensus())?;
-        todo!("pos_verifier is being dropped");
-    }
-
-    pub fn pos_force_vote_proposal(&self, block_id: H256) -> RpcResult<()> {
-        if !self.network.is_test_mode() {
-            // Reject force vote if test RPCs are enabled in a mainnet node,
-            // because this may cause staked MAZZEs locked
-            // permanently.
-            bail!(RpcError::internal_error())
-        }
-        // self.pos_handler.force_vote_proposal(block_id).map_err(|e| {
-        //     warn!("force_vote_proposal: err={:?}", e);
-        //     RpcError::internal_error().into()
-        // })
-        todo!("pos_verifier is being dropped");
-    }
-
-    pub fn pos_force_propose(
-        &self, round: U64, parent_block_id: H256,
-        payload: Vec<TransactionPayload>,
-    ) -> RpcResult<()> {
-        if !self.network.is_test_mode() {
-            // Reject force vote if test RPCs are enabled in a mainnet node,
-            // because this may cause staked MAZZEs locked
-            // permanently.
-            bail!(RpcError::internal_error())
-        }
-        // self.pos_handler
-        //     .force_propose(round, parent_block_id, payload)
-        //     .map_err(|e| {
-        //         warn!("pos_force_propose: err={:?}", e);
-        //         RpcError::internal_error().into()
-        //     })
-        todo!("pos_verifier is being dropped");
-    }
-
-    pub fn pos_trigger_timeout(&self, timeout_type: String) -> RpcResult<()> {
-        if !self.network.is_test_mode() {
-            // Reject force vote if test RPCs are enabled in a mainnet node,
-            // because this may cause staked MAZZEs locked
-            // permanently.
-            bail!(RpcError::internal_error())
-        }
-        debug!("pos_trigger_timeout: type={}", timeout_type);
-        // self.pos_handler.trigger_timeout(timeout_type).map_err(|e| {
-        //     warn!("pos_trigger_timeout: err={:?}", e);
-        //     RpcError::internal_error().into()
-        // })
-        todo!("pos_verifier is being dropped");
-    }
-
-    pub fn pos_force_sign_main_decision(
-        &self, block_hash: H256, height: U64,
-    ) -> RpcResult<()> {
-        if !self.network.is_test_mode() {
-            // Reject force vote if test RPCs are enabled in a mainnet node,
-            // because this may cause staked MAZZEs locked
-            // permanently.
-            bail!(RpcError::internal_error())
-        }
-        // self.pos_handler
-        //     .force_sign_main_decision(MainBlockDecision {
-        //         block_hash,
-        //         height: height.as_u64(),
-        //     })
-        //     .map_err(|e| {
-        //         warn!("pos_trigger_timeout: err={:?}", e);
-        //         RpcError::internal_error().into()
-        //     })
-        todo!("pos_verifier is being dropped");
-    }
-
-    pub fn pos_get_chosen_proposal(&self) -> RpcResult<Option<RpcPosBlock>> {
-        // let maybe_block = self
-        //     .pos_handler
-        //     .get_chosen_proposal()
-        //     .map_err(|e| {
-        //         warn!("pos_get_chosen_proposal: err={:?}", e);
-        //         RpcError::internal_error()
-        //     })?
-        //     .and_then(|b| {
-        //         let block_hash = b.id();
-        //         self.pos_handler
-        //             .cached_db()
-        //             .get_block(&block_hash)
-        //             .ok()
-        //             .map(|executed_block| {
-        //                 let executed_block = executed_block.lock();
-        //                 RpcPosBlock {
-        //                     hash: hash_value_to_h256(b.id()),
-        //                     epoch: U64::from(b.epoch()),
-        //                     round: U64::from(b.round()),
-        //                     last_tx_number: executed_block
-        //                         .output()
-        //                         .version()
-        //                         .unwrap_or_default()
-        //                         .into(),
-        //                     miner: b.author().map(|a| H256::from(a.to_u8())),
-        //                     parent_hash: hash_value_to_h256(b.parent_id()),
-        //                     timestamp: U64::from(b.timestamp_usecs()),
-        //                     main_decision: executed_block
-        //                         .output()
-        //                         .main_block()
-        //                         .as_ref()
-        //                         .map(|d| Decision::from(d)),
-        //                     height: executed_block
-        //                         .output()
-        //                         .executed_trees()
-        //                         .pos_state()
-        //                         .current_view()
-        //                         .into(),
-        //                     signatures: vec![],
-        //                 }
-        //             })
-        //     });
-        // Ok(maybe_block)
-        todo!("pos_verifier is being dropped");
     }
 }
 

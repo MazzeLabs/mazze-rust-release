@@ -6,14 +6,13 @@ use crate::rpc::{
     error_codes::{internal_error_msg, invalid_params_msg},
     types::{
         call_request::rpc_call_request_network,
-        errors::check_rpc_address_network, pos::PoSEpochReward,
+        errors::check_rpc_address_network,
         MazzeFeeHistory, PoSEconomics, RpcAddress, SponsorInfo, StatOnGasLoad,
         TokenSupplyInfo, VoteParamsInfo, WrapTransaction, U64 as HexU64,
     },
 };
 use blockgen::BlockGenerator;
 use delegate::delegate;
-use diem_types::transaction::TransactionPayload;
 use jsonrpc_core::{BoxFuture, Error as JsonRpcError, Result as JsonRpcResult};
 use mazze_execute_helper::estimation::{decode_error, EstimateExt};
 use mazze_executor::{
@@ -73,7 +72,7 @@ use crate::{
         },
         traits::{debug::LocalRpc, mazze::Mazze, test::TestRpc},
         types::{
-            eth::Transaction as EthTransaction, pos::Block as PosBlock,
+            eth::Transaction as EthTransaction,
             sign_call, Account as RpcAccount, AccountPendingInfo,
             AccountPendingTransactions, BlameInfo, Block as RpcBlock,
             BlockHashOrEpochNumber, Bytes, CallRequest,
@@ -87,7 +86,6 @@ use crate::{
         RpcResult,
     },
 };
-use diem_types::account_address::AccountAddress;
 use mazze_addr::Network;
 use mazze_execute_helper::estimation::EstimateRequest;
 use mazze_executor::state::State;
@@ -2351,20 +2349,6 @@ impl TestRpc for TestRpcImpl {
             fn say_hello(&self) -> JsonRpcResult<String>;
             fn stop(&self) -> JsonRpcResult<()>;
             fn save_node_db(&self) -> JsonRpcResult<()>;
-            fn pos_register(&self, voting_power: U64, version: Option<u8>) -> JsonRpcResult<(Bytes, AccountAddress)>;
-            fn pos_update_voting_power(
-                &self, pos_account: AccountAddress, increased_voting_power: U64,
-            ) -> JsonRpcResult<()>;
-            fn pos_stop_election(&self) -> JsonRpcResult<Option<u64>>;
-            fn pos_start_voting(&self, initialize: bool) -> JsonRpcResult<()>;
-            fn pos_stop_voting(&self) -> JsonRpcResult<()>;
-            fn pos_voting_status(&self) -> JsonRpcResult<bool>;
-            fn pos_start(&self) -> JsonRpcResult<()>;
-            fn pos_force_vote_proposal(&self, block_id: H256) -> JsonRpcResult<()>;
-            fn pos_force_propose(&self, round: U64, parent_block_id: H256, payload: Vec<TransactionPayload>) -> JsonRpcResult<()>;
-            fn pos_trigger_timeout(&self, timeout_type: String) -> JsonRpcResult<()>;
-            fn pos_force_sign_main_decision(&self, block_hash: H256, height: U64) -> JsonRpcResult<()>;
-            fn pos_get_chosen_proposal(&self) -> JsonRpcResult<Option<PosBlock>>;
         }
 
         to self.rpc_impl {

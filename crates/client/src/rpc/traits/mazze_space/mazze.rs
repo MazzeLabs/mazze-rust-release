@@ -3,9 +3,9 @@
 // See http://www.gnu.org/licenses/
 
 use crate::rpc::types::{
-    pos::PoSEpochReward, Account as RpcAccount, AccountPendingInfo,
-    AccountPendingTransactions, Block, BlockHashOrEpochNumber, Bytes,
-    CallRequest, CheckBalanceAgainstTransactionResponse, EpochNumber,
+    Account as RpcAccount, AccountPendingInfo, AccountPendingTransactions,
+    Block, BlockHashOrEpochNumber, Bytes, CallRequest,
+    CheckBalanceAgainstTransactionResponse, EpochNumber,
     EstimateGasAndCollateralResponse, Log as RpcLog, MazzeFeeHistory,
     MazzeFilterChanges, MazzeRpcLogFilter, PoSEconomics, Receipt as RpcReceipt,
     RewardInfo as RpcRewardInfo, RpcAddress, SponsorInfo, Status as RpcStatus,

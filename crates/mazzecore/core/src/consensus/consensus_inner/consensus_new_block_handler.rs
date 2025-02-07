@@ -1142,9 +1142,6 @@ impl ConsensusNewBlockHandler {
         let mut fork_at;
         let old_main_chain_len = inner.main_chain.len();
 
-        // Update consensus inner with a possibly new pos_reference.
-        inner.update_pos_main_decision(me);
-
         // Now we are going to maintain the timer chain.
         let diff = inner.arena[me].data.past_view_timer_longest_difficulty
             + inner.get_timer_difficulty(me);

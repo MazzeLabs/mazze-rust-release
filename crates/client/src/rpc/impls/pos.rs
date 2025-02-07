@@ -53,29 +53,35 @@ use std::sync::Arc;
 use storage_interface::{DBReaderForPoW, DbReader};
 
 pub struct PoSInterceptor {
-    pos_handler: Arc<PosVerifier>,
+    // pos_handler: Arc<PosVerifier>,
 }
 
 impl PoSInterceptor {
-    pub fn new(pos_handler: Arc<PosVerifier>) -> Self {
-        PoSInterceptor { pos_handler }
+    pub fn new() -> Self {
+        // PoSInterceptor { pos_handler }
+        PoSInterceptor {}
     }
 }
 
 impl RpcInterceptor for PoSInterceptor {
     fn before(&self, _name: &String) -> JsonRpcResult<()> {
-        match self.pos_handler.pos_option() {
-            Some(_) => Ok(()),
-            None => bail!(build_rpc_server_error(
-                POS_NOT_ENABLED,
-                "PoS chain is not enabled".into()
-            )),
-        }
+        // match self.pos_handler.pos_option() {
+        //     Some(_) => Ok(()),
+        //     None => bail!(build_rpc_server_error(
+        //         POS_NOT_ENABLED,
+        //         "PoS chain is not enabled".into()
+        //     )),
+        // }
+
+        bail!(build_rpc_server_error(
+            POS_NOT_ENABLED,
+            "PoS chain is not enabled".into()
+        ));
     }
 }
 
 pub struct PosHandler {
-    pos_handler: Arc<PosVerifier>,
+    // pos_handler: Arc<PosVerifier>,
     pow_data_manager: Arc<BlockDataManager>,
     network_type: Network,
     consensus: SharedConsensusGraph,
@@ -83,11 +89,12 @@ pub struct PosHandler {
 
 impl PosHandler {
     pub fn new(
-        pos_handler: Arc<PosVerifier>, pow_data_manager: Arc<BlockDataManager>,
+        // pos_handler: Arc<PosVerifier>, 
+        pow_data_manager: Arc<BlockDataManager>,
         network_type: Network, consensus: SharedConsensusGraph,
     ) -> Self {
         PosHandler {
-            pos_handler,
+            // pos_handler,
             pow_data_manager,
             network_type,
             consensus,
@@ -95,37 +102,40 @@ impl PosHandler {
     }
 
     fn current_height(&self) -> u64 {
-        self.pos_handler
-            .pos_ledger_db()
-            .get_latest_pos_state()
-            .current_view()
+        // self.pos_handler
+        //     .pos_ledger_db()
+        //     .get_latest_pos_state()
+        //     .current_view()
+        0u64
     }
 
     fn current_epoch(&self) -> u64 {
-        self.pos_handler
-            .pos_ledger_db()
-            .get_latest_pos_state()
-            .epoch_state()
-            .epoch
+        // self.pos_handler
+        //     .pos_ledger_db()
+        //     .get_latest_pos_state()
+        //     .epoch_state()
+        //     .epoch
+        0u64
     }
 
     fn status_impl(&self) -> Status {
-        let state = self.pos_handler.pos_ledger_db().get_latest_pos_state();
-        let decision = state.main_decision();
-        let epoch_state = state.epoch_state();
-        let block_number = state.current_view();
-        let latest_voted = self.latest_voted().map(|b| U64::from(b.height));
-        let latest_tx_number = self
-            .block_by_number(BlockNumber::Num(U64::from(block_number)))
-            .map(|b| b.last_tx_number.into())
-            .unwrap_or_default();
-        Status {
-            epoch: U64::from(epoch_state.epoch),
-            latest_committed: U64::from(block_number),
-            main_decision: Decision::from(decision),
-            latest_voted,
-            latest_tx_number,
-        }
+        // let state = self.pos_handler.pos_ledger_db().get_latest_pos_state();
+        // let decision = state.main_decision();
+        // let epoch_state = state.epoch_state();
+        // let block_number = state.current_view();
+        // let latest_voted = self.latest_voted().map(|b| U64::from(b.height));
+        // let latest_tx_number = self
+        //     .block_by_number(BlockNumber::Num(U64::from(block_number)))
+        //     .map(|b| b.last_tx_number.into())
+        //     .unwrap_or_default();
+        // Status {
+        //     epoch: U64::from(epoch_state.epoch),
+        //     latest_committed: U64::from(block_number),
+        //     main_decision: Decision::from(decision),
+        //     latest_voted,
+        //     latest_tx_number,
+        // }
+        todo!("pos_verifier is being disabled")
     }
 
     fn account_impl(
@@ -271,31 +281,32 @@ impl PosHandler {
     fn pos_state_by_view(
         &self, view: Option<U64>,
     ) -> Result<Arc<PosState>, String> {
-        let latest_state =
-            self.pos_handler.pos_ledger_db().get_latest_pos_state();
-        let state = match view {
-            None => latest_state,
-            Some(v) => {
-                let latest_view = latest_state.current_view();
-                let v = v.as_u64();
-                if v > latest_view {
-                    bail!("Specified block {} is not executed, the latest block number is {}", v, latest_view)
-                }
+        // let latest_state =
+        //     self.pos_handler.pos_ledger_db().get_latest_pos_state();
+        // let state = match view {
+        //     None => latest_state,
+        //     Some(v) => {
+        //         let latest_view = latest_state.current_view();
+        //         let v = v.as_u64();
+        //         if v > latest_view {
+        //             bail!("Specified block {} is not executed, the latest block number is {}", v, latest_view)
+        //         }
 
-                let state = self
-                    .pos_handler
-                    .pos_ledger_db()
-                    .get_committed_block_hash_by_view(v)
-                    .and_then(|block_hash| {
-                        self.pos_handler
-                            .pos_ledger_db()
-                            .get_pos_state(&block_hash)
-                    })
-                    .map_err(|_| format!("PoS state of {} not found", v))?;
-                Arc::new(state)
-            }
-        };
-        Ok(state)
+        //         let state = self
+        //             .pos_handler
+        //             .pos_ledger_db()
+        //             .get_committed_block_hash_by_view(v)
+        //             .and_then(|block_hash| {
+        //                 self.pos_handler
+        //                     .pos_ledger_db()
+        //                     .get_pos_state(&block_hash)
+        //             })
+        //             .map_err(|_| format!("PoS state of {} not found", v))?;
+        //         Arc::new(state)
+        //     }
+        // };
+        // Ok(state)
+        todo!("pos_verifier is being disabled")
     }
 
     fn committee_by_block_number(
@@ -323,230 +334,235 @@ impl PosHandler {
     fn ledger_info_by_epoch(
         &self, epoch: u64,
     ) -> Option<LedgerInfoWithSignatures> {
-        self.pos_handler
-            .pos_ledger_db()
-            .get_epoch_ending_ledger_infos(epoch, epoch + 1)
-            .ok()?
-            .get_all_ledger_infos()
-            .first()
-            .map(|l| l.clone())
+        // self.pos_handler
+        //     .pos_ledger_db()
+        //     .get_epoch_ending_ledger_infos(epoch, epoch + 1)
+        //     .ok()?
+        //     .get_all_ledger_infos()
+        //     .first()
+        //     .map(|l| l.clone())
+        None
     }
 
     fn ledger_infos_by_epoch(
         &self, start_epoch: u64, end_epoch: u64,
     ) -> Vec<LedgerInfoWithSignatures> {
-        self.pos_handler
-            .pos_ledger_db()
-            .get_epoch_ending_ledger_infos(start_epoch, end_epoch)
-            .ok()
-            .map(|proof| proof.get_all_ledger_infos())
-            .unwrap_or(vec![])
+        // self.pos_handler
+        //     .pos_ledger_db()
+        //     .get_epoch_ending_ledger_infos(start_epoch, end_epoch)
+        //     .ok()
+        //     .map(|proof| proof.get_all_ledger_infos())
+        //     .unwrap_or(vec![])
+        vec![]
     }
 
     // get epoch state
     fn epoch_state_by_epoch_number(&self, epoch: u64) -> Option<EpochState> {
-        if epoch == 0 {
-            return None;
-        }
-        if epoch == self.current_epoch() {
-            return Some(
-                self.pos_handler
-                    .pos_ledger_db()
-                    .get_latest_pos_state()
-                    .epoch_state()
-                    .clone(),
-            );
-        }
-        if let Some(ledger_info) = self.ledger_info_by_epoch(epoch - 1) {
-            let option = ledger_info.ledger_info().next_epoch_state();
-            return option.map(|f| (*f).clone());
-        }
+        // if epoch == 0 {
+        //     return None;
+        // }
+        // if epoch == self.current_epoch() {
+        //     return Some(
+        //         self.pos_handler
+        //             .pos_ledger_db()
+        //             .get_latest_pos_state()
+        //             .epoch_state()
+        //             .clone(),
+        //     );
+        // }
+        // if let Some(ledger_info) = self.ledger_info_by_epoch(epoch - 1) {
+        //     let option = ledger_info.ledger_info().next_epoch_state();
+        //     return option.map(|f| (*f).clone());
+        // }
         None
     }
 
     fn block_by_hash(&self, hash: H256) -> Option<Block> {
         let hash_value = HashValue::from_slice(hash.as_bytes()).ok()?;
-        let block = self
-            .pos_handler
-            .pos_ledger_db()
-            .get_committed_block_by_hash(&hash_value);
-        match block {
-            Ok(b) => {
-                let mut block = Block {
-                    hash,
-                    height: U64::from(b.view),
-                    epoch: U64::from(b.epoch),
-                    round: U64::from(b.round),
-                    last_tx_number: U64::from(b.version),
-                    miner: b.miner.map(|m| H256::from(m.to_u8())),
-                    parent_hash: hash_value_to_h256(b.parent_hash),
-                    timestamp: U64::from(b.timestamp),
-                    main_decision: Some(Decision::from(&b.main_decision)),
-                    signatures: vec![],
-                };
-                // get signatures info
-                if let Some(epoch_state) =
-                    self.epoch_state_by_epoch_number(b.epoch)
-                {
-                    if let Ok(ledger_info) = self
-                        .pos_handler
-                        .pos_ledger_db()
-                        .get_ledger_info_by_voted_block(&b.hash)
-                    {
-                        block.signatures = ledger_info
-                            .signatures()
-                            .iter()
-                            .map(|(a, _s)| {
-                                let voting_power = epoch_state
-                                    .verifier()
-                                    .get_voting_power(a)
-                                    .unwrap_or(0);
-                                Signature {
-                                    account: H256::from(a.to_u8()),
-                                    // signature: s.to_string(),
-                                    votes: U64::from(voting_power),
-                                }
-                            })
-                            .collect();
-                    }
-                };
-                Some(block)
-            }
-            Err(_) => self.consensus_block_by_hash(hash),
-        }
+        // let block = self
+        //     .pos_handler
+        //     .pos_ledger_db()
+        //     .get_committed_block_by_hash(&hash_value);
+        // match block {
+        //     Ok(b) => {
+        //         let mut block = Block {
+        //             hash,
+        //             height: U64::from(b.view),
+        //             epoch: U64::from(b.epoch),
+        //             round: U64::from(b.round),
+        //             last_tx_number: U64::from(b.version),
+        //             miner: b.miner.map(|m| H256::from(m.to_u8())),
+        //             parent_hash: hash_value_to_h256(b.parent_hash),
+        //             timestamp: U64::from(b.timestamp),
+        //             main_decision: Some(Decision::from(&b.main_decision)),
+        //             signatures: vec![],
+        //         };
+        //         // get signatures info
+        //         if let Some(epoch_state) =
+        //             self.epoch_state_by_epoch_number(b.epoch)
+        //         {
+        //             if let Ok(ledger_info) = self
+        //                 .pos_handler
+        //                 .pos_ledger_db()
+        //                 .get_ledger_info_by_voted_block(&b.hash)
+        //             {
+        //                 block.signatures = ledger_info
+        //                     .signatures()
+        //                     .iter()
+        //                     .map(|(a, _s)| {
+        //                         let voting_power = epoch_state
+        //                             .verifier()
+        //                             .get_voting_power(a)
+        //                             .unwrap_or(0);
+        //                         Signature {
+        //                             account: H256::from(a.to_u8()),
+        //                             // signature: s.to_string(),
+        //                             votes: U64::from(voting_power),
+        //                         }
+        //                     })
+        //                     .collect();
+        //             }
+        //         };
+        //         Some(block)
+        //     }
+        //     Err(_) => self.consensus_block_by_hash(hash),
+        // }
+        None
     }
 
     fn block_by_number(&self, number: BlockNumber) -> Option<Block> {
-        match number {
-            BlockNumber::Num(num) => {
-                if num.as_u64() <= self.current_height() {
-                    let hash = self
-                        .pos_handler
-                        .pos_ledger_db()
-                        .get_committed_block_hash_by_view(num.as_u64())
-                        .ok()?;
-                    self.block_by_hash(hash_value_to_h256(hash))
-                } else {
-                    self.consensus_block_by_number(num)
-                }
-            }
-            BlockNumber::LatestCommitted => {
-                let hash = self.pos_handler.get_latest_pos_reference();
-                self.block_by_hash(hash)
-            }
-            BlockNumber::Earliest => {
-                let hash = self
-                    .pos_handler
-                    .pos_ledger_db()
-                    .get_committed_block_hash_by_view(1)
-                    .ok()?;
-                self.block_by_hash(hash_value_to_h256(hash))
-            }
-            BlockNumber::LatestVoted => self.latest_voted(),
-        }
+        // match number {
+        //     BlockNumber::Num(num) => {
+        //         if num.as_u64() <= self.current_height() {
+        //             let hash = self
+        //                 .pos_handler
+        //                 .pos_ledger_db()
+        //                 .get_committed_block_hash_by_view(num.as_u64())
+        //                 .ok()?;
+        //             self.block_by_hash(hash_value_to_h256(hash))
+        //         } else {
+        //             self.consensus_block_by_number(num)
+        //         }
+        //     }
+        //     BlockNumber::LatestCommitted => {
+        //         let hash = self.pos_handler.get_latest_pos_reference();
+        //         self.block_by_hash(hash)
+        //     }
+        //     BlockNumber::Earliest => {
+        //         let hash = self
+        //             .pos_handler
+        //             .pos_ledger_db()
+        //             .get_committed_block_hash_by_view(1)
+        //             .ok()?;
+        //         self.block_by_hash(hash_value_to_h256(hash))
+        //     }
+        //     BlockNumber::LatestVoted => self.latest_voted(),
+        // }
+        None
     }
 
     fn consensus_blocks(&self) -> Option<Vec<Block>> {
-        let blocks = self.pos_handler.consensus_db().get_blocks().ok()?;
-        let block_ids = blocks.values().map(|b| b.id()).collect::<Vec<_>>();
-        debug!("consensus_blocks: block_ids={:?}", block_ids);
-        if blocks.len() == 0 {
-            return Some(vec![]);
-        }
-        let qcs = self
-            .pos_handler
-            .consensus_db()
-            .get_quorum_certificates()
-            .ok()?;
-        // sort by epoch and round
-        let blocks: Vec<ConsensusBlock> = blocks
-            .into_iter()
-            .sorted_by(|(_, b1), (_, b2)| {
-                Ord::cmp(&(b1.epoch(), b1.round()), &(b2.epoch(), b2.round()))
-            })
-            .map(|(_, b)| b)
-            .collect();
-        let latest_epoch_state = self
-            .pos_handler
-            .pos_ledger_db()
-            .get_latest_pos_state()
-            .epoch_state()
-            .clone();
-        // map to Committed block
-        let rpc_blocks = blocks
-            .into_iter()
-            .filter(|b| b.epoch() == latest_epoch_state.epoch)
-            .map(|b| {
-                let mut rpc_block = Block {
-                    hash: hash_value_to_h256(b.id()),
-                    epoch: U64::from(b.epoch()),
-                    round: U64::from(b.round()),
-                    last_tx_number: Default::default(),
-                    miner: b.author().map(|a| H256::from(a.to_u8())),
-                    parent_hash: hash_value_to_h256(b.parent_id()),
-                    timestamp: U64::from(b.timestamp_usecs()),
-                    main_decision: Default::default(),
-                    height: Default::default(),
-                    signatures: vec![],
-                };
-                // Executed blocks are committed and pruned before ConsensusDB.
-                // If we get a block from ConsensusDB and it's pruned before we
-                // get the executed block here, its version and
-                // main decision would be missing.
-                // If this consensus block is not on a fork, its CommittedBlock
-                // should be accessible in this case.
-                if let Ok(executed_block) =
-                    self.pos_handler.cached_db().get_block(&b.id())
-                {
-                    let executed = executed_block.lock();
-                    if let Some(version) = executed.output().version() {
-                        rpc_block.last_tx_number = U64::from(version);
-                    }
-                    rpc_block.main_decision = executed
-                        .output()
-                        .main_block()
-                        .as_ref()
-                        .map(|p| Decision::from(p));
-                    rpc_block.height = U64::from(
-                        executed
-                            .output()
-                            .executed_trees()
-                            .pos_state()
-                            .current_view(),
-                    );
-                } else if let Ok(committed_block) = self
-                    .pos_handler
-                    .pos_ledger_db()
-                    .get_committed_block_by_hash(&b.id())
-                {
-                    rpc_block.last_tx_number = committed_block.version.into();
-                    rpc_block.main_decision =
-                        Some(Decision::from(&committed_block.main_decision));
-                    rpc_block.height = U64::from(committed_block.view);
-                }
-                if let Some(qc) = qcs.get(&b.id()) {
-                    let signatures = qc
-                        .ledger_info()
-                        .signatures()
-                        .iter()
-                        .map(|(a, _s)| {
-                            let voting_power = latest_epoch_state
-                                .verifier()
-                                .get_voting_power(a)
-                                .unwrap_or(0);
-                            Signature {
-                                account: H256::from(a.to_u8()),
-                                // signature: s.to_string(),
-                                votes: U64::from(voting_power),
-                            }
-                        })
-                        .collect();
-                    rpc_block.signatures = signatures;
-                }
-                rpc_block
-            })
-            .collect::<Vec<_>>();
-        Some(rpc_blocks)
+        // let blocks = self.pos_handler.consensus_db().get_blocks().ok()?;
+        // let block_ids = blocks.values().map(|b| b.id()).collect::<Vec<_>>();
+        // debug!("consensus_blocks: block_ids={:?}", block_ids);
+        // if blocks.len() == 0 {
+        //     return Some(vec![]);
+        // }
+        // let qcs = self
+        //     .pos_handler
+        //     .consensus_db()
+        //     .get_quorum_certificates()
+        //     .ok()?;
+        // // sort by epoch and round
+        // let blocks: Vec<ConsensusBlock> = blocks
+        //     .into_iter()
+        //     .sorted_by(|(_, b1), (_, b2)| {
+        //         Ord::cmp(&(b1.epoch(), b1.round()), &(b2.epoch(), b2.round()))
+        //     })
+        //     .map(|(_, b)| b)
+        //     .collect();
+        // let latest_epoch_state = self
+        //     .pos_handler
+        //     .pos_ledger_db()
+        //     .get_latest_pos_state()
+        //     .epoch_state()
+        //     .clone();
+        // // map to Committed block
+        // let rpc_blocks = blocks
+        //     .into_iter()
+        //     .filter(|b| b.epoch() == latest_epoch_state.epoch)
+        //     .map(|b| {
+        //         let mut rpc_block = Block {
+        //             hash: hash_value_to_h256(b.id()),
+        //             epoch: U64::from(b.epoch()),
+        //             round: U64::from(b.round()),
+        //             last_tx_number: Default::default(),
+        //             miner: b.author().map(|a| H256::from(a.to_u8())),
+        //             parent_hash: hash_value_to_h256(b.parent_id()),
+        //             timestamp: U64::from(b.timestamp_usecs()),
+        //             main_decision: Default::default(),
+        //             height: Default::default(),
+        //             signatures: vec![],
+        //         };
+        //         // Executed blocks are committed and pruned before ConsensusDB.
+        //         // If we get a block from ConsensusDB and it's pruned before we
+        //         // get the executed block here, its version and
+        //         // main decision would be missing.
+        //         // If this consensus block is not on a fork, its CommittedBlock
+        //         // should be accessible in this case.
+        //         if let Ok(executed_block) =
+        //             self.pos_handler.cached_db().get_block(&b.id())
+        //         {
+        //             let executed = executed_block.lock();
+        //             if let Some(version) = executed.output().version() {
+        //                 rpc_block.last_tx_number = U64::from(version);
+        //             }
+        //             rpc_block.main_decision = executed
+        //                 .output()
+        //                 .main_block()
+        //                 .as_ref()
+        //                 .map(|p| Decision::from(p));
+        //             rpc_block.height = U64::from(
+        //                 executed
+        //                     .output()
+        //                     .executed_trees()
+        //                     .pos_state()
+        //                     .current_view(),
+        //             );
+        //         } else if let Ok(committed_block) = self
+        //             .pos_handler
+        //             .pos_ledger_db()
+        //             .get_committed_block_by_hash(&b.id())
+        //         {
+        //             rpc_block.last_tx_number = committed_block.version.into();
+        //             rpc_block.main_decision =
+        //                 Some(Decision::from(&committed_block.main_decision));
+        //             rpc_block.height = U64::from(committed_block.view);
+        //         }
+        //         if let Some(qc) = qcs.get(&b.id()) {
+        //             let signatures = qc
+        //                 .ledger_info()
+        //                 .signatures()
+        //                 .iter()
+        //                 .map(|(a, _s)| {
+        //                     let voting_power = latest_epoch_state
+        //                         .verifier()
+        //                         .get_voting_power(a)
+        //                         .unwrap_or(0);
+        //                     Signature {
+        //                         account: H256::from(a.to_u8()),
+        //                         // signature: s.to_string(),
+        //                         votes: U64::from(voting_power),
+        //                     }
+        //                 })
+        //                 .collect();
+        //             rpc_block.signatures = signatures;
+        //         }
+        //         rpc_block
+        //     })
+        //     .collect::<Vec<_>>();
+        // Some(rpc_blocks)
+        None
     }
 
     fn latest_voted(&self) -> Option<Block> {
@@ -574,65 +590,66 @@ impl PosHandler {
     }
 
     fn tx_by_version(&self, version: u64) -> Option<Transaction> {
-        let pos_ledger_db = self.pos_handler.pos_ledger_db();
-        match pos_ledger_db.get_transaction(version).ok()? {
-            CoreTransaction::UserTransaction(signed_tx) => {
-                let mut block_hash: Option<H256> = None;
-                let mut block_number: Option<U64> = None;
-                let mut timestamp: Option<U64> = None;
-                let block_meta = pos_ledger_db
-                    .get_transaction_block_meta(version)
-                    .unwrap_or(None);
-                if let Some((_, bm)) = block_meta {
-                    block_hash = Some(hash_value_to_h256(bm.id()));
-                    timestamp = Some(U64::from(bm.timestamp_usec()));
-                    if let Some(block) = self.block_by_hash(block_hash?) {
-                        block_number = Some(block.height);
-                    }
-                }
-                let status = pos_ledger_db
-                    .get_transaction_info(version)
-                    .ok()
-                    .map(|tx| RpcTransactionStatus::from(tx.status().clone()));
-                Some(Transaction {
-                    hash: hash_value_to_h256(signed_tx.hash()),
-                    from: H256::from(signed_tx.sender().to_u8()),
-                    block_hash,
-                    block_number,
-                    timestamp,
-                    number: U64::from(version),
-                    payload: Some(signed_tx.payload().clone().into()),
-                    status,
-                    tx_type: tx_type(signed_tx.payload().clone()),
-                })
-            }
-            CoreTransaction::GenesisTransaction(_) => None,
-            CoreTransaction::BlockMetadata(block_meta) => {
-                let block_number = self
-                    .block_by_hash(hash_value_to_h256(block_meta.id()))
-                    .map(|b| U64::from(b.height));
-                let mut tx = Transaction {
-                    hash: Default::default(),
-                    from: Default::default(), // TODO
-                    block_hash: Some(hash_value_to_h256(block_meta.id())),
-                    block_number,
-                    timestamp: Some(U64::from(block_meta.timestamp_usec())),
-                    number: U64::from(version),
-                    payload: None,
-                    status: None,
-                    tx_type: RpcTransactionType::BlockMetadata,
-                };
-                if let Some(tx_info) =
-                    pos_ledger_db.get_transaction_info(version).ok()
-                {
-                    let status =
-                        RpcTransactionStatus::from(tx_info.status().clone());
-                    tx.status = Some(status);
-                    tx.hash = hash_value_to_h256(tx_info.transaction_hash());
-                }
-                Some(tx)
-            }
-        }
+        // let pos_ledger_db = self.pos_handler.pos_ledger_db();
+        // match pos_ledger_db.get_transaction(version).ok()? {
+        //     CoreTransaction::UserTransaction(signed_tx) => {
+        //         let mut block_hash: Option<H256> = None;
+        //         let mut block_number: Option<U64> = None;
+        //         let mut timestamp: Option<U64> = None;
+        //         let block_meta = pos_ledger_db
+        //             .get_transaction_block_meta(version)
+        //             .unwrap_or(None);
+        //         if let Some((_, bm)) = block_meta {
+        //             block_hash = Some(hash_value_to_h256(bm.id()));
+        //             timestamp = Some(U64::from(bm.timestamp_usec()));
+        //             if let Some(block) = self.block_by_hash(block_hash?) {
+        //                 block_number = Some(block.height);
+        //             }
+        //         }
+        //         let status = pos_ledger_db
+        //             .get_transaction_info(version)
+        //             .ok()
+        //             .map(|tx| RpcTransactionStatus::from(tx.status().clone()));
+        //         Some(Transaction {
+        //             hash: hash_value_to_h256(signed_tx.hash()),
+        //             from: H256::from(signed_tx.sender().to_u8()),
+        //             block_hash,
+        //             block_number,
+        //             timestamp,
+        //             number: U64::from(version),
+        //             payload: Some(signed_tx.payload().clone().into()),
+        //             status,
+        //             tx_type: tx_type(signed_tx.payload().clone()),
+        //         })
+        //     }
+        //     CoreTransaction::GenesisTransaction(_) => None,
+        //     CoreTransaction::BlockMetadata(block_meta) => {
+        //         let block_number = self
+        //             .block_by_hash(hash_value_to_h256(block_meta.id()))
+        //             .map(|b| U64::from(b.height));
+        //         let mut tx = Transaction {
+        //             hash: Default::default(),
+        //             from: Default::default(), // TODO
+        //             block_hash: Some(hash_value_to_h256(block_meta.id())),
+        //             block_number,
+        //             timestamp: Some(U64::from(block_meta.timestamp_usec())),
+        //             number: U64::from(version),
+        //             payload: None,
+        //             status: None,
+        //             tx_type: RpcTransactionType::BlockMetadata,
+        //         };
+        //         if let Some(tx_info) =
+        //             pos_ledger_db.get_transaction_info(version).ok()
+        //         {
+        //             let status =
+        //                 RpcTransactionStatus::from(tx_info.status().clone());
+        //             tx.status = Some(status);
+        //             tx.hash = hash_value_to_h256(tx_info.transaction_hash());
+        //         }
+        //         Some(tx)
+        //     }
+        // }
+        None
     }
 
     fn ledger_info_by_block_number(
@@ -644,26 +661,28 @@ impl PosHandler {
             "ledger_info_by_block_number {:?} {:?}",
             block_number, block_hash
         );
-        self.pos_handler
-            .pos_ledger_db()
-            .get_block_ledger_info(
-                &HashValue::from_slice(block_hash.as_bytes()).unwrap(),
-            )
-            .ok()
+        // self.pos_handler
+        //     .pos_ledger_db()
+        //     .get_block_ledger_info(
+        //         &HashValue::from_slice(block_hash.as_bytes()).unwrap(),
+        //     )
+        //     .ok()
+        None
     }
 
     fn ledger_info_by_epoch_and_round(
         &self, epoch: u64, round: u64,
     ) -> Option<LedgerInfoWithSignatures> {
-        let block_hash = self
-            .pos_handler
-            .pos_ledger_db()
-            .get_block_hash_by_epoch_and_round(epoch, round)
-            .ok()?;
-        self.pos_handler
-            .pos_ledger_db()
-            .get_block_ledger_info(&block_hash)
-            .ok()
+        // let block_hash = self
+        //     .pos_handler
+        //     .pos_ledger_db()
+        //     .get_block_hash_by_epoch_and_round(epoch, round)
+        //     .ok()?;
+        // self.pos_handler
+        //     .pos_ledger_db()
+        //     .get_block_ledger_info(&block_hash)
+        //     .ok()
+        None
     }
 }
 

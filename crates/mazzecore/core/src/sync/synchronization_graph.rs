@@ -37,7 +37,7 @@ use primitives::{
 use crate::{
     block_data_manager::{BlockDataManager, BlockStatus},
     channel::Channel,
-    consensus::{pos_handler::PosVerifier, SharedConsensusGraph},
+    consensus::SharedConsensusGraph,
     error::{BlockError, Error, ErrorKind},
     pow::{PowComputer, ProofOfWorkConfig},
     state_exposer::{SyncGraphBlockState, STATE_EXPOSER},
@@ -210,9 +210,12 @@ impl MallocSizeOf for SynchronizationGraphInner {
 
 impl SynchronizationGraphInner {
     pub fn with_genesis_block(
-        genesis_header: Arc<BlockHeader>, pow_config: ProofOfWorkConfig,
-        pow: Arc<PowComputer>, config: SyncGraphConfig,
-        data_man: Arc<BlockDataManager>, machine: Arc<Machine>,
+        genesis_header: Arc<BlockHeader>,
+        pow_config: ProofOfWorkConfig,
+        pow: Arc<PowComputer>,
+        config: SyncGraphConfig,
+        data_man: Arc<BlockDataManager>,
+        machine: Arc<Machine>,
         // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         let mut inner = SynchronizationGraphInner {
@@ -1044,9 +1047,12 @@ pub type SharedSynchronizationGraph = Arc<SynchronizationGraph>;
 impl SynchronizationGraph {
     pub fn new(
         consensus: SharedConsensusGraph,
-        verification_config: VerificationConfig, pow_config: ProofOfWorkConfig,
-        pow: Arc<PowComputer>, sync_config: SyncGraphConfig,
-        notifications: Arc<Notifications>, machine: Arc<Machine>,
+        verification_config: VerificationConfig,
+        pow_config: ProofOfWorkConfig,
+        pow: Arc<PowComputer>,
+        sync_config: SyncGraphConfig,
+        notifications: Arc<Notifications>,
+        machine: Arc<Machine>,
         // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         let data_man = consensus.get_data_manager().clone();

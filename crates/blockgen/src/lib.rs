@@ -14,11 +14,9 @@ use mazze_parameters::{
 };
 use mazze_types::{Address, SpaceMap, H256, U256};
 use mazzecore::{
-    block_parameters::*,
-    consensus::{consensus_inner::StateBlameInfo, pos_handler::PosVerifier},
-    pow::*,
-    verification::compute_transaction_root,
-    ConsensusGraph, ConsensusGraphTrait, SharedSynchronizationGraph,
+    block_parameters::*, consensus::consensus_inner::StateBlameInfo, pow::*,
+    verification::compute_transaction_root, ConsensusGraph,
+    ConsensusGraphTrait, SharedSynchronizationGraph,
     SharedSynchronizationService, SharedTransactionPool, Stopable,
 };
 use metrics::{Gauge, GaugeUsize};
@@ -144,10 +142,12 @@ impl Worker {
 
 impl BlockGenerator {
     pub fn new(
-        graph: SharedSynchronizationGraph, txpool: SharedTransactionPool,
+        graph: SharedSynchronizationGraph,
+        txpool: SharedTransactionPool,
         sync: SharedSynchronizationService,
         maybe_txgen: Option<SharedTransactionGenerator>,
-        pow_config: ProofOfWorkConfig, pow: Arc<PowComputer>,
+        pow_config: ProofOfWorkConfig,
+        pow: Arc<PowComputer>,
         mining_author: Address, // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         info!(

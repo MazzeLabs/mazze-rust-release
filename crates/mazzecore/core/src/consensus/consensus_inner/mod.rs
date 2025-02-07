@@ -15,8 +15,7 @@ use crate::{
     consensus::{
         consensus_inner::consensus_executor::ConsensusExecutor,
         debug_recompute::log_invalid_state_root, outlier_cache::OutlierCache,
-        pastset_cache::PastSetCache, 
-        MaybeExecutedTxExtraInfo, TransactionInfo,
+        pastset_cache::PastSetCache, MaybeExecutedTxExtraInfo, TransactionInfo,
     },
     pos::pow_handler::POS_TERM_EPOCHS,
     pow::{target_difficulty, PowComputer, ProofOfWorkConfig},
@@ -35,9 +34,7 @@ use mazze_internal_common::{
 use mazze_parameters::{consensus::*, consensus_internal::*};
 use mazze_types::{H256, U256, U512};
 use metrics::{Counter, CounterUsize};
-use primitives::{
-    pos::PosBlockId, Block, BlockHeader, BlockHeaderBuilder, EpochId,
-};
+use primitives::{Block, BlockHeader, BlockHeaderBuilder, EpochId};
 use slab::Slab;
 use std::{
     cmp::{max, min},
@@ -604,10 +601,12 @@ impl ConsensusGraphNode {
 
 impl ConsensusGraphInner {
     pub fn with_era_genesis(
-        pow_config: ProofOfWorkConfig, pow: Arc<PowComputer>,
+        pow_config: ProofOfWorkConfig,
+        pow: Arc<PowComputer>,
         // pos_verifier: Arc<PosVerifier>,
         data_man: Arc<BlockDataManager>,
-        inner_conf: ConsensusInnerConfig, cur_era_genesis_block_hash: &H256,
+        inner_conf: ConsensusInnerConfig,
+        cur_era_genesis_block_hash: &H256,
         cur_era_stable_block_hash: &H256,
     ) -> Self {
         let genesis_block_header = data_man
@@ -1205,7 +1204,7 @@ impl ConsensusGraphInner {
 
     pub fn check_mining_adaptive_block(
         &mut self, parent_arena_index: usize, referee_indices: Vec<usize>,
-        difficulty: U256, pos_reference: Option<PosBlockId>,
+        difficulty: U256,
     ) -> bool {
         // We first compute outlier barrier for newly mined block
         let parent_outlier_opt = self.outlier_cache.get(parent_arena_index);
@@ -1275,7 +1274,6 @@ impl ConsensusGraphInner {
             None,
             &timer_chain_tuple,
             i128::try_from(difficulty.low_u128()).unwrap(),
-            pos_reference,
         )
     }
 
@@ -1388,11 +1386,10 @@ impl ConsensusGraphInner {
         &mut self, parent_0: usize, outlier_barrier: &BitSet,
         weight_tuple: Option<&Vec<i128>>,
         timer_chain_tuple: &(u64, HashMap<usize, u64>, Vec<usize>, Vec<usize>),
-        difficulty: i128, pos_reference: Option<PosBlockId>,
+        difficulty: i128,
     ) -> bool {
         let mut parent = parent_0;
-        let force_confirm =
-            self.compute_block_force_confirm(timer_chain_tuple, pos_reference);
+        let force_confirm = self.compute_block_force_confirm(timer_chain_tuple);
         let force_confirm_height = self.arena[force_confirm].height;
         // This may happen if we are forced to generate at a position choosing
         // incorrect parent. We should return false here.
@@ -1499,9 +1496,6 @@ impl ConsensusGraphInner {
             weight_tuple,
             timer_chain_tuple,
             difficulty,
-            self.data_man
-                .pos_reference_by_hash(&self.arena[me].hash)
-                .expect("header exist"),
         )
     }
 
@@ -1682,7 +1676,6 @@ impl ConsensusGraphInner {
     fn compute_block_force_confirm(
         &self,
         timer_chain_tuple: &(u64, HashMap<usize, u64>, Vec<usize>, Vec<usize>),
-        pos_reference: Option<PosBlockId>,
     ) -> usize {
         let (fork_at, _, extra_lca, tmp_chain) = timer_chain_tuple;
         let fork_end_index =
@@ -1697,24 +1690,6 @@ impl ConsensusGraphInner {
         } else {
             self.cur_era_genesis_block_arena_index
         };
-        // match pos_reference {
-        //     None => timer_chain_choice,
-        //     Some(pos_reference) => {
-        //         let pos_main_decision = self
-        //             .pos_verifier
-        //             .get_main_decision(&pos_reference)
-        //             .expect("pos_reference checked");
-        //         self.compute_force_confirm(
-        //             timer_chain_choice,
-        //             &(
-        //                 pos_main_decision,
-        //                 self.data_man
-        //                     .block_height_by_hash(&pos_main_decision)
-        //                     .expect("pos main decision checked"),
-        //             ),
-        //         )
-        //     }
-        // }
 
         timer_chain_choice
     }
@@ -3991,7 +3966,6 @@ impl ConsensusGraphInner {
     /// Return possibly new parent.
     pub fn choose_correct_parent(
         &mut self, parent_arena_index: usize, referee_indices: Vec<usize>,
-        pos_reference: Option<PosBlockId>,
     ) -> usize {
         // We first compute outlier barrier for newly mined block
         let parent_outlier_opt = self.outlier_cache.get(parent_arena_index);
@@ -4059,17 +4033,14 @@ impl ConsensusGraphInner {
             parent_arena_index,
             &outlier_barrier,
             &timer_chain_tuple,
-            pos_reference,
         )
     }
 
     fn choose_correct_parent_impl(
         &mut self, parent: usize, outlier_barrier: &BitSet,
         timer_chain_tuple: &(u64, HashMap<usize, u64>, Vec<usize>, Vec<usize>),
-        pos_reference: Option<PosBlockId>,
     ) -> usize {
-        let force_confirm =
-            self.compute_block_force_confirm(timer_chain_tuple, pos_reference);
+        let force_confirm = self.compute_block_force_confirm(timer_chain_tuple);
         let force_confirm_height = self.arena[force_confirm].height;
 
         if self.ancestor_at(parent, force_confirm_height) == force_confirm {

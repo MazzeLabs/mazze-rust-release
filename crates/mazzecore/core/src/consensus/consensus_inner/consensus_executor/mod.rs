@@ -41,7 +41,7 @@ use primitives::{
 };
 
 use crate::{
-    block_data_manager::{BlockDataManager, BlockRewardResult, PosRewardInfo},
+    block_data_manager::{BlockDataManager, BlockRewardResult},
     consensus::{
         consensus_inner::{
             consensus_new_block_handler::ConsensusNewBlockHandler,
@@ -64,10 +64,7 @@ use mazze_execute_helper::estimation::{
 use mazze_executor::{
     executive::ExecutionOutcome,
     machine::Machine,
-    state::{
-        distribute_pos_interest, update_pos_status, CleanupMode, State,
-        StateCommitResult,
-    },
+    state::{CleanupMode, State, StateCommitResult},
 };
 use mazze_vm_types::{Env, Spec};
 
@@ -1087,8 +1084,8 @@ impl ConsensusExecutionHandler {
             );
         }
 
-        self.process_pos_interest(&mut state, main_block, current_block_number)
-            .expect("db error");
+        // self.process_pos_interest(&mut state, main_block, current_block_number)
+        //     .expect("db error");
 
         let commit_result = state
             .commit(*epoch_hash, debug_record.as_deref_mut())
@@ -1155,58 +1152,6 @@ impl ConsensusExecutionHandler {
         debug!("Skip execution in prefix {:?}", epoch_hash);
     }
 
-    fn process_pos_interest(
-        &self, state: &mut State, main_block: &Block, current_block_number: u64,
-    ) -> DbResult<()> {
-        // TODO(peilun): Specify if we unlock before or after executing the
-        // transactions.
-        // let maybe_parent_pos_ref = self
-        //     .data_man
-        //     .block_header_by_hash(&main_block.block_header.parent_hash()) // `None` only for genesis.
-        //     .and_then(|parent| parent.pos_reference().clone());
-        // if self
-        //     .pos_verifier
-        //     .is_enabled_at_height(main_block.block_header.height())
-        //     && maybe_parent_pos_ref.is_some()
-        //     && *main_block.block_header.pos_reference() != maybe_parent_pos_ref
-        // {
-        //     let current_pos_ref = main_block
-        //         .block_header
-        //         .pos_reference()
-        //         .as_ref()
-        //         .expect("checked before sync graph insertion");
-        //     let parent_pos_ref = &maybe_parent_pos_ref.expect("checked");
-        //     // The pos_reference is continuous, so after seeing a new
-        //     // pos_reference, we only need to process the new
-        //     // unlock_txs in it.
-        //     for (unlock_node_id, votes) in self
-        //         .pos_verifier
-        //         .get_unlock_nodes(current_pos_ref, parent_pos_ref)
-        //     {
-        //         debug!("unlock node: {:?} {}", unlock_node_id, votes);
-        //         update_pos_status(state, unlock_node_id, votes)?;
-        //     }
-        //     if let Some((pos_epoch, reward_event)) = self
-        //         .pos_verifier
-        //         .get_reward_distribution_event(current_pos_ref, parent_pos_ref)
-        //         .as_ref()
-        //         .and_then(|x| x.first())
-        //     {
-        //         debug!("distribute_pos_interest: {:?}", reward_event);
-        //         let account_rewards: Vec<(H160, H256, U256)> =
-        //             distribute_pos_interest(
-        //                 state,
-        //                 reward_event.rewards(),
-        //                 current_block_number,
-        //             )?;
-        //         self.data_man.insert_pos_reward(
-        //             *pos_epoch,
-        //             &PosRewardInfo::new(account_rewards, main_block.hash()),
-        //         )
-        //     }
-        // }
-        Ok(())
-    }
 
     fn notify_txpool(
         &self, commit_result: &StateCommitResult, epoch_hash: &H256,
@@ -1589,14 +1534,6 @@ impl ConsensusExecutionHandler {
         }
         let best_block_header = best_block_header.unwrap();
         let block_height = best_block_header.height() + 1;
-
-        let pos_id = best_block_header.pos_reference().as_ref();
-        // let pos_view_number =
-        //     pos_id.and_then(|id| self.pos_verifier.get_pos_view(id));
-        // let main_decision_epoch = pos_id
-        //     .and_then(|id| self.pos_verifier.get_main_decision(id))
-        //     .and_then(|hash| self.data_man.block_header_by_hash(&hash))
-        //     .map(|header| header.height());
 
         let start_block_number = match self.data_man.get_epoch_execution_context(epoch_id) {
             Some(v) => v.start_block_number + epoch_size as u64,

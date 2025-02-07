@@ -5,7 +5,7 @@ use alloy_rpc_types_trace::geth::GethDebugTracingOptions;
 use geth_tracer::{GethTraceWithHash, GethTracer, TxExecContext};
 use pow_types::StakingEvent;
 
-use mazze_statedb::{ErrorKind as DbErrorKind, Result as DbResult};
+use mazze_statedb::Result as DbResult;
 use mazze_types::{Space, SpaceMap, H256, U256};
 use primitives::{
     receipt::BlockReceipts, Action, Block, BlockNumber, EpochId, Receipt,
@@ -181,18 +181,6 @@ impl ConsensusExecutionHandler {
             block_number,
             last_hash,
         } = *block_context;
-
-        let last_block_header = &self.data_man.block_header_by_hash(&last_hash);
-
-        let pos_id = last_block_header
-            .as_ref()
-            .and_then(|header| header.pos_reference().as_ref());
-        // let pos_view_number =
-        //     pos_id.and_then(|id| self.pos_verifier.get_pos_view(id));
-        // let main_decision_epoch = pos_id
-        //     .and_then(|id| self.pos_verifier.get_main_decision(id))
-        //     .and_then(|hash| self.data_man.block_header_by_hash(&hash))
-        //     .map(|header| header.height());
 
         let epoch_height = main_block.block_header.height();
         let chain_id = self.machine.params().chain_id_map(epoch_height);

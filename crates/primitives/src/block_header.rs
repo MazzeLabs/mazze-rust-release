@@ -9,8 +9,8 @@ pub use base_price::{
 };
 
 use crate::{
-    block::BlockHeight, bytes::Bytes, hash::keccak, pos::PosBlockId,
-    receipt::BlockReceipts, MERKLE_NULL_NODE, NULL_EPOCH,
+    block::BlockHeight, bytes::Bytes, hash::keccak, receipt::BlockReceipts,
+    MERKLE_NULL_NODE, NULL_EPOCH,
 };
 use malloc_size_of::{new_malloc_size_ops, MallocSizeOf, MallocSizeOfOps};
 use mazze_types::{
@@ -67,8 +67,6 @@ pub struct BlockHeaderRlpPart {
     custom: Vec<Bytes>,
     /// Nonce of the block
     nonce: U256,
-    /// Referred PoS block ID.
-    pos_reference: Option<H256>,
     /// `[core_space_base_price, espace_base_price]`.
     base_price: Option<BasePrice>,
 }
@@ -89,7 +87,6 @@ impl PartialEq for BlockHeaderRlpPart {
             && self.gas_limit == o.gas_limit
             && self.referee_hashes == o.referee_hashes
             && self.custom == o.custom
-            && self.pos_reference == o.pos_reference
             && self.base_price == o.base_price
     }
 }
@@ -213,11 +210,6 @@ impl BlockHeader {
         self.nonce
     }
 
-    /// Get the PoS reference.
-    pub fn pos_reference(&self) -> &Option<PosBlockId> {
-        &self.pos_reference
-    }
-
     pub fn base_price(&self) -> Option<SpaceMap<U256>> {
         self.base_price.map(
             |BasePrice {
@@ -277,7 +269,6 @@ impl BlockHeader {
     fn stream_rlp_without_nonce(&self, stream: &mut RlpStream) {
         let adaptive_n = if self.adaptive { 1 as u8 } else { 0 as u8 };
         let list_len = HEADER_LIST_MIN_LEN
-            + self.pos_reference.is_some() as usize
             + self.base_price.is_some() as usize
             + self.custom.len();
         stream
@@ -295,9 +286,6 @@ impl BlockHeader {
             .append(&adaptive_n)
             .append(&self.gas_limit)
             .append_list(&self.referee_hashes);
-        if self.pos_reference.is_some() {
-            stream.append(&self.pos_reference);
-        }
         if self.base_price.is_some() {
             stream.append(&self.base_price);
         }
@@ -318,7 +306,6 @@ impl BlockHeader {
         let adaptive_n = if self.adaptive { 1 as u8 } else { 0 as u8 };
         let list_len = HEADER_LIST_MIN_LEN
             + 1
-            + self.pos_reference.is_some() as usize
             + self.base_price.is_some() as usize
             + self.custom.len();
         stream
@@ -337,9 +324,6 @@ impl BlockHeader {
             .append(&self.gas_limit)
             .append_list(&self.referee_hashes)
             .append(&self.nonce);
-        if self.pos_reference.is_some() {
-            stream.append(&self.pos_reference);
-        }
         if self.base_price.is_some() {
             stream.append(&self.base_price);
         }
@@ -359,7 +343,6 @@ impl BlockHeader {
         let adaptive_n = if self.adaptive { 1 as u8 } else { 0 as u8 };
         let list_len = HEADER_LIST_MIN_LEN
             + 2
-            + self.pos_reference.is_some() as usize
             + self.base_price.is_some() as usize
             + self.custom.len();
         stream
@@ -381,9 +364,6 @@ impl BlockHeader {
             // Just encode the Option for future compatibility.
             // It should always be Some when it is being inserted to db.
             .append(&self.pow_hash);
-        if self.pos_reference.is_some() {
-            stream.append(&self.pos_reference);
-        }
         if self.base_price.is_some() {
             stream.append(&self.base_price);
         }
@@ -417,13 +397,11 @@ impl BlockHeader {
             referee_hashes: r.list_at(12)?,
             custom: vec![],
             nonce: r.val_at(13)?,
-            pos_reference: r.val_at(15).unwrap_or(None),
             base_price: r.val_at(16).unwrap_or(None),
         };
         let pow_hash = r.val_at(14)?;
 
         for i in (15
-            + rlp_part.pos_reference.is_some() as usize
             + rlp_part.base_price.is_some() as usize)
             ..r.item_count()?
         {
@@ -469,7 +447,6 @@ pub struct BlockHeaderBuilder {
     referee_hashes: Vec<H256>,
     custom: Vec<Bytes>,
     nonce: U256,
-    pos_reference: Option<PosBlockId>,
     base_price: Option<BasePrice>,
 }
 
@@ -491,7 +468,6 @@ impl BlockHeaderBuilder {
             referee_hashes: Vec::new(),
             custom: Vec::new(),
             nonce: U256::zero(),
-            pos_reference: None,
             base_price: None,
         }
     }
@@ -581,13 +557,6 @@ impl BlockHeaderBuilder {
         self
     }
 
-    pub fn with_pos_reference(
-        &mut self, pos_reference: Option<PosBlockId>,
-    ) -> &mut Self {
-        self.pos_reference = pos_reference;
-        self
-    }
-
     pub fn with_base_price(
         &mut self, maybe_base_price: Option<SpaceMap<U256>>,
     ) -> &mut Self {
@@ -616,7 +585,6 @@ impl BlockHeaderBuilder {
                 referee_hashes: self.referee_hashes.clone(),
                 custom: self.custom.clone(),
                 nonce: self.nonce,
-                pos_reference: self.pos_reference,
                 base_price: self.base_price.clone(),
             },
             hash: None,
@@ -701,11 +669,9 @@ impl Decodable for BlockHeader {
             referee_hashes: r.list_at(12)?,
             custom: vec![],
             nonce: r.val_at(13)?,
-            pos_reference: r.val_at(14).unwrap_or(None),
             base_price: r.val_at(15).unwrap_or(None),
         };
         for i in (14
-            + rlp_part.pos_reference.is_some() as usize
             + rlp_part.base_price.is_some() as usize)
             ..r.item_count()?
         {

@@ -289,11 +289,6 @@ pub trait Mazze {
         &self, epoch_number: Option<EpochNumber>,
     ) -> JsonRpcResult<U256>;
 
-    #[rpc(name = "mazze_getPoSRewardByEpoch")]
-    fn get_pos_reward_by_epoch(
-        &self, epoch: EpochNumber,
-    ) -> JsonRpcResult<Option<PoSEpochReward>>;
-
     #[rpc(name = "mazze_getParamsFromVote")]
     fn get_vote_params(
         &self, epoch_number: Option<EpochNumber>,

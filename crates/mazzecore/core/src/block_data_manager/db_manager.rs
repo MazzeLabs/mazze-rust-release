@@ -3,7 +3,7 @@ use crate::{
         db_decode_list, db_encode_list, BlamedHeaderVerifiedRoots,
         BlockExecutionResultWithEpoch, BlockRewardResult, BlockTracesWithEpoch,
         CheckpointHashes, DataVersionTuple, EpochExecutionContext,
-        LocalBlockInfo, PosRewardInfo,
+        LocalBlockInfo,
     },
     db::{
         COL_BLAMED_HEADER_VERIFIED_ROOTS, COL_BLOCKS, COL_BLOCK_TRACES,
@@ -485,25 +485,6 @@ impl DBManager {
 
     pub fn gc_progress_from_db(&self) -> Option<u64> {
         self.load_decodable_val(DBTable::Misc, GC_PROGRESS_KEY)
-    }
-
-    pub fn insert_pos_reward(
-        &self, pos_epoch: u64, pos_reward: &PosRewardInfo,
-    ) {
-        self.insert_encodable_val(
-            DBTable::RewardByPosEpoch,
-            &pos_epoch.to_be_bytes(),
-            pos_reward,
-        );
-    }
-
-    pub fn pos_reward_by_pos_epoch(
-        &self, pos_epoch: u64,
-    ) -> Option<PosRewardInfo> {
-        self.load_decodable_val(
-            DBTable::RewardByPosEpoch,
-            &pos_epoch.to_be_bytes(),
-        )
     }
 
     /// The functions below are private utils used by the DBManager to access

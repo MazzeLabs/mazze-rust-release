@@ -361,11 +361,6 @@ impl VerificationConfig {
         //     }
         // }
 
-        // TODO: remove this after pos is removed
-        if header.pos_reference().is_some() {
-            bail!(BlockError::UnexpectedPosReference);
-        }
-
         if header.height() >= self.machine.params().transition_heights.cip1559 {
             if header.base_price().is_none() {
                 bail!(BlockError::MissingBaseFee);

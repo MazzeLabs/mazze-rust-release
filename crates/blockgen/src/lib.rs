@@ -21,7 +21,7 @@ use mazzecore::{
 };
 use metrics::{Gauge, GaugeUsize};
 use parking_lot::{Mutex, RwLock};
-use primitives::{pos::PosBlockId, *};
+use primitives::*;
 use std::{
     cmp::max,
     collections::HashSet,
@@ -214,8 +214,7 @@ impl BlockGenerator {
         &self, mut parent_hash: H256, mut referees: Vec<H256>,
         mut blame_info: StateBlameInfo, block_gas_limit: U256,
         transactions: Vec<Arc<SignedTransaction>>, difficulty: u64,
-        adaptive_opt: Option<bool>, maybe_pos_reference: Option<PosBlockId>,
-        maybe_base_price: Option<SpaceMap<U256>>,
+        adaptive_opt: Option<bool>, maybe_base_price: Option<SpaceMap<U256>>,
     ) -> Block {
         trace!("{} txs packed", transactions.len());
         let consensus_graph = self.consensus_graph();
@@ -225,7 +224,6 @@ impl BlockGenerator {
                 &mut parent_hash,
                 &mut referees,
                 &mut blame_info,
-                maybe_pos_reference,
             );
         }
         let mut consensus_inner = consensus_graph.inner.write();
@@ -244,7 +242,6 @@ impl BlockGenerator {
                 &parent_hash,
                 &referees,
                 &expected_difficulty,
-                maybe_pos_reference,
             )
         };
 
@@ -292,7 +289,6 @@ impl BlockGenerator {
             .with_nonce(U256::zero())
             .with_gas_limit(block_gas_limit)
             .with_custom(custom)
-            .with_pos_reference(maybe_pos_reference)
             .with_base_price(maybe_base_price)
             .build();
 
@@ -304,7 +300,6 @@ impl BlockGenerator {
     pub fn assemble_new_fixed_block(
         &self, parent_hash: H256, referee: Vec<H256>, num_txs: usize,
         difficulty: u64, adaptive: bool, block_gas_target: u64,
-        pos_reference: Option<PosBlockId>,
     ) -> Result<Block, String> {
         let consensus_graph = self.consensus_graph();
         let state_blame_info = consensus_graph
@@ -370,7 +365,6 @@ impl BlockGenerator {
             transactions,
             difficulty,
             Some(adaptive),
-            pos_reference.or_else(|| self.get_pos_reference(&parent_hash)),
             maybe_base_price,
         ))
     }
@@ -420,8 +414,6 @@ impl BlockGenerator {
         //     None
         // };
 
-        let maybe_pos_reference = None;
-
         referee.retain(|r| *r != best_block_hash);
 
         self.assemble_new_block_impl(
@@ -432,7 +424,6 @@ impl BlockGenerator {
             transactions,
             0,
             None,
-            maybe_pos_reference,
             maybe_base_price,
         )
     }
@@ -487,7 +478,6 @@ impl BlockGenerator {
             transactions,
             0,
             None,
-            self.get_pos_reference(&best_block_hash),
             maybe_base_price,
         )
     }
@@ -529,7 +519,7 @@ impl BlockGenerator {
     // This function is used in test only to simulate attacker behavior.
     pub fn generate_fixed_block(
         &self, parent_hash: H256, referee: Vec<H256>, num_txs: usize,
-        difficulty: u64, adaptive: bool, pos_reference: Option<H256>,
+        difficulty: u64, adaptive: bool,
     ) -> Result<H256, String> {
         let block = self.assemble_new_fixed_block(
             parent_hash,
@@ -538,7 +528,6 @@ impl BlockGenerator {
             difficulty,
             adaptive,
             GENESIS_GAS_LIMIT,
-            pos_reference,
         )?;
         Ok(self.generate_block_impl(block))
     }
@@ -620,7 +609,6 @@ impl BlockGenerator {
             transactions,
             0,
             adaptive,
-            self.get_pos_reference(&best_block_hash),
             maybe_base_price,
         );
 
@@ -661,7 +649,6 @@ impl BlockGenerator {
             transactions,
             0,
             Some(adaptive),
-            self.get_pos_reference(&parent_hash),
             maybe_base_price,
         );
         if let Some(custom) = maybe_custom {
@@ -705,7 +692,6 @@ impl BlockGenerator {
             transactions,
             0,
             Some(adaptive),
-            self.get_pos_reference(&parent_hash),
             maybe_base_price,
         );
         block.block_header.set_nonce(nonce);
@@ -1081,20 +1067,6 @@ impl BlockGenerator {
             }
             thread::sleep(interval);
         }
-    }
-
-    /// Get the latest pos reference according to parent height.
-    ///
-    /// Return `None` if parent block is missing in `BlockDataManager`, but this
-    /// should not happen in the current usage.
-    fn get_pos_reference(&self, parent_hash: &H256) -> Option<PosBlockId> {
-        // let height = self.graph.data_man.block_height_by_hash(parent_hash)? + 1;
-        // if self.pos_verifier.is_enabled_at_height(height) {
-        //     Some(self.pos_verifier.get_latest_pos_reference())
-        // } else {
-        //     None
-        // }
-        None
     }
 }
 

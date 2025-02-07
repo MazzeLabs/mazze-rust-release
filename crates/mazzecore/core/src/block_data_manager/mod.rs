@@ -49,7 +49,6 @@ use mazze_internal_common::{
     EpochExecutionCommitment, StateAvailabilityBoundary, StateRootWithAuxInfo,
 };
 use metrics::{register_meter_with_group, Meter, MeterTimer};
-use primitives::pos::PosBlockId;
 use std::{hash::Hash, path::Path, time::Duration};
 
 lazy_static! {
@@ -601,16 +600,6 @@ impl BlockDataManager {
     pub fn block_height_by_hash(&self, hash: &H256) -> Option<u64> {
         let result = self.block_header_by_hash(hash)?;
         Some(result.height())
-    }
-
-    /// Return `None` if the header does not exist.
-    /// Return `Some(None)` if the header exist but it does not have a PoS
-    /// reference field.
-    pub fn pos_reference_by_hash(
-        &self, hash: &H256,
-    ) -> Option<Option<PosBlockId>> {
-        self.block_header_by_hash(hash)
-            .map(|header| header.pos_reference().clone())
     }
 
     pub fn compact_block_by_hash(&self, hash: &H256) -> Option<CompactBlock> {
@@ -1186,18 +1175,6 @@ impl BlockDataManager {
         )
     }
 
-    pub fn insert_pos_reward(
-        &self, pos_epoch: u64, pos_reward: &PosRewardInfo,
-    ) {
-        self.db_manager.insert_pos_reward(pos_epoch, pos_reward)
-    }
-
-    pub fn pos_reward_by_pos_epoch(
-        &self, pos_epoch: u64,
-    ) -> Option<PosRewardInfo> {
-        self.db_manager.pos_reward_by_pos_epoch(pos_epoch)
-    }
-
     pub fn remove_epoch_execution_commitment(&self, block_hash: &H256) {
         self.epoch_execution_commitments.write().remove(block_hash);
     }
@@ -1346,22 +1323,6 @@ impl BlockDataManager {
                     }
                 }
             }
-            let me_height = self.block_height_by_hash(epoch_hash).unwrap();
-            // if pos_verifier.pos_option().is_some() && me_height != 0 {
-            //     trace!(
-            //         "staking events update: height={}, new={}",
-            //         me_height,
-            //         epoch_hash,
-            //     );
-            //     if let Err(e) = pos_verifier.consensus_db().put_staking_events(
-            //         me_height,
-            //         *epoch_hash,
-            //         epoch_staking_events,
-            //     ) {
-            //         error!("epoch_executed err={:?}", e);
-            //         return false;
-            //     }
-            // }
         }
         true
     }

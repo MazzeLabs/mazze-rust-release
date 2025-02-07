@@ -57,9 +57,12 @@ pub struct ConsensusNewBlockHandler {
 /// object accordingly.
 impl ConsensusNewBlockHandler {
     pub fn new(
-        conf: ConsensusConfig, txpool: SharedTransactionPool,
-        data_man: Arc<BlockDataManager>, executor: Arc<ConsensusExecutor>,
-        statistics: SharedStatistics, notifications: Arc<Notifications>,
+        conf: ConsensusConfig,
+        txpool: SharedTransactionPool,
+        data_man: Arc<BlockDataManager>,
+        executor: Arc<ConsensusExecutor>,
+        statistics: SharedStatistics,
+        notifications: Arc<Notifications>,
         node_type: NodeType, // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         let epochs_sender = notifications.epochs_ordered.clone();
@@ -1027,13 +1030,8 @@ impl ConsensusNewBlockHandler {
                     inner, me, &outlier,
                 );
 
-            inner.arena[me].data.force_confirm = inner
-                .compute_block_force_confirm(
-                    &timer_chain_tuple,
-                    self.data_man
-                        .pos_reference_by_hash(&inner.arena[me].hash)
-                        .expect("header exist"),
-                );
+            inner.arena[me].data.force_confirm =
+                inner.compute_block_force_confirm(&timer_chain_tuple);
             debug!(
                 "Force confirm block index {} in the past view of block index={}",
                 inner.arena[me].data.force_confirm, me

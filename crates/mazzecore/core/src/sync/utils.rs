@@ -3,14 +3,8 @@ use std::{
 };
 
 use parking_lot::Mutex;
-use rand_08::{prelude::StdRng, SeedableRng};
 use threadpool::ThreadPool;
 
-use diem_config::keys::ConfigKey;
-use diem_crypto::Uniform;
-use diem_types::validator_config::{
-    ConsensusPrivateKey, ConsensusVRFPrivateKey,
-};
 use mazze_internal_common::ChainIdParamsInner;
 use mazze_parameters::{
     block::{MAX_BLOCK_SIZE_IN_BYTES, REFEREE_DEFAULT_BOUND},

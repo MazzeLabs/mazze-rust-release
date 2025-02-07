@@ -30,7 +30,7 @@ pub trait TestRpc {
     #[rpc(name = "generatefixedblock")]
     fn generate_fixed_block(
         &self, parent_hash: H256, referee: Vec<H256>, num_txs: usize,
-        adaptive: bool, difficulty: Option<u64>, pos_reference: Option<H256>,
+        adaptive: bool, difficulty: Option<u64>,
     ) -> RpcResult<H256>;
 
     #[rpc(name = "addnode")]

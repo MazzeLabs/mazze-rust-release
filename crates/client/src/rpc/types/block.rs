@@ -25,7 +25,6 @@ use std::{convert::TryInto, sync::Arc};
 use crate::rpc::types::{
     transaction::PackedOrExecuted, Bytes, Receipt, Transaction,
 };
-use primitives::pos::PosBlockId;
 
 #[derive(PartialEq, Debug)]
 pub enum BlockTransactions {
@@ -137,8 +136,6 @@ pub struct Block {
     pub size: Option<U256>,
     /// Custom field
     pub custom: Vec<Bytes>,
-    /// PoS reference.
-    pub pos_reference: Option<PosBlockId>,
 }
 
 impl Block {
@@ -338,7 +335,6 @@ impl Block {
                 .map(Into::into)
                 .collect(),
             size: Some(b.size().into()),
-            pos_reference: b.block_header.pos_reference().clone(),
         })
     }
 
@@ -439,8 +435,6 @@ pub struct Header {
     pub adaptive: bool,
     /// Nonce of the block
     pub nonce: U256,
-    /// PoS reference.
-    pub pos_reference: Option<PosBlockId>,
 }
 
 impl Header {
@@ -482,7 +476,6 @@ impl Header {
                 pow::pow_hash_to_quality(&pow_hash, &h.nonce())
             }), /* TODO(thegaram):
                  * include custom */
-            pos_reference: *h.pos_reference(),
         })
     }
 }
@@ -560,7 +553,6 @@ mod tests {
             transactions: BlockTransactions::Hashes(vec![]),
             custom: vec![],
             size: Some(69.into()),
-            pos_reference: Default::default(),
         };
         let serialized_block = serde_json::to_string(&block).unwrap();
 
@@ -597,7 +589,6 @@ mod tests {
             transactions: BlockTransactions::Full(vec![]),
             custom: vec![],
             size: Some(69.into()),
-            pos_reference: Default::default(),
         };
         let deserialized_block: Block =
             serde_json::from_str(serialized).unwrap();
@@ -625,7 +616,6 @@ mod tests {
             referee_hashes: Vec::new(),
             adaptive: false,
             nonce: 0.into(),
-            pos_reference: None,
         };
         let serialized_header = serde_json::to_string(&header).unwrap();
 

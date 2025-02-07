@@ -30,8 +30,7 @@ use metrics::{
     register_meter_with_group, register_queue, Meter, MeterTimer, Queue,
 };
 use primitives::{
-    pos::PosBlockId, transaction::SignedTransaction, Block, BlockHeader,
-    EpochNumber,
+    transaction::SignedTransaction, Block, BlockHeader, EpochNumber,
 };
 
 use crate::{
@@ -644,19 +643,16 @@ impl SynchronizationGraphInner {
         // }
     }
 
-    // Get parent (height, timestamp, gas_limit, difficulty,
-    // parent_and_referee_pos_references) This function assumes that the
+    // Get parent (height, timestamp, gas_limit, difficulty)
+    // This function assumes that the
     // parent and referee information MUST exist in memory or in disk.
     fn get_parent_and_referee_info(
         &self, index: usize,
-    ) -> (u64, u64, U256, U256, Vec<Option<PosBlockId>>) {
+    ) -> (u64, u64, U256, U256) {
         let parent_height;
         let parent_timestamp;
         let parent_gas_limit;
         let parent_difficulty;
-        // Since eventually all blocks should have pos_references, we do not
-        // try to avoid loading them here before PoS is enabled.
-        let mut pos_references = Vec::new();
         let parent = self.arena[index].parent;
 
         // Get info for parent.
@@ -665,8 +661,6 @@ impl SynchronizationGraphInner {
             parent_timestamp = self.arena[parent].block_header.timestamp();
             parent_gas_limit = *self.arena[parent].block_header.gas_limit();
             parent_difficulty = *self.arena[parent].block_header.difficulty();
-            pos_references
-                .push(self.arena[parent].block_header.pos_reference().clone())
         } else {
             let parent_hash = self.arena[index].block_header.parent_hash();
             let parent_header = self
@@ -678,15 +672,11 @@ impl SynchronizationGraphInner {
             parent_timestamp = parent_header.timestamp();
             parent_gas_limit = *parent_header.gas_limit();
             parent_difficulty = *parent_header.difficulty();
-            pos_references.push(parent_header.pos_reference().clone());
         }
 
         // Get pos references for referees.
         let mut referee_hash_in_mem = HashSet::new();
         for referee in self.arena[index].referees.iter() {
-            pos_references.push(
-                self.arena[*referee].block_header.pos_reference().clone(),
-            );
             referee_hash_in_mem
                 .insert(self.arena[*referee].block_header.hash());
         }
@@ -698,7 +688,6 @@ impl SynchronizationGraphInner {
                     .block_header_by_hash(referee_hash)
                     .unwrap()
                     .clone();
-                pos_references.push(referee_header.pos_reference().clone());
             }
         }
 
@@ -707,7 +696,6 @@ impl SynchronizationGraphInner {
             parent_timestamp,
             parent_gas_limit,
             parent_difficulty,
-            pos_references,
         )
     }
 
@@ -720,7 +708,6 @@ impl SynchronizationGraphInner {
             parent_timestamp,
             parent_gas_limit,
             parent_difficulty,
-            predecessor_pos_references,
         ) = self.get_parent_and_referee_info(index);
 
         // Verify the height and epoch numbers are correct

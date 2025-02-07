@@ -984,11 +984,11 @@ impl RpcImpl {
 
     fn generate_fixed_block(
         &self, parent_hash: H256, referee: Vec<H256>, num_txs: usize,
-        adaptive: bool, difficulty: Option<u64>, pos_reference: Option<H256>,
+        adaptive: bool, difficulty: Option<u64>,
     ) -> RpcResult<H256> {
         info!(
-            "RPC Request: generate_fixed_block({:?}, {:?}, {:?}, {:?}, {:?})",
-            parent_hash, referee, num_txs, difficulty, pos_reference,
+            "RPC Request: generate_fixed_block({:?}, {:?}, {:?}, {:?})",
+            parent_hash, referee, num_txs, difficulty,
         );
 
         Ok(self.block_gen.generate_fixed_block(
@@ -997,7 +997,6 @@ impl RpcImpl {
             num_txs,
             difficulty.unwrap_or(0),
             adaptive,
-            pos_reference,
         )?)
     }
 
@@ -2281,7 +2280,6 @@ impl Mazze for MazzeHandler {
             fn get_client_version(&self) -> JsonRpcResult<String>;
             fn account_pending_info(&self, addr: RpcAddress) -> BoxFuture<Option<AccountPendingInfo>>;
             fn account_pending_transactions(&self, address: RpcAddress, maybe_start_nonce: Option<U256>, maybe_limit: Option<U64>) -> BoxFuture<AccountPendingTransactions>;
-            fn get_pos_reward_by_epoch(&self, epoch: EpochNumber) -> JsonRpcResult<Option<PoSEpochReward>>;
             fn fee_history(&self, block_count: HexU64, newest_block: EpochNumber, reward_percentiles: Vec<f64>) -> BoxFuture<MazzeFeeHistory>;
             fn max_priority_fee_per_gas(&self) -> BoxFuture<U256>;
         }
@@ -2382,7 +2380,7 @@ impl TestRpc for TestRpcImpl {
             fn get_main_chain_and_weight(&self, height_range: Option<(u64, u64)>) -> JsonRpcResult<Vec<(H256, U256)>>;
             fn get_executed_info(&self, block_hash: H256) -> JsonRpcResult<(H256, H256)> ;
             fn generate_fixed_block(
-                &self, parent_hash: H256, referee: Vec<H256>, num_txs: usize, adaptive: bool, difficulty: Option<u64>, pos_reference: Option<H256>)
+                &self, parent_hash: H256, referee: Vec<H256>, num_txs: usize, adaptive: bool, difficulty: Option<u64>)
                 -> JsonRpcResult<H256>;
             fn generate_one_block_with_direct_txgen(
                 &self, num_txs: usize, block_size_limit: usize, num_txs_simple: usize, num_txs_erc20: usize)

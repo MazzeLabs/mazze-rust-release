@@ -278,63 +278,6 @@ impl RpcImpl {
             .block_by_hash(&main_hash, false /* update_cache */)
     }
 
-    pub fn get_pos_reward_by_epoch(
-        &self, epoch: EpochNumber,
-    ) -> JsonRpcResult<Option<PoSEpochReward>> {
-        let maybe_block = self.primitive_block_by_epoch_number(epoch);
-        if maybe_block.is_none() {
-            return Ok(None);
-        }
-        let block = maybe_block.unwrap();
-        if block.block_header.pos_reference().is_none() {
-            return Ok(None);
-        }
-        // match self
-        //     .data_man
-        //     .block_by_hash(block.block_header.parent_hash(), false)
-        // {
-        //     None => Ok(None),
-        //     Some(parent_block) => {
-        //         if parent_block.block_header.pos_reference().is_none() {
-        //             return Ok(None);
-        //         }
-        //         let block_pos_ref = block.block_header.pos_reference().unwrap();
-        //         let parent_pos_ref =
-        //             parent_block.block_header.pos_reference().unwrap();
-
-        //         if block_pos_ref == parent_pos_ref {
-        //             return Ok(None);
-        //         }
-
-        //         let hash = HashValue::from_slice(parent_pos_ref.as_bytes())
-        //             .map_err(|_| RpcError::internal_error())?;
-        //         // let pos_block = self
-        //         //     .pos_handler
-        //         //     .pos_ledger_db()
-        //         //     .get_committed_block_by_hash(&hash)
-        //         //     .map_err(|_| RpcError::internal_error())?;
-        //         let maybe_epoch_rewards =
-        //             self.data_man.pos_reward_by_pos_epoch(pos_block.epoch);
-        //         if maybe_epoch_rewards.is_none() {
-        //             return Ok(None);
-        //         }
-        //         let epoch_rewards = maybe_epoch_rewards.unwrap();
-        //         if epoch_rewards.execution_epoch_hash
-        //             != block.block_header.hash()
-        //         {
-        //             return Ok(None);
-        //         }
-        //         let reward_info: PoSEpochReward = PoSEpochReward::try_from(
-        //             epoch_rewards,
-        //             *self.network.get_network_type(),
-        //         )
-        //         .map_err(|_| RpcError::internal_error())?;
-        //         Ok(Some(reward_info))
-        //     }
-        // }
-        todo!("pos_verifier is being dropped");
-    }
-
     pub fn confirmation_risk_by_hash(
         &self, block_hash: H256,
     ) -> JsonRpcResult<Option<U256>> {

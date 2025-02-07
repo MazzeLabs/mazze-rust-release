@@ -21,10 +21,8 @@ use crate::{
     block_data_manager::{
         BlockDataManager, BlockExecutionResultWithEpoch, DataVersionTuple,
     },
-    consensus::{
-        consensus_inner::{
-            consensus_executor::ConsensusExecutionConfiguration, StateBlameInfo,
-        },
+    consensus::consensus_inner::{
+        consensus_executor::ConsensusExecutionConfiguration, StateBlameInfo,
     },
     pow::{PowComputer, ProofOfWorkConfig},
     rpc_errors::{invalid_params, invalid_params_check, Result as RpcResult},
@@ -72,7 +70,6 @@ use primitives::{
     epoch::BlockHashOrEpochNumber,
     filter::{FilterError, LogFilter},
     log_entry::LocalizedLogEntry,
-    pos::PosBlockId,
     receipt::Receipt,
     BlockHeader, EpochId, EpochNumber, SignedTransaction, TransactionIndex,
     TransactionStatus,
@@ -249,13 +246,18 @@ impl ConsensusGraph {
     /// other components. The execution will be skipped if bench_mode sets
     /// to true.
     pub fn with_era_genesis(
-        conf: ConsensusConfig, txpool: SharedTransactionPool,
-        statistics: SharedStatistics, data_man: Arc<BlockDataManager>,
-        pow_config: ProofOfWorkConfig, pow: Arc<PowComputer>,
-        era_genesis_block_hash: &H256, era_stable_block_hash: &H256,
+        conf: ConsensusConfig,
+        txpool: SharedTransactionPool,
+        statistics: SharedStatistics,
+        data_man: Arc<BlockDataManager>,
+        pow_config: ProofOfWorkConfig,
+        pow: Arc<PowComputer>,
+        era_genesis_block_hash: &H256,
+        era_stable_block_hash: &H256,
         notifications: Arc<Notifications>,
         execution_conf: ConsensusExecutionConfiguration,
-        verification_config: VerificationConfig, node_type: NodeType,
+        verification_config: VerificationConfig,
+        node_type: NodeType,
         // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         let inner =
@@ -314,12 +316,16 @@ impl ConsensusGraph {
     /// in the data manager and various other components. The execution will
     /// be skipped if bench_mode sets to true.
     pub fn new(
-        conf: ConsensusConfig, txpool: SharedTransactionPool,
-        statistics: SharedStatistics, data_man: Arc<BlockDataManager>,
-        pow_config: ProofOfWorkConfig, pow: Arc<PowComputer>,
+        conf: ConsensusConfig,
+        txpool: SharedTransactionPool,
+        statistics: SharedStatistics,
+        data_man: Arc<BlockDataManager>,
+        pow_config: ProofOfWorkConfig,
+        pow: Arc<PowComputer>,
         notifications: Arc<Notifications>,
         execution_conf: ConsensusExecutionConfiguration,
-        verification_conf: VerificationConfig, node_type: NodeType,
+        verification_conf: VerificationConfig,
+        node_type: NodeType,
         // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         let genesis_hash = data_man.get_cur_consensus_era_genesis_hash();
@@ -377,7 +383,6 @@ impl ConsensusGraph {
     pub fn check_mining_adaptive_block(
         &self, inner: &mut ConsensusGraphInner, parent_hash: &H256,
         referees: &Vec<H256>, difficulty: &U256,
-        pos_reference: Option<PosBlockId>,
     ) -> bool {
         let parent_index =
             *inner.hash_to_arena_indices.get(parent_hash).expect(
@@ -397,7 +402,6 @@ impl ConsensusGraph {
             parent_index,
             referee_indices,
             *difficulty,
-            pos_reference,
         )
     }
 
@@ -406,7 +410,7 @@ impl ConsensusGraph {
     /// referee choices with `pos_reference` provided.
     pub fn choose_correct_parent(
         &self, parent_hash: &mut H256, referees: &mut Vec<H256>,
-        blame_info: &mut StateBlameInfo, pos_reference: Option<PosBlockId>,
+        blame_info: &mut StateBlameInfo,
     ) {
         let correct_parent_hash = {
             // if let Some(pos_ref) = &pos_reference {
@@ -448,11 +452,8 @@ impl ConsensusGraph {
                         .expect("Checked by the caller")
                 })
                 .collect();
-            let correct_parent = inner.choose_correct_parent(
-                parent_index,
-                referee_indices,
-                pos_reference,
-            );
+            let correct_parent =
+                inner.choose_correct_parent(parent_index, referee_indices);
             inner.arena[correct_parent].hash
         };
 

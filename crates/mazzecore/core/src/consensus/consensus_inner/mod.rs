@@ -15,7 +15,7 @@ use crate::{
     consensus::{
         consensus_inner::consensus_executor::ConsensusExecutor,
         debug_recompute::log_invalid_state_root, outlier_cache::OutlierCache,
-        pastset_cache::PastSetCache, pos_handler::PosVerifier,
+        pastset_cache::PastSetCache, 
         MaybeExecutedTxExtraInfo, TransactionInfo,
     },
     pos::pow_handler::POS_TERM_EPOCHS,

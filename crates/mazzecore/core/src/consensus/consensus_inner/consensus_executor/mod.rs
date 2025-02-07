@@ -47,7 +47,6 @@ use crate::{
             consensus_new_block_handler::ConsensusNewBlockHandler,
             StateBlameInfo,
         },
-        pos_handler::PosVerifier,
         ConsensusGraphInner,
     },
     rpc_errors::{invalid_params_check, Result as RpcResult},
@@ -187,10 +186,12 @@ pub struct ConsensusExecutor {
 
 impl ConsensusExecutor {
     pub fn start(
-        tx_pool: SharedTransactionPool, data_man: Arc<BlockDataManager>,
+        tx_pool: SharedTransactionPool,
+        data_man: Arc<BlockDataManager>,
         consensus_inner: Arc<RwLock<ConsensusGraphInner>>,
         config: ConsensusExecutionConfiguration,
-        verification_config: VerificationConfig, bench_mode: bool,
+        verification_config: VerificationConfig,
+        bench_mode: bool,
         // pos_verifier: Arc<PosVerifier>,
     ) -> Arc<Self> {
         let machine = tx_pool.machine();
@@ -834,9 +835,11 @@ pub struct ConsensusExecutionHandler {
 
 impl ConsensusExecutionHandler {
     pub fn new(
-        tx_pool: SharedTransactionPool, data_man: Arc<BlockDataManager>,
+        tx_pool: SharedTransactionPool,
+        data_man: Arc<BlockDataManager>,
         config: ConsensusExecutionConfiguration,
-        verification_config: VerificationConfig, machine: Arc<Machine>,
+        verification_config: VerificationConfig,
+        machine: Arc<Machine>,
         // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         ConsensusExecutionHandler {

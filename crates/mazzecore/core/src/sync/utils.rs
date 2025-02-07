@@ -30,7 +30,6 @@ use crate::{
     cache_config::CacheConfig,
     consensus::{
         consensus_inner::consensus_executor::ConsensusExecutionConfiguration,
-        pos_handler::{PosConfiguration, PosVerifier},
         ConsensusConfig, ConsensusInnerConfig,
     },
     db::NUM_COLUMNS,

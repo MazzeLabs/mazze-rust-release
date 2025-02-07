@@ -43,9 +43,8 @@ use mazze_executor::executive::ExecutionOutcome;
 use mazze_parameters::internal_contract_addresses::POS_REGISTER_CONTRACT_ADDRESS;
 use mazze_types::{hexstr_to_h256, Address, H256, U64};
 use mazzecore::{
-    consensus::pos_handler::PosVerifier, rpc_errors::invalid_params_check,
-    BlockDataManager, ConsensusGraph, ConsensusGraphTrait,
-    SharedConsensusGraph,
+    rpc_errors::invalid_params_check, BlockDataManager, ConsensusGraph,
+    ConsensusGraphTrait, SharedConsensusGraph,
 };
 use rustc_hex::FromHex;
 use solidity_abi::ABIEncodable;

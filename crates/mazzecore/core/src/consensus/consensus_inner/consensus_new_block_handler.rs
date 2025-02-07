@@ -12,7 +12,6 @@ use crate::{
             consensus_executor::{ConsensusExecutor, EpochExecutionTask},
             ConsensusGraphInner, NULL,
         },
-        pos_handler::PosVerifier,
         ConsensusConfig,
     },
     state_exposer::{ConsensusGraphBlockState, STATE_EXPOSER},

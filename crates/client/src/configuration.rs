@@ -35,7 +35,7 @@ use mazzecore::{
     },
     consensus::{
         consensus_inner::consensus_executor::ConsensusExecutionConfiguration,
-        pos_handler::PosVerifier, ConsensusConfig, ConsensusInnerConfig,
+        ConsensusConfig, ConsensusInnerConfig,
     },
     consensus_internal_parameters::*,
     consensus_parameters::*,

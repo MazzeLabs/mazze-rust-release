@@ -7,7 +7,6 @@ pub mod consensus_trait;
 pub mod debug_recompute;
 mod outlier_cache;
 mod pastset_cache;
-pub mod pos_handler;
 
 use super::consensus::consensus_inner::{
     confirmation_meter::ConfirmationMeter,
@@ -26,7 +25,6 @@ use crate::{
         consensus_inner::{
             consensus_executor::ConsensusExecutionConfiguration, StateBlameInfo,
         },
-        pos_handler::PosVerifier,
     },
     pow::{PowComputer, ProofOfWorkConfig},
     rpc_errors::{invalid_params, invalid_params_check, Result as RpcResult},

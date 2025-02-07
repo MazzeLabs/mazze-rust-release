@@ -38,7 +38,6 @@ use crate::{
     block_data_manager::{
         db_manager::DBManager, tx_data_manager::TransactionDataManager,
     },
-    consensus::pos_handler::PosVerifier,
 };
 pub use block_data_types::*;
 use db_gc_manager::GCProgress;

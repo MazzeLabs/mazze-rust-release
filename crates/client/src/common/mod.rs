@@ -37,7 +37,6 @@ use mazze_types::{address_util::AddressUtil, Address, Space, U256};
 pub use mazzecore::pos::pos::PosDropHandle;
 use mazzecore::{
     block_data_manager::BlockDataManager,
-    consensus::pos_handler::{PosConfiguration, PosVerifier},
     genesis_block::{self as genesis, genesis_block},
     pow::PowComputer,
     statistics::Statistics,
@@ -68,7 +67,6 @@ use crate::{
     },
     GENESIS_VERSION,
 };
-use mazzecore::consensus::pos_handler::read_initial_nodes_from_file;
 
 /// Hold all top-level components for a type of client.
 /// This struct implement ClientShutdownTrait.
@@ -353,16 +351,17 @@ pub fn initialize_common_modules(
     };
 
     // Only try to setup PoW genesis block if pos is enabled from genesis.
-    let initial_nodes = if conf.raw_conf.pos_reference_enable_height == 0 {
-        Some(
-            read_initial_nodes_from_file(
-                conf.raw_conf.pos_initial_nodes_path.as_str(),
-            )
-            .expect("Genesis must have been initialized with pos"),
-        )
-    } else {
-        None
-    };
+    // TODO: Check if these are related to bootnodes, shouldn't be
+    // let initial_nodes = if conf.raw_conf.pos_reference_enable_height == 0 {
+    //     Some(
+    //         read_initial_nodes_from_file(
+    //             conf.raw_conf.pos_initial_nodes_path.as_str(),
+    //         )
+    //         .expect("Genesis must have been initialized with pos"),
+    //     )
+    // } else {
+    //     None
+    // };
 
     let consensus_conf = conf.consensus_config();
     let vm = VmFactory::new(1024 * 32);
@@ -376,7 +375,7 @@ pub fn initialize_common_modules(
         machine.clone(),
         conf.raw_conf.execute_genesis, /* need_to_execute */
         conf.raw_conf.chain_id,
-        &initial_nodes,
+        &None // &initial_nodes,
     );
     storage_manager.notify_genesis_hash(genesis_block.hash());
     let mut genesis_accounts = genesis_accounts;

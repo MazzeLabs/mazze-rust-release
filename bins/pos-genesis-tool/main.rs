@@ -49,7 +49,6 @@ use diem_types::{
 use executor::{db_bootstrapper::generate_waypoint, vm::PosVM};
 use mazze_types::H256;
 use mazzecore::{
-    consensus::pos_handler::save_initial_nodes_to_file,
     genesis_block::{
         register_transaction, GenesisPosNodeInfo, GenesisPosState,
     },
@@ -332,19 +331,19 @@ where
         let initial_nodes = genesis_nodes[..num_genesis_validator].to_vec();
         let initial_committee =
             elect_genesis_committee(&initial_nodes, initial_seed.as_bytes());
-        save_initial_nodes_to_file(
-            "./initial_nodes.json",
-            GenesisPosState {
-                initial_nodes,
-                initial_committee: initial_committee
-                    .iter()
-                    .map(|(node_id, voting_power)| {
-                        (node_id.addr, *voting_power)
-                    })
-                    .collect(),
-                initial_seed,
-            },
-        );
+        // save_initial_nodes_to_file(
+        //     "./initial_nodes.json",
+        //     GenesisPosState {
+        //         initial_nodes,
+        //         initial_committee: initial_committee
+        //             .iter()
+        //             .map(|(node_id, voting_power)| {
+        //                 (node_id.addr, *voting_power)
+        //             })
+        //             .collect(),
+        //         initial_seed,
+        //     },
+        // );
         generate_genesis_from_public_keys(initial_committee);
         Ok("Ok".into())
     } else if args.cmd_frompub {
@@ -381,19 +380,19 @@ where
         }
         let initial_committee =
             elect_genesis_committee(&genesis_nodes, initial_seed.as_bytes());
-        save_initial_nodes_to_file(
-            "./initial_nodes.json",
-            GenesisPosState {
-                initial_nodes: genesis_nodes,
-                initial_committee: initial_committee
-                    .iter()
-                    .map(|(node_id, voting_power)| {
-                        (node_id.addr, *voting_power)
-                    })
-                    .collect(),
-                initial_seed,
-            },
-        );
+        // save_initial_nodes_to_file(
+        //     "./initial_nodes.json",
+        //     GenesisPosState {
+        //         initial_nodes: genesis_nodes,
+        //         initial_committee: initial_committee
+        //             .iter()
+        //             .map(|(node_id, voting_power)| {
+        //                 (node_id.addr, *voting_power)
+        //             })
+        //             .collect(),
+        //         initial_seed,
+        //     },
+        // );
         generate_genesis_from_public_keys(initial_committee);
         Ok("Ok".into())
     } else {

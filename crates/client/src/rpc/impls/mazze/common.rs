@@ -46,9 +46,9 @@ use mazze_types::{
     Address, AddressSpaceUtil, Space, H160, H256, H520, U128, U256, U512, U64,
 };
 use mazzecore::{
-    consensus::pos_handler::PosVerifier, genesis_block::register_transaction,
-    rpc_errors::invalid_params_check, BlockDataManager, ConsensusGraph,
-    ConsensusGraphTrait, PeerInfo, SharedConsensusGraph, SharedTransactionPool,
+    genesis_block::register_transaction, rpc_errors::invalid_params_check,
+    BlockDataManager, ConsensusGraph, ConsensusGraphTrait, PeerInfo,
+    SharedConsensusGraph, SharedTransactionPool,
 };
 use mazzecore_accounts::AccountProvider;
 use mazzekey::Password;

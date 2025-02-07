@@ -80,10 +80,6 @@ path = "../../crates/mazzecore/core/benchmark/consensus/src/main.rs"
 name = "mazze-gen-dot"
 path = "../mazze-gen-dot/main.rs"
 
-[[bin]]
-name = "pos-genesis-tool"
-path = "../pos-genesis-tool/main.rs"
-
 [features]
 default = ["jemalloc-global", "bls-blst"]
 deadlock-detection = ["parking_lot/deadlock_detection"]

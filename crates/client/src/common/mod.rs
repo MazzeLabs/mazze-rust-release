@@ -221,7 +221,7 @@ pub fn initialize_common_modules(
         HashMap<Address, U256>,
         Arc<BlockDataManager>,
         Arc<PowComputer>,
-        Arc<PosVerifier>,
+        // Arc<PosVerifier>,
         Arc<TransactionPool>,
         Arc<ConsensusGraph>,
         Arc<SynchronizationGraph>,
@@ -410,22 +410,22 @@ pub fn initialize_common_modules(
         Arc::new(network)
     };
 
-    let pos_verifier = Arc::new(PosVerifier::new(
-        Some(network.clone()),
-        PosConfiguration {
-            bls_key: self_pos_private_key,
-            vrf_key: self_vrf_private_key,
-            diem_conf_path: conf.raw_conf.pos_config_path.clone(),
-            protocol_conf: conf.protocol_config(),
-            pos_initial_nodes_path: conf
-                .raw_conf
-                .pos_initial_nodes_path
-                .clone(),
-            vrf_proposal_threshold: conf.raw_conf.vrf_proposal_threshold,
-            pos_state_config: conf.pos_state_config(),
-        },
-        conf.raw_conf.pos_reference_enable_height,
-    ));
+    // let pos_verifier = Arc::new(PosVerifier::new(
+    //     Some(network.clone()),
+    //     PosConfiguration {
+    //         bls_key: self_pos_private_key,
+    //         vrf_key: self_vrf_private_key,
+    //         diem_conf_path: conf.raw_conf.pos_config_path.clone(),
+    //         protocol_conf: conf.protocol_config(),
+    //         pos_initial_nodes_path: conf
+    //             .raw_conf
+    //             .pos_initial_nodes_path
+    //             .clone(),
+    //         vrf_proposal_threshold: conf.raw_conf.vrf_proposal_threshold,
+    //         pos_state_config: conf.pos_state_config(),
+    //     },
+    //     conf.raw_conf.pos_reference_enable_height,
+    // ));
     let verification_config =
         conf.verification_config(machine.clone());
     let txpool = Arc::new(TransactionPool::new(
@@ -517,7 +517,7 @@ pub fn initialize_common_modules(
         genesis_accounts,
         data_man,
         pow,
-        pos_verifier,
+        // pos_verifier,
         txpool,
         consensus,
         sync_graph,
@@ -548,7 +548,7 @@ pub fn initialize_not_light_node_modules(
         Option<TcpServer>,
         Option<WSServer>,
         Option<WSServer>,
-        Arc<PosVerifier>,
+        // Arc<PosVerifier>,
         Runtime,
         Option<HttpServer>,
         Option<WSServer>,
@@ -561,7 +561,7 @@ pub fn initialize_not_light_node_modules(
         genesis_accounts,
         data_man,
         pow,
-        pos_verifier,
+        // pos_verifier,
         txpool,
         consensus,
         sync_graph,
@@ -661,7 +661,7 @@ pub fn initialize_not_light_node_modules(
         conf.pow_config(),
         pow.clone(),
         maybe_author.clone().unwrap_or_default(),
-        pos_verifier.clone(),
+        // pos_verifier.clone(),
     ));
     if conf.is_dev_mode() {
         // If `dev_block_interval_ms` is None, blocks are generated after
@@ -811,7 +811,7 @@ pub fn initialize_not_light_node_modules(
         rpc_tcp_server,
         debug_rpc_ws_server,
         rpc_ws_server,
-        pos_verifier,
+        // pos_verifier,
         runtime,
         eth_rpc_http_server,
         eth_rpc_ws_server,

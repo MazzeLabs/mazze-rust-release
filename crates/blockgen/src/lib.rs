@@ -65,7 +65,7 @@ pub struct BlockGenerator {
     state: RwLock<MiningState>,
     workers: Mutex<Vec<(Worker, mpsc::Sender<ProofOfWorkProblem>)>>,
     pub stratum: RwLock<Option<Stratum>>,
-    pos_verifier: Arc<PosVerifier>,
+    // pos_verifier: Arc<PosVerifier>,
 }
 
 pub struct Worker {
@@ -148,7 +148,7 @@ impl BlockGenerator {
         sync: SharedSynchronizationService,
         maybe_txgen: Option<SharedTransactionGenerator>,
         pow_config: ProofOfWorkConfig, pow: Arc<PowComputer>,
-        mining_author: Address, pos_verifier: Arc<PosVerifier>,
+        mining_author: Address, // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         info!(
             "Initial mining difficulty set to: {:?}",
@@ -165,7 +165,7 @@ impl BlockGenerator {
             state: RwLock::new(MiningState::Start),
             workers: Mutex::new(Vec::new()),
             stratum: RwLock::new(None),
-            pos_verifier,
+            // pos_verifier,
         }
     }
 
@@ -1088,12 +1088,13 @@ impl BlockGenerator {
     /// Return `None` if parent block is missing in `BlockDataManager`, but this
     /// should not happen in the current usage.
     fn get_pos_reference(&self, parent_hash: &H256) -> Option<PosBlockId> {
-        let height = self.graph.data_man.block_height_by_hash(parent_hash)? + 1;
-        if self.pos_verifier.is_enabled_at_height(height) {
-            Some(self.pos_verifier.get_latest_pos_reference())
-        } else {
-            None
-        }
+        // let height = self.graph.data_man.block_height_by_hash(parent_hash)? + 1;
+        // if self.pos_verifier.is_enabled_at_height(height) {
+        //     Some(self.pos_verifier.get_latest_pos_reference())
+        // } else {
+        //     None
+        // }
+        None
     }
 }
 

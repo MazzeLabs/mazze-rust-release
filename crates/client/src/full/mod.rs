@@ -73,7 +73,7 @@ impl FullClient {
         Ok(Box::new(ClientComponents {
             data_manager_weak_ptr: Arc::downgrade(&data_man),
             blockgen: Some(blockgen),
-            pos_handler: None, // Some(pos_handler),
+            // pos_handler: None, // Some(pos_handler),
             other_components: FullClientExtraComponents {
                 consensus,
                 debug_rpc_http_server,

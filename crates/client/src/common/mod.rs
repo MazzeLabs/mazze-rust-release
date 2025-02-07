@@ -75,7 +75,7 @@ use mazzecore::consensus::pos_handler::read_initial_nodes_from_file;
 pub struct ClientComponents<BlockGenT, Rest> {
     pub data_manager_weak_ptr: Weak<BlockDataManager>,
     pub blockgen: Option<Arc<BlockGenT>>,
-    pub pos_handler: Option<Arc<PosVerifier>>,
+    // pub pos_handler: Option<Arc<PosVerifier>>,
     pub other_components: Rest,
 }
 
@@ -101,7 +101,7 @@ impl<BlockGenT: 'static + Stopable, Rest> ClientTrait
         &self,
     ) -> (
         Weak<BlockDataManager>,
-        Option<Arc<PosVerifier>>,
+        // Option<Arc<PosVerifier>>,
         Option<Arc<dyn Stopable>>,
     ) {
         debug!("take_out_components_for_shutdown");
@@ -111,7 +111,11 @@ impl<BlockGenT: 'static + Stopable, Rest> ClientTrait
             None => None,
         };
 
-        (data_manager_weak_ptr, self.pos_handler.clone(), blockgen)
+        (
+            data_manager_weak_ptr,
+            // self.pos_handler.clone(),
+            blockgen,
+        )
     }
 }
 
@@ -120,7 +124,7 @@ pub trait ClientTrait {
         &self,
     ) -> (
         Weak<BlockDataManager>,
-        Option<Arc<PosVerifier>>,
+        // Option<Arc<PosVerifier>>,
         Option<Arc<dyn Stopable>>,
     );
 }
@@ -158,32 +162,35 @@ pub mod client_methods {
 
     /// Returns whether the shutdown is considered clean.
     pub fn shutdown(this: Box<dyn ClientTrait>) -> bool {
-        let (ledger_db, maybe_pos_handler, maybe_blockgen) =
-            this.take_out_components_for_shutdown();
+        let (
+            ledger_db,
+            // maybe_pos_handler,
+            maybe_blockgen,
+        ) = this.take_out_components_for_shutdown();
         drop(this);
         if let Some(blockgen) = maybe_blockgen {
             blockgen.stop();
             drop(blockgen);
         }
-        let maybe_pos_db = if let Some(pos_handler) = maybe_pos_handler {
-            let maybe_pos_db = pos_handler.stop();
-            drop(pos_handler);
-            maybe_pos_db
-        } else {
-            None
-        };
+        // let maybe_pos_db = if let Some(pos_handler) = maybe_pos_handler {
+        //     let maybe_pos_db = pos_handler.stop();
+        //     drop(pos_handler);
+        //     maybe_pos_db
+        // } else {
+        //     None
+        // };
 
         // Make sure ledger_db is properly dropped, so rocksdb can be closed
         // cleanly
         let mut graceful = true;
         graceful &= check_graceful_shutdown(ledger_db);
         debug!("ledger_db drop: graceful = {}", graceful);
-        if let Some((pos_ledger_db, consensus_db)) = maybe_pos_db {
-            graceful &= check_graceful_shutdown(pos_ledger_db);
-            debug!("pos_ledger_db drop: graceful = {}", graceful);
-            graceful &= check_graceful_shutdown(consensus_db);
-            debug!("consensus_db drop: graceful = {}", graceful);
-        }
+        // if let Some((pos_ledger_db, consensus_db)) = maybe_pos_db {
+        //     graceful &= check_graceful_shutdown(pos_ledger_db);
+        //     debug!("pos_ledger_db drop: graceful = {}", graceful);
+        //     graceful &= check_graceful_shutdown(consensus_db);
+        //     debug!("consensus_db drop: graceful = {}", graceful);
+        // }
         graceful
     }
 
@@ -426,8 +433,7 @@ pub fn initialize_common_modules(
     //     },
     //     conf.raw_conf.pos_reference_enable_height,
     // ));
-    let verification_config =
-        conf.verification_config(machine.clone());
+    let verification_config = conf.verification_config(machine.clone());
     let txpool = Arc::new(TransactionPool::new(
         conf.txpool_config(),
         verification_config.clone(),

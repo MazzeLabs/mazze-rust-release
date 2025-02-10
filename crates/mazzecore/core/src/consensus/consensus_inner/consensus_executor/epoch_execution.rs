@@ -276,12 +276,12 @@ impl ConsensusExecutionHandler {
                 .transact(transaction, options)?;
         execution_outcome.log(transaction, &block_context.block.hash());
 
-        if let Some(burnt_fee) = execution_outcome
-            .try_as_executed()
-            .and_then(|e| e.burnt_fee)
-        {
-            state.burn_by_cip1559(burnt_fee);
-        };
+        // if let Some(burnt_fee) = execution_outcome
+        //     .try_as_executed()
+        //     .and_then(|e| e.burnt_fee)
+        // {
+        //     state.burn_by_cip1559(burnt_fee);
+        // };
 
         let r = make_process_tx_outcome(
             execution_outcome,

@@ -24,9 +24,6 @@ mod collateral;
 /// Implements functions for committing `State` changes to db.
 mod commit;
 
-/// Implements access functions global statistic variables of `State`.
-mod global_statistics;
-
 /// Implements functions for the sponsorship mechanism of `State`.
 mod sponsor;
 
@@ -39,19 +36,14 @@ mod reward;
 mod tests;
 
 pub use self::{
-    collateral::{initialize_cip107, settle_collateral_for_all},
-    commit::StateCommitResult,
-    reward::initialize_cip137,
-    sponsor::COMMISSION_PRIVILEGE_SPECIAL_KEY,
+    collateral::initialize_cip107, commit::StateCommitResult,
+    reward::initialize_cip137, sponsor::COMMISSION_PRIVILEGE_SPECIAL_KEY,
 };
 #[cfg(test)]
 pub use tests::get_state_for_genesis_write;
 
 use self::checkpoints::CheckpointLayer;
-use super::{
-    global_stat::GlobalStat,
-    overlay_account::{AccountEntry, OverlayAccount, RequireFields},
-};
+use super::overlay_account::{AccountEntry, OverlayAccount, RequireFields};
 use crate::substate::Substate;
 use mazze_statedb::{
     Result as DbResult, StateDbExt, StateDbGeneric as StateDb,
@@ -73,30 +65,16 @@ pub struct State {
     /// you are familiar with checkpoint maintenance.
     cache: RwLock<HashMap<AddressWithSpace, AccountEntry>>,
 
-    /// In-memory global statistic variables.
-    // TODO: try not to make it special?
-    global_stat: GlobalStat,
-
     /// Checkpoint layers for the account entries
     checkpoints: RwLock<Vec<CheckpointLayer>>,
 }
 
 impl State {
     pub fn new(db: StateDb) -> DbResult<Self> {
-        let initialized = db.is_initialized()?;
-
-        let world_stat = if initialized {
-            GlobalStat::loaded(&db)?
-        } else {
-            GlobalStat::assert_non_inited(&db)?;
-            GlobalStat::new()
-        };
-
         Ok(State {
             db,
             cache: Default::default(),
             checkpoints: Default::default(),
-            global_stat: world_stat,
         })
     }
 

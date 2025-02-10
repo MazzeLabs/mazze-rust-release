@@ -44,7 +44,6 @@ impl State {
 
         let accounts_for_txpool =
             self.commit_dirty_accounts(debug_record.as_deref_mut())?;
-        self.global_stat.commit(&mut self.db, debug_record)?;
         Ok(accounts_for_txpool)
     }
 

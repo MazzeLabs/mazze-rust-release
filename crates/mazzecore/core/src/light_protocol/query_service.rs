@@ -31,7 +31,6 @@ use mazze_parameters::{
         TRANSACTION_COUNT_PER_BLOCK_WATER_LINE_MEDIUM,
     },
 };
-use mazze_statedb::global_params::{self, GlobalParamKey};
 use mazze_types::{
     address_util::AddressUtil, AllChainID, BigEndianHash, Bloom, H160, H256,
     KECCAK_EMPTY_BLOOM, U256,
@@ -554,30 +553,15 @@ impl QueryService {
     pub async fn get_interest_rate(
         &self, epoch: EpochNumber,
     ) -> Result<U256, Error> {
-        debug!("get_interest_rate epoch={:?}", epoch);
-
-        let epoch = self.get_height_from_epoch_number(epoch)?;
-
-        let key = global_params::InterestRate::STORAGE_KEY.to_key_bytes();
-
-        self.retrieve_state_entry::<U256>(epoch, key)
-            .await
-            .map(|opt| opt.unwrap_or_default())
+        // TODO: drop this fn, part of pos cleanup
+        Ok(U256::zero())
     }
 
     pub async fn get_accumulate_interest_rate(
         &self, epoch: EpochNumber,
     ) -> Result<U256, Error> {
-        debug!("get_accumulate_interest_rate epoch={:?}", epoch);
-
-        let epoch = self.get_height_from_epoch_number(epoch)?;
-
-        let key =
-            global_params::AccumulateInterestRate::STORAGE_KEY.to_key_bytes();
-
-        self.retrieve_state_entry::<U256>(epoch, key)
-            .await
-            .map(|opt| opt.unwrap_or_default())
+        // TODO: drop this fn, part of pos cleanup
+        Ok(U256::zero())
     }
 
     pub async fn get_tx_info(&self, hash: H256) -> Result<TxInfo, Error> {

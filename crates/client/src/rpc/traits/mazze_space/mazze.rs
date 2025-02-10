@@ -272,21 +272,10 @@ pub trait Mazze {
         &self, epoch_number: Option<EpochNumber>,
     ) -> JsonRpcResult<TokenSupplyInfo>;
 
-    /// Return information about total token supply.
-    #[rpc(name = "mazze_getCollateralInfo")]
-    fn get_collateral_info(
-        &self, epoch_number: Option<EpochNumber>,
-    ) -> JsonRpcResult<StorageCollateralInfo>;
-
     #[rpc(name = "mazze_getFeeBurnt")]
     fn get_fee_burnt(
         &self, epoch_number: Option<EpochNumber>,
     ) -> JsonRpcResult<U256>;
-
-    #[rpc(name = "mazze_getParamsFromVote")]
-    fn get_vote_params(
-        &self, epoch_number: Option<EpochNumber>,
-    ) -> JsonRpcResult<VoteParamsInfo>;
 
     //        /// Returns transaction at given block hash and index.
     //        #[rpc(name = "mazze_getTransactionByBlockHashAndIndex")]

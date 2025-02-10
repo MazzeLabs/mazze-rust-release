@@ -12,8 +12,6 @@ use primitives::{
     StorageKeyWithSpace, VoteStakeList,
 };
 
-use crate::global_params::{GlobalParamKey, InterestRate};
-
 use super::{Result, StateDbGeneric};
 
 pub trait StateDbExt {
@@ -45,12 +43,6 @@ pub trait StateDbExt {
     ) -> Result<Option<VoteStakeList>>;
 
     fn get_system_storage(&self, key: &[u8]) -> Result<U256>;
-
-    fn get_global_param<T: GlobalParamKey>(&self) -> Result<U256>;
-    fn set_global_param<T: GlobalParamKey>(
-        &mut self, value: &U256,
-        debug_record: Option<&mut ComputeEpochDebugRecord>,
-    ) -> Result<()>;
 
     // This function is used to check whether the db has been initialized when
     // create a state. So we can know the loaded `None` represents "not
@@ -132,10 +124,6 @@ impl StateDbExt for StateDbGeneric {
         )
     }
 
-    fn get_global_param<T: GlobalParamKey>(&self) -> Result<U256> {
-        Ok(self.get::<U256>(T::STORAGE_KEY)?.unwrap_or_default())
-    }
-
     fn get_system_storage(&self, key: &[u8]) -> Result<U256> {
         let storage_key = StorageKey::StorageKey {
             address_bytes: SYSTEM_STORAGE_ADDRESS.as_bytes(),
@@ -145,15 +133,7 @@ impl StateDbExt for StateDbGeneric {
         Ok(self.get::<U256>(storage_key)?.unwrap_or_default())
     }
 
-    fn set_global_param<T: GlobalParamKey>(
-        &mut self, value: &U256,
-        debug_record: Option<&mut ComputeEpochDebugRecord>,
-    ) -> Result<()> {
-        self.set::<U256>(T::STORAGE_KEY, value, debug_record)
-    }
-
     fn is_initialized(&self) -> Result<bool> {
-        let interest_rate_opt = self.get::<U256>(InterestRate::STORAGE_KEY)?;
-        Ok(interest_rate_opt.is_some())
+        Ok(true)
     }
 }

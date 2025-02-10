@@ -13,7 +13,6 @@ use crate::{
         accrue_substate, exec_main_frame, CallStackInfo, FrameResult,
         FrameReturn, FreshFrame, RuntimeRes,
     },
-    state::settle_collateral_for_all,
     substate::{cleanup_mode, Substate},
 };
 use mazze_parameters::staking::code_collateral_units;
@@ -45,7 +44,8 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
 
         if insufficient_sender_balance {
             if self.tx.space() == Space::Ethereum {
-                self.context.state.sub_total_evm_tokens(actual_gas_cost);
+                // TODO: check this out
+                // self.context.state.sub_total_evm_tokens(actual_gas_cost);
             }
             return self.finalize_on_insufficient_balance(actual_gas_cost);
         }
@@ -62,11 +62,12 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
         let refund_info = self.compute_refunded_gas(&result);
         self.refund_gas(&params, refund_info.refund_value)?;
 
-        if self.tx.space() == Space::Ethereum {
-            self.context
-                .state
-                .sub_total_evm_tokens(refund_info.fees_value);
-        }
+        // TODO: check this out
+        // if self.tx.space() == Space::Ethereum {
+        //     self.context
+        //         .state
+        //         .sub_total_evm_tokens(refund_info.fees_value);
+        // }
 
         // perform suicides
         self.kill_process()?;
@@ -270,12 +271,11 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
         self.context.state.checkpoint();
         self.observer.as_tracer().trace_checkpoint();
 
-        let res = exec_vm(
+        let mut res = exec_vm(
             &mut self.context,
             params.clone(),
             &mut *self.observer.as_tracer(),
         )?;
-        let mut res = self.settle_collateral(res, total_storage_limit)?;
 
         // Charge collateral and process the checkpoint.
         match &res {
@@ -297,47 +297,6 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
         });
 
         Ok(res)
-    }
-
-    fn settle_collateral(
-        &mut self, mut res: FrameResult, total_storage_limit: U256,
-    ) -> DbResult<FrameResult> {
-        let context = &mut self.context;
-        let state = &mut *context.state;
-        if let Ok(FrameReturn {
-            apply_state: true,
-            substate: Some(ref substate),
-            ..
-        }) = res
-        {
-            let dry_run = !matches!(
-                self.settings.charge_collateral,
-                ChargeCollateral::Normal
-            );
-
-            // For a ethereum space tx, this function has no op.
-            let mut collateral_check_result = settle_collateral_for_all(
-                state,
-                substate,
-                &mut *self.observer.as_tracer(),
-                &context.spec,
-                dry_run,
-            )?;
-
-            if collateral_check_result.is_ok() {
-                let sender = self.tx.sender();
-                collateral_check_result = state.check_storage_limit(
-                    &sender.address,
-                    &total_storage_limit,
-                    dry_run,
-                )?;
-            }
-
-            if let Err(err) = collateral_check_result {
-                res = Err(err.into_vm_error());
-            }
-        }
-        return Ok(res);
     }
 
     // TODO: maybe we can find a better interface for doing the suicide
@@ -376,14 +335,6 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
 
         // Kill process does not occupy new storage entries.
         // The storage recycling process should never occupy new collateral.
-        settle_collateral_for_all(
-            state,
-            &substate,
-            &mut *tracer,
-            &spec,
-            false,
-        )?
-        .expect("Should success");
 
         for contract_address in parent_substate
             .suicides
@@ -443,10 +394,10 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
             );
 
             state.remove_contract(contract_address)?;
-            state.sub_total_issued(contract_balance);
-            if contract_address.space == Space::Ethereum {
-                state.sub_total_evm_tokens(contract_balance);
-            }
+            // state.sub_total_issued(contract_balance);
+            // if contract_address.space == Space::Ethereum {
+            //     state.sub_total_evm_tokens(contract_balance);
+            // }
         }
 
         parent_substate.accrue(substate);

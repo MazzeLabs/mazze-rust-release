@@ -85,10 +85,10 @@ impl<'a> EstimationContext<'a> {
             )?;
             // Make sure statistics are also correct and will not violate any
             // underlying assumptions.
-            self.state.add_total_issued(balance_inc);
-            if tx.space() == Space::Ethereum {
-                self.state.add_total_evm_tokens(balance_inc);
-            }
+            // self.state.add_total_issued(balance_inc);
+            // if tx.space() == Space::Ethereum {
+            //     self.state.add_total_evm_tokens(balance_inc);
+            // }
         }
 
         if request.has_nonce {

@@ -1152,7 +1152,6 @@ impl ConsensusExecutionHandler {
         debug!("Skip execution in prefix {:?}", epoch_hash);
     }
 
-
     fn notify_txpool(
         &self, commit_result: &StateCommitResult, epoch_hash: &H256,
     ) {
@@ -1209,14 +1208,10 @@ impl ConsensusExecutionHandler {
         // This is the total primary tokens issued in this epoch.
         let mut total_base_reward: U256 = 0.into();
 
-        let base_reward_per_block = if spec.cip94 {
-            U512::from(state.pow_base_reward())
-        } else {
-            self.compute_block_base_reward(
-                reward_info.past_block_count,
-                main_block.block_header.height(),
-            )
-        };
+        let base_reward_per_block = self.compute_block_base_reward(
+            reward_info.past_block_count,
+            main_block.block_header.height(),
+        );
         debug!("base_reward: {}", base_reward_per_block);
 
         // Base reward and outlier penalties.
@@ -1493,14 +1488,14 @@ impl ConsensusExecutionHandler {
                 });
             }
         }
-        let new_mint = total_base_reward + allocated_secondary_reward;
-        if new_mint >= burnt_fee {
-            // The very likely case
-            state.add_total_issued(new_mint - burnt_fee);
-        } else {
-            // The very unlikely case
-            state.sub_total_issued(burnt_fee - new_mint);
-        }
+        // let new_mint = total_base_reward + allocated_secondary_reward;
+        // if new_mint >= burnt_fee {
+        //     // The very likely case
+        //     state.add_total_issued(new_mint - burnt_fee);
+        // } else {
+        //     // The very unlikely case
+        //     state.sub_total_issued(burnt_fee - new_mint);
+        // }
     }
 
     fn recompute_states(

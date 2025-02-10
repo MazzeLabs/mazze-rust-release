@@ -19,13 +19,7 @@ use mazze_executor::{
     executive::{ExecutionError, ExecutionOutcome, TxDropError},
     internal_contract::storage_point_prop,
 };
-use mazze_statedb::{
-    global_params::{
-        AccumulateInterestRate, BaseFeeProp, InterestRate, PowBaseReward,
-        TotalBurnt1559,
-    },
-    StateDbExt,
-};
+use mazze_statedb::StateDbExt;
 use mazze_types::{
     Address, AddressSpaceUtil, BigEndianHash, Space, H256, H520, U128, U256,
     U64,
@@ -422,7 +416,7 @@ impl RpcImpl {
             .consensus
             .get_state_db_by_epoch_number(epoch_num, "epoch_num")?;
 
-        Ok(state_db.get_global_param::<InterestRate>()?.into())
+        Ok(U256::zero())
     }
 
     /// Returns accumulate interest rate of the given epoch
@@ -434,9 +428,7 @@ impl RpcImpl {
             .consensus
             .get_state_db_by_epoch_number(epoch_num, "epoch_num")?;
 
-        Ok(state_db
-            .get_global_param::<AccumulateInterestRate>()?
-            .into())
+        Ok(U256::zero())
     }
 
     fn send_raw_transaction(&self, raw: Bytes) -> RpcResult<H256> {
@@ -1527,9 +1519,9 @@ impl RpcImpl {
             self.consensus
                 .get_state_db_by_epoch_number(epoch, "epoch")?,
         )?;
-        let total_issued = state.total_issued_tokens();
-        let total_staking = state.total_staking_tokens();
-        let total_collateral = state.total_storage_tokens();
+        let total_issued = U256::zero(); // state.total_issued_tokens();
+        let total_staking = U256::zero();
+        let total_collateral = U256::zero(); // state.total_storage_tokens();
         let two_year_unlock_address = genesis_contract_address_two_year();
         let four_year_unlock_address = genesis_contract_address_four_year();
         let two_year_locked = state
@@ -1540,7 +1532,7 @@ impl RpcImpl {
             .unwrap_or(U256::zero());
         let total_circulating =
             total_issued - two_year_locked - four_year_locked;
-        let total_espace_tokens = state.total_espace_tokens();
+        let total_espace_tokens = U256::zero(); // state.total_espace_tokens();
         Ok(TokenSupplyInfo {
             total_circulating,
             total_issued,
@@ -1550,56 +1542,14 @@ impl RpcImpl {
         })
     }
 
-    pub fn get_collateral_info(
-        &self, epoch: Option<EpochNumber>,
-    ) -> RpcResult<StorageCollateralInfo> {
-        let epoch = epoch.unwrap_or(EpochNumber::LatestState).into();
-        let state = State::new(
-            self.consensus
-                .get_state_db_by_epoch_number(epoch, "epoch")?,
-        )?;
-        let total_storage_tokens = state.total_storage_tokens();
-        let converted_storage_points = state.converted_storage_points()
-            / *MAZZIES_PER_STORAGE_COLLATERAL_UNIT;
-        let used_storage_points =
-            state.used_storage_points() / *MAZZIES_PER_STORAGE_COLLATERAL_UNIT;
-        Ok(StorageCollateralInfo {
-            total_storage_tokens,
-            converted_storage_points,
-            used_storage_points,
-        })
-    }
-
-    pub fn get_vote_params(
-        &self, epoch: Option<EpochNumber>,
-    ) -> RpcResult<VoteParamsInfo> {
-        let epoch = epoch.unwrap_or(EpochNumber::LatestState).into();
-        let state_db = self
-            .consensus
-            .get_state_db_by_epoch_number(epoch, "epoch_num")?;
-        let interest_rate = state_db.get_global_param::<InterestRate>()?
-            / U256::from(BLOCKS_PER_YEAR);
-        let pow_base_reward = state_db.get_global_param::<PowBaseReward>()?;
-
-        let storage_point_prop =
-            state_db.get_system_storage(&storage_point_prop())?;
-
-        let base_fee_share_prop = state_db.get_global_param::<BaseFeeProp>()?;
-        Ok(VoteParamsInfo {
-            pow_base_reward,
-            interest_rate,
-            storage_point_prop,
-            base_fee_share_prop,
-        })
-    }
-
     pub fn get_fee_burnt(&self, epoch: Option<EpochNumber>) -> RpcResult<U256> {
         let epoch = epoch.unwrap_or(EpochNumber::LatestState).into();
         let state_db = self
             .consensus
             .get_state_db_by_epoch_number(epoch, "epoch_num")?;
 
-        Ok(state_db.get_global_param::<TotalBurnt1559>()?)
+        // Ok(state_db.get_global_param::<TotalBurnt1559>()?)
+        Ok(U256::zero())
     }
 
     pub fn set_db_crash(
@@ -2294,8 +2244,8 @@ impl Mazze for MazzeHandler {
             fn transaction_receipt(&self, tx_hash: H256) -> BoxFuture<Option<RpcReceipt>>;
             fn storage_root(&self, address: RpcAddress, epoch_num: Option<EpochNumber>) -> BoxFuture<Option<StorageRoot>>;
             fn get_supply_info(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<TokenSupplyInfo>;
-            fn get_collateral_info(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<StorageCollateralInfo>;
-            fn get_vote_params(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<VoteParamsInfo>;
+            // fn get_collateral_info(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<StorageCollateralInfo>;
+            // fn get_vote_params(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<VoteParamsInfo>;
             fn get_fee_burnt(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<U256>;
         }
     }

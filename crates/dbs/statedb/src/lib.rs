@@ -7,7 +7,6 @@ extern crate error_chain;
 #[macro_use]
 extern crate log;
 
-pub mod global_params;
 mod statedb_ext;
 
 use mazze_db_errors::statedb as error;
@@ -378,6 +377,7 @@ mod impls {
                     let storage_key = StorageKeyWithSpace::from_key_bytes::<
                         SkipInputCheck,
                     >(k);
+                    debug!("apply_changes_to_storage k={:?}", storage_key);
                     match &v.current_value {
                         Some(v) => {
                             self.storage.set(storage_key, (&**v).into())?;

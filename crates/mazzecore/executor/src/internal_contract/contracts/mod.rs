@@ -6,7 +6,6 @@ mod admin;
 mod context;
 pub(super) mod cross_space;
 mod future;
-pub(super) mod params_control;
 mod sponsor;
 pub(super) mod system_storage;
 

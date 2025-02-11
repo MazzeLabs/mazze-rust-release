@@ -17,7 +17,7 @@ use crate::{
 };
 use futures::{
     future::{self, Either},
-    stream, try_join, FutureExt, StreamExt, TryFutureExt, TryStreamExt,
+    stream, FutureExt, StreamExt, TryFutureExt, TryStreamExt,
 };
 use mazze_addr::Network;
 use mazze_executor::state::COMMISSION_PRIVILEGE_SPECIAL_KEY;
@@ -548,20 +548,6 @@ impl QueryService {
 
         let epoch = self.get_height_from_epoch_number(epoch)?;
         self.retrieve_storage_root(epoch, address).await
-    }
-
-    pub async fn get_interest_rate(
-        &self, epoch: EpochNumber,
-    ) -> Result<U256, Error> {
-        // TODO: drop this fn, part of pos cleanup
-        Ok(U256::zero())
-    }
-
-    pub async fn get_accumulate_interest_rate(
-        &self, epoch: EpochNumber,
-    ) -> Result<U256, Error> {
-        // TODO: drop this fn, part of pos cleanup
-        Ok(U256::zero())
     }
 
     pub async fn get_tx_info(&self, hash: H256) -> Result<TxInfo, Error> {

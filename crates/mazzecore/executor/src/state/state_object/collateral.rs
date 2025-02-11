@@ -1,15 +1,8 @@
-use super::{State, Substate};
-use crate::{
-    executive_observer::TracerTrait, internal_contract::storage_point_prop,
-    return_if, try_loaded,
-};
-use mazze_parameters::{
-    consensus_internal::CIP107_STORAGE_POINT_PROP_INIT,
-    staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
-};
+use super::State;
+use crate::try_loaded;
 use mazze_statedb::Result as DbResult;
-use mazze_types::{address_util::AddressUtil, Address, AddressSpaceUtil, U256};
-use mazze_vm_types::{self as vm, Spec};
+use mazze_types::{Address, U256};
+use mazze_vm_types::{self as vm};
 
 impl State {
     pub fn collateral_for_storage(&self, address: &Address) -> DbResult<U256> {
@@ -51,39 +44,35 @@ impl State {
         })
     }
 
-    pub fn storage_point_prop(&self) -> DbResult<U256> {
-        self.get_system_storage(&storage_point_prop())
-    }
+    // fn initialize_cip107(
+    //     &mut self, address: &Address,
+    // ) -> DbResult<(U256, U256)> {
+    //     debug!("Check initialize CIP-107");
 
-    fn initialize_cip107(
-        &mut self, address: &Address,
-    ) -> DbResult<(U256, U256)> {
-        debug!("Check initialize CIP-107");
+    //     let prop: U256 = self.storage_point_prop()?;
+    //     let mut account =
+    //         self.write_account_or_new_lock(&address.with_native_space())?;
+    //     return_if!(!account.is_contract());
+    //     return_if!(account.is_cip_107_initialized());
 
-        let prop: U256 = self.storage_point_prop()?;
-        let mut account =
-            self.write_account_or_new_lock(&address.with_native_space())?;
-        return_if!(!account.is_contract());
-        return_if!(account.is_cip_107_initialized());
+    //     let (from_balance, from_collateral) = account.initialize_cip107(prop);
+    //     std::mem::drop(account);
 
-        let (from_balance, from_collateral) = account.initialize_cip107(prop);
-        std::mem::drop(account);
-
-        Ok((from_balance, from_collateral))
-    }
+    //     Ok((from_balance, from_collateral))
+    // }
 }
 
 /// Initialize CIP-107 for the whole system.
-pub fn initialize_cip107(state: &mut State) -> DbResult<()> {
-    debug!(
-        "set storage_point_prop to {}",
-        CIP107_STORAGE_POINT_PROP_INIT
-    );
-    state.set_system_storage(
-        storage_point_prop().to_vec(),
-        CIP107_STORAGE_POINT_PROP_INIT.into(),
-    )
-}
+// pub fn initialize_cip107(state: &mut State) -> DbResult<()> {
+//     debug!(
+//         "set storage_point_prop to {}",
+//         CIP107_STORAGE_POINT_PROP_INIT
+//     );
+//     state.set_system_storage(
+//         storage_point_prop().to_vec(),
+//         CIP107_STORAGE_POINT_PROP_INIT.into(),
+//     )
+// }
 
 pub type CollateralCheckResult = std::result::Result<(), CollateralCheckError>;
 

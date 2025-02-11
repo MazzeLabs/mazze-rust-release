@@ -5,7 +5,6 @@ use mazze_statedb::{
     ErrorKind as DbErrorKind, Result as DbResult, StateDbExt, StateDbGeneric,
 };
 use mazze_types::Address;
-use primitives::{DepositList, VoteStakeList};
 use std::sync::Arc;
 
 impl OverlayAccount {
@@ -84,16 +83,16 @@ impl OverlayAccount {
     /// To prevent panics from reading ext fields without loading from the DB,
     /// these method are restricted to be visible only within the `state`
     /// module.
-    pub(in crate::state) fn deposit_list(&self) -> &DepositList {
-        self.deposit_list.as_ref().expect(NOT_LOADED_ERR)
-    }
+    // pub(in crate::state) fn deposit_list(&self) -> &DepositList {
+    //     self.deposit_list.as_ref().expect(NOT_LOADED_ERR)
+    // }
 
     /// To prevent panics from reading ext fields without loading from the DB,
     /// these method are restricted to be visible only within the `state`
     /// module.
-    pub(in crate::state) fn vote_stake_list(&self) -> &VoteStakeList {
-        self.vote_stake_list.as_ref().expect(NOT_LOADED_ERR)
-    }
+    // pub(in crate::state) fn vote_stake_list(&self) -> &VoteStakeList {
+    //     self.vote_stake_list.as_ref().expect(NOT_LOADED_ERR)
+    // }
 
     /// To prevent panics from reading ext fields without loading from the DB,
     /// these method are restricted to be visible only within the `state`

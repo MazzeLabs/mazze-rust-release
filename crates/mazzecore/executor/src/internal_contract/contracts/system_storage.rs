@@ -10,6 +10,7 @@ make_solidity_contract! {
     pub struct SystemStorage(SYSTEM_STORAGE_ADDRESS, SolFnTable::default, initialize: |params: &CommonParams| params.transition_numbers.cip94n, is_active: |spec: &Spec| spec.cip94);
 }
 
+#[allow(unused)]
 pub fn base_slot(contract: Address) -> U256 {
     let hash = keccak(H256::from(contract).as_ref());
     U256::from_big_endian(hash.as_ref())

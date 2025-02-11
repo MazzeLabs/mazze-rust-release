@@ -90,8 +90,7 @@ impl State {
     }
 
     pub fn set_sponsor_for_collateral(
-        &mut self, address: &Address, sponsor: &Address,
-        sponsor_balance: &U256, is_cip107: bool,
+        &mut self, address: &Address, sponsor: &Address, sponsor_balance: &U256,
     ) -> DbResult<U256> {
         let sponsor_not_change = *sponsor
             == self.sponsor_for_collateral(address)?.unwrap_or_default();
@@ -99,11 +98,7 @@ impl State {
             *sponsor_balance == self.sponsor_balance_for_collateral(address)?;
         return_if!(sponsor_not_change && balance_not_change);
 
-        let prop = if is_cip107 {
-            self.storage_point_prop()?
-        } else {
-            U256::zero()
-        };
+        let prop = U256::zero();
 
         let converted_storage_points = self
             .write_native_account_lock(&address)?

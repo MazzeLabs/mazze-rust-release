@@ -3821,7 +3821,7 @@ impl ConsensusGraphInner {
 
     // TODO: investigate if needed after removing pos
     pub fn get_next_main_decision(
-        &self, parent_decision_hash: &H256, confirmed_height: u64,
+        &self, _parent_decision_hash: &H256, _confirmed_height: u64,
     ) -> Option<(u64, H256)> {
         // let r = match self.hash_to_arena_indices.get(parent_decision_hash) {
         //     None => {
@@ -3900,7 +3900,7 @@ impl ConsensusGraphInner {
             self.hash_to_arena_indices.get(ancestor_hash),
             self.hash_to_arena_indices.get(me_hash),
         ) {
-            (Some(ancestor), Some(me)) => {
+            (Some(_ancestor), Some(_me)) => {
                 // if self.arena[*me].height % POS_TERM_EPOCHS != 0 {
                 //     return false;
                 // }

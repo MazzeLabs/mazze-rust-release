@@ -1,8 +1,5 @@
 use super::{
-    contract_address,
-    executed::make_ext_result,
-    fresh_executive::CostInfo,
-    transact_options::{ChargeCollateral, TransactSettings},
+    contract_address, executed::make_ext_result, fresh_executive::CostInfo,
     Executed, ExecutionError, ExecutiveContext,
 };
 
@@ -11,7 +8,7 @@ use crate::{
     executive_observer::{AddressPocket, ExecutiveObserver, TracerTrait},
     stack::{
         accrue_substate, exec_main_frame, CallStackInfo, FrameResult,
-        FrameReturn, FreshFrame, RuntimeRes,
+        FreshFrame, RuntimeRes,
     },
     substate::{cleanup_mode, Substate},
 };
@@ -30,7 +27,6 @@ pub(super) struct PreCheckedExecutive<'a, O: ExecutiveObserver> {
     pub context: ExecutiveContext<'a>,
     pub tx: &'a SignedTransaction,
     pub observer: O,
-    pub settings: TransactSettings,
     pub cost: CostInfo,
     pub substate: Substate,
 }
@@ -262,9 +258,10 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
     fn exec_vm(&mut self, params: ActionParams) -> DbResult<ExecutiveResult> {
         // No matter who pays the collateral, we only focuses on the storage
         // limit of sender.
-        let total_storage_limit =
-            self.context.state.collateral_for_storage(&params.sender)?
-                + self.cost.storage_cost;
+        // TODO: check how removing this impacts the logic
+        // let total_storage_limit =
+        //     self.context.state.collateral_for_storage(&params.sender)?
+        //         + self.cost.storage_cost;
 
         // Initialize the checkpoint for transaction execution. This checkpoint
         // can be reverted by "not enough balance for storage".

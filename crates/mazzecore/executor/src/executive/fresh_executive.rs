@@ -103,7 +103,6 @@ impl<'a, O: ExecutiveObserver> FreshExecutive<'a, O> {
             context: self.context,
             tx: self.tx,
             observer: self.observer,
-            settings: self.settings,
             cost,
             substate: Substate::new(),
         }

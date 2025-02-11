@@ -7,17 +7,16 @@ use crate::rpc::{
     types::{
         call_request::rpc_call_request_network,
         errors::check_rpc_address_network, MazzeFeeHistory, RpcAddress,
-        SponsorInfo, StatOnGasLoad, TokenSupplyInfo, VoteParamsInfo,
-        WrapTransaction, U64 as HexU64,
+        SponsorInfo, StatOnGasLoad, TokenSupplyInfo, WrapTransaction,
+        U64 as HexU64,
     },
 };
 use blockgen::BlockGenerator;
 use delegate::delegate;
 use jsonrpc_core::{BoxFuture, Error as JsonRpcError, Result as JsonRpcResult};
 use mazze_execute_helper::estimation::{decode_error, EstimateExt};
-use mazze_executor::{
-    executive::{ExecutionError, ExecutionOutcome, TxDropError},
-    internal_contract::storage_point_prop,
+use mazze_executor::executive::{
+    ExecutionError, ExecutionOutcome, TxDropError,
 };
 use mazze_statedb::StateDbExt;
 use mazze_types::{
@@ -73,8 +72,7 @@ use crate::{
             EpochNumber, EstimateGasAndCollateralResponse, Log as RpcLog,
             MazzeRpcLogFilter, PackedOrExecuted, Receipt as RpcReceipt,
             RewardInfo as RpcRewardInfo, SendTxRequest, Status as RpcStatus,
-            StorageCollateralInfo, SyncGraphStates,
-            Transaction as RpcTransaction,
+            SyncGraphStates, Transaction as RpcTransaction,
         },
         RpcResult,
     },
@@ -87,7 +85,6 @@ use mazze_parameters::{
     genesis::{
         genesis_contract_address_four_year, genesis_contract_address_two_year,
     },
-    staking::{BLOCKS_PER_YEAR, MAZZIES_PER_STORAGE_COLLATERAL_UNIT},
 };
 use mazze_storage::state::StateDbGetOriginalMethods;
 use mazzecore::{
@@ -286,26 +283,6 @@ impl RpcImpl {
         }
     }
 
-    fn staking_balance(
-        &self, address: RpcAddress, num: Option<EpochNumber>,
-    ) -> RpcResult<U256> {
-        self.check_address_network(address.network)?;
-        let epoch_num = num.unwrap_or(EpochNumber::LatestState).into();
-
-        info!(
-            "RPC Request: mazze_getStakingBalance address={:?} epoch_num={:?}",
-            address, epoch_num
-        );
-
-        let state_db = self
-            .consensus
-            .get_state_db_by_epoch_number(epoch_num, "num")?;
-        let acc =
-            state_db.get_account(&address.hex_address.with_native_space())?;
-
-        Ok(acc.map_or(U256::zero(), |acc| acc.staking_balance).into())
-    }
-
     fn deposit_list(
         &self, address: RpcAddress, num: Option<EpochNumber>,
     ) -> RpcResult<Vec<DepositInfo>> {
@@ -407,28 +384,6 @@ impl RpcImpl {
             };
 
         Ok(RpcAccount::try_from(account, network)?)
-    }
-
-    /// Returns interest rate of the given epoch
-    fn interest_rate(&self, epoch_num: Option<EpochNumber>) -> RpcResult<U256> {
-        let epoch_num = epoch_num.unwrap_or(EpochNumber::LatestState).into();
-        let state_db = self
-            .consensus
-            .get_state_db_by_epoch_number(epoch_num, "epoch_num")?;
-
-        Ok(U256::zero())
-    }
-
-    /// Returns accumulate interest rate of the given epoch
-    fn accumulate_interest_rate(
-        &self, epoch_num: Option<EpochNumber>,
-    ) -> RpcResult<U256> {
-        let epoch_num = epoch_num.unwrap_or(EpochNumber::LatestState).into();
-        let state_db = self
-            .consensus
-            .get_state_db_by_epoch_number(epoch_num, "epoch_num")?;
-
-        Ok(U256::zero())
     }
 
     fn send_raw_transaction(&self, raw: Bytes) -> RpcResult<H256> {
@@ -1544,7 +1499,7 @@ impl RpcImpl {
 
     pub fn get_fee_burnt(&self, epoch: Option<EpochNumber>) -> RpcResult<U256> {
         let epoch = epoch.unwrap_or(EpochNumber::LatestState).into();
-        let state_db = self
+        let _state_db = self
             .consensus
             .get_state_db_by_epoch_number(epoch, "epoch_num")?;
 
@@ -2214,15 +2169,11 @@ impl Mazze for MazzeHandler {
         to self.rpc_impl {
             fn code(&self, addr: RpcAddress, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> BoxFuture<Bytes>;
             fn account(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<RpcAccount>;
-            fn interest_rate(&self, num: Option<EpochNumber>) -> BoxFuture<U256>;
-            fn accumulate_interest_rate(&self, num: Option<EpochNumber>) -> BoxFuture<U256>;
             fn admin(&self, address: RpcAddress, num: Option<EpochNumber>)
                 -> BoxFuture<Option<RpcAddress>>;
             fn sponsor_info(&self, address: RpcAddress, num: Option<EpochNumber>)
                 -> BoxFuture<SponsorInfo>;
             fn balance(&self, address: RpcAddress, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> BoxFuture<U256>;
-            fn staking_balance(&self, address: RpcAddress, num: Option<EpochNumber>)
-                -> BoxFuture<U256>;
             fn deposit_list(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<Vec<DepositInfo>>;
             fn vote_list(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<Vec<VoteStakeInfo>>;
             fn collateral_for_storage(&self, address: RpcAddress, num: Option<EpochNumber>)
@@ -2244,8 +2195,6 @@ impl Mazze for MazzeHandler {
             fn transaction_receipt(&self, tx_hash: H256) -> BoxFuture<Option<RpcReceipt>>;
             fn storage_root(&self, address: RpcAddress, epoch_num: Option<EpochNumber>) -> BoxFuture<Option<StorageRoot>>;
             fn get_supply_info(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<TokenSupplyInfo>;
-            // fn get_collateral_info(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<StorageCollateralInfo>;
-            // fn get_vote_params(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<VoteParamsInfo>;
             fn get_fee_burnt(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<U256>;
         }
     }

@@ -16,7 +16,7 @@ mod state_object;
 #[cfg(test)]
 pub use state_object::get_state_for_genesis_write;
 pub use state_object::{
-    initialize_cip107, initialize_cip137, State, StateCommitResult,
+    initialize_cip137, State, StateCommitResult,
     COMMISSION_PRIVILEGE_SPECIAL_KEY,
 };
 

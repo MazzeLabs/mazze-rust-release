@@ -1,7 +1,5 @@
 use super::State;
-use mazze_parameters::{
-    consensus::ONE_MAZZE_IN_MAZZY, consensus_internal::CIP137_BASEFEE_PROP_INIT,
-};
+use mazze_parameters::consensus_internal::CIP137_BASEFEE_PROP_INIT;
 use mazze_types::U256;
 
 impl State {
@@ -38,7 +36,7 @@ impl State {
 }
 
 /// Initialize CIP-137 for the whole system.
-pub fn initialize_cip137(state: &mut State) {
+pub fn initialize_cip137(_state: &mut State) {
     debug!("set base_fee_prop to {}", CIP137_BASEFEE_PROP_INIT);
     // state.set_base_fee_prop(CIP137_BASEFEE_PROP_INIT.into());
 }

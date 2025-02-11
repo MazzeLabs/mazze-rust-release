@@ -9,7 +9,7 @@ use crate::rpc::types::{
     EstimateGasAndCollateralResponse, Log as RpcLog, MazzeFeeHistory,
     MazzeFilterChanges, MazzeRpcLogFilter, Receipt as RpcReceipt,
     RewardInfo as RpcRewardInfo, RpcAddress, SponsorInfo, Status as RpcStatus,
-    StorageCollateralInfo, TokenSupplyInfo, Transaction, VoteParamsInfo,
+    StorageCollateralInfo, TokenSupplyInfo, Transaction,
     U64 as HexU64,
 };
 use jsonrpc_core::{BoxFuture, Result as JsonRpcResult};
@@ -68,12 +68,6 @@ pub trait Mazze {
     fn sponsor_info(
         &self, addr: RpcAddress, epoch_number: Option<EpochNumber>,
     ) -> BoxFuture<SponsorInfo>;
-
-    /// Returns balance of the given account.
-    #[rpc(name = "mazze_getStakingBalance")]
-    fn staking_balance(
-        &self, addr: RpcAddress, epoch_number: Option<EpochNumber>,
-    ) -> BoxFuture<U256>;
 
     /// Returns deposit list of the given account.
     #[rpc(name = "mazze_getDepositList")]
@@ -235,18 +229,6 @@ pub trait Mazze {
     fn account(
         &self, address: RpcAddress, epoch_num: Option<EpochNumber>,
     ) -> BoxFuture<RpcAccount>;
-
-    /// Returns interest rate of the given epoch
-    #[rpc(name = "mazze_getInterestRate")]
-    fn interest_rate(
-        &self, epoch_number: Option<EpochNumber>,
-    ) -> BoxFuture<U256>;
-
-    /// Returns accumulate interest rate of the given epoch
-    #[rpc(name = "mazze_getAccumulateInterestRate")]
-    fn accumulate_interest_rate(
-        &self, epoch_number: Option<EpochNumber>,
-    ) -> BoxFuture<U256>;
 
     #[rpc(name = "mazze_getConfirmationRiskByHash")]
     fn confirmation_risk_by_hash(

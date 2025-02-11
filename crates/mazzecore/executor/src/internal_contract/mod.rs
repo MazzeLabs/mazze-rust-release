@@ -22,6 +22,5 @@ pub use self::{
         admin::suicide,
         context::{block_hash_slot, epoch_hash_slot},
         cross_space::{evm_map, Resume},
-        params_control::storage_point_prop,
     },
 };

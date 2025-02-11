@@ -161,7 +161,7 @@ pub fn set_sponsor_for_collateral(
     // If previous sponsor is not the same as current sponsor, we should try
     // to replace the sponsor. Otherwise, we should try to charge
     // `sponsor_balance`.
-    let converted_storage_point = if prev_sponsor.as_ref().map_or_else(
+    let _converted_storage_point = if prev_sponsor.as_ref().map_or_else(
         || !sponsor.is_zero(),
         |prev_sponsor| prev_sponsor != sponsor,
     ) {
@@ -200,12 +200,12 @@ pub fn set_sponsor_for_collateral(
             &sponsor_balance,
             &mut cleanup_mode(substate, &spec),
         )?;
-        state.set_sponsor_for_collateral(
-            &contract_address,
-            sponsor,
-            &(sponsor_balance - collateral_for_storage),
-            spec.cip107,
-        )?
+        // state.set_sponsor_for_collateral(
+        //     &contract_address,
+        //     sponsor,
+        //     &(sponsor_balance - collateral_for_storage),
+        //     spec.cip107,
+        // )?
     } else {
         context.tracer.trace_internal_transfer(
             AddressPocket::Balance(params.address.with_space(params.space)),
@@ -217,20 +217,20 @@ pub fn set_sponsor_for_collateral(
             &sponsor_balance,
             &mut cleanup_mode(substate, &spec),
         )?;
-        state.set_sponsor_for_collateral(
-            &contract_address,
-            sponsor,
-            &(sponsor_balance + prev_sponsor_balance),
-            spec.cip107,
-        )?
+        // state.set_sponsor_for_collateral(
+        //     &contract_address,
+        //     sponsor,
+        //     &(sponsor_balance + prev_sponsor_balance),
+        //     spec.cip107,
+        // )?
     };
-    if !converted_storage_point.is_zero() {
-        context.tracer.trace_internal_transfer(
-            AddressPocket::SponsorBalanceForStorage(contract_address),
-            AddressPocket::MintBurn,
-            converted_storage_point,
-        );
-    }
+    // if !converted_storage_point.is_zero() {
+    //     context.tracer.trace_internal_transfer(
+    //         AddressPocket::SponsorBalanceForStorage(contract_address),
+    //         AddressPocket::MintBurn,
+    //         converted_storage_point,
+    //     );
+    // }
     Ok(())
 }
 

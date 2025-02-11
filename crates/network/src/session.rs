@@ -18,7 +18,6 @@ use priority_send_queue::SendQueuePriority;
 use rlp::{Rlp, RlpStream};
 use serde_derive::Serialize;
 use std::{
-    convert::TryFrom,
     fmt,
     net::SocketAddr,
     str,
@@ -376,6 +375,7 @@ impl Session {
             })
     }
 
+    // TODO: check why this is no longer being used, we might've removed more than needed
     /// Read Hello packet to exchange the supported protocols, and set the
     /// `had_hello` flag to indicates that session is ready to send/receive
     /// protocol packets.

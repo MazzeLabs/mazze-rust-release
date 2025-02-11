@@ -10,7 +10,6 @@ use std::{
 };
 
 use rustc_hex::FromHex;
-use serde::{Deserialize, Serialize};
 use toml::Value;
 
 use keylib::KeyPair;
@@ -27,7 +26,7 @@ use mazze_statedb::StateDb;
 use mazze_storage::{StorageManager, StorageManagerTrait};
 use mazze_types::{
     address_util::AddressUtil, Address, AddressSpaceUtil, AddressWithSpace,
-    Space, H256, U256,
+    U256,
 };
 use primitives::{
     Action, Block, BlockHeaderBuilder, BlockReceipts, SignedTransaction,

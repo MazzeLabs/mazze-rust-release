@@ -36,8 +36,8 @@ mod reward;
 mod tests;
 
 pub use self::{
-    collateral::initialize_cip107, commit::StateCommitResult,
-    reward::initialize_cip137, sponsor::COMMISSION_PRIVILEGE_SPECIAL_KEY,
+    commit::StateCommitResult, reward::initialize_cip137,
+    sponsor::COMMISSION_PRIVILEGE_SPECIAL_KEY,
 };
 #[cfg(test)]
 pub use tests::get_state_for_genesis_write;
@@ -45,9 +45,7 @@ pub use tests::get_state_for_genesis_write;
 use self::checkpoints::CheckpointLayer;
 use super::overlay_account::{AccountEntry, OverlayAccount, RequireFields};
 use crate::substate::Substate;
-use mazze_statedb::{
-    Result as DbResult, StateDbExt, StateDbGeneric as StateDb,
-};
+use mazze_statedb::{Result as DbResult, StateDbGeneric as StateDb};
 use mazze_types::AddressWithSpace;
 use parking_lot::RwLock;
 use std::collections::HashMap;

@@ -30,7 +30,6 @@ mod trace_filter;
 mod transaction;
 mod tx_pool;
 mod variadic_u64;
-mod vote_params_info;
 
 pub use self::{
     account::Account,
@@ -74,5 +73,4 @@ pub use self::{
         TxPoolPendingNonceRange, TxPoolStatus, TxWithPoolInfo,
     },
     variadic_u64::U64,
-    vote_params_info::VoteParamsInfo,
 };

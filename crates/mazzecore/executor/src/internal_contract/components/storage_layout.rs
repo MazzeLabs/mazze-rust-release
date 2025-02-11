@@ -1,6 +1,7 @@
 use keccak_hash::keccak;
 use mazze_types::U256;
 
+#[allow(unused)]
 // General function for solidity storage rule
 pub fn mapping_slot(base: U256, index: U256) -> U256 {
     let mut input = [0u8; 64];
@@ -33,6 +34,7 @@ pub fn array_slot(base: U256, index: usize, element_size: usize) -> U256 {
     base + index * element_size
 }
 
+#[allow(unused)]
 pub fn u256_to_array(input: U256) -> [u8; 32] {
     let mut answer = [0u8; 32];
     input.to_big_endian(answer.as_mut());

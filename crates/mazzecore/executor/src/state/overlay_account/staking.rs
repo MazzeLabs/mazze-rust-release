@@ -4,11 +4,6 @@ use primitives::{DepositInfo, DepositList};
 use super::OverlayAccount;
 
 impl OverlayAccount {
-    pub fn staking_balance(&self) -> &U256 {
-        self.address.assert_native();
-        &self.staking_balance
-    }
-
     pub fn withdrawable_staking_balance(&self, block_number: u64) -> U256 {
         self.address.assert_native();
         assert!(self.vote_stake_list.is_some());

@@ -286,26 +286,6 @@ impl RpcImpl {
         }
     }
 
-    fn staking_balance(
-        &self, address: RpcAddress, num: Option<EpochNumber>,
-    ) -> RpcResult<U256> {
-        self.check_address_network(address.network)?;
-        let epoch_num = num.unwrap_or(EpochNumber::LatestState).into();
-
-        info!(
-            "RPC Request: mazze_getStakingBalance address={:?} epoch_num={:?}",
-            address, epoch_num
-        );
-
-        let state_db = self
-            .consensus
-            .get_state_db_by_epoch_number(epoch_num, "num")?;
-        let acc =
-            state_db.get_account(&address.hex_address.with_native_space())?;
-
-        Ok(acc.map_or(U256::zero(), |acc| acc.staking_balance).into())
-    }
-
     fn deposit_list(
         &self, address: RpcAddress, num: Option<EpochNumber>,
     ) -> RpcResult<Vec<DepositInfo>> {
@@ -407,28 +387,6 @@ impl RpcImpl {
             };
 
         Ok(RpcAccount::try_from(account, network)?)
-    }
-
-    /// Returns interest rate of the given epoch
-    fn interest_rate(&self, epoch_num: Option<EpochNumber>) -> RpcResult<U256> {
-        let epoch_num = epoch_num.unwrap_or(EpochNumber::LatestState).into();
-        let state_db = self
-            .consensus
-            .get_state_db_by_epoch_number(epoch_num, "epoch_num")?;
-
-        Ok(U256::zero())
-    }
-
-    /// Returns accumulate interest rate of the given epoch
-    fn accumulate_interest_rate(
-        &self, epoch_num: Option<EpochNumber>,
-    ) -> RpcResult<U256> {
-        let epoch_num = epoch_num.unwrap_or(EpochNumber::LatestState).into();
-        let state_db = self
-            .consensus
-            .get_state_db_by_epoch_number(epoch_num, "epoch_num")?;
-
-        Ok(U256::zero())
     }
 
     fn send_raw_transaction(&self, raw: Bytes) -> RpcResult<H256> {
@@ -2214,15 +2172,11 @@ impl Mazze for MazzeHandler {
         to self.rpc_impl {
             fn code(&self, addr: RpcAddress, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> BoxFuture<Bytes>;
             fn account(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<RpcAccount>;
-            fn interest_rate(&self, num: Option<EpochNumber>) -> BoxFuture<U256>;
-            fn accumulate_interest_rate(&self, num: Option<EpochNumber>) -> BoxFuture<U256>;
             fn admin(&self, address: RpcAddress, num: Option<EpochNumber>)
                 -> BoxFuture<Option<RpcAddress>>;
             fn sponsor_info(&self, address: RpcAddress, num: Option<EpochNumber>)
                 -> BoxFuture<SponsorInfo>;
             fn balance(&self, address: RpcAddress, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> BoxFuture<U256>;
-            fn staking_balance(&self, address: RpcAddress, num: Option<EpochNumber>)
-                -> BoxFuture<U256>;
             fn deposit_list(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<Vec<DepositInfo>>;
             fn vote_list(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<Vec<VoteStakeInfo>>;
             fn collateral_for_storage(&self, address: RpcAddress, num: Option<EpochNumber>)

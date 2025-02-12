@@ -16,9 +16,9 @@ impl Default for OverlayAccount {
             storage_write_cache: Default::default(),
             transient_storage: Default::default(),
             storage_layout_change: None,
-            staking_balance: 0.into(),
+            // staking_balance: 0.into(),
             collateral_for_storage: 0.into(),
-            accumulated_interest_return: 0.into(),
+            // accumulated_interest_return: 0.into(),
             deposit_list: None,
             vote_stake_list: None,
             code_hash: KECCAK_EMPTY,
@@ -38,9 +38,9 @@ impl OverlayAccount {
             nonce: account.nonce,
             admin: account.admin,
             sponsor_info: account.sponsor_info,
-            staking_balance: account.staking_balance,
+            // staking_balance: account.staking_balance,
             collateral_for_storage: account.collateral_for_storage,
-            accumulated_interest_return: account.accumulated_interest_return,
+            // accumulated_interest_return: account.accumulated_interest_return,
             code_hash: account.code_hash,
             ..Default::default()
         };
@@ -133,9 +133,9 @@ impl OverlayAccount {
             nonce: self.nonce,
             admin: self.admin,
             sponsor_info: self.sponsor_info.clone(),
-            staking_balance: self.staking_balance,
+            // staking_balance: self.staking_balance,
             collateral_for_storage: self.collateral_for_storage,
-            accumulated_interest_return: self.accumulated_interest_return,
+            // accumulated_interest_return: self.accumulated_interest_return,
             deposit_list: self.deposit_list.clone(),
             vote_stake_list: self.vote_stake_list.clone(),
             code_hash: self.code_hash,
@@ -157,9 +157,9 @@ impl OverlayAccount {
         account.balance = self.balance;
         account.nonce = self.nonce;
         account.code_hash = self.code_hash;
-        account.staking_balance = self.staking_balance;
+        // account.staking_balance = self.staking_balance;
         account.collateral_for_storage = self.collateral_for_storage;
-        account.accumulated_interest_return = self.accumulated_interest_return;
+        // account.accumulated_interest_return = self.accumulated_interest_return;
         account.admin = self.admin;
         account.sponsor_info = self.sponsor_info.clone();
         account.set_address(self.address);

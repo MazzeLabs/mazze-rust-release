@@ -557,13 +557,6 @@ impl QueryService {
         Ok(U256::zero())
     }
 
-    pub async fn get_accumulate_interest_rate(
-        &self, epoch: EpochNumber,
-    ) -> Result<U256, Error> {
-        // TODO: drop this fn, part of pos cleanup
-        Ok(U256::zero())
-    }
-
     pub async fn get_tx_info(&self, hash: H256) -> Result<TxInfo, Error> {
         debug!("get_tx_info hash={:?}", hash);
 

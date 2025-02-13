@@ -317,6 +317,8 @@ impl Session {
                 };
 
                 // Handle Hello packet to exchange protocols
+                let rlp = Rlp::new(&packet.data);
+                self.read_hello(&rlp, host)?;
                 Ok(SessionDataWithDisconnectInfo {
                     session_data: SessionData::Ready,
                     token_to_disconnect,

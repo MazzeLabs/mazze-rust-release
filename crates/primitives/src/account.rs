@@ -356,6 +356,7 @@ pub struct Account {
 /// Defined for Rlp serialization/deserialization.
 #[derive(RlpEncodable, RlpDecodable)]
 pub struct BasicAccount {
+    dummy_diferentiator: u8,
     pub balance: U256,
     pub nonce: U256,
     // /// This is the number of tokens used in staking.
@@ -464,6 +465,7 @@ impl Account {
     pub fn to_basic_account(&self) -> BasicAccount {
         assert_eq!(self.address_local_info.space, Space::Native);
         BasicAccount {
+            dummy_diferentiator: 1,
             balance: self.balance,
             nonce: self.nonce,
             // staking_balance: self.staking_balance,
@@ -509,8 +511,8 @@ impl Account {
                 ContractAccount::decode(rlp)?,
             ),
             // TODO: fix this; both ethereum and native accounts have 3 fields
-            3 => Self::from_basic_account(address, BasicAccount::decode(rlp)?),
-            2 => Self::from_ethereum_account(
+            4 => Self::from_basic_account(address, BasicAccount::decode(rlp)?),
+            3 => Self::from_ethereum_account(
                 address,
                 EthereumAccount::decode(rlp)?,
             ),
@@ -624,6 +626,7 @@ fn test_random_account(
         Account::from_basic_account(
             address,
             BasicAccount {
+                dummy_diferentiator: 1,
                 balance: 1000.into(),
                 nonce: 123.into(),
                 // staking_balance: 10000000.into(),

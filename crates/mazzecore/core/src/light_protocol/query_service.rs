@@ -17,7 +17,7 @@ use crate::{
 };
 use futures::{
     future::{self, Either},
-    stream, try_join, FutureExt, StreamExt, TryFutureExt, TryStreamExt,
+    stream, FutureExt, StreamExt, TryFutureExt, TryStreamExt,
 };
 use mazze_addr::Network;
 use mazze_executor::state::COMMISSION_PRIVILEGE_SPECIAL_KEY;
@@ -41,7 +41,6 @@ use primitives::{
     log_entry::{LocalizedLogEntry, LogEntry},
     Account, Block, BlockReceipts, CodeInfo, DepositList, EpochNumber, Receipt,
     SignedTransaction, StorageKey, StorageRoot, StorageValue, TransactionIndex,
-    VoteStakeList,
 };
 use rlp::Rlp;
 use std::{collections::BTreeSet, future::Future, sync::Arc, time::Duration};
@@ -393,12 +392,6 @@ impl QueryService {
             .to_key_bytes()
     }
 
-    fn vote_list_key(address: &H160) -> Vec<u8> {
-        StorageKey::new_vote_list_key(address)
-            .with_native_space()
-            .to_key_bytes()
-    }
-
     pub async fn get_account(
         &self, epoch: EpochNumber, address: H160,
     ) -> Result<Option<Account>, Error> {
@@ -421,14 +414,6 @@ impl QueryService {
         let epoch = self.get_height_from_epoch_number(epoch)?;
         let key = Self::deposit_list_key(&address);
         self.retrieve_state_entry::<DepositList>(epoch, key).await
-    }
-
-    pub async fn get_vote_list(
-        &self, epoch: EpochNumber, address: H160,
-    ) -> Result<Option<VoteStakeList>, Error> {
-        let epoch = self.get_height_from_epoch_number(epoch)?;
-        let key = Self::vote_list_key(&address);
-        self.retrieve_state_entry::<VoteStakeList>(epoch, key).await
     }
 
     pub async fn get_code(
@@ -548,13 +533,6 @@ impl QueryService {
 
         let epoch = self.get_height_from_epoch_number(epoch)?;
         self.retrieve_storage_root(epoch, address).await
-    }
-
-    pub async fn get_interest_rate(
-        &self, epoch: EpochNumber,
-    ) -> Result<U256, Error> {
-        // TODO: drop this fn, part of pos cleanup
-        Ok(U256::zero())
     }
 
     pub async fn get_tx_info(&self, hash: H256) -> Result<TxInfo, Error> {

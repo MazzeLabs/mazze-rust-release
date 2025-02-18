@@ -7,17 +7,16 @@ use crate::rpc::{
     types::{
         call_request::rpc_call_request_network,
         errors::check_rpc_address_network, MazzeFeeHistory, RpcAddress,
-        SponsorInfo, StatOnGasLoad, TokenSupplyInfo, VoteParamsInfo,
-        WrapTransaction, U64 as HexU64,
+        SponsorInfo, StatOnGasLoad, TokenSupplyInfo, WrapTransaction,
+        U64 as HexU64,
     },
 };
 use blockgen::BlockGenerator;
 use delegate::delegate;
 use jsonrpc_core::{BoxFuture, Error as JsonRpcError, Result as JsonRpcResult};
 use mazze_execute_helper::estimation::{decode_error, EstimateExt};
-use mazze_executor::{
-    executive::{ExecutionError, ExecutionOutcome, TxDropError},
-    internal_contract::storage_point_prop,
+use mazze_executor::executive::{
+    ExecutionError, ExecutionOutcome, TxDropError,
 };
 use mazze_statedb::StateDbExt;
 use mazze_types::{
@@ -42,7 +41,7 @@ use primitives::{
     filter::LogFilter, receipt::EVM_SPACE_SUCCESS, Account, Block, BlockHeader,
     BlockReceipts, DepositInfo, SignedTransaction, StorageKey, StorageRoot,
     StorageValue, Transaction, TransactionIndex, TransactionStatus,
-    TransactionWithSignature, VoteStakeInfo,
+    TransactionWithSignature,
 };
 use random_crash::*;
 use rlp::Rlp;
@@ -73,8 +72,7 @@ use crate::{
             EpochNumber, EstimateGasAndCollateralResponse, Log as RpcLog,
             MazzeRpcLogFilter, PackedOrExecuted, Receipt as RpcReceipt,
             RewardInfo as RpcRewardInfo, SendTxRequest, Status as RpcStatus,
-            StorageCollateralInfo, SyncGraphStates,
-            Transaction as RpcTransaction,
+            SyncGraphStates, Transaction as RpcTransaction,
         },
         RpcResult,
     },
@@ -87,7 +85,7 @@ use mazze_parameters::{
     genesis::{
         genesis_contract_address_four_year, genesis_contract_address_two_year,
     },
-    staking::{BLOCKS_PER_YEAR, MAZZIES_PER_STORAGE_COLLATERAL_UNIT},
+    staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT, // TODO: check why this is not used
 };
 use mazze_storage::state::StateDbGetOriginalMethods;
 use mazzecore::{
@@ -306,29 +304,6 @@ impl RpcImpl {
         {
             None => Ok(vec![]),
             Some(deposit_list) => Ok(deposit_list.0),
-        }
-    }
-
-    fn vote_list(
-        &self, address: RpcAddress, num: Option<EpochNumber>,
-    ) -> RpcResult<Vec<VoteStakeInfo>> {
-        self.check_address_network(address.network)?;
-        let epoch_num = num.unwrap_or(EpochNumber::LatestState).into();
-
-        info!(
-            "RPC Request: mazze_getVoteList address={:?} epoch_num={:?}",
-            address, epoch_num
-        );
-
-        let state_db = self
-            .consensus
-            .get_state_db_by_epoch_number(epoch_num, "num")?;
-
-        match state_db
-            .get_vote_list(&address.hex_address.with_native_space())?
-        {
-            None => Ok(vec![]),
-            Some(vote_list) => Ok(vote_list.0),
         }
     }
 
@@ -2178,7 +2153,6 @@ impl Mazze for MazzeHandler {
                 -> BoxFuture<SponsorInfo>;
             fn balance(&self, address: RpcAddress, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> BoxFuture<U256>;
             fn deposit_list(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<Vec<DepositInfo>>;
-            fn vote_list(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<Vec<VoteStakeInfo>>;
             fn collateral_for_storage(&self, address: RpcAddress, num: Option<EpochNumber>)
                 -> BoxFuture<U256>;
             fn call(&self, request: CallRequest, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>)

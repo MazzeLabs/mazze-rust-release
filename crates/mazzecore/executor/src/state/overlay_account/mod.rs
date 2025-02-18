@@ -34,9 +34,6 @@ mod factory;
 /// mechanism.
 mod sponsor;
 
-/// Implements functions of an `OverlayAccount` related to the staking.
-mod staking;
-
 /// Each `OverlayAccount` maintains a 256-bit addressable storage space, managed
 /// directly by `OverlayAccount` rather than the state object. This module
 /// implements functions of an `OverlayAccount` related to the storage entry
@@ -57,7 +54,7 @@ use mazze_types::{
 use parking_lot::RwLock;
 use primitives::{
     is_default::IsDefault, CodeInfo, DepositList, SponsorInfo, StorageLayout,
-    StorageValue, VoteStakeList,
+    StorageValue,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -109,13 +106,6 @@ pub struct OverlayAccount {
     ///
     /// Cleared after CIP-97.
     deposit_list: Option<DepositList>,
-    /// List of the vote info of the account. (`None` indicates not loaded from
-    /// db.)
-    ///
-    /// The `unlock_block_number` sorted in increasing order and the `amount`
-    /// is sorted in decreasing order. All the `unlock_block_number` and
-    /// `amount` is unique in the list.
-    vote_stake_list: Option<VoteStakeList>,
     /// The code of the account.  (`None` indicates not loaded from db if
     /// `code_hash` isn't `KECCAK_EMPTY`.)
     code: Option<CodeInfo>,
@@ -206,9 +196,7 @@ mod tests_another {
 
         assert!(account.as_account().is_default());
 
-        account.cache_ext_fields(true, true, &state.db).unwrap();
-        assert!(account.vote_stake_list().is_default());
-        assert!(account.deposit_list().is_default());
+        account.cache_ext_fields(true, &state.db).unwrap();
     }
 
     #[test]

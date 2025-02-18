@@ -8,8 +8,8 @@ use mazze_parameters::{
     staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
 };
 use mazze_statedb::Result as DbResult;
-use mazze_types::{address_util::AddressUtil, Address, AddressSpaceUtil, U256};
-use mazze_vm_types::{self as vm, Spec};
+use mazze_types::{Address, AddressSpaceUtil, U256};
+use mazze_vm_types::{self as vm};
 
 impl State {
     pub fn collateral_for_storage(&self, address: &Address) -> DbResult<U256> {

@@ -24,9 +24,7 @@ use network::{
     node_table::{Node, NodeId},
     throttling, SessionDetails, UpdateNodeOperation,
 };
-use primitives::{
-    Account, DepositInfo, StorageRoot, TransactionWithSignature, VoteStakeInfo,
-};
+use primitives::{Account, DepositInfo, StorageRoot, TransactionWithSignature};
 use rlp::Encodable;
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 // To convert from RpcResult to BoxFuture by delegate! macro automatically.
@@ -37,18 +35,16 @@ use crate::{
         impls::common::{self, RpcImpl as CommonImpl},
         traits::{debug::LocalRpc, mazze::Mazze, test::TestRpc},
         types::{
-            errors::check_rpc_address_network,
-            Account as RpcAccount, AccountPendingInfo,
-            AccountPendingTransactions, BlameInfo, Block as RpcBlock,
-            BlockHashOrEpochNumber, Bytes, CallRequest,
+            errors::check_rpc_address_network, Account as RpcAccount,
+            AccountPendingInfo, AccountPendingTransactions, BlameInfo,
+            Block as RpcBlock, BlockHashOrEpochNumber, Bytes, CallRequest,
             CheckBalanceAgainstTransactionResponse, ConsensusGraphStates,
             EpochNumber, EstimateGasAndCollateralResponse, FeeHistory,
             Log as RpcLog, MazzeFeeHistory, MazzeRpcLogFilter,
             Receipt as RpcReceipt, RewardInfo as RpcRewardInfo, RpcAddress,
             SendTxRequest, SponsorInfo, StatOnGasLoad, Status as RpcStatus,
-            StorageCollateralInfo, SyncGraphStates, TokenSupplyInfo,
-            Transaction as RpcTransaction, VoteParamsInfo, WrapTransaction,
-            U64 as HexU64,
+            SyncGraphStates, TokenSupplyInfo, Transaction as RpcTransaction,
+            WrapTransaction, U64 as HexU64,
         },
         RpcBoxFuture, RpcResult,
     },
@@ -324,36 +320,6 @@ impl RpcImpl {
             // TODO impl light node rpc
             Ok(None)
         };
-        Box::new(fut.boxed().compat())
-    }
-
-    fn vote_list(
-        &self, address: RpcAddress, num: Option<EpochNumber>,
-    ) -> RpcBoxFuture<Vec<VoteStakeInfo>> {
-        let epoch = num.unwrap_or(EpochNumber::LatestState).into();
-
-        info!(
-            "RPC Request: mazze_getVoteList address={:?} epoch_num={:?}",
-            address, epoch
-        );
-
-        // clone `self.light` to avoid lifetime issues due to capturing `self`
-        let light = self.light.clone();
-
-        let fut = async move {
-            Self::check_address_network(address.network, &light)?;
-
-            let maybe_list = invalid_params_check(
-                "address",
-                light.get_vote_list(epoch, address.into()).await,
-            )?;
-
-            match maybe_list {
-                None => Ok(vec![]),
-                Some(vote_list) => Ok(vote_list.0),
-            }
-        };
-
         Box::new(fut.boxed().compat())
     }
 
@@ -1144,7 +1110,6 @@ impl Mazze for MazzeHandler {
             fn storage_root(&self, address: RpcAddress, epoch_num: Option<EpochNumber>) -> BoxFuture<Option<StorageRoot>>;
             fn transaction_by_hash(&self, hash: H256) -> BoxFuture<Option<RpcTransaction>>;
             fn transaction_receipt(&self, tx_hash: H256) -> BoxFuture<Option<RpcReceipt>>;
-            fn vote_list(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<Vec<VoteStakeInfo>>;
             fn fee_history(&self, block_count: HexU64, newest_block: EpochNumber, reward_percentiles: Vec<f64>) -> BoxFuture<MazzeFeeHistory>;
         }
     }

@@ -1,9 +1,7 @@
 use mazze_internal_common::debug::ComputeEpochDebugRecord;
 use mazze_statedb::{Result as DbResult, StateDb, StateDbExt};
 use mazze_types::AddressWithSpace;
-use primitives::{
-    Account, CodeInfo, DepositList, StorageKey, StorageValue, VoteStakeList,
-};
+use primitives::{Account, CodeInfo, DepositList, StorageKey, StorageValue};
 use std::sync::Arc;
 
 use super::OverlayAccount;
@@ -63,20 +61,6 @@ impl OverlayAccount {
             db.set::<DepositList>(
                 storage_key,
                 deposit_list,
-                debug_record.as_deref_mut(),
-            )?;
-        }
-
-        // Commit votestake list
-
-        if let Some(vote_stake_list) = self.vote_stake_list.as_ref() {
-            self.address.assert_native();
-            let storage_key =
-                StorageKey::new_vote_list_key(&self.address.address)
-                    .with_space(self.address.space);
-            db.set::<VoteStakeList>(
-                storage_key,
-                vote_stake_list,
                 debug_record.as_deref_mut(),
             )?;
         }

@@ -30,7 +30,7 @@ pub(super) struct PreCheckedExecutive<'a, O: ExecutiveObserver> {
     pub context: ExecutiveContext<'a>,
     pub tx: &'a SignedTransaction,
     pub observer: O,
-    pub settings: TransactSettings,
+    pub settings: TransactSettings, // TODO: check why this is not used and if it should be used
     pub cost: CostInfo,
     pub substate: Substate,
 }
@@ -262,6 +262,7 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
     fn exec_vm(&mut self, params: ActionParams) -> DbResult<ExecutiveResult> {
         // No matter who pays the collateral, we only focuses on the storage
         // limit of sender.
+        // TODO: check why this is not used and if it should be used
         let total_storage_limit =
             self.context.state.collateral_for_storage(&params.sender)?
                 + self.cost.storage_cost;

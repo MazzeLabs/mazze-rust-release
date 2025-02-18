@@ -22,7 +22,6 @@ mod reward_info;
 mod sponsor_info;
 mod stat_on_gas_load;
 mod status;
-mod storage_collateral_info;
 mod sync_graph_states;
 mod token_supply_info;
 mod trace;
@@ -30,7 +29,6 @@ mod trace_filter;
 mod transaction;
 mod tx_pool;
 mod variadic_u64;
-mod vote_params_info;
 
 pub use self::{
     account::Account,
@@ -60,7 +58,6 @@ pub use self::{
     sponsor_info::SponsorInfo,
     stat_on_gas_load::StatOnGasLoad,
     status::Status,
-    storage_collateral_info::StorageCollateralInfo,
     sync_graph_states::SyncGraphStates,
     token_supply_info::TokenSupplyInfo,
     trace::{
@@ -74,5 +71,4 @@ pub use self::{
         TxPoolPendingNonceRange, TxPoolStatus, TxWithPoolInfo,
     },
     variadic_u64::U64,
-    vote_params_info::VoteParamsInfo,
 };

@@ -9,7 +9,7 @@ use mazze_internal_common::debug::ComputeEpochDebugRecord;
 use mazze_types::{AddressWithSpace, H256, U256};
 use primitives::{
     is_default::IsDefault, Account, CodeInfo, DepositList, StorageKey,
-    StorageKeyWithSpace, VoteStakeList,
+    StorageKeyWithSpace,
 };
 
 use super::{Result, StateDbGeneric};
@@ -37,10 +37,6 @@ pub trait StateDbExt {
     fn get_deposit_list(
         &self, address: &AddressWithSpace,
     ) -> Result<Option<DepositList>>;
-
-    fn get_vote_list(
-        &self, address: &AddressWithSpace,
-    ) -> Result<Option<VoteStakeList>>;
 
     fn get_system_storage(&self, key: &[u8]) -> Result<U256>;
 
@@ -112,15 +108,6 @@ impl StateDbExt for StateDbGeneric {
         self.get::<DepositList>(
             StorageKey::new_deposit_list_key(&address.address)
                 .with_native_space(),
-        )
-    }
-
-    fn get_vote_list(
-        &self, address: &AddressWithSpace,
-    ) -> Result<Option<VoteStakeList>> {
-        address.assert_native();
-        self.get::<VoteStakeList>(
-            StorageKey::new_vote_list_key(&address.address).with_native_space(),
         )
     }
 

@@ -38,7 +38,7 @@ impl State {
 }
 
 /// Initialize CIP-137 for the whole system.
-pub fn initialize_cip137(state: &mut State) {
-    debug!("set base_fee_prop to {}", CIP137_BASEFEE_PROP_INIT);
+pub fn initialize_cip137(_state: &mut State) {
+    // debug!("set base_fee_prop to {}", CIP137_BASEFEE_PROP_INIT);
     // state.set_base_fee_prop(CIP137_BASEFEE_PROP_INIT.into());
 }

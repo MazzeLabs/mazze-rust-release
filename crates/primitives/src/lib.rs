@@ -33,10 +33,7 @@ pub mod transaction_index;
 pub mod zero;
 
 pub use crate::{
-    account::{
-        Account, CodeInfo, DepositInfo, DepositList, SponsorInfo,
-        VoteStakeInfo, VoteStakeList,
-    },
+    account::{Account, CodeInfo, DepositInfo, DepositList, SponsorInfo},
     block::{Block, BlockNumber},
     block_header::{BlockHeader, BlockHeaderBuilder},
     block_number::compute_block_number,

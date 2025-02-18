@@ -9,13 +9,12 @@ use crate::rpc::types::{
     EstimateGasAndCollateralResponse, Log as RpcLog, MazzeFeeHistory,
     MazzeFilterChanges, MazzeRpcLogFilter, Receipt as RpcReceipt,
     RewardInfo as RpcRewardInfo, RpcAddress, SponsorInfo, Status as RpcStatus,
-    StorageCollateralInfo, TokenSupplyInfo, Transaction, VoteParamsInfo,
-    U64 as HexU64,
+    TokenSupplyInfo, Transaction, U64 as HexU64,
 };
 use jsonrpc_core::{BoxFuture, Result as JsonRpcResult};
 use jsonrpc_derive::rpc;
 use mazze_types::{H128, H256, U256, U64};
-use primitives::{DepositInfo, StorageRoot, VoteStakeInfo};
+use primitives::{DepositInfo, StorageRoot};
 
 /// Mazze rpc interface.
 #[rpc(server)]
@@ -74,12 +73,6 @@ pub trait Mazze {
     fn deposit_list(
         &self, addr: RpcAddress, epoch_number: Option<EpochNumber>,
     ) -> BoxFuture<Vec<DepositInfo>>;
-
-    /// Returns vote list of the given account.
-    #[rpc(name = "mazze_getVoteList")]
-    fn vote_list(
-        &self, addr: RpcAddress, epoch_number: Option<EpochNumber>,
-    ) -> BoxFuture<Vec<VoteStakeInfo>>;
 
     /// Returns balance of the given account.
     #[rpc(name = "mazze_getCollateralForStorage")]

@@ -18,7 +18,6 @@ use priority_send_queue::SendQueuePriority;
 use rlp::{Rlp, RlpStream};
 use serde_derive::Serialize;
 use std::{
-    convert::TryFrom,
     fmt,
     net::SocketAddr,
     str,

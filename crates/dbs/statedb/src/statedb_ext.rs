@@ -12,6 +12,8 @@ use primitives::{
     StorageKeyWithSpace,
 };
 
+use crate::global_params::GlobalParamKey;
+
 use super::{Result, StateDbGeneric};
 
 pub trait StateDbExt {
@@ -39,6 +41,12 @@ pub trait StateDbExt {
     ) -> Result<Option<DepositList>>;
 
     fn get_system_storage(&self, key: &[u8]) -> Result<U256>;
+
+    fn get_global_param<T: GlobalParamKey>(&self) -> Result<U256>;
+    fn set_global_param<T: GlobalParamKey>(
+        &mut self, value: &U256,
+        debug_record: Option<&mut ComputeEpochDebugRecord>,
+    ) -> Result<()>;
 
     // This function is used to check whether the db has been initialized when
     // create a state. So we can know the loaded `None` represents "not
@@ -118,6 +126,17 @@ impl StateDbExt for StateDbGeneric {
         }
         .with_native_space();
         Ok(self.get::<U256>(storage_key)?.unwrap_or_default())
+    }
+
+    fn get_global_param<T: GlobalParamKey>(&self) -> Result<U256> {
+        Ok(self.get::<U256>(T::STORAGE_KEY)?.unwrap_or_default())
+    }
+
+    fn set_global_param<T: GlobalParamKey>(
+        &mut self, value: &U256,
+        debug_record: Option<&mut ComputeEpochDebugRecord>,
+    ) -> Result<()> {
+        self.set::<U256>(T::STORAGE_KEY, value, debug_record)
     }
 
     fn is_initialized(&self) -> Result<bool> {

@@ -50,10 +50,10 @@ pub fn suicide(
             &balance,
             &mut cleanup_mode(substate, spec),
         )?;
-        // state.sub_total_issued(balance);
-        // if contract_address.space == Space::Ethereum {
-        //     state.sub_total_evm_tokens(balance);
-        // }
+        state.sub_total_issued(balance);
+        if contract_address.space == Space::Ethereum {
+            state.sub_total_evm_tokens(balance);
+        }
     } else {
         trace!(target: "context", "Destroying {} -> {} (xfer: {})", contract_address.address, refund_address.address, balance);
         tracer.trace_internal_transfer(

@@ -9,6 +9,8 @@ pub const ADMIN_CONTROL_CONTRACT_ADDRESS: Address =
     H160(hex!("0888000000000000000000000000000000000000"));
 pub const SPONSOR_WHITELIST_CONTROL_CONTRACT_ADDRESS: Address =
     H160(hex!("0888000000000000000000000000000000000001"));
+pub const STORAGE_COLLATERAL_CONTRACT_ADDRESS: Address =
+    H160(hex!("0888000000000000000000000000000000000002"));
 
 pub const CONTEXT_CONTRACT_ADDRESS: Address =
     H160(hex!("0888000000000000000000000000000000000004"));
@@ -23,8 +25,6 @@ pub const SYSTEM_STORAGE_ADDRESS: Address =
 
 // We reserve more addresses so we don't need to change the genesis hash
 // in test mode each time adding new internal contracts.
-pub const RESERVED2: Address =
-    H160(hex!("0888000000000000000000000000000000000002"));
 pub const RESERVED3: Address =
     H160(hex!("0888000000000000000000000000000000000003"));
 pub const RESERVED8: Address =

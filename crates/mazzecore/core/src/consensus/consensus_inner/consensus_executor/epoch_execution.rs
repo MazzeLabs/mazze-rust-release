@@ -276,12 +276,12 @@ impl ConsensusExecutionHandler {
                 .transact(transaction, options)?;
         execution_outcome.log(transaction, &block_context.block.hash());
 
-        // if let Some(burnt_fee) = execution_outcome
-        //     .try_as_executed()
-        //     .and_then(|e| e.burnt_fee)
-        // {
-        //     state.burn_by_cip1559(burnt_fee);
-        // };
+        if let Some(burnt_fee) = execution_outcome
+            .try_as_executed()
+            .and_then(|e| e.burnt_fee)
+        {
+            state.burn_by_cip1559(burnt_fee);
+        };
 
         let r = make_process_tx_outcome(
             execution_outcome,
@@ -411,21 +411,6 @@ impl ConsensusExecutionHandler {
         let params = self.machine.params();
         let transition_numbers = &params.transition_numbers;
 
-        // let cip94_start = transition_numbers.cip94n;
-        // let period = params.params_dao_vote_period;
-        // // Update/initialize parameters before processing rewards.
-        // if block_number >= cip94_start
-        //     && (block_number - cip94_start) % period == 0
-        // {
-        //     let set_pos_staking = block_number > transition_numbers.cip105;
-        //     initialize_or_update_dao_voted_params(state, set_pos_staking)?;
-        // }
-
-        // Initialize old_storage_point_prop_ratio in the state.
-        // The time may not be in the vote period boundary, so this is not
-        // integrated with `initialize_or_update_dao_voted_params`, but
-        // that function will update the value after cip107 is enabled
-        // here.
         if block_number == transition_numbers.cip107 {
             initialize_cip107(state)?;
         }
@@ -441,12 +426,6 @@ impl ConsensusExecutionHandler {
             initialize_cip137(state);
         }
 
-        if block_number < transition_numbers.cip43a {
-            state.bump_block_number_accumulate_interest();
-        }
-
-        let secondary_reward = state.secondary_reward();
-
         initialize_internal_contract_accounts(
             state,
             self.machine
@@ -454,7 +433,7 @@ impl ConsensusExecutionHandler {
                 .initialized_at(block_number),
         )?;
 
-        Ok(secondary_reward)
+        Ok(U256::zero())
     }
 }
 

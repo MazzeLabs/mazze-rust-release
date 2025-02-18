@@ -25,8 +25,7 @@ use mazze_parameters::{
 use mazze_statedb::StateDb;
 use mazze_storage::{StorageManager, StorageManagerTrait};
 use mazze_types::{
-    address_util::AddressUtil, Address, AddressSpaceUtil, AddressWithSpace,
-    U256,
+    address_util::AddressUtil, Address, AddressSpaceUtil, AddressWithSpace, Space, U256
 };
 use primitives::{
     Action, Block, BlockHeaderBuilder, BlockReceipts, SignedTransaction,
@@ -116,16 +115,16 @@ pub fn genesis_block(
         state
             .add_balance(&addr, &balance, CleanupMode::NoEmpty)
             .unwrap();
-        // state.add_total_issued(balance);
-        // if addr.space == Space::Ethereum {
-        //     state.add_total_evm_tokens(balance);
-        // }
+        state.add_total_issued(balance);
+        if addr.space == Space::Ethereum {
+            state.add_total_evm_tokens(balance);
+        }
     }
     let genesis_account_address = GENESIS_ACCOUNT_ADDRESS.with_native_space();
 
     let genesis_token_count = U256::from(GENESIS_TOKEN_COUNT_IN_MAZZE)
         * U256::from(ONE_MAZZE_IN_MAZZY);
-    // state.add_total_issued(genesis_token_count);
+    state.add_total_issued(genesis_token_count);
     let two_year_unlock_token_count =
         U256::from(TWO_YEAR_UNLOCK_TOKEN_COUNT_IN_MAZZE)
             * U256::from(ONE_MAZZE_IN_MAZZY);

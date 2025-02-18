@@ -140,16 +140,18 @@ impl MazzeFilterClient {
                     .or_insert(vec![])
                     .push(epoch.1.clone());
 
-                let latest_finalized_epoch_number =
-                    consensus.latest_finalized_epoch_number();
+                // TODO: investigate this as it is not the same as finalized epoch
+                // and it might produce incorrect results
+                let latest_confirmed_epoch_number =
+                    consensus.latest_confirmed_epoch_number();
                 debug!(
-                    "latest finalized epoch number: {}, received epochs: {:?}",
-                    latest_finalized_epoch_number, epoch
+                    "latest confirmed epoch number: {}, received epochs: {:?}",
+                    latest_confirmed_epoch_number, epoch
                 );
 
                 // only keep epochs after finalized state
                 while let Some(e) = epochs.epochs_queue.front() {
-                    if e.0 < latest_finalized_epoch_number {
+                    if e.0 < latest_confirmed_epoch_number {
                         let (k, _) = epochs.epochs_queue.pop_front().unwrap();
                         if let Some(target) = epochs.epochs_map.get_mut(&k) {
                             if target.len() == 1 {

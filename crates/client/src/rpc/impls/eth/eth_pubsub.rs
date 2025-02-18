@@ -201,10 +201,12 @@ impl PubSubClient {
 
                 last_epoch = epoch.0;
 
-                let latest_finalized_epoch_number =
-                    consensus.latest_finalized_epoch_number();
+                // TODO: investigate this as it is not the same as finalized epoch
+                // and it might produce incorrect results
+                let latest_confirmed_epoch_number =
+                    consensus.latest_confirmed_epoch_number();
                 while let Some(e) = epochs.front() {
-                    if e.0 < latest_finalized_epoch_number {
+                    if e.0 < latest_confirmed_epoch_number {
                         epochs.pop_front();
                     } else {
                         break;

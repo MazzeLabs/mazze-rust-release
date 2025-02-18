@@ -7,8 +7,8 @@ use crate::rpc::{
     types::{
         call_request::rpc_call_request_network,
         errors::check_rpc_address_network, MazzeFeeHistory, RpcAddress,
-        SponsorInfo, StatOnGasLoad, TokenSupplyInfo, WrapTransaction,
-        U64 as HexU64,
+        SponsorInfo, StatOnGasLoad, StorageCollateralInfo, TokenSupplyInfo,
+        WrapTransaction, U64 as HexU64,
     },
 };
 use blockgen::BlockGenerator;
@@ -18,7 +18,7 @@ use mazze_execute_helper::estimation::{decode_error, EstimateExt};
 use mazze_executor::executive::{
     ExecutionError, ExecutionOutcome, TxDropError,
 };
-use mazze_statedb::StateDbExt;
+use mazze_statedb::{global_params::TotalBurnt1559, StateDbExt};
 use mazze_types::{
     Address, AddressSpaceUtil, BigEndianHash, Space, H256, H520, U128, U256,
     U64,
@@ -85,7 +85,7 @@ use mazze_parameters::{
     genesis::{
         genesis_contract_address_four_year, genesis_contract_address_two_year,
     },
-    staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT, // TODO: check why this is not used
+    staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
 };
 use mazze_storage::state::StateDbGetOriginalMethods;
 use mazzecore::{
@@ -1452,9 +1452,9 @@ impl RpcImpl {
             self.consensus
                 .get_state_db_by_epoch_number(epoch, "epoch")?,
         )?;
-        let total_issued = U256::zero(); // state.total_issued_tokens();
+        let total_issued = state.total_issued_tokens();
         let total_staking = U256::zero();
-        let total_collateral = U256::zero(); // state.total_storage_tokens();
+        let total_collateral = state.total_storage_tokens();
         let two_year_unlock_address = genesis_contract_address_two_year();
         let four_year_unlock_address = genesis_contract_address_four_year();
         let two_year_locked = state
@@ -1465,7 +1465,7 @@ impl RpcImpl {
             .unwrap_or(U256::zero());
         let total_circulating =
             total_issued - two_year_locked - four_year_locked;
-        let total_espace_tokens = U256::zero(); // state.total_espace_tokens();
+        let total_espace_tokens = state.total_espace_tokens();
         Ok(TokenSupplyInfo {
             total_circulating,
             total_issued,
@@ -1475,14 +1475,33 @@ impl RpcImpl {
         })
     }
 
+    pub fn get_collateral_info(
+        &self, epoch: Option<EpochNumber>,
+    ) -> RpcResult<StorageCollateralInfo> {
+        let epoch = epoch.unwrap_or(EpochNumber::LatestState).into();
+        let state = State::new(
+            self.consensus
+                .get_state_db_by_epoch_number(epoch, "epoch")?,
+        )?;
+        let total_storage_tokens = state.total_storage_tokens();
+        let converted_storage_points = state.converted_storage_points()
+            / *MAZZIES_PER_STORAGE_COLLATERAL_UNIT;
+        let used_storage_points =
+            state.used_storage_points() / *MAZZIES_PER_STORAGE_COLLATERAL_UNIT;
+        Ok(StorageCollateralInfo {
+            total_storage_tokens,
+            converted_storage_points,
+            used_storage_points,
+        })
+    }
+
     pub fn get_fee_burnt(&self, epoch: Option<EpochNumber>) -> RpcResult<U256> {
         let epoch = epoch.unwrap_or(EpochNumber::LatestState).into();
         let state_db = self
             .consensus
             .get_state_db_by_epoch_number(epoch, "epoch_num")?;
 
-        // Ok(state_db.get_global_param::<TotalBurnt1559>()?)
-        Ok(U256::zero())
+        Ok(state_db.get_global_param::<TotalBurnt1559>()?)
     }
 
     pub fn set_db_crash(
@@ -1716,7 +1735,7 @@ impl RpcImpl {
                 bail!(invalid_params_msg("Cannot stat genesis"))
             }
             EpochNumber::LatestMined => bail!(invalid_params_msg(
-                "Epoch number is earilier than 'latest_state'"
+                "Epoch number is earlier than 'latest_state'"
             )),
             EpochNumber::Num(num) => {
                 let main_hash = consensus.get_hash_from_epoch_number(
@@ -1733,7 +1752,6 @@ impl RpcImpl {
                 num.as_u64()
             }
             EpochNumber::LatestCheckpoint
-            | EpochNumber::LatestFinalized
             | EpochNumber::LatestConfirmed
             | EpochNumber::LatestState => {
                 let main_hash =
@@ -2172,7 +2190,7 @@ impl Mazze for MazzeHandler {
             fn transaction_receipt(&self, tx_hash: H256) -> BoxFuture<Option<RpcReceipt>>;
             fn storage_root(&self, address: RpcAddress, epoch_num: Option<EpochNumber>) -> BoxFuture<Option<StorageRoot>>;
             fn get_supply_info(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<TokenSupplyInfo>;
-            // fn get_collateral_info(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<StorageCollateralInfo>;
+            fn get_collateral_info(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<StorageCollateralInfo>;
             // fn get_vote_params(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<VoteParamsInfo>;
             fn get_fee_burnt(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<U256>;
         }

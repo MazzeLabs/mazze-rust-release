@@ -1396,8 +1396,6 @@ impl ConsensusExecutionHandler {
         }
 
         let mut merged_rewards = BTreeMap::new();
-        // Here is the exact secondary reward allocated in total
-        let mut allocated_secondary_reward = U256::from(0);
 
         for (enum_idx, block) in epoch_blocks.iter().enumerate() {
             let base_reward = epoch_block_total_rewards[enum_idx];
@@ -1417,22 +1415,7 @@ impl ConsensusExecutionHandler {
                 U256::from(0)
             };
 
-            // Distribute the secondary reward according to primary reward.
-            let total_reward = if base_reward > U256::from(0) {
-                let block_secondary_reward =
-                    base_reward * secondary_reward / total_base_reward;
-                if let Some(debug_out) = &mut debug_record {
-                    debug_out.secondary_rewards.push(BlockHashAuthorValue(
-                        block_hash,
-                        block.block_header.author().clone(),
-                        block_secondary_reward,
-                    ));
-                }
-                allocated_secondary_reward += block_secondary_reward;
-                base_reward + tx_fee + block_secondary_reward
-            } else {
-                base_reward + tx_fee
-            };
+            let total_reward = base_reward + tx_fee;
 
             *merged_rewards
                 .entry(*block.block_header.author())
@@ -1488,14 +1471,14 @@ impl ConsensusExecutionHandler {
                 });
             }
         }
-        // let new_mint = total_base_reward + allocated_secondary_reward;
-        // if new_mint >= burnt_fee {
-        //     // The very likely case
-        //     state.add_total_issued(new_mint - burnt_fee);
-        // } else {
-        //     // The very unlikely case
-        //     state.sub_total_issued(burnt_fee - new_mint);
-        // }
+        let new_mint = total_base_reward;
+        if new_mint >= burnt_fee {
+            // The very likely case
+            state.add_total_issued(new_mint - burnt_fee);
+        } else {
+            // The very unlikely case
+            state.sub_total_issued(burnt_fee - new_mint);
+        }
     }
 
     fn recompute_states(

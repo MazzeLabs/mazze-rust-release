@@ -495,9 +495,6 @@ impl ConsensusGraph {
                 self.latest_confirmed_epoch_number()
             }
             EpochNumber::LatestMined => self.best_epoch_number(),
-            EpochNumber::LatestFinalized => {
-                self.latest_finalized_epoch_number()
-            }
             EpochNumber::LatestState => self.best_executed_state_epoch_number(),
             EpochNumber::Number(num) => {
                 let epoch_num = num;
@@ -2171,13 +2168,6 @@ impl ConsensusGraphTrait for ConsensusGraph {
 
     fn latest_confirmed_epoch_number(&self) -> u64 {
         self.confirmation_meter.get_confirmed_epoch_num()
-    }
-
-    fn latest_finalized_epoch_number(&self) -> u64 {
-        self.inner
-            .read_recursive()
-            .latest_epoch_confirmed_by_pos()
-            .1
     }
 
     fn best_chain_id(&self) -> AllChainID {

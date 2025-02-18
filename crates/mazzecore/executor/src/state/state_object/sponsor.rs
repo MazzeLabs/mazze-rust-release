@@ -1,5 +1,9 @@
 use mazze_parameters::internal_contract_addresses::SPONSOR_WHITELIST_CONTROL_CONTRACT_ADDRESS;
-use mazze_statedb::{access_mode, Result as DbResult};
+use mazze_statedb::{
+    access_mode,
+    global_params::{ConvertedStoragePoints, TotalIssued},
+    Result as DbResult,
+};
 use mazze_types::{
     maybe_address, Address, AddressSpaceUtil, AddressWithSpace, U256,
 };
@@ -109,6 +113,9 @@ impl State {
             .write_native_account_lock(&address)?
             .set_sponsor_for_collateral(sponsor, sponsor_balance, prop);
 
+        *self.global_stat.val::<TotalIssued>() -= converted_storage_points;
+        *self.global_stat.val::<ConvertedStoragePoints>() +=
+            converted_storage_points;
         Ok(converted_storage_points)
     }
 

@@ -777,10 +777,6 @@ impl RpcImpl {
             .get_height_from_epoch_number(EpochNumber::LatestState.into())?
             .into();
 
-        let latest_finalized = consensus_graph
-            .get_height_from_epoch_number(EpochNumber::LatestFinalized.into())?
-            .into();
-
         Ok(RpcStatus {
             best_hash: best_info.best_block_hash.into(),
             block_number: block_number.into(),
@@ -792,7 +788,6 @@ impl RpcImpl {
             epoch_number: best_info.best_epoch_number.into(),
             latest_checkpoint,
             latest_confirmed,
-            latest_finalized,
             latest_state,
             network_id: self.network.network_id().into(),
             pending_tx_number: tx_count.into(),

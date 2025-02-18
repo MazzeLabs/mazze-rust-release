@@ -9,13 +9,12 @@ use crate::rpc::types::{
     EstimateGasAndCollateralResponse, Log as RpcLog, MazzeFeeHistory,
     MazzeFilterChanges, MazzeRpcLogFilter, Receipt as RpcReceipt,
     RewardInfo as RpcRewardInfo, RpcAddress, SponsorInfo, Status as RpcStatus,
-    TokenSupplyInfo, Transaction, U64 as HexU64,
+    StorageCollateralInfo, TokenSupplyInfo, Transaction, U64 as HexU64,
 };
 use jsonrpc_core::{BoxFuture, Result as JsonRpcResult};
 use jsonrpc_derive::rpc;
 use mazze_types::{H128, H256, U256, U64};
 use primitives::{DepositInfo, StorageRoot};
-
 /// Mazze rpc interface.
 #[rpc(server)]
 pub trait Mazze {
@@ -246,6 +245,11 @@ pub trait Mazze {
     fn get_supply_info(
         &self, epoch_number: Option<EpochNumber>,
     ) -> JsonRpcResult<TokenSupplyInfo>;
+
+    #[rpc(name = "mazze_getCollateralInfo")]
+    fn get_collateral_info(
+        &self, epoch_number: Option<EpochNumber>,
+    ) -> JsonRpcResult<StorageCollateralInfo>;
 
     #[rpc(name = "mazze_getFeeBurnt")]
     fn get_fee_burnt(

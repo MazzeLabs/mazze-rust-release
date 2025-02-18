@@ -5,6 +5,11 @@
 //! Ledger State: Acts as a caching and checkpoint layer built upon semantically
 //! meaningful database interfaces for the execution.
 
+/// Global Statistic Variables: Manages global variables with different
+/// checkpoint and caching mechanisms compared to other state variables, such
+/// as, `total_issued_tokens`.
+mod global_stat;
+
 /// Overlay Account: Defines the access and manipulation object during
 /// execution. Each `OverlayAccount` encompasses both the database-stored
 /// information of an account and its in-execution data.
@@ -16,8 +21,8 @@ mod state_object;
 #[cfg(test)]
 pub use state_object::get_state_for_genesis_write;
 pub use state_object::{
-    initialize_cip107, initialize_cip137, State, StateCommitResult,
-    COMMISSION_PRIVILEGE_SPECIAL_KEY,
+    initialize_cip107, initialize_cip137, settle_collateral_for_all, State,
+    StateCommitResult, COMMISSION_PRIVILEGE_SPECIAL_KEY,
 };
 
 use mazze_types::AddressWithSpace;

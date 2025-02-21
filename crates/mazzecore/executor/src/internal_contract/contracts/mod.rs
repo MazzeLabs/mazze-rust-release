@@ -50,6 +50,7 @@ pub fn all_internal_contracts() -> Vec<Box<dyn super::InternalContractTrait>> {
         Box::new(context::Context::instance()),
         Box::new(cross_space::CrossSpaceCall::instance()),
         Box::new(system_storage::SystemStorage::instance()),
+        Box::new(future::Reserved2::instance()),
         Box::new(future::Reserved3::instance()),
         Box::new(future::Reserved8::instance()),
         Box::new(future::Reserved9::instance()),

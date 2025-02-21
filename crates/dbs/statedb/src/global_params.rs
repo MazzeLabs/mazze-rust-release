@@ -4,7 +4,7 @@ use primitives::{StorageKey, StorageKeyWithSpace};
 
 pub trait GlobalParamKey {
     const SPACE: Space = Space::Native;
-    const ADDRESS: Address = STORAGE_COLLATERAL_CONTRACT_ADDRESS;
+    const ADDRESS: Address = ADMIN_CONTROL_CONTRACT_ADDRESS;
     const ID: usize;
     const KEY: &'static [u8];
     const STORAGE_KEY: StorageKeyWithSpace<'static> =

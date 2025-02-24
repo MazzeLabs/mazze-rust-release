@@ -106,15 +106,6 @@ pub mod consensus_internal {
     /// update is CPU intensive if the tree graph is in a unstable state.
     pub const CONFIRMATION_METER_UPDATE_FREQUENCY: usize = 20;
 
-    // The number of blocks to settle a DAO parameter vote.
-    // It's set to two months now.
-    pub const DAO_PARAMETER_VOTE_PERIOD: u64 =
-        super::staking::BLOCKS_PER_DAY * 30 * 2;
-    // DAO votes are only effective if the total vote count reaches this minimal
-    // percentage of pos staking tokens.
-    // The condition is checked against each voted parameter separately.
-    pub const DAO_MIN_VOTE_PERCENTAGE: u64 = 5;
-
     /// The initial storage point proportion after CIP107 is enabled.
     pub const CIP107_STORAGE_POINT_PROP_INIT: u64 = ONE_MAZZE_IN_MAZZY;
 
@@ -257,24 +248,10 @@ pub mod block {
     pub const CROSS_SPACE_GAS_RATIO: u64 = 10;
 }
 
+//TODO: rename to collateral
 pub mod staking {
-    use super::pow::{TARGET_AVERAGE_BLOCK_GENERATION_PERIOD, ONE_SECOND_IN_USEC};
     use crate::consensus::ONE_MAZZE_IN_MAZZY;
     use mazze_types::U256;
-
-    pub const BLOCKS_PER_SECOND: u64 = ONE_SECOND_IN_USEC / TARGET_AVERAGE_BLOCK_GENERATION_PERIOD;
-
-    // 8 blocks per second
-    pub const BLOCKS_PER_MINUTE: u64 = BLOCKS_PER_SECOND * 60;
-
-    /// This is the number of blocks per hour.
-    pub const BLOCKS_PER_HOUR: u64 = BLOCKS_PER_MINUTE * 60;
-    /// This is the number of blocks per day.
-    pub const BLOCKS_PER_DAY: u64 = BLOCKS_PER_HOUR * 24;
-    /// This is the number of blocks per year.
-    pub const BLOCKS_PER_YEAR: u64 = BLOCKS_PER_DAY * 365;
-    /// The inverse of interest rate
-    pub const INVERSE_INTEREST_RATE: u64 = 25;
 
     /// This is the storage collateral units for each KiB of code, amount in
     /// COLLATERAL_UNITs. Code collateral is calculated by each whole KiB
@@ -292,32 +269,6 @@ pub mod staking {
         pub static ref COLLATERAL_MAZZIES_PER_STORAGE_KEY: U256 =
             *MAZZIES_PER_STORAGE_COLLATERAL_UNIT
             * COLLATERAL_UNITS_PER_STORAGE_KEY;
-        /// This is the scale factor for accumulated interest rate:
-        /// `BLOCKS_PER_YEAR * 2 ^ 80`.
-        /// The actual accumulate interest rate stored will be
-        /// `accumulate_interest_rate / INTEREST_RATE_SCALE`.
-        // TODO: drop this
-        pub static ref ACCUMULATED_INTEREST_RATE_SCALE: U256 =
-            U256::from(BLOCKS_PER_YEAR) << 80;
-        /// The initial annual interest is 4%, which means the initial interest
-        /// rate per block will be
-        /// `4% / BLOCKS_PER_YEAR`. We will multiply it with scale factor and
-        /// store it as an integer.
-        /// This is the scale factor of initial interest rate per block.
-        // TODO: drop this
-        pub static ref INTEREST_RATE_PER_BLOCK_SCALE: U256 =
-            U256::from(BLOCKS_PER_YEAR * 1000000);
-        /// This is the initial interest rate per block with scale:
-        /// `4% / BLOCKS_PER_YEAR * INTEREST_RATE_PER_BLOCK_SCALE`.
-        pub static ref INITIAL_INTEREST_RATE_PER_BLOCK: U256 =
-            U256::from(40000);
-        /// This is the service charge rate for withdraw,
-        /// `SERVICE_CHARGE_RATE /
-        /// SERVICE_CHARGE_RATE_SCALE = 0.05%`
-        pub static ref SERVICE_CHARGE_RATE: U256 = U256::from(5);
-        pub static ref SERVICE_CHARGE_RATE_SCALE: U256 = U256::from(10000);
-        /// This controls the tokens required for one PoS vote
-        pub static ref POS_VOTE_PRICE: U256 = U256::from(1000)*ONE_MAZZE_IN_MAZZY;
     }
 
     pub fn code_collateral_units(len: usize) -> u64 {
@@ -439,5 +390,4 @@ pub const WORKER_COMPUTATION_PARALLELISM: usize = 8;
 
 pub struct DaoControlParameters {
     pub pow_base_reward: U256,
-    pub pos_annual_interest_rate: U256,
 }

@@ -4,7 +4,6 @@ use mazze_parameters::{
 };
 use mazze_types::U256;
 
-use mazze_parameters::staking::INTEREST_RATE_PER_BLOCK_SCALE;
 use mazze_statedb::global_params::*;
 
 impl State {

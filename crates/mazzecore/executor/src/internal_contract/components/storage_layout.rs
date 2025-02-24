@@ -1,6 +1,7 @@
 use keccak_hash::keccak;
 use mazze_types::U256;
 
+// TODO: check lack of usage
 // General function for solidity storage rule
 pub fn mapping_slot(base: U256, index: U256) -> U256 {
     let mut input = [0u8; 64];

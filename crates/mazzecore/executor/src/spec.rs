@@ -13,8 +13,7 @@ use mazze_parameters::{
         TANZANITE_HEADER_CUSTOM_FIRST_ELEMENT,
     },
     consensus_internal::{
-        DAO_PARAMETER_VOTE_PERIOD, INITIAL_BASE_MINING_REWARD_IN_UMAZZE,
-        OUTLIER_PENALTY_RATIO,
+        INITIAL_BASE_MINING_REWARD_IN_UMAZZE, OUTLIER_PENALTY_RATIO,
     },
 };
 use mazze_types::{AllChainID, Space, SpaceMap, U256, U512};
@@ -53,7 +52,6 @@ pub struct CommonParams {
     /// The gas ratio of evm transactions for the block can pack the EVM
     /// transactions
     pub evm_transaction_gas_ratio: u64,
-    pub params_dao_vote_period: u64,
     pub min_base_price: SpaceMap<U256>,
 
     /// Set the internal contracts to state at the genesis blocks, even if it
@@ -155,7 +153,6 @@ impl Default for CommonParams {
             base_block_rewards,
             evm_transaction_block_ratio: EVM_TRANSACTION_BLOCK_RATIO,
             evm_transaction_gas_ratio: EVM_TRANSACTION_GAS_RATIO,
-            params_dao_vote_period: DAO_PARAMETER_VOTE_PERIOD,
             early_set_internal_contracts_states: false,
             transition_numbers: Default::default(),
             transition_heights: Default::default(),
@@ -182,7 +179,6 @@ impl CommonParams {
         spec.cip98 = number >= self.transition_numbers.cip98;
         spec.cip105 = number >= self.transition_numbers.cip105;
         spec.cip_sigma_fix = number >= self.transition_numbers.cip_sigma_fix;
-        spec.params_dao_vote_period = self.params_dao_vote_period;
         spec.cip107 = number >= self.transition_numbers.cip107;
         spec.cip118 = number >= self.transition_numbers.cip118;
         spec.cip119 = number >= self.transition_numbers.cip119;

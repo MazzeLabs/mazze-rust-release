@@ -162,7 +162,6 @@ build_config! {
         (cip1559_transition_height, (Option<u64>), None)
         (cancun_opcodes_transition_number, (Option<u64>), None)
         (referee_bound, (usize), REFEREE_DEFAULT_BOUND)
-        (params_dao_vote_period, (u64), DAO_PARAMETER_VOTE_PERIOD)
         (timer_chain_beta, (u64), TIMER_CHAIN_DEFAULT_BETA)
         (timer_chain_block_difficulty_ratio, (u64), TIMER_CHAIN_BLOCK_DEFAULT_DIFFICULTY_RATIO)
         (min_native_base_price, (Option<u64>), None)
@@ -1259,8 +1258,6 @@ impl Configuration {
             self.raw_conf.evm_transaction_block_ratio;
         params.evm_transaction_gas_ratio =
             self.raw_conf.evm_transaction_gas_ratio;
-
-        params.params_dao_vote_period = self.raw_conf.params_dao_vote_period;
 
         self.set_cips(&mut params);
 

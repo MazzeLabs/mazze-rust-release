@@ -85,7 +85,7 @@ use mazze_parameters::{
     genesis::{
         genesis_contract_address_four_year, genesis_contract_address_two_year,
     },
-    staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
+    collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
 };
 use mazze_storage::state::StateDbGetOriginalMethods;
 use mazzecore::{

@@ -32,7 +32,7 @@ use parking_lot::{Condvar, Mutex};
 
 use mazze_addr::Network;
 use mazze_parameters::{
-    rpc::GAS_PRICE_DEFAULT_VALUE, staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
+    rpc::GAS_PRICE_DEFAULT_VALUE, collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
 };
 use mazze_types::{
     Address, AddressSpaceUtil, Space, H160, H256, H520, U128, U256, U512, U64,

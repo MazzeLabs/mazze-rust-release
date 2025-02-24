@@ -5,7 +5,7 @@ use crate::{
 };
 use mazze_parameters::{
     consensus_internal::CIP107_STORAGE_POINT_PROP_INIT,
-    staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
+    collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
 };
 use mazze_statedb::{global_params::*, Result as DbResult};
 use mazze_types::{address_util::AddressUtil, Address, AddressSpaceUtil, U256};

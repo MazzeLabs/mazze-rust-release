@@ -10,7 +10,7 @@ use mazze_executor::{
 use super::observer::{
     exec_tracer::ErrorUnwind, gasman::GasLimitEstimation, Observer,
 };
-use mazze_parameters::{consensus::ONE_MAZZE_IN_MAZZY, staking::*};
+use mazze_parameters::{consensus::ONE_MAZZE_IN_MAZZY, collateral::*};
 use mazze_statedb::Result as DbResult;
 use mazze_types::{
     address_util::AddressUtil, Address, AddressSpaceUtil, Space, U256,

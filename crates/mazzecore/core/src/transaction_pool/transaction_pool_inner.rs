@@ -9,7 +9,7 @@ use mazze_executor::machine::Machine;
 use mazze_packing_pool::{PackingPool, PackingPoolConfig};
 use mazze_parameters::{
     consensus_internal::ELASTICITY_MULTIPLIER,
-    staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
+    collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
 };
 
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;

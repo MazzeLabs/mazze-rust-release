@@ -17,7 +17,7 @@ use crate::{
     substate::Substate,
 };
 use mazze_bytes::Bytes;
-use mazze_parameters::staking::{
+use mazze_parameters::collateral::{
     code_collateral_units, MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
 };
 use mazze_types::{

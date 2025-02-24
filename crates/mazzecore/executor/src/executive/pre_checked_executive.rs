@@ -16,7 +16,7 @@ use crate::{
     state::settle_collateral_for_all,
     substate::{cleanup_mode, Substate},
 };
-use mazze_parameters::staking::code_collateral_units;
+use mazze_parameters::collateral::code_collateral_units;
 use mazze_vm_types::{
     self as vm, ActionParams, ActionValue, CallType, CreateContractAddress,
     CreateType,

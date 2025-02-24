@@ -5,7 +5,7 @@
 use super::{super::impls::sponsor::*, preludes::*};
 use mazze_parameters::{
     internal_contract_addresses::SPONSOR_WHITELIST_CONTROL_CONTRACT_ADDRESS,
-    staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
+    collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
 };
 use mazze_types::{Address, U256};
 

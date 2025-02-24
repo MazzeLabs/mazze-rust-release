@@ -5,7 +5,7 @@ use super::{
     ExecutiveContext, PreCheckedExecutive,
 };
 use crate::{executive_observer::ExecutiveObserver, substate::Substate};
-use mazze_parameters::staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT;
+use mazze_parameters::collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT;
 
 use mazze_statedb::Result as DbResult;
 use mazze_types::{Address, AddressSpaceUtil, Space, U256, U512};

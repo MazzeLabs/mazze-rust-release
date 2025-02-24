@@ -248,8 +248,7 @@ pub mod block {
     pub const CROSS_SPACE_GAS_RATIO: u64 = 10;
 }
 
-//TODO: rename to collateral
-pub mod staking {
+pub mod collateral {
     use crate::consensus::ONE_MAZZE_IN_MAZZY;
     use mazze_types::U256;
 

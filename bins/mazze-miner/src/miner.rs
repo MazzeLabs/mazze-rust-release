@@ -5,7 +5,6 @@ use mazze_types::{H256, U256};
 use mazzecore::pow::{
     boundary_to_difficulty, ProofOfWorkProblem, ProofOfWorkSolution,
 };
-use randomx_rs::RandomXFlag;
 use serde_json::Value;
 use std::str::FromStr;
 use std::sync::Arc;

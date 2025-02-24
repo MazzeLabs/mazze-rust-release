@@ -2,7 +2,6 @@
 pub enum NumaError {
     TopologyError(String),
     ThreadBindError(String),
-    RandomXError(randomx_rs::RandomXError),
     MemoryError(String),
     ThreadAssignmentFailed,
 }
@@ -14,7 +13,6 @@ impl std::fmt::Display for NumaError {
             NumaError::ThreadBindError(e) => {
                 write!(f, "Thread binding error: {}", e)
             }
-            NumaError::RandomXError(e) => write!(f, "RandomX error: {}", e),
             NumaError::MemoryError(e) => write!(f, "Memory error: {}", e),
             NumaError::ThreadAssignmentFailed => {
                 write!(f, "Thread assignment failed")

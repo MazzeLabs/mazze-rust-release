@@ -12,11 +12,10 @@ use tokio::time::{sleep, Duration};
 mod miner;
 mod miner_config;
 mod stratum_client;
+mod core;
+
 use miner::Miner;
 use stratum_client::StratumClient;
-mod core;
-mod core_numa;
-mod mining_metrics;
 
 async fn connect_with_retry(
     config: &MinerConfig, miner: Miner,

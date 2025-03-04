@@ -101,8 +101,6 @@ pub struct Spec {
     pub extcodehash_gas: usize,
     /// Price of SUICIDE
     pub suicide_gas: usize,
-    /// Price for retiring PoS node.
-    pub retire_gas: usize,
     /// Price for deploying Eip-1820 contract.
     pub eip1820_gas: usize,
     pub access_list_storage_key_gas: usize,
@@ -299,7 +297,6 @@ impl Spec {
             extcodehash_gas: 400,
             balance_gas: 400,
             suicide_gas: 5000,
-            retire_gas: 5_000_000,
             eip1820_gas: 1_500_000,
             access_list_storage_key_gas: 1900,
             access_list_address_gas: 2400,

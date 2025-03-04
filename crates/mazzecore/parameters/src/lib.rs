@@ -201,7 +201,7 @@ pub mod pow {
 
     // TODO: compute a more appropriate initial difficulty
     // previous initial difficulty: 20_000_000_000;
-    pub const INITIAL_DIFFICULTY: u64 = 500;
+    pub const INITIAL_DIFFICULTY: u64 = 50;
 }
 
 pub mod tx_pool {

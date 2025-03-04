@@ -464,34 +464,7 @@ impl Session {
 
         self.had_hello = Some(Instant::now());
         match rlp.item_count()? {
-            3 => Ok(()),
-            4 => {
-                // // FIXME(lpl): Verify keys.
-                // let pos_public_key_bytes: Vec<u8> = rlp.val_at(3)?;
-                // trace!("pos_public_key_bytes: {:?}", pos_public_key_bytes);
-                // if pos_public_key_bytes.len() < BLS_PUBLIC_KEY_LENGTH {
-                //     bail!("pos public key bytes is too short!");
-                // }
-                // let bls_pub_key = ConsensusPublicKey::try_from(
-                //     &pos_public_key_bytes[..BLS_PUBLIC_KEY_LENGTH],
-                // )
-                // .map_err(|e| {
-                //     Error::from_kind(
-                //         ErrorKind::Decoder(format!("{:?}", e)).into(),
-                //     )
-                // })?;
-                // let vrf_pub_key = ConsensusVRFPublicKey::try_from(
-                //     &pos_public_key_bytes[BLS_PUBLIC_KEY_LENGTH..],
-                // )
-                // .map_err(|e| {
-                //     Error::from_kind(
-                //         ErrorKind::Decoder(format!("{:?}", e)).into(),
-                //     )
-                // })?;
-
-                // Ok(Some((bls_pub_key, vrf_pub_key)))
-                Ok(())
-            }
+            3 | 4 => Ok(()),
             length => Err(ErrorKind::Decoder(format!(
                 "Hello has incorrect rlp length: {:?}",
                 length

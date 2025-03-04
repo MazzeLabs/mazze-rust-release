@@ -71,8 +71,6 @@ pub struct ConsensusInnerConfig {
     pub enable_optimistic_execution: bool,
     /// Control whether we enable the state exposer for the testing purpose.
     pub enable_state_expose: bool,
-    /// The deferred epoch count before a confirmed epoch.
-    pub pos_main_decision_defer_epoch_count: u64,
 
     pub cip113_main_decision_defer_epoch_count: u64,
     pub cip113_transition_height: u64,
@@ -84,18 +82,6 @@ pub struct ConsensusInnerConfig {
     pub force_recompute_height_during_construct_main: Option<u64>,
     pub recovery_latest_mpt_snapshot: bool,
     pub use_isolated_db_for_mpt_table: bool,
-}
-
-impl ConsensusInnerConfig {
-    pub fn pos_main_decision_defer_epoch_count(
-        &self, confirmed_height: u64,
-    ) -> u64 {
-        if confirmed_height >= self.cip113_transition_height {
-            self.cip113_main_decision_defer_epoch_count
-        } else {
-            self.pos_main_decision_defer_epoch_count
-        }
-    }
 }
 
 #[derive(Copy, Clone, DeriveMallocSizeOf)]
@@ -443,7 +429,6 @@ impl Default for ConsensusGraphMainData {
 pub struct ConsensusGraphInner {
     /// data_man is the handle to access raw block data
     pub data_man: Arc<BlockDataManager>,
-    // pub pos_verifier: Arc<PosVerifier>,
     pub inner_conf: ConsensusInnerConfig,
     pub pow_config: ProofOfWorkConfig,
     pub pow: Arc<PowComputer>,
@@ -492,6 +477,7 @@ pub struct ConsensusGraphInner {
     // TODO(lpl): It's always used after being updated, so this should be okay.
     /// The main decision of the best (the round is the largest) pos
     /// reference.
+    /// TODO: check if still used, rename to best_main_decision
     best_pos_main_decision: (H256, u64),
 
     /// weight_tree maintains the subtree weight of each node in the
@@ -602,7 +588,6 @@ impl ConsensusGraphInner {
     pub fn with_era_genesis(
         pow_config: ProofOfWorkConfig,
         pow: Arc<PowComputer>,
-        // pos_verifier: Arc<PosVerifier>,
         data_man: Arc<BlockDataManager>,
         inner_conf: ConsensusInnerConfig,
         cur_era_genesis_block_hash: &H256,
@@ -646,7 +631,6 @@ impl ConsensusGraphInner {
             pow,
             current_difficulty: initial_difficulty.into(),
             data_man: data_man.clone(),
-            // pos_verifier,
             inner_conf,
             outlier_cache: OutlierCache::new(),
             pastset_cache: Default::default(),

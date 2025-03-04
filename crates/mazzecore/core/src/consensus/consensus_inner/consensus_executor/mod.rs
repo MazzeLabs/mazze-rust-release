@@ -189,7 +189,6 @@ impl ConsensusExecutor {
         config: ConsensusExecutionConfiguration,
         verification_config: VerificationConfig,
         bench_mode: bool,
-        // pos_verifier: Arc<PosVerifier>,
     ) -> Arc<Self> {
         let machine = tx_pool.machine();
         let handler = Arc::new(ConsensusExecutionHandler::new(
@@ -198,7 +197,6 @@ impl ConsensusExecutor {
             config,
             verification_config,
             machine,
-            // pos_verifier,
         ));
         let (sender, receiver) = channel();
 
@@ -826,7 +824,6 @@ pub struct ConsensusExecutionHandler {
     config: ConsensusExecutionConfiguration,
     verification_config: VerificationConfig,
     machine: Arc<Machine>,
-    // pos_verifier: Arc<PosVerifier>,
     execution_state_prefetcher: Option<Arc<ExecutionStatePrefetcher>>,
 }
 
@@ -837,7 +834,6 @@ impl ConsensusExecutionHandler {
         config: ConsensusExecutionConfiguration,
         verification_config: VerificationConfig,
         machine: Arc<Machine>,
-        // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         ConsensusExecutionHandler {
             tx_pool,
@@ -845,7 +841,6 @@ impl ConsensusExecutionHandler {
             config,
             verification_config,
             machine,
-            // pos_verifier,
             execution_state_prefetcher: if DEFAULT_EXECUTION_PREFETCH_THREADS
                 > 0
             {
@@ -968,7 +963,6 @@ impl ConsensusExecutionHandler {
             on_local_main,
             self.config.executive_trace,
             reward_execution_info,
-            // self.pos_verifier.as_ref(),
             evm_chain_id,
         )
     }
@@ -1083,9 +1077,6 @@ impl ConsensusExecutionHandler {
                 spec,
             );
         }
-
-        // self.process_pos_interest(&mut state, main_block, current_block_number)
-        //     .expect("db error");
 
         let commit_result = state
             .commit(*epoch_hash, debug_record.as_deref_mut())
@@ -1584,8 +1575,6 @@ impl ConsensusExecutionHandler {
             last_hash: epoch_id.clone(),
             gas_limit: tx.gas().clone(),
             epoch_height: block_height,
-            pos_view: Some(0), // TODO: safely drop `pos_view`
-            finalized_epoch: Some(0), // TODO: safely drop/implement `finalized_epoch`, check routine
             transaction_epoch_bound: self
                 .verification_config
                 .transaction_epoch_bound,

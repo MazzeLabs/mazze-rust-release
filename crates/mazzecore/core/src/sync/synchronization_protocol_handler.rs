@@ -431,10 +431,7 @@ pub struct ProtocolConfiguration {
     pub max_chunk_number_in_manifest: usize,
     pub allow_phase_change_without_peer: bool,
     pub min_phase_change_normal_peer_count: usize,
-    pub pos_genesis_main_decision: H256,
     pub check_status_genesis: bool,
-
-    pub pos_started_as_voter: bool,
 }
 
 impl SynchronizationProtocolHandler {

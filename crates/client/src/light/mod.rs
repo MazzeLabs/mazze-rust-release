@@ -64,7 +64,6 @@ impl LightClient {
             _genesis_accounts,
             data_man,
             pow,
-            // pos_verifier,
             txpool,
             consensus,
             sync_graph,
@@ -175,7 +174,6 @@ impl LightClient {
         Ok(Box::new(ClientComponents {
             data_manager_weak_ptr: Arc::downgrade(&data_man),
             blockgen: None,
-            // pos_handler: None, // Some(pos_verifier),
             other_components: LightClientExtraComponents {
                 consensus,
                 debug_rpc_http_server,

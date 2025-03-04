@@ -15,15 +15,10 @@ make_solidity_contract! {
 }
 
 fn generate_fn_table() -> SolFnTable {
-    make_function_table!(EpochNumber, PoSHeight, FinalizedEpoch, EpochHash)
+    make_function_table!(EpochNumber, EpochHash)
 }
 
-group_impl_is_active!(
-    |spec: &Spec| spec.cip64,
-    EpochNumber,
-    PoSHeight,
-    FinalizedEpoch
-);
+group_impl_is_active!(|spec: &Spec| spec.cip64, EpochNumber,);
 
 group_impl_is_active!(|spec: &Spec| spec.cip133_core, EpochHash);
 
@@ -40,38 +35,6 @@ impl SimpleExecutionTrait for EpochNumber {
         context: &mut InternalRefContext,
     ) -> vm::Result<U256> {
         Ok(U256::from(context.env.epoch_height))
-    }
-}
-
-make_solidity_function! {
-    struct PoSHeight((), "posHeight()", U256);
-}
-
-// same gas cost as the `NUMBER` opcode
-impl_function_type!(PoSHeight, "query", gas: |spec: &Spec| spec.tier_step_gas[(GasPriceTier::Base).idx()]);
-
-impl SimpleExecutionTrait for PoSHeight {
-    fn execute_inner(
-        &self, _input: (), _params: &ActionParams,
-        context: &mut InternalRefContext,
-    ) -> vm::Result<U256> {
-        Ok(context.env.pos_view.unwrap_or(0).into())
-    }
-}
-
-make_solidity_function! {
-    struct FinalizedEpoch((), "finalizedEpochNumber()", U256);
-}
-
-// same gas cost as the `NUMBER` opcode
-impl_function_type!(FinalizedEpoch, "query", gas: |spec: &Spec| spec.tier_step_gas[(GasPriceTier::Base).idx()]);
-
-impl SimpleExecutionTrait for FinalizedEpoch {
-    fn execute_inner(
-        &self, _input: (), _params: &ActionParams,
-        context: &mut InternalRefContext,
-    ) -> vm::Result<U256> {
-        Ok(context.env.finalized_epoch.unwrap_or(0).into())
     }
 }
 

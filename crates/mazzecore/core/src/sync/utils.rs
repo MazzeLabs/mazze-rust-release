@@ -175,21 +175,6 @@ pub fn initialize_synchronization_graph_with_data_manager(
     let mut params = CommonParams::default();
     params.transition_heights.cip1559 = u64::MAX;
     let machine = Arc::new(new_machine_with_builtin(params, vm));
-    // let mut rng = StdRng::from_seed([0u8; 32]);
-    // let pos_verifier = Arc::new(PosVerifier::new(
-    //     None,
-    //     // These configurations will not be used.
-    //     PosConfiguration {
-    //         bls_key: ConfigKey::new(ConsensusPrivateKey::generate(&mut rng)),
-    //         vrf_key: ConfigKey::new(ConsensusVRFPrivateKey::generate(&mut rng)),
-    //         diem_conf_path: Default::default(),
-    //         protocol_conf: Default::default(),
-    //         pos_initial_nodes_path: "".to_string(),
-    //         vrf_proposal_threshold: Default::default(),
-    //         pos_state_config: Default::default(),
-    //     },
-    //     u64::MAX,
-    // ));
 
     let verification_config = VerificationConfig::new(
         true, /* test_mode */
@@ -198,7 +183,6 @@ pub fn initialize_synchronization_graph_with_data_manager(
         TRANSACTION_DEFAULT_EPOCH_BOUND,
         TXPOOL_DEFAULT_NONCE_BITS,
         machine.clone(),
-        // pos_verifier.clone(),
     );
 
     let txpool = Arc::new(TransactionPool::new(
@@ -236,7 +220,6 @@ pub fn initialize_synchronization_graph_with_data_manager(
                 era_epoch_count,
                 enable_optimistic_execution: false,
                 enable_state_expose: false,
-                pos_main_decision_defer_epoch_count: 50,
                 cip113_main_decision_defer_epoch_count: 50,
                 cip113_transition_height: u64::MAX,
                 debug_dump_dir_invalid_state_root: None,
@@ -267,7 +250,6 @@ pub fn initialize_synchronization_graph_with_data_manager(
         },
         verification_config.clone(),
         NodeType::Archive,
-        // pos_verifier.clone(),
     ));
 
     let sync = Arc::new(SynchronizationGraph::new(
@@ -278,7 +260,6 @@ pub fn initialize_synchronization_graph_with_data_manager(
         sync_config,
         notifications,
         machine,
-        // pos_verifier.clone(),
     ));
 
     (sync, consensus)

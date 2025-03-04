@@ -14,7 +14,8 @@ use crate::rpc::types::{
 use jsonrpc_core::{BoxFuture, Result as JsonRpcResult};
 use jsonrpc_derive::rpc;
 use mazze_types::{H128, H256, U256, U64};
-use primitives::{DepositInfo, StorageRoot};
+use primitives::StorageRoot;
+
 /// Mazze rpc interface.
 #[rpc(server)]
 pub trait Mazze {
@@ -66,12 +67,6 @@ pub trait Mazze {
     fn sponsor_info(
         &self, addr: RpcAddress, epoch_number: Option<EpochNumber>,
     ) -> BoxFuture<SponsorInfo>;
-
-    /// Returns deposit list of the given account.
-    #[rpc(name = "mazze_getDepositList")]
-    fn deposit_list(
-        &self, addr: RpcAddress, epoch_number: Option<EpochNumber>,
-    ) -> BoxFuture<Vec<DepositInfo>>;
 
     /// Returns balance of the given account.
     #[rpc(name = "mazze_getCollateralForStorage")]

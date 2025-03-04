@@ -63,7 +63,6 @@ pub struct BlockGenerator {
     state: RwLock<MiningState>,
     workers: Mutex<Vec<(Worker, mpsc::Sender<ProofOfWorkProblem>)>>,
     pub stratum: RwLock<Option<Stratum>>,
-    // pos_verifier: Arc<PosVerifier>,
 }
 
 pub struct Worker {
@@ -148,7 +147,7 @@ impl BlockGenerator {
         maybe_txgen: Option<SharedTransactionGenerator>,
         pow_config: ProofOfWorkConfig,
         pow: Arc<PowComputer>,
-        mining_author: Address, // pos_verifier: Arc<PosVerifier>,
+        mining_author: Address,
     ) -> Self {
         info!(
             "Initial mining difficulty set to: {:?}",
@@ -165,7 +164,6 @@ impl BlockGenerator {
             state: RwLock::new(MiningState::Start),
             workers: Mutex::new(Vec::new()),
             stratum: RwLock::new(None),
-            // pos_verifier,
         }
     }
 
@@ -401,18 +399,6 @@ impl BlockGenerator {
 
         let best_block_hash = best_info.best_block_hash.clone();
         let mut referee = best_info.bounded_terminal_block_hashes.clone();
-        // TODO: enable PoS reference - disabled for block processing debugging
-        // let maybe_pos_reference = if self
-        //     .pos_verifier
-        //     .is_enabled_at_height(best_info.best_epoch_number + 1)
-        // {
-        //     // parent is in consensus, so our PoS must have processed its
-        //     // pos_reference, meaning this latest pos reference must
-        //     // be valid.
-        //     Some(self.pos_verifier.get_latest_pos_reference())
-        // } else {
-        //     None
-        // };
 
         referee.retain(|r| *r != best_block_hash);
 

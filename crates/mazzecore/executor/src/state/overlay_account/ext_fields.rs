@@ -14,7 +14,6 @@ impl OverlayAccount {
         match require {
             RequireFields::None => false,
             RequireFields::Code => !self.is_code_loaded(),
-            RequireFields::DepositList => self.deposit_list.is_none(),
         }
     }
 
@@ -40,29 +39,12 @@ impl OverlayAccount {
 
         Ok(())
     }
-
-    /// Load lazily maintained deposit list and vote list.
-    pub fn cache_ext_fields(
-        &mut self, cache_deposit_list: bool, db: &StateDbGeneric,
-    ) -> DbResult<()> {
-        self.address.assert_native();
-        if cache_deposit_list && self.deposit_list.is_none() {
-            let deposit_list_opt = if self.fresh_storage() {
-                None
-            } else {
-                db.get_deposit_list(&self.address)?
-            };
-            self.deposit_list = Some(deposit_list_opt.unwrap_or_default());
-        }
-        Ok(())
-    }
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub enum RequireFields {
     None,
     Code,
-    DepositList,
 }
 
 const NOT_LOADED_ERR: &'static str =

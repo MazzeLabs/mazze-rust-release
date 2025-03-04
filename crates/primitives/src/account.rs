@@ -9,13 +9,8 @@ use mazze_types::{
 };
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use rlp_derive::{RlpDecodable, RlpEncodable};
-use serde_derive::{Deserialize, Serialize};
 
-use std::{
-    fmt,
-    ops::{Deref, DerefMut},
-    sync::Arc,
-};
+use std::{fmt, sync::Arc};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum AddressSpace {
@@ -29,60 +24,6 @@ pub enum AccountError {
     ReservedAddressSpace(Address),
     AddressSpaceMismatch(Address, AddressSpace),
     InvalidRlp(DecoderError),
-}
-
-#[derive(
-    Clone,
-    Debug,
-    RlpDecodable,
-    RlpEncodable,
-    Ord,
-    PartialOrd,
-    Eq,
-    PartialEq,
-    Serialize,
-    Deserialize,
-)]
-#[serde(rename_all = "camelCase")]
-pub struct DepositInfo {
-    /// This is the number of tokens in this deposit.
-    pub amount: U256,
-    /// This is the timestamp when this deposit happened, measured in the
-    /// number of past blocks. It will be used to calculate
-    /// the service charge.
-    pub deposit_time: U256,
-    /// This is the accumulated interest rate when this deposit happened.
-    pub accumulated_interest_rate: U256,
-}
-
-#[derive(Clone, Debug, Default, Ord, PartialOrd, Eq, PartialEq)]
-pub struct DepositList(pub Vec<DepositInfo>);
-
-impl Encodable for DepositList {
-    fn rlp_append(&self, s: &mut RlpStream) {
-        s.append_list(&self.0);
-    }
-}
-
-impl Decodable for DepositList {
-    fn decode(d: &Rlp) -> Result<Self, DecoderError> {
-        let deposit_vec = d.as_list()?;
-        Ok(DepositList(deposit_vec))
-    }
-}
-
-impl Deref for DepositList {
-    type Target = Vec<DepositInfo>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for DepositList {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
 }
 
 #[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]

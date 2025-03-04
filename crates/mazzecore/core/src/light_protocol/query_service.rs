@@ -39,7 +39,7 @@ use network::{service::ProtocolVersion, NetworkContext, NetworkService};
 use primitives::{
     filter::{FilterError, LogFilter},
     log_entry::{LocalizedLogEntry, LogEntry},
-    Account, Block, BlockReceipts, CodeInfo, DepositList, EpochNumber, Receipt,
+    Account, Block, BlockReceipts, CodeInfo, EpochNumber, Receipt,
     SignedTransaction, StorageKey, StorageRoot, StorageValue, TransactionIndex,
 };
 use rlp::Rlp;
@@ -386,12 +386,6 @@ impl QueryService {
             .to_key_bytes()
     }
 
-    fn deposit_list_key(address: &H160) -> Vec<u8> {
-        StorageKey::new_deposit_list_key(address)
-            .with_native_space()
-            .to_key_bytes()
-    }
-
     pub async fn get_account(
         &self, epoch: EpochNumber, address: H160,
     ) -> Result<Option<Account>, Error> {
@@ -406,14 +400,6 @@ impl QueryService {
                 Ok(Some(Account::new_from_rlp(address, &Rlp::new(&rlp))?))
             }
         }
-    }
-
-    pub async fn get_deposit_list(
-        &self, epoch: EpochNumber, address: H160,
-    ) -> Result<Option<DepositList>, Error> {
-        let epoch = self.get_height_from_epoch_number(epoch)?;
-        let key = Self::deposit_list_key(&address);
-        self.retrieve_state_entry::<DepositList>(epoch, key).await
     }
 
     pub async fn get_code(

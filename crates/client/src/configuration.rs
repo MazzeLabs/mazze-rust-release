@@ -2,6 +2,7 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
+// TODO: Cleanup this file
 use std::{collections::BTreeMap, convert::TryInto, path::PathBuf, sync::Arc};
 
 use lazy_static::*;
@@ -328,7 +329,7 @@ build_config! {
         // DAG-Embedded Tree Structure (DETS) Section.
         (is_consortium, (bool), false)
         (pos_config_path, (Option<String>), Some("./pos_config/pos_config.yaml".to_string()))
-        (pos_genesis_main_decision, (Option<H256>), None)
+        // (pos_genesis_main_decision, (Option<H256>), None)
         (vrf_proposal_threshold, (U256), U256::from_str("1111111111111100000000000000000000000000000000000000000000000000").unwrap())
         // Deferred epoch count before a confirmed epoch.
         (pos_main_decision_defer_epoch_count, (u64), 50)
@@ -621,7 +622,6 @@ impl Configuration {
                 era_epoch_count: self.raw_conf.era_epoch_count,
                 enable_optimistic_execution,
                 enable_state_expose: self.raw_conf.enable_state_expose,
-                pos_main_decision_defer_epoch_count: self.raw_conf.pos_main_decision_defer_epoch_count,
                 cip113_main_decision_defer_epoch_count: self.raw_conf.cip113_main_decision_defer_epoch_count,
                 cip113_transition_height: self.raw_conf.cip113_transition_height,
                 debug_dump_dir_invalid_state_root: if self
@@ -907,12 +907,7 @@ impl Configuration {
             min_phase_change_normal_peer_count: self
                 .raw_conf
                 .min_phase_change_normal_peer_count,
-            pos_genesis_main_decision: self
-                .raw_conf
-                .pos_genesis_main_decision
-                .expect("set to genesis if none"),
             check_status_genesis: self.raw_conf.check_status_genesis,
-            pos_started_as_voter: self.raw_conf.pos_started_as_voter,
         }
     }
 

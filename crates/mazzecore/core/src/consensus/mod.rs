@@ -258,13 +258,11 @@ impl ConsensusGraph {
         execution_conf: ConsensusExecutionConfiguration,
         verification_config: VerificationConfig,
         node_type: NodeType,
-        // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         let inner =
             Arc::new(RwLock::new(ConsensusGraphInner::with_era_genesis(
                 pow_config,
                 pow.clone(),
-                // pos_verifier.clone(),
                 data_man.clone(),
                 conf.inner_conf.clone(),
                 era_genesis_block_hash,
@@ -277,7 +275,6 @@ impl ConsensusGraph {
             execution_conf,
             verification_config,
             conf.bench_mode,
-            // pos_verifier.clone(),
         );
         let confirmation_meter = ConfirmationMeter::new();
 
@@ -295,7 +292,6 @@ impl ConsensusGraph {
                 statistics,
                 notifications,
                 node_type,
-                // pos_verifier,
             ),
             confirmation_meter,
             best_info: RwLock::new(Arc::new(Default::default())),
@@ -326,7 +322,6 @@ impl ConsensusGraph {
         execution_conf: ConsensusExecutionConfiguration,
         verification_conf: VerificationConfig,
         node_type: NodeType,
-        // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         let genesis_hash = data_man.get_cur_consensus_era_genesis_hash();
         let stable_hash = data_man.get_cur_consensus_era_stable_hash();
@@ -343,7 +338,6 @@ impl ConsensusGraph {
             execution_conf,
             verification_conf,
             node_type,
-            // pos_verifier,
         )
     }
 
@@ -405,35 +399,13 @@ impl ConsensusGraph {
         )
     }
 
-    /// After considering the latest `pos_reference`, `parent_hash` may become
-    /// an invalid choice, so this function tries to update the parent and
-    /// referee choices with `pos_reference` provided.
+    /// This function chooses the correct parent and referees for a new block.
+    /// TODO: investigate if still needed
     pub fn choose_correct_parent(
         &self, parent_hash: &mut H256, referees: &mut Vec<H256>,
         blame_info: &mut StateBlameInfo,
     ) {
         let correct_parent_hash = {
-            // if let Some(pos_ref) = &pos_reference {
-            //     loop {
-            //         let inner = self.inner.read();
-            //         let main_decision = inner
-            //             .pos_verifier
-            //             .get_main_decision(pos_ref)
-            //             .expect("pos ref committed");
-            //         if inner.hash_to_arena_indices.contains_key(&main_decision)
-            //             || inner.main_block_processed(&main_decision)
-            //         {
-            //             // If this pos ref is processed in catching-up, its
-            //             // main decision may have not been processed
-            //             break;
-            //         } else {
-            //             // Wait without holding consensus inner lock.
-            //             drop(inner);
-            //             warn!("Wait for PoW to catch up with PoS");
-            //             sleep(Duration::from_secs(1));
-            //         }
-            //     }
-            // }
             // recompute `blame_info` needs locking `self.inner`, so we limit
             // the lock scope here.
             let mut inner = self.inner.write();

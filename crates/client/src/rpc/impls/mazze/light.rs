@@ -24,7 +24,7 @@ use network::{
     node_table::{Node, NodeId},
     throttling, SessionDetails, UpdateNodeOperation,
 };
-use primitives::{Account, DepositInfo, StorageRoot, TransactionWithSignature};
+use primitives::{Account, StorageRoot, TransactionWithSignature};
 use rlp::Encodable;
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 // To convert from RpcResult to BoxFuture by delegate! macro automatically.
@@ -275,36 +275,6 @@ impl RpcImpl {
                 Some(acc) => {
                     Ok(SponsorInfo::try_from(acc.sponsor_info, network)?)
                 }
-            }
-        };
-
-        Box::new(fut.boxed().compat())
-    }
-
-    fn deposit_list(
-        &self, address: RpcAddress, num: Option<EpochNumber>,
-    ) -> RpcBoxFuture<Vec<DepositInfo>> {
-        let epoch = num.unwrap_or(EpochNumber::LatestState).into();
-
-        info!(
-            "RPC Request: mazze_getDepositList address={:?} epoch_num={:?}",
-            address, epoch
-        );
-
-        // clone `self.light` to avoid lifetime issues due to capturing `self`
-        let light = self.light.clone();
-
-        let fut = async move {
-            Self::check_address_network(address.network, &light)?;
-
-            let maybe_list = invalid_params_check(
-                "address",
-                light.get_deposit_list(epoch, address.into()).await,
-            )?;
-
-            match maybe_list {
-                None => Ok(vec![]),
-                Some(deposit_list) => Ok(deposit_list.0),
             }
         };
 
@@ -1099,7 +1069,6 @@ impl Mazze for MazzeHandler {
             fn check_balance_against_transaction(&self, account_addr: RpcAddress, contract_addr: RpcAddress, gas_limit: U256, gas_price: U256, storage_limit: U256, epoch: Option<EpochNumber>) -> BoxFuture<CheckBalanceAgainstTransactionResponse>;
             fn code(&self, address: RpcAddress, block_hash_or_epoch_num: Option<BlockHashOrEpochNumber>) -> BoxFuture<Bytes>;
             fn collateral_for_storage(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<U256>;
-            fn deposit_list(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<Vec<DepositInfo>>;
             fn epoch_number(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<U256>;
             fn gas_price(&self) -> BoxFuture<U256>;
             fn get_logs(&self, filter: MazzeRpcLogFilter) -> BoxFuture<Vec<RpcLog>>;

@@ -8,7 +8,7 @@ use crate::{
     db::{
         COL_BLAMED_HEADER_VERIFIED_ROOTS, COL_BLOCKS, COL_BLOCK_TRACES,
         COL_EPOCH_NUMBER, COL_HASH_BY_BLOCK_NUMBER, COL_MISC,
-        COL_REWARD_BY_POS_EPOCH, COL_TX_INDEX,
+        COL_TX_INDEX,
     },
     pow::PowComputer,
     verification::VerificationConfig,
@@ -49,9 +49,8 @@ enum DBTable {
     BlamedHeaderVerifiedRoots,
     BlockTraces,
     HashByBlockNumber,
-    RewardByPosEpoch,
 }
-
+// TODO: validate POS related columns have been successfully removed
 fn rocks_db_col(table: DBTable) -> u32 {
     match table {
         DBTable::Misc => COL_MISC,
@@ -61,7 +60,6 @@ fn rocks_db_col(table: DBTable) -> u32 {
         DBTable::BlamedHeaderVerifiedRoots => COL_BLAMED_HEADER_VERIFIED_ROOTS,
         DBTable::BlockTraces => COL_BLOCK_TRACES,
         DBTable::HashByBlockNumber => COL_HASH_BY_BLOCK_NUMBER,
-        DBTable::RewardByPosEpoch => COL_REWARD_BY_POS_EPOCH,
     }
 }
 
@@ -74,7 +72,6 @@ fn sqlite_db_table(table: DBTable) -> String {
         DBTable::BlamedHeaderVerifiedRoots => "blamed_header_verified_roots",
         DBTable::BlockTraces => "block_traces",
         DBTable::HashByBlockNumber => "hash_by_block_number",
-        DBTable::RewardByPosEpoch => "reward_by_pos_epoch",
     }
     .into()
 }

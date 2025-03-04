@@ -93,27 +93,6 @@ impl ConsensusExecutionHandler {
             std::mem::swap(&mut epoch_recorder.geth_traces, task.answer);
         }
 
-        // if !dry_run && self.pos_verifier.pos_option().is_some() {
-        //     debug!(
-        //         "put_staking_events: {:?} height={} len={}",
-        //         main_block.hash(),
-        //         main_block.block_header.height(),
-        //         epoch_recorder.staking_events.len()
-        //     );
-        //     self.pos_verifier
-        //         .consensus_db()
-        //         .put_staking_events(
-        //             main_block.block_header.height(),
-        //             main_block.hash(),
-        //             epoch_recorder.staking_events,
-        //         )
-        //         .map_err(|e| {
-        //             mazze_statedb::Error::from(DbErrorKind::PosDatabaseError(
-        //                 format!("{:?}", e),
-        //             ))
-        //         })?;
-        // }
-
         if !dry_run && on_local_main {
             self.tx_pool.recycle_transactions(epoch_recorder.repack_tx);
         }
@@ -190,8 +169,6 @@ impl ConsensusExecutionHandler {
             last_hash,
             gas_limit: U256::from(block.block_header.gas_limit()),
             epoch_height,
-            pos_view: Some(0), // TODO: safely drop `pos_view`
-            finalized_epoch: Some(0), // TODO: safely drop/implement `finalized_epoch`, check routine
             transaction_epoch_bound: self
                 .verification_config
                 .transaction_epoch_bound,

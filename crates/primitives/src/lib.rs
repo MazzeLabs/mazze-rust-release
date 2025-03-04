@@ -22,7 +22,7 @@ pub mod epoch;
 pub mod filter;
 pub mod is_default;
 pub mod log_entry;
-pub mod pos;
+pub mod pos; // TODO: remove this
 pub mod receipt;
 pub mod state_root;
 pub mod static_bool;
@@ -33,7 +33,7 @@ pub mod transaction_index;
 pub mod zero;
 
 pub use crate::{
-    account::{Account, CodeInfo, DepositInfo, DepositList, SponsorInfo},
+    account::{Account, CodeInfo, SponsorInfo},
     block::{Block, BlockNumber},
     block_header::{BlockHeader, BlockHeaderBuilder},
     block_number::compute_block_number,

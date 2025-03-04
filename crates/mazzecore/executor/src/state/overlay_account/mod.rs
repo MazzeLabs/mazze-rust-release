@@ -53,8 +53,7 @@ use mazze_types::{
 };
 use parking_lot::RwLock;
 use primitives::{
-    is_default::IsDefault, CodeInfo, DepositList, SponsorInfo, StorageLayout,
-    StorageValue,
+    is_default::IsDefault, CodeInfo, SponsorInfo, StorageLayout, StorageValue,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -101,11 +100,6 @@ pub struct OverlayAccount {
     /* ----------------------------------------------------------------
     -  Lazily loaded database-stored fields, also called `ext_fields` -
     ---------------------------------------------------------------- */
-    /// List of the deposit info of the account, sorted in increasing order of
-    /// `deposit_time`. (`None` indicates not loaded from db.)
-    ///
-    /// Cleared after CIP-97.
-    deposit_list: Option<DepositList>,
     /// The code of the account.  (`None` indicates not loaded from db if
     /// `code_hash` isn't `KECCAK_EMPTY`.)
     code: Option<CodeInfo>,

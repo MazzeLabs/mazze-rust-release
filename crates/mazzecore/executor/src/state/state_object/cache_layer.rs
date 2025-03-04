@@ -210,9 +210,6 @@ impl State {
         match require {
             RequireFields::None => Ok(()),
             RequireFields::Code => account.cache_code(db),
-            RequireFields::DepositList => {
-                account.cache_ext_fields(true /* cache_deposit_list */, db)
-            }
         }
     }
 }

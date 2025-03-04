@@ -39,9 +39,8 @@ use network::{
 use parking_lot::Mutex;
 use primitives::{
     filter::LogFilter, receipt::EVM_SPACE_SUCCESS, Account, Block, BlockHeader,
-    BlockReceipts, DepositInfo, SignedTransaction, StorageKey, StorageRoot,
-    StorageValue, Transaction, TransactionIndex, TransactionStatus,
-    TransactionWithSignature,
+    BlockReceipts, SignedTransaction, StorageKey, StorageRoot, StorageValue,
+    Transaction, TransactionIndex, TransactionStatus, TransactionWithSignature,
 };
 use random_crash::*;
 use rlp::Rlp;
@@ -81,11 +80,11 @@ use mazze_addr::Network;
 use mazze_execute_helper::estimation::EstimateRequest;
 use mazze_executor::state::State;
 use mazze_parameters::{
+    collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
     consensus_internal::REWARD_EPOCH_COUNT,
     genesis::{
         genesis_contract_address_four_year, genesis_contract_address_two_year,
     },
-    collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
 };
 use mazze_storage::state::StateDbGetOriginalMethods;
 use mazzecore::{
@@ -281,29 +280,6 @@ impl RpcImpl {
         match state_db.get_account(&address.hex_address.with_native_space())? {
             None => Ok(SponsorInfo::default(network)?),
             Some(acc) => Ok(SponsorInfo::try_from(acc.sponsor_info, network)?),
-        }
-    }
-
-    fn deposit_list(
-        &self, address: RpcAddress, num: Option<EpochNumber>,
-    ) -> RpcResult<Vec<DepositInfo>> {
-        self.check_address_network(address.network)?;
-        let epoch_num = num.unwrap_or(EpochNumber::LatestState).into();
-
-        info!(
-            "RPC Request: mazze_getDepositList address={:?} epoch_num={:?}",
-            address, epoch_num
-        );
-
-        let state_db = self
-            .consensus
-            .get_state_db_by_epoch_number(epoch_num, "num")?;
-
-        match state_db
-            .get_deposit_list(&address.hex_address.with_native_space())?
-        {
-            None => Ok(vec![]),
-            Some(deposit_list) => Ok(deposit_list.0),
         }
     }
 
@@ -2170,7 +2146,6 @@ impl Mazze for MazzeHandler {
             fn sponsor_info(&self, address: RpcAddress, num: Option<EpochNumber>)
                 -> BoxFuture<SponsorInfo>;
             fn balance(&self, address: RpcAddress, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> BoxFuture<U256>;
-            fn deposit_list(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<Vec<DepositInfo>>;
             fn collateral_for_storage(&self, address: RpcAddress, num: Option<EpochNumber>)
                 -> BoxFuture<U256>;
             fn call(&self, request: CallRequest, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>)
@@ -2191,7 +2166,6 @@ impl Mazze for MazzeHandler {
             fn storage_root(&self, address: RpcAddress, epoch_num: Option<EpochNumber>) -> BoxFuture<Option<StorageRoot>>;
             fn get_supply_info(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<TokenSupplyInfo>;
             fn get_collateral_info(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<StorageCollateralInfo>;
-            // fn get_vote_params(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<VoteParamsInfo>;
             fn get_fee_burnt(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<U256>;
         }
     }

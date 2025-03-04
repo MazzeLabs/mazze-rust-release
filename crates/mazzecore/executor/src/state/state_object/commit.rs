@@ -104,16 +104,6 @@ impl State {
                     .with_space(address.space),
                 debug_record.as_deref_mut(),
             )?;
-            self.db.delete(
-                StorageKey::new_deposit_list_key(&address.address)
-                    .with_space(address.space),
-                debug_record.as_deref_mut(),
-            )?;
-            self.db.delete(
-                StorageKey::new_vote_list_key(&address.address)
-                    .with_space(address.space),
-                debug_record.as_deref_mut(),
-            )?;
         }
         Ok(())
     }

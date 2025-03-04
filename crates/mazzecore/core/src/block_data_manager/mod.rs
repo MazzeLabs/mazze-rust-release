@@ -1203,7 +1203,6 @@ impl BlockDataManager {
         on_local_main: bool,
         update_trace: bool,
         reward_execution_info: &Option<RewardExecutionInfo>,
-        // pos_verifier: &PosVerifier,
         evm_chain_id: u32,
     ) -> bool {
         if !self.epoch_executed(epoch_hash) {

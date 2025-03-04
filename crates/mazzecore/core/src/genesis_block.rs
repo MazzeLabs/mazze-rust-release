@@ -321,33 +321,6 @@ pub fn genesis_block(
         }
     }
 
-    // if let Some(initial_nodes) = initial_nodes {
-    //     for node in &initial_nodes.initial_nodes {
-    //         let stake_balance = U256::from(node.voting_power) * *POS_VOTE_PRICE;
-    //         // TODO(lpl): Pass in signed tx so they can be retired.
-    //         state
-    //             .add_balance(
-    //                 &node.address.with_native_space(),
-    //                 &(stake_balance
-    //                     + U256::from(ONE_MAZZE_IN_MAZZY) * U256::from(20)),
-    //                 CleanupMode::NoEmpty,
-    //             )
-    //             .unwrap();
-    //         state
-    //             .deposit(&node.address, &stake_balance, 0, false)
-    //             .unwrap();
-    //         let signed_tx = node
-    //             .register_tx
-    //             .clone()
-    //             .fake_sign(node.address.with_native_space());
-    //         execute_genesis_transaction(
-    //             &signed_tx,
-    //             &mut state,
-    //             machine.clone(),
-    //         );
-    //     }
-    // }
-
     state
         .genesis_special_remove_account(&genesis_account_address.address)
         .expect("Clean account failed");
@@ -397,68 +370,6 @@ pub fn genesis_block(
     );
     genesis
 }
-
-// pub fn register_transaction(
-//     // bls_priv_key: BLSPrivateKey, vrf_pub_key: EcVrfPublicKey,
-//     power: u64,
-//     genesis_chain_id: u32, legacy: bool,
-// ) -> NativeTransaction {
-//     /// TODO: test this function with new internal contracts.
-//     // use bls_signatures::{
-//     //     sigma_protocol, PrivateKey as BlsPrivKey, PublicKey as BlsPubKey,
-//     //     Serialize,
-//     // };
-//     use mazze_parameters::internal_contract_addresses::POS_REGISTER_CONTRACT_ADDRESS;
-//     use rand_08::rngs::OsRng;
-//     use solidity_abi::ABIEncodable;
-//     use tiny_keccak::{Hasher, Keccak};
-
-//     // let bls_pub_key = bls_priv_key.public_key();
-//     // let (commit, answer) =
-//     //     sigma_protocol::prove(bls_priv_key.raw_key(), &mut OsRng, legacy);
-
-//     let mut encoded_commit = Vec::<u8>::new();
-//     BlsPubKey::from(commit)
-//         .write_bytes(&mut encoded_commit)
-//         .expect("write to Vec<u8> never fails");
-
-//     let mut encoded_answer = Vec::<u8>::new();
-//     BlsPrivKey::from(answer)
-//         .write_bytes(&mut encoded_answer)
-//         .expect("write to Vec<u8> never fails");
-
-//     let encoded_bls_pub_key = bls_pub_key.to_bytes();
-
-//     let encoded_vrf_pub_key = vrf_pub_key.to_bytes();
-
-//     let mut hasher = Keccak::v256();
-//     hasher.update(encoded_bls_pub_key.as_slice());
-//     hasher.update(encoded_vrf_pub_key.as_slice());
-//     let mut computed_identifier = H256::default();
-//     hasher.finalize(computed_identifier.as_bytes_mut());
-
-//     let params = (
-//         computed_identifier,
-//         power,
-//         encoded_bls_pub_key,
-//         encoded_vrf_pub_key,
-//         [encoded_commit, encoded_answer],
-//     );
-
-//     let mut call_data: Vec<u8> = "e335b451".from_hex().unwrap();
-//     call_data.extend_from_slice(&params.abi_encode());
-
-//     let mut tx = NativeTransaction::default();
-//     tx.nonce = 0.into();
-//     tx.data = call_data;
-//     tx.value = U256::zero();
-//     tx.action = Action::Call(POS_REGISTER_CONTRACT_ADDRESS);
-//     tx.chain_id = genesis_chain_id;
-//     tx.gas = 200000.into();
-//     tx.gas_price = 1.into();
-//     tx.storage_limit = 16000;
-//     tx
-// }
 
 fn execute_genesis_transaction(
     transaction: &SignedTransaction, state: &mut State, machine: Arc<Machine>,

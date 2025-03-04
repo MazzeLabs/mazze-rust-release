@@ -1,7 +1,7 @@
 use mazze_internal_common::debug::ComputeEpochDebugRecord;
 use mazze_statedb::{Result as DbResult, StateDb, StateDbExt};
 use mazze_types::AddressWithSpace;
-use primitives::{Account, CodeInfo, DepositList, StorageKey, StorageValue};
+use primitives::{Account, CodeInfo, StorageKey, StorageValue};
 use std::sync::Arc;
 
 use super::OverlayAccount;
@@ -47,20 +47,6 @@ impl OverlayAccount {
             db.set::<CodeInfo>(
                 storage_key,
                 code_info,
-                debug_record.as_deref_mut(),
-            )?;
-        }
-
-        // Commit deposit list
-
-        if let Some(deposit_list) = self.deposit_list.as_ref() {
-            self.address.assert_native();
-            let storage_key =
-                StorageKey::new_deposit_list_key(&self.address.address)
-                    .with_space(self.address.space);
-            db.set::<DepositList>(
-                storage_key,
-                deposit_list,
                 debug_record.as_deref_mut(),
             )?;
         }

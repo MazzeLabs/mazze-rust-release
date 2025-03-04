@@ -1,7 +1,7 @@
 use crate::{
     account::{Account, CodeInfo},
     hash::KECCAK_EMPTY,
-    DepositList, SponsorInfo, StorageValue,
+    SponsorInfo, StorageValue,
 };
 use mazze_types::{Address, U256};
 use std::default::Default;
@@ -29,12 +29,6 @@ impl IsDefault for Account {
 impl IsDefault for CodeInfo {
     fn is_default(&self) -> bool {
         self.code.len() == 0 && self.owner == Address::default()
-    }
-}
-
-impl IsDefault for DepositList {
-    fn is_default(&self) -> bool {
-        self.0.is_empty()
     }
 }
 

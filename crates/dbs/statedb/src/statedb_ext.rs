@@ -8,7 +8,7 @@ use rlp::Rlp;
 use mazze_internal_common::debug::ComputeEpochDebugRecord;
 use mazze_types::{AddressWithSpace, H256, U256};
 use primitives::{
-    is_default::IsDefault, Account, CodeInfo, DepositList, StorageKey,
+    is_default::IsDefault, Account, CodeInfo, StorageKey,
     StorageKeyWithSpace,
 };
 
@@ -35,10 +35,6 @@ pub trait StateDbExt {
     fn get_code(
         &self, address: &AddressWithSpace, code_hash: &H256,
     ) -> Result<Option<CodeInfo>>;
-
-    fn get_deposit_list(
-        &self, address: &AddressWithSpace,
-    ) -> Result<Option<DepositList>>;
 
     fn get_system_storage(&self, key: &[u8]) -> Result<U256>;
 
@@ -106,16 +102,6 @@ impl StateDbExt for StateDbGeneric {
         self.get::<CodeInfo>(
             StorageKey::new_code_key(&address.address, code_hash)
                 .with_space(address.space),
-        )
-    }
-
-    fn get_deposit_list(
-        &self, address: &AddressWithSpace,
-    ) -> Result<Option<DepositList>> {
-        address.assert_native();
-        self.get::<DepositList>(
-            StorageKey::new_deposit_list_key(&address.address)
-                .with_native_space(),
         )
     }
 

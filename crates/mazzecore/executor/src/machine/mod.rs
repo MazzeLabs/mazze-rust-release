@@ -150,7 +150,7 @@ fn new_builtin_map(
         Builtin::new(
             Box::new(ModexpPricer::new(20)),
             builtin_factory("modexp"),
-            params.transition_numbers.cip62,
+            0,
         ),
     );
     btree.insert(
@@ -158,7 +158,7 @@ fn new_builtin_map(
         Builtin::new(
             Box::new(Linear::new(500, 0)),
             builtin_factory("alt_bn128_add"),
-            params.transition_numbers.cip62,
+            0,
         ),
     );
     btree.insert(
@@ -166,7 +166,7 @@ fn new_builtin_map(
         Builtin::new(
             Box::new(Linear::new(40_000, 0)),
             builtin_factory("alt_bn128_mul"),
-            params.transition_numbers.cip62,
+            0,
         ),
     );
     btree.insert(
@@ -174,7 +174,7 @@ fn new_builtin_map(
         Builtin::new(
             Box::new(AltBn128PairingPricer::new(100_000, 80_000)),
             builtin_factory("alt_bn128_pairing"),
-            params.transition_numbers.cip62,
+            0,
         ),
     );
     btree.insert(

@@ -1320,11 +1320,6 @@ impl Configuration {
             } else {
                 params.transition_numbers.cip43a
             });
-        params.transition_numbers.cip62 = if self.is_test_or_dev_mode() {
-            0u64
-        } else {
-            BN128_ENABLE_NUMBER
-        };
         params.transition_numbers.cip78b = self
             .raw_conf
             .cip78_patch_transition_number

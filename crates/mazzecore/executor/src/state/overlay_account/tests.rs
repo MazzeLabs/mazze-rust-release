@@ -164,16 +164,6 @@ fn test_overlay_account_create() {
     assert_eq!(*overlay_account.sponsor_info(), Default::default());
 }
 
-fn check_ordered_feature(vote_stake_list: &VoteStakeList) {
-    for i in 1..vote_stake_list.len() {
-        assert!(
-            vote_stake_list[i - 1].unlock_block_number
-                < vote_stake_list[i].unlock_block_number
-        );
-        assert!(vote_stake_list[i - 1].amount > vote_stake_list[i].amount);
-    }
-}
-
 fn init_test_account() -> OverlayAccount {
     let storage_manager = new_state_manager_for_unit_test();
     let db = StateDb::new(storage_manager.get_state_for_genesis_write());
@@ -188,7 +178,6 @@ fn init_test_account() -> OverlayAccount {
 
     let mut overlay_account =
         OverlayAccount::from_loaded(&address_with_space, account.clone());
-    overlay_account.cache_ext_fields(&db).unwrap();
 
     overlay_account
 }

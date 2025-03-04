@@ -189,8 +189,6 @@ mod tests_another {
         let state = get_state_for_genesis_write(&storage_manager);
 
         assert!(account.as_account().is_default());
-
-        account.cache_ext_fields(true, &state.db).unwrap();
     }
 
     #[test]

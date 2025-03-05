@@ -64,8 +64,6 @@ pub struct CommonParams {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsBlockNumber {
-    /// CIP-64: Get Current Epoch Number via Internal Contract
-    pub cip64: BlockNumber,
     /// CIP-71: Disable Anti-Reentrancy
     pub cip71: BlockNumber,
     /// CIP-78: Correct `is_sponsored` Fields in Receipt
@@ -156,7 +154,6 @@ impl Default for CommonParams {
 impl CommonParams {
     pub fn spec(&self, number: BlockNumber, height: BlockHeight) -> Spec {
         let mut spec = Spec::genesis_spec();
-        spec.cip64 = number >= self.transition_numbers.cip64;
         spec.cip71 = number >= self.transition_numbers.cip71;
         spec.cip90 = number >= self.transition_numbers.cip90b;
         spec.cip78a = number >= self.transition_numbers.cip78a;

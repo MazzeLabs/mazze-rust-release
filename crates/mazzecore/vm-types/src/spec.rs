@@ -132,8 +132,6 @@ pub struct Spec {
     pub wasm: Option<WasmCosts>,
     /// The magnification of gas storage occupying related operaions.
     pub evm_gas_ratio: usize,
-    /// CIP-64: Get current epoch number through internal contract
-    pub cip64: bool,
     /// CIP-71: Disable anti-reentrancy
     pub cip71: bool,
     /// CIP-78: Correct `is_sponsored` fields in receipt
@@ -303,7 +301,6 @@ impl Spec {
             kill_dust: CleanDustMode::Off,
             keep_unsigned_nonce: false,
             wasm: None,
-            cip64: true,
             cip71: true,
             cip90: true,
             cip78a: true,

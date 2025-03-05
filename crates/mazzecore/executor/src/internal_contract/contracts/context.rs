@@ -11,14 +11,14 @@ use crate::{internal_contract::epoch_hash_slot, return_if};
 use super::preludes::*;
 
 make_solidity_contract! {
-    pub struct Context(CONTEXT_CONTRACT_ADDRESS, generate_fn_table, initialize: |params: &CommonParams| params.transition_numbers.cip64, is_active: |spec: &Spec| spec.cip64);
+    pub struct Context(CONTEXT_CONTRACT_ADDRESS, generate_fn_table, initialize: |_params: &CommonParams| 0, is_active: |_spec: &Spec| true);
 }
 
 fn generate_fn_table() -> SolFnTable {
     make_function_table!(EpochNumber, EpochHash)
 }
 
-group_impl_is_active!(|spec: &Spec| spec.cip64, EpochNumber,);
+group_impl_is_active!(|_spec: &Spec| true, EpochNumber,);
 
 group_impl_is_active!(|spec: &Spec| spec.cip133_core, EpochHash);
 

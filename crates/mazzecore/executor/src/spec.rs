@@ -8,7 +8,6 @@ use mazze_parameters::{
     block::{EVM_TRANSACTION_BLOCK_RATIO, EVM_TRANSACTION_GAS_RATIO},
     consensus::{
         CIP112_HEADER_CUSTOM_FIRST_ELEMENT,
-        DAO_VOTE_HEADER_CUSTOM_FIRST_ELEMENT,
         NEXT_HARDFORK_HEADER_CUSTOM_FIRST_ELEMENT, ONE_UMAZZE_IN_MAZZY,
     },
     consensus_internal::{
@@ -64,8 +63,6 @@ pub struct CommonParams {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsBlockNumber {
-    /// CIP-94: On-Chain DAO Vote for Chain Parameters
-    pub cip94n: BlockNumber,
     /// CIP-97: Clear Staking Lists
     pub cip97: BlockNumber,
     /// CIP-98: Fix BLOCKHASH Opcode Bug in eSpace
@@ -100,8 +97,6 @@ pub struct TransitionsBlockNumber {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsEpochHeight {
-    /// CIP-94: On-Chain DAO Vote for Chain Parameters
-    pub cip94h: BlockHeight,
     /// CIP-112: Fix Block Headers `custom` Field Serde
     pub cip112: BlockHeight,
     /// CIP-130: Aligning Gas Limit with Transaction Size
@@ -139,8 +134,6 @@ impl Default for CommonParams {
 impl CommonParams {
     pub fn spec(&self, number: BlockNumber, height: BlockHeight) -> Spec {
         let mut spec = Spec::genesis_spec();
-        spec.cip94 = number >= self.transition_numbers.cip94n;
-        spec.cip94_activation_block_number = self.transition_numbers.cip94n;
         spec.cip97 = number >= self.transition_numbers.cip97;
         spec.cip98 = number >= self.transition_numbers.cip98;
         spec.cip105 = number >= self.transition_numbers.cip105;
@@ -183,11 +176,7 @@ impl CommonParams {
     }
 
     pub fn custom_prefix(&self, height: BlockHeight) -> Option<Vec<Bytes>> {
-        if height >= self.transition_heights.cip94h
-            && height < self.transition_heights.cip112
-        {
-            Some(vec![DAO_VOTE_HEADER_CUSTOM_FIRST_ELEMENT.to_vec()])
-        } else if height >= self.transition_heights.cip112
+        if height >= self.transition_heights.cip112
             && height < self.transition_heights.cip1559
         {
             Some(vec![CIP112_HEADER_CUSTOM_FIRST_ELEMENT.to_vec()])

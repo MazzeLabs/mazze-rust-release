@@ -43,7 +43,6 @@ pub mod consensus {
 
     pub const ONE_GMAZZY_IN_MAZZY: u64 = 1_000_000_000;
 
-    pub const DAO_VOTE_HEADER_CUSTOM_FIRST_ELEMENT: [u8; 1] = [2];
     pub const CIP112_HEADER_CUSTOM_FIRST_ELEMENT: [u8; 1] = [3];
     pub const NEXT_HARDFORK_HEADER_CUSTOM_FIRST_ELEMENT: [u8; 1] = [4];
 }

@@ -1290,14 +1290,6 @@ impl Configuration {
             self.raw_conf.dao_vote_transition_number.unwrap_or(default_transition_time);
             params.transition_numbers => { cip97, cip98 }
         );
-        params.transition_numbers.cip94n = self
-            .raw_conf
-            .dao_vote_transition_number
-            .unwrap_or(non_genesis_default_transition_time);
-        params.transition_heights.cip94h = self
-            .raw_conf
-            .dao_vote_transition_height
-            .unwrap_or(non_genesis_default_transition_time);
         params.transition_numbers.cip105 = self
             .raw_conf
             .cip105_transition_number

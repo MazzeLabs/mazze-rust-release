@@ -132,10 +132,6 @@ pub struct Spec {
     pub wasm: Option<WasmCosts>,
     /// The magnification of gas storage occupying related operaions.
     pub evm_gas_ratio: usize,
-    /// CIP-94: On-chain Parameter DAO Vote
-    pub cip94: bool,
-    pub cip94_activation_block_number: u64,
-    pub params_dao_vote_period: u64,
     /// CIP-97: Remove staking list
     pub cip97: bool,
     /// CIP-98: Fix espace bug
@@ -293,10 +289,7 @@ impl Spec {
             kill_dust: CleanDustMode::Off,
             keep_unsigned_nonce: false,
             wasm: None,
-            cip94: true,
             evm_gas_ratio: 2,
-            cip94_activation_block_number: 0,
-            params_dao_vote_period: 0,
             cip97: true,
             cip98: true,
             cip105: true,

@@ -104,7 +104,6 @@ pub struct ProofOfWorkConfig {
     pub stratum_port: u16,
     pub stratum_secret: Option<H256>,
     pub pow_problem_window_size: usize,
-    pub cip86_height: u64,
 }
 
 impl ProofOfWorkConfig {
@@ -112,7 +111,6 @@ impl ProofOfWorkConfig {
         test_mode: bool, mining_type: &str, initial_difficulty: Option<u64>,
         stratum_listen_addr: String, stratum_port: u16,
         stratum_secret: Option<H256>, pow_problem_window_size: usize,
-        cip86_height: u64,
     ) -> Self {
         if test_mode {
             ProofOfWorkConfig {
@@ -124,7 +122,6 @@ impl ProofOfWorkConfig {
                 stratum_port,
                 stratum_secret,
                 pow_problem_window_size,
-                cip86_height,
             }
         } else {
             ProofOfWorkConfig {
@@ -136,20 +133,15 @@ impl ProofOfWorkConfig {
                 stratum_port,
                 stratum_secret,
                 pow_problem_window_size,
-                cip86_height,
             }
         }
     }
 
-    pub fn difficulty_adjustment_epoch_period(&self, cur_height: u64) -> u64 {
+    pub fn difficulty_adjustment_epoch_period(&self) -> u64 {
         if self.test_mode {
             20
         } else {
-            if cur_height > self.cip86_height {
-                DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD_CIP
-            } else {
-                DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD
-            }
+            DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD
         }
     }
 
@@ -329,8 +321,8 @@ where
     assert_ne!(epoch, 0);
     debug_assert!(
         epoch
-            == (epoch / pow_config.difficulty_adjustment_epoch_period(epoch))
-                * pow_config.difficulty_adjustment_epoch_period(epoch)
+            == (epoch / pow_config.difficulty_adjustment_epoch_period())
+                * pow_config.difficulty_adjustment_epoch_period()
     );
 
     let mut cur = cur_hash.clone();
@@ -340,7 +332,7 @@ where
     let mut min_time = 0;
 
     // Collect the total block count and the timespan in the current period
-    for _ in 0..pow_config.difficulty_adjustment_epoch_period(epoch) {
+    for _ in 0..pow_config.difficulty_adjustment_epoch_period() {
         block_count += num_blocks_in_epoch(&cur) as u64;
         cur = cur_header.parent_hash().clone();
         cur_header = data_man.block_header_by_hash(&cur).unwrap();
@@ -358,11 +350,7 @@ where
     // d_{t+1}=0.8*d_t+0.2*d'
     // where d_t is the difficulty of the current period, and d' is the
     // expected difficulty to reach the ideal block_generation_period.
-    let mut target_diff = if epoch < pow_config.cip86_height {
-        expected_diff
-    } else {
-        cur_difficulty / 5 * 4 + expected_diff / 5
-    };
+    let mut target_diff = cur_difficulty / 5 * 4 + expected_diff / 5;
 
     let (lower, upper) = pow_config.get_adjustment_bound(cur_difficulty);
     if target_diff > upper {

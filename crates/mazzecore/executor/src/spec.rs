@@ -104,8 +104,6 @@ pub struct TransitionsBlockNumber {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsEpochHeight {
-    /// CIP-86: Update Difficulty Adjustment Algorithm
-    pub cip86: BlockHeight,
     /// CIP-90: Introduce a Fully EVM-Compatible Space
     pub cip90a: BlockHeight,
     /// CIP-94: On-Chain DAO Vote for Chain Parameters

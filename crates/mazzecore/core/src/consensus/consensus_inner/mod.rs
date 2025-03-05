@@ -586,12 +586,9 @@ impl ConsensusGraphNode {
 
 impl ConsensusGraphInner {
     pub fn with_era_genesis(
-        pow_config: ProofOfWorkConfig,
-        pow: Arc<PowComputer>,
-        data_man: Arc<BlockDataManager>,
-        inner_conf: ConsensusInnerConfig,
-        cur_era_genesis_block_hash: &H256,
-        cur_era_stable_block_hash: &H256,
+        pow_config: ProofOfWorkConfig, pow: Arc<PowComputer>,
+        data_man: Arc<BlockDataManager>, inner_conf: ConsensusInnerConfig,
+        cur_era_genesis_block_hash: &H256, cur_era_stable_block_hash: &H256,
     ) -> Self {
         let genesis_block_header = data_man
             .block_header_by_hash(cur_era_genesis_block_hash)
@@ -1948,21 +1945,13 @@ impl ConsensusGraphInner {
         let parent_arena_index =
             *self.hash_to_arena_indices.get(parent_hash).unwrap();
         let parent_epoch = self.arena[parent_arena_index].height;
-        if parent_epoch
-            < self
-                .pow_config
-                .difficulty_adjustment_epoch_period(parent_epoch)
-        {
+        if parent_epoch < self.pow_config.difficulty_adjustment_epoch_period() {
             // Use initial difficulty for early epochs
             self.pow_config.initial_difficulty.into()
         } else {
             let last_period_upper = (parent_epoch
-                / self
-                    .pow_config
-                    .difficulty_adjustment_epoch_period(parent_epoch))
-                * self
-                    .pow_config
-                    .difficulty_adjustment_epoch_period(parent_epoch);
+                / self.pow_config.difficulty_adjustment_epoch_period())
+                * self.pow_config.difficulty_adjustment_epoch_period();
             if last_period_upper != parent_epoch {
                 self.arena[parent_arena_index].difficulty
             } else {
@@ -1997,9 +1986,8 @@ impl ConsensusGraphInner {
             // state root and do not update the main chain.
             self.current_difficulty = self.pow_config.initial_difficulty.into();
         } else if epoch
-            == (epoch
-                / self.pow_config.difficulty_adjustment_epoch_period(epoch))
-                * self.pow_config.difficulty_adjustment_epoch_period(epoch)
+            == (epoch / self.pow_config.difficulty_adjustment_epoch_period())
+                * self.pow_config.difficulty_adjustment_epoch_period()
         {
             self.current_difficulty = target_difficulty(
                 &self.data_man,

@@ -702,7 +702,6 @@ impl Configuration {
             self.raw_conf.stratum_port,
             stratum_secret,
             self.raw_conf.pow_problem_window_size,
-            self.common_params().transition_heights.cip86,
         )
     }
 
@@ -1296,10 +1295,6 @@ impl Configuration {
         set_conf!(
             self.raw_conf.hydra_transition_number.unwrap_or(default_transition_time);
             params.transition_numbers => { cip92 }
-        );
-        set_conf!(
-            self.raw_conf.hydra_transition_height.unwrap_or(default_transition_time);
-            params.transition_heights => { cip86 }
         );
 
         params.transition_heights.cip90a = self

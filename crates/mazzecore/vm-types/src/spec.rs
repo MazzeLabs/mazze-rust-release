@@ -132,8 +132,6 @@ pub struct Spec {
     pub wasm: Option<WasmCosts>,
     /// The magnification of gas storage occupying related operaions.
     pub evm_gas_ratio: usize,
-    /// CIP-71: Disable anti-reentrancy
-    pub cip71: bool,
     /// CIP-78: Correct `is_sponsored` fields in receipt
     pub cip78a: bool,
     /// CIP-78: Correct `is_sponsored` fields in receipt
@@ -301,7 +299,6 @@ impl Spec {
             kill_dust: CleanDustMode::Off,
             keep_unsigned_nonce: false,
             wasm: None,
-            cip71: true,
             cip90: true,
             cip78a: true,
             cip78b: true,

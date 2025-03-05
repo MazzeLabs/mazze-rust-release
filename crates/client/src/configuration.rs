@@ -1296,7 +1296,7 @@ impl Configuration {
         //
         set_conf!(
             self.raw_conf.hydra_transition_number.unwrap_or(default_transition_time);
-            params.transition_numbers => { cip71, cip78a, cip92 }
+            params.transition_numbers => { cip78a, cip92 }
         );
         set_conf!(
             self.raw_conf.hydra_transition_height.unwrap_or(default_transition_time);

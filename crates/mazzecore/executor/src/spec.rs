@@ -64,8 +64,6 @@ pub struct CommonParams {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsBlockNumber {
-    /// CIP-71: Disable Anti-Reentrancy
-    pub cip71: BlockNumber,
     /// CIP-78: Correct `is_sponsored` Fields in Receipt
     pub cip78a: BlockNumber,
     pub cip78b: BlockNumber,
@@ -154,7 +152,6 @@ impl Default for CommonParams {
 impl CommonParams {
     pub fn spec(&self, number: BlockNumber, height: BlockHeight) -> Spec {
         let mut spec = Spec::genesis_spec();
-        spec.cip71 = number >= self.transition_numbers.cip71;
         spec.cip90 = number >= self.transition_numbers.cip90b;
         spec.cip78a = number >= self.transition_numbers.cip78a;
         spec.cip78b = number >= self.transition_numbers.cip78b;

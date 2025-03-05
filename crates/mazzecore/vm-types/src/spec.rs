@@ -132,8 +132,7 @@ pub struct Spec {
     pub wasm: Option<WasmCosts>,
     /// The magnification of gas storage occupying related operations.
     pub evm_gas_ratio: usize,
-    /// CIP-105: Minimal DAO votes requirement based on PoS votes.
-    pub cip105: bool,
+
     pub cip_sigma_fix: bool,
     /// CIP-107: Reduce storage collateral refund.
     pub cip107: bool,
@@ -286,7 +285,6 @@ impl Spec {
             keep_unsigned_nonce: false,
             wasm: None,
             evm_gas_ratio: 2,
-            cip105: true,
             cip_sigma_fix: true,
             cip107: true,
             cip118: true,

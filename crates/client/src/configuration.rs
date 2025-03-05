@@ -145,9 +145,6 @@ build_config! {
         (initial_difficulty, (Option<u64>), None)
         (hydra_transition_number, (Option<u64>), None)
         (hydra_transition_height, (Option<u64>), None)
-        (dao_vote_transition_number, (Option<u64>), None)
-        (dao_vote_transition_height, (Option<u64>), None)
-        (cip105_transition_number, (Option<u64>), None)
         (sigma_fix_transition_number, (Option<u64>), None)
         (cip107_transition_number, (Option<u64>), None)
         (cip112_transition_height, (Option<u64>), None)
@@ -1278,15 +1275,6 @@ impl Configuration {
         base_block_rewards
             .insert(0, INITIAL_BASE_MINING_REWARD_IN_UMAZZE.into());
         params.base_block_rewards = base_block_rewards;
-
-        //
-        // DAO vote hardfork (V2.1)
-        //
-        params.transition_numbers.cip105 = self
-            .raw_conf
-            .cip105_transition_number
-            .or(self.raw_conf.dao_vote_transition_number)
-            .unwrap_or(default_transition_time);
 
         //
         // Sigma protocol fix hardfork (V2.2)

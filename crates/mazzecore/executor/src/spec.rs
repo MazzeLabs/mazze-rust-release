@@ -64,8 +64,6 @@ pub struct CommonParams {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsBlockNumber {
-    /// CIP-92: Enable Blake2F Builtin Function
-    pub cip92: BlockNumber,
     /// CIP-94: On-Chain DAO Vote for Chain Parameters
     pub cip94n: BlockNumber,
     /// CIP-97: Clear Staking Lists

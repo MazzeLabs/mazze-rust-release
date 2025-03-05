@@ -1284,14 +1284,6 @@ impl Configuration {
         params.base_block_rewards = base_block_rewards;
 
         //
-        // Hydra hardfork (V2.0)
-        //
-        set_conf!(
-            self.raw_conf.hydra_transition_number.unwrap_or(default_transition_time);
-            params.transition_numbers => { cip92 }
-        );
-
-        //
         // DAO vote hardfork (V2.1)
         //
         set_conf!(

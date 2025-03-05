@@ -8,7 +8,7 @@ use crate::{
     sync::{Error as SyncError, ErrorKind as SyncErrorKind},
 };
 use mazze_executor::{
-    executive::gas_required_for, machine::Machine, spec::TransitionsEpochHeight,
+    machine::Machine, spec::TransitionsEpochHeight,
 };
 use mazze_parameters::{block::*, consensus_internal::ELASTICITY_MULTIPLIER};
 use mazze_storage::{
@@ -740,7 +740,6 @@ impl VerificationConfig {
         // Each constraint depends on a mode or a CIP should be
         // implemented in a seperated function.
         // ******************************************
-        let cip76 = height >= transitions.cip76;
         let cip90a = height >= transitions.cip90a;
         let cip130 = height >= transitions.cip130;
         let cip1559 = height >= transitions.cip1559;
@@ -762,7 +761,6 @@ impl VerificationConfig {
             bail!(TransactionError::FutureTransactionType)
         }
 
-        Self::check_gas_limit(tx, cip76, &mode)?;
         Self::check_gas_limit_with_calldata(tx, cip130)?;
         Ok(())
     }
@@ -795,39 +793,6 @@ impl VerificationConfig {
             VerifyTxMode::Local(MaybeLater, _spec) => true,
             VerifyTxMode::Remote => cip1559,
         }
-    }
-
-    /// Check transaction intrinsic gas. Influenced by CIP-76.
-    fn check_gas_limit(
-        tx: &TransactionWithSignature, cip76: bool, mode: &VerifyTxMode,
-    ) -> Result<(), TransactionError> {
-        const GENESIS_SPEC: Spec = Spec::genesis_spec();
-        let maybe_spec = if let VerifyTxMode::Local(_, spec) = mode {
-            // In local mode, we check gas limit as usual.
-            Some(*spec)
-        } else if !cip76 {
-            // In remote mode, we only check gas limit before cip-76 activated.
-            Some(&GENESIS_SPEC)
-        } else {
-            None
-        };
-
-        if let Some(spec) = maybe_spec {
-            let tx_intrinsic_gas = gas_required_for(
-                *tx.action() == Action::Create,
-                &tx.data(),
-                tx.access_list(),
-                &spec,
-            );
-            if *tx.gas() < (tx_intrinsic_gas as usize).into() {
-                bail!(TransactionError::NotEnoughBaseGas {
-                    required: tx_intrinsic_gas.into(),
-                    got: *tx.gas()
-                });
-            }
-        }
-
-        Ok(())
     }
 
     fn check_gas_limit_with_calldata(

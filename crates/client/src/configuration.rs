@@ -1300,7 +1300,7 @@ impl Configuration {
         );
         set_conf!(
             self.raw_conf.hydra_transition_height.unwrap_or(default_transition_time);
-            params.transition_heights => { cip76, cip86 }
+            params.transition_heights => { cip86 }
         );
 
         params.transition_numbers.cip78b = self

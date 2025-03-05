@@ -107,8 +107,6 @@ pub struct TransitionsBlockNumber {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsEpochHeight {
-    /// CIP-76: Remove VM-Related Constraints in Syncing Blocks
-    pub cip76: BlockHeight,
     /// CIP-86: Update Difficulty Adjustment Algorithm
     pub cip86: BlockHeight,
     /// CIP-90: Introduce a Fully EVM-Compatible Space

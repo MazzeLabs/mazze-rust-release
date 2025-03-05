@@ -116,7 +116,7 @@ impl<'a> Context<'a> {
     }
 
     fn blockhash_from_env(&self, number: &U256) -> H256 {
-        if self.space == Space::Ethereum && self.spec.cip98 {
+        if self.space == Space::Ethereum {
             return if U256::from(self.env().epoch_height) == number + 1 {
                 self.env().last_hash.clone()
             } else {

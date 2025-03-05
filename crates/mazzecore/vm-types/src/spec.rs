@@ -130,10 +130,8 @@ pub struct Spec {
     pub keep_unsigned_nonce: bool,
     /// Wasm extra specs, if wasm activated
     pub wasm: Option<WasmCosts>,
-    /// The magnification of gas storage occupying related operaions.
+    /// The magnification of gas storage occupying related operations.
     pub evm_gas_ratio: usize,
-    /// CIP-98: Fix espace bug
-    pub cip98: bool,
     /// CIP-105: Minimal DAO votes requirement based on PoS votes.
     pub cip105: bool,
     pub cip_sigma_fix: bool,
@@ -288,7 +286,6 @@ impl Spec {
             keep_unsigned_nonce: false,
             wasm: None,
             evm_gas_ratio: 2,
-            cip98: true,
             cip105: true,
             cip_sigma_fix: true,
             cip107: true,

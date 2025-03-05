@@ -63,8 +63,6 @@ pub struct CommonParams {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsBlockNumber {
-    /// CIP-98: Fix BLOCKHASH Opcode Bug in eSpace
-    pub cip98: BlockNumber,
     /// CIP-105: Minimal DAO Vote Count Based on PoS Staking
     pub cip105: BlockNumber,
     /// CIP-107: DAO-Adjustable Burn of Storage Collateral
@@ -132,7 +130,6 @@ impl Default for CommonParams {
 impl CommonParams {
     pub fn spec(&self, number: BlockNumber, height: BlockHeight) -> Spec {
         let mut spec = Spec::genesis_spec();
-        spec.cip98 = number >= self.transition_numbers.cip98;
         spec.cip105 = number >= self.transition_numbers.cip105;
         spec.cip_sigma_fix = number >= self.transition_numbers.cip_sigma_fix;
         spec.cip107 = number >= self.transition_numbers.cip107;

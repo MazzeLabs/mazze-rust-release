@@ -1285,10 +1285,6 @@ impl Configuration {
         //
         // DAO vote hardfork (V2.1)
         //
-        set_conf!(
-            self.raw_conf.dao_vote_transition_number.unwrap_or(default_transition_time);
-            params.transition_numbers => { cip98 }
-        );
         params.transition_numbers.cip105 = self
             .raw_conf
             .cip105_transition_number

@@ -1277,7 +1277,6 @@ impl Configuration {
                 }
             };
 
-
         let mut base_block_rewards = BTreeMap::new();
         base_block_rewards
             .insert(0, INITIAL_BASE_MINING_REWARD_IN_UMAZZE.into());
@@ -1288,7 +1287,7 @@ impl Configuration {
         //
         set_conf!(
             self.raw_conf.dao_vote_transition_number.unwrap_or(default_transition_time);
-            params.transition_numbers => { cip97, cip98 }
+            params.transition_numbers => { cip98 }
         );
         params.transition_numbers.cip105 = self
             .raw_conf

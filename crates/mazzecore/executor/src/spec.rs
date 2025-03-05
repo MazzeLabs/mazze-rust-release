@@ -65,8 +65,7 @@ pub struct CommonParams {
 pub struct TransitionsBlockNumber {
     /// CIP-107: DAO-Adjustable Burn of Storage Collateral
     pub cip107: BlockNumber,
-    /// A security fix without a publicly submitted CIP
-    pub cip_sigma_fix: BlockNumber,
+
     /// CIP-118: Query Unused Storage Points in Internal Contract
     pub cip118: BlockNumber,
     /// CIP-119: PUSH0 instruction
@@ -128,7 +127,6 @@ impl Default for CommonParams {
 impl CommonParams {
     pub fn spec(&self, number: BlockNumber, height: BlockHeight) -> Spec {
         let mut spec = Spec::genesis_spec();
-        spec.cip_sigma_fix = number >= self.transition_numbers.cip_sigma_fix;
         spec.cip107 = number >= self.transition_numbers.cip107;
         spec.cip118 = number >= self.transition_numbers.cip118;
         spec.cip119 = number >= self.transition_numbers.cip119;

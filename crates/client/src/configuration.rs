@@ -145,7 +145,6 @@ build_config! {
         (initial_difficulty, (Option<u64>), None)
         (hydra_transition_number, (Option<u64>), None)
         (hydra_transition_height, (Option<u64>), None)
-        (sigma_fix_transition_number, (Option<u64>), None)
         (cip107_transition_number, (Option<u64>), None)
         (cip112_transition_height, (Option<u64>), None)
         (cip118_transition_number, (Option<u64>), None)
@@ -1275,14 +1274,6 @@ impl Configuration {
         base_block_rewards
             .insert(0, INITIAL_BASE_MINING_REWARD_IN_UMAZZE.into());
         params.base_block_rewards = base_block_rewards;
-
-        //
-        // Sigma protocol fix hardfork (V2.2)
-        //
-        params.transition_numbers.cip_sigma_fix = self
-            .raw_conf
-            .sigma_fix_transition_number
-            .unwrap_or(default_transition_time);
 
         //
         // Burn collateral hardfork (V2.3)

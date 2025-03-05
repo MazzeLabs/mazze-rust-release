@@ -133,7 +133,6 @@ pub struct Spec {
     /// The magnification of gas storage occupying related operations.
     pub evm_gas_ratio: usize,
 
-    pub cip_sigma_fix: bool,
     /// CIP-107: Reduce storage collateral refund.
     pub cip107: bool,
     /// CIP-118: Query Unused Storage Points in Internal Contract
@@ -285,7 +284,6 @@ impl Spec {
             keep_unsigned_nonce: false,
             wasm: None,
             evm_gas_ratio: 2,
-            cip_sigma_fix: true,
             cip107: true,
             cip118: true,
             cip119: true,

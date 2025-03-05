@@ -143,7 +143,6 @@ build_config! {
         (genesis_accounts, (Option<String>), None)
         (genesis_secrets, (Option<String>), None)
         (initial_difficulty, (Option<u64>), None)
-        (tanzanite_transition_height, (u64), TANZANITE_HEIGHT)
         (hydra_transition_number, (Option<u64>), None)
         (hydra_transition_height, (Option<u64>), None)
         (dao_vote_transition_number, (Option<u64>), None)
@@ -1287,18 +1286,10 @@ impl Configuration {
                 }
             };
 
-        //
-        // Tanzanite hardfork
-        //
-        params.transition_heights.cip40 =
-            self.raw_conf.tanzanite_transition_height;
+
         let mut base_block_rewards = BTreeMap::new();
         base_block_rewards
             .insert(0, INITIAL_BASE_MINING_REWARD_IN_UMAZZE.into());
-        base_block_rewards.insert(
-            params.transition_heights.cip40,
-            MINING_REWARD_TANZANITE_IN_UMAZZE.into(),
-        );
         params.base_block_rewards = base_block_rewards;
 
         //

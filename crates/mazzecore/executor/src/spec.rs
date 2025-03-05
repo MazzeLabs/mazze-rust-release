@@ -10,7 +10,6 @@ use mazze_parameters::{
         CIP112_HEADER_CUSTOM_FIRST_ELEMENT,
         DAO_VOTE_HEADER_CUSTOM_FIRST_ELEMENT,
         NEXT_HARDFORK_HEADER_CUSTOM_FIRST_ELEMENT, ONE_UMAZZE_IN_MAZZY,
-        TANZANITE_HEADER_CUSTOM_FIRST_ELEMENT,
     },
     consensus_internal::{
         INITIAL_BASE_MINING_REWARD_IN_UMAZZE, OUTLIER_PENALTY_RATIO,
@@ -115,8 +114,6 @@ pub struct TransitionsBlockNumber {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsEpochHeight {
-    /// CIP-40: Reduce Block Base Reward to 2 MAZZE
-    pub cip40: BlockHeight,
     /// CIP-76: Remove VM-Related Constraints in Syncing Blocks
     pub cip76: BlockHeight,
     /// CIP-86: Update Difficulty Adjustment Algorithm
@@ -211,11 +208,7 @@ impl CommonParams {
     }
 
     pub fn custom_prefix(&self, height: BlockHeight) -> Option<Vec<Bytes>> {
-        if height >= self.transition_heights.cip40
-            && height < self.transition_heights.cip94h
-        {
-            Some(vec![TANZANITE_HEADER_CUSTOM_FIRST_ELEMENT.to_vec()])
-        } else if height >= self.transition_heights.cip94h
+        if height >= self.transition_heights.cip94h
             && height < self.transition_heights.cip112
         {
             Some(vec![DAO_VOTE_HEADER_CUSTOM_FIRST_ELEMENT.to_vec()])

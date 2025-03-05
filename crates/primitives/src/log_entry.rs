@@ -45,18 +45,9 @@ impl rlp::Encodable for LogEntry {
     }
 }
 
-// We want to remain backward-compatible with pre-CIP90 entries in the DB.
-// However, rlp_derive::RlpDecodable is not backward-compatible when adding new
-// fields, so we implement backward-compatible decoding manually.
 impl rlp::Decodable for LogEntry {
     fn decode(rlp: &rlp::Rlp) -> Result<Self, rlp::DecoderError> {
         match rlp.item_count()? {
-            3 => Ok(LogEntry {
-                address: rlp.val_at(0)?,
-                topics: rlp.list_at(1)?,
-                data: rlp.val_at(2)?,
-                space: Space::Native,
-            }),
             4 => Ok(LogEntry {
                 address: rlp.val_at(0)?,
                 topics: rlp.list_at(1)?,

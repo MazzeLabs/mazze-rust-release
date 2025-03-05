@@ -64,8 +64,6 @@ pub struct CommonParams {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsBlockNumber {
-    /// CIP-90: Introduce a Fully EVM-Compatible Space
-    pub cip90b: BlockNumber,
     /// CIP-92: Enable Blake2F Builtin Function
     pub cip92: BlockNumber,
     /// CIP-94: On-Chain DAO Vote for Chain Parameters
@@ -104,8 +102,6 @@ pub struct TransitionsBlockNumber {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsEpochHeight {
-    /// CIP-90: Introduce a Fully EVM-Compatible Space
-    pub cip90a: BlockHeight,
     /// CIP-94: On-Chain DAO Vote for Chain Parameters
     pub cip94h: BlockHeight,
     /// CIP-112: Fix Block Headers `custom` Field Serde
@@ -145,7 +141,6 @@ impl Default for CommonParams {
 impl CommonParams {
     pub fn spec(&self, number: BlockNumber, height: BlockHeight) -> Spec {
         let mut spec = Spec::genesis_spec();
-        spec.cip90 = number >= self.transition_numbers.cip90b;
         spec.cip94 = number >= self.transition_numbers.cip94n;
         spec.cip94_activation_block_number = self.transition_numbers.cip94n;
         spec.cip97 = number >= self.transition_numbers.cip97;

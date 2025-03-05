@@ -57,7 +57,6 @@ impl StateManager {
             Some(SingleMptStorageManager::new_arc(
                 conf.path_storage_dir.join("single_mpt"),
                 conf.single_mpt_space,
-                conf.full_state_start_height().expect("enabled"),
                 conf.single_mpt_cache_start_size,
                 conf.single_mpt_cache_size,
                 conf.single_mpt_slab_idle_size,
@@ -797,8 +796,7 @@ impl StateManagerTrait for StateManager {
         self: &Arc<Self>, parent_epoch_id: StateIndex,
         recover_mpt_during_construct_main_state: bool,
     ) -> Result<Option<Box<dyn StateTrait>>> {
-        let mut parent_epoch = parent_epoch_id.epoch_id;
-        let parent_height = parent_epoch_id.maybe_height;
+        let parent_epoch = parent_epoch_id.epoch_id;
         let state = self.get_state_for_next_epoch_inner(
             parent_epoch_id,
             false,
@@ -812,24 +810,6 @@ impl StateManagerTrait for StateManager {
         }
         let single_mpt_storage_manager =
             self.single_mpt_storage_manager.as_ref().unwrap();
-        if let Some(parent_height) = parent_height {
-            trace!(
-                "get_state_for_next_epoch: parent={}, available={}",
-                parent_height,
-                single_mpt_storage_manager.available_height
-            );
-            if single_mpt_storage_manager.available_height > parent_height {
-                return Ok(Some(Box::new(state.unwrap())));
-            } else if single_mpt_storage_manager.available_height
-                == parent_height
-            {
-                // For the first available single_mpt state, we read the genesis
-                // block state as the parent state to continue execution.
-                // This is only needed for tests because there is no eSpace
-                // state entries for Mazze Mainnet.
-                parent_epoch = *single_mpt_storage_manager.genesis_hash.lock();
-            }
-        }
         let single_mpt_state =
             single_mpt_storage_manager.get_state_by_epoch(parent_epoch)?;
         if single_mpt_state.is_none() {

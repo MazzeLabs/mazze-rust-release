@@ -147,8 +147,6 @@ build_config! {
         (hydra_transition_height, (Option<u64>), None)
         (dao_vote_transition_number, (Option<u64>), None)
         (dao_vote_transition_height, (Option<u64>), None)
-        (cip90_transition_height,(Option<u64>),None)
-        (cip90_transition_number,(Option<u64>),None)
         (cip105_transition_number, (Option<u64>), None)
         (sigma_fix_transition_number, (Option<u64>), None)
         (cip107_transition_number, (Option<u64>), None)
@@ -793,10 +791,6 @@ impl Configuration {
                 }
             },
             single_mpt_space: self.raw_conf.single_mpt_space.clone(),
-            cip90a: self
-                .raw_conf
-                .cip90_transition_height
-                .unwrap_or(self.raw_conf.hydra_transition_height.unwrap_or(0)),
             keep_snapshot_before_stable_checkpoint: self
                 .raw_conf
                 .keep_snapshot_before_stable_checkpoint,
@@ -1296,17 +1290,6 @@ impl Configuration {
             self.raw_conf.hydra_transition_number.unwrap_or(default_transition_time);
             params.transition_numbers => { cip92 }
         );
-
-        params.transition_heights.cip90a = self
-            .raw_conf
-            .cip90_transition_height
-            .or(self.raw_conf.hydra_transition_height)
-            .unwrap_or(default_transition_time);
-        params.transition_numbers.cip90b = self
-            .raw_conf
-            .cip90_transition_number
-            .or(self.raw_conf.hydra_transition_number)
-            .unwrap_or(default_transition_time);
 
         //
         // DAO vote hardfork (V2.1)

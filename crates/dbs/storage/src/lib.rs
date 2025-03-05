@@ -124,7 +124,6 @@ pub struct StorageConfiguration {
     pub max_open_mpt_count: u32,
     pub enable_single_mpt_storage: bool,
     pub single_mpt_space: Option<Space>,
-    pub cip90a: u64,
     pub keep_snapshot_before_stable_checkpoint: bool,
     pub use_isolated_db_for_mpt_table: bool,
     pub use_isolated_db_for_mpt_table_height: Option<u64>,
@@ -171,26 +170,10 @@ impl StorageConfiguration {
             max_open_mpt_count: defaults::DEFAULT_MAX_OPEN_MPT,
             enable_single_mpt_storage: false,
             single_mpt_space: None,
-            cip90a: 0,
             keep_snapshot_before_stable_checkpoint: true,
             use_isolated_db_for_mpt_table: false,
             use_isolated_db_for_mpt_table_height: None,
             keep_era_genesis_snapshot: false,
-        }
-    }
-
-    pub fn full_state_start_height(&self) -> Option<u64> {
-        if self.enable_single_mpt_storage {
-            let height = if self.single_mpt_space == Some(Space::Ethereum) {
-                // The eSpace state is only available after cip90 is
-                // enabled.
-                self.cip90a
-            } else {
-                0
-            };
-            Some(height)
-        } else {
-            None
         }
     }
 }

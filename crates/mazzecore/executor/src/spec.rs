@@ -64,9 +64,6 @@ pub struct CommonParams {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsBlockNumber {
-    /// CIP-43: Introduce Finality Through Staking Vote
-    pub cip43a: BlockNumber,
-    pub cip43b: BlockNumber,
     /// CIP-64: Get Current Epoch Number via Internal Contract
     pub cip64: BlockNumber,
     /// CIP-71: Disable Anti-Reentrancy

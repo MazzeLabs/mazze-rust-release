@@ -147,7 +147,6 @@ build_config! {
         (hydra_transition_height, (Option<u64>), None)
         (dao_vote_transition_number, (Option<u64>), None)
         (dao_vote_transition_height, (Option<u64>), None)
-        (cip43_init_end_number, (Option<u64>), None)
         (cip78_patch_transition_number,(Option<u64>),None)
         (cip90_transition_height,(Option<u64>),None)
         (cip90_transition_number,(Option<u64>),None)
@@ -1297,20 +1296,13 @@ impl Configuration {
         //
         set_conf!(
             self.raw_conf.hydra_transition_number.unwrap_or(default_transition_time);
-            params.transition_numbers => { cip43a, cip64, cip71, cip78a, cip92 }
+            params.transition_numbers => { cip64, cip71, cip78a, cip92 }
         );
         set_conf!(
             self.raw_conf.hydra_transition_height.unwrap_or(default_transition_time);
             params.transition_heights => { cip76, cip86 }
         );
-        params.transition_numbers.cip43b = self
-            .raw_conf
-            .cip43_init_end_number
-            .unwrap_or(if self.is_test_or_dev_mode() {
-                u64::MAX
-            } else {
-                params.transition_numbers.cip43a
-            });
+
         params.transition_numbers.cip78b = self
             .raw_conf
             .cip78_patch_transition_number

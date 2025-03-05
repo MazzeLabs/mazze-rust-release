@@ -7,9 +7,7 @@ use crate::{
     pow::{self, PowComputer},
     sync::{Error as SyncError, ErrorKind as SyncErrorKind},
 };
-use mazze_executor::{
-    machine::Machine, spec::TransitionsEpochHeight,
-};
+use mazze_executor::{machine::Machine, spec::TransitionsEpochHeight};
 use mazze_parameters::{block::*, consensus_internal::ELASTICITY_MULTIPLIER};
 use mazze_storage::{
     into_simple_mpt_key, make_simple_mpt, simple_mpt_merkle_root,

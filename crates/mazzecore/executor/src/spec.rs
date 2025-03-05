@@ -64,9 +64,6 @@ pub struct CommonParams {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsBlockNumber {
-    /// CIP-78: Correct `is_sponsored` Fields in Receipt
-    pub cip78a: BlockNumber,
-    pub cip78b: BlockNumber,
     /// CIP-90: Introduce a Fully EVM-Compatible Space
     pub cip90b: BlockNumber,
     /// CIP-92: Enable Blake2F Builtin Function
@@ -151,8 +148,6 @@ impl CommonParams {
     pub fn spec(&self, number: BlockNumber, height: BlockHeight) -> Spec {
         let mut spec = Spec::genesis_spec();
         spec.cip90 = number >= self.transition_numbers.cip90b;
-        spec.cip78a = number >= self.transition_numbers.cip78a;
-        spec.cip78b = number >= self.transition_numbers.cip78b;
         spec.cip94 = number >= self.transition_numbers.cip94n;
         spec.cip94_activation_block_number = self.transition_numbers.cip94n;
         spec.cip97 = number >= self.transition_numbers.cip97;

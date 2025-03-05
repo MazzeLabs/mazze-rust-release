@@ -579,7 +579,6 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
                     cost,
                     tx_substate,
                     ext_result,
-                    spec,
                 );
 
                 if r.apply_state {

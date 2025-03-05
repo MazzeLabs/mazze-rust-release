@@ -54,8 +54,6 @@ pub(super) struct CostInfo {
     pub gas_sponsored: bool,
     /// Transaction's collateral is sponsored
     pub storage_sponsored: bool,
-    /// Transaction's gas is in the sponsor whitelist
-    pub storage_sponsor_eligible: bool,
 }
 
 impl<'a, O: ExecutiveObserver> FreshExecutive<'a, O> {
@@ -249,7 +247,6 @@ impl<'a, O: ExecutiveObserver> FreshExecutive<'a, O> {
                 total_cost: sender_cost,
                 gas_sponsored: false,
                 storage_sponsored: false,
-                storage_sponsor_eligible: false,
             }));
         }
 
@@ -362,10 +359,6 @@ impl<'a, O: ExecutiveObserver> FreshExecutive<'a, O> {
             total_cost,
             gas_sponsored,
             storage_sponsored,
-            // Only for backward compatible for a early bug.
-            // The receipt reported `storage_sponsor_eligible` instead of
-            // `storage_sponsored`.
-            storage_sponsor_eligible,
         }));
     }
 }

@@ -132,10 +132,6 @@ pub struct Spec {
     pub wasm: Option<WasmCosts>,
     /// The magnification of gas storage occupying related operaions.
     pub evm_gas_ratio: usize,
-    /// CIP-78: Correct `is_sponsored` fields in receipt
-    pub cip78a: bool,
-    /// CIP-78: Correct `is_sponsored` fields in receipt
-    pub cip78b: bool,
     /// CIP-90: A Space that Fully EVM Compatible
     pub cip90: bool,
     /// CIP-94: On-chain Parameter DAO Vote
@@ -300,8 +296,6 @@ impl Spec {
             keep_unsigned_nonce: false,
             wasm: None,
             cip90: true,
-            cip78a: true,
-            cip78b: true,
             cip94: true,
             evm_gas_ratio: 2,
             cip94_activation_block_number: 0,

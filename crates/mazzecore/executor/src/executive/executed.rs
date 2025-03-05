@@ -82,12 +82,8 @@ impl Executed {
         } else {
             actual_gas_cost / cost.gas_price
         };
-        let mut gas_sponsor_paid = cost.gas_sponsored;
-        let mut storage_sponsor_paid = cost.storage_sponsored;
-        if !spec.cip78b {
-            gas_sponsor_paid = false;
-            storage_sponsor_paid = false;
-        }
+        let gas_sponsor_paid = cost.gas_sponsored;
+        let storage_sponsor_paid = cost.storage_sponsored;
 
         let burnt_fee = spec.cip1559.then(|| {
             let target_burnt = tx.gas().saturating_mul(cost.burnt_gas_price);
@@ -115,13 +111,9 @@ impl Executed {
         tx: &TransactionWithSignature, cost: CostInfo, ext_result: ExecutedExt,
         spec: &Spec,
     ) -> Self {
-        let mut storage_sponsor_paid = cost.storage_sponsored;
+        let storage_sponsor_paid = cost.storage_sponsored;
         let mut gas_sponsor_paid = cost.gas_sponsored;
 
-        if !spec.cip78b {
-            gas_sponsor_paid = false;
-            storage_sponsor_paid = false;
-        }
         if spec.cip145 {
             gas_sponsor_paid = false;
         }
@@ -151,7 +143,7 @@ impl Executed {
 
     pub(super) fn from_executive_return(
         r: &ExecutiveReturn, refund_info: RefundInfo, cost: CostInfo,
-        substate: Substate, ext_result: ExecutedExt, spec: &Spec,
+        substate: Substate, ext_result: ExecutedExt,
     ) -> Self {
         let output = r.return_data.to_vec();
 
@@ -171,14 +163,10 @@ impl Executed {
             burnt_fees_value: burnt_fee,
             ..
         } = refund_info;
-        let mut storage_sponsor_paid = if spec.cip78a {
-            cost.storage_sponsored
-        } else {
-            cost.storage_sponsor_eligible
-        };
+        let mut storage_sponsor_paid = cost.storage_sponsored;
 
         let mut gas_sponsor_paid = cost.gas_sponsored;
-        if !r.apply_state && !spec.cip78b {
+        if !r.apply_state {
             gas_sponsor_paid = false;
             storage_sponsor_paid = false;
         }

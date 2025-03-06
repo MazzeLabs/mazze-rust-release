@@ -7,7 +7,6 @@ use mazze_internal_common::{ChainIdParams, ChainIdParamsInner};
 use mazze_parameters::{
     block::{EVM_TRANSACTION_BLOCK_RATIO, EVM_TRANSACTION_GAS_RATIO},
     consensus::{
-        CIP112_HEADER_CUSTOM_FIRST_ELEMENT,
         NEXT_HARDFORK_HEADER_CUSTOM_FIRST_ELEMENT, ONE_UMAZZE_IN_MAZZY,
     },
     consensus_internal::{
@@ -87,8 +86,6 @@ pub struct TransitionsBlockNumber {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsEpochHeight {
-    /// CIP-112: Fix Block Headers `custom` Field Serde
-    pub cip112: BlockHeight,
     /// CIP-130: Aligning Gas Limit with Transaction Size
     pub cip130: BlockHeight,
     /// CIP-133: Enhanced Block Hash Query
@@ -161,11 +158,7 @@ impl CommonParams {
     }
 
     pub fn custom_prefix(&self, height: BlockHeight) -> Option<Vec<Bytes>> {
-        if height >= self.transition_heights.cip112
-            && height < self.transition_heights.cip1559
-        {
-            Some(vec![CIP112_HEADER_CUSTOM_FIRST_ELEMENT.to_vec()])
-        } else if height >= self.transition_heights.cip1559 {
+        if height >= self.transition_heights.cip1559 {
             Some(vec![NEXT_HARDFORK_HEADER_CUSTOM_FIRST_ELEMENT.to_vec()])
         } else {
             None

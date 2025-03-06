@@ -16,7 +16,6 @@ use malloc_size_of::{new_malloc_size_ops, MallocSizeOf, MallocSizeOfOps};
 use mazze_types::{
     Address, Bloom, Space, SpaceMap, H256, KECCAK_EMPTY_BLOOM, U256,
 };
-use once_cell::sync::OnceCell;
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use rlp_derive::{RlpDecodable, RlpEncodable};
 use std::{
@@ -26,9 +25,6 @@ use std::{
 };
 
 const HEADER_LIST_MIN_LEN: usize = 13;
-/// The height to start fixing the wrong encoding/decoding of the `custom`
-/// field.
-pub static CIP112_TRANSITION_HEIGHT: OnceCell<u64> = OnceCell::new();
 
 const BASE_PRICE_CHANGE_DENOMINATOR: usize = 8;
 
@@ -291,13 +287,14 @@ impl BlockHeader {
         }
 
         for b in &self.custom {
-            if self.height
-                >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
-            {
-                stream.append(b);
-            } else {
-                stream.append_raw(b, 1);
-            }
+            // if self.height
+            //     >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
+            // {
+            //     stream.append(b);
+            // } else {
+            //     stream.append_raw(b, 1);
+            // }
+            stream.append(b);
         }
     }
 
@@ -328,13 +325,14 @@ impl BlockHeader {
             stream.append(&self.base_price);
         }
         for b in &self.custom {
-            if self.height
-                >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
-            {
-                stream.append(b);
-            } else {
-                stream.append_raw(b, 1);
-            }
+           // if self.height
+            //     >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
+            // {
+            //     stream.append(b);
+            // } else {
+            //     stream.append_raw(b, 1);
+            // }
+            stream.append(b);
         }
     }
 
@@ -369,13 +367,14 @@ impl BlockHeader {
         }
 
         for b in &self.custom {
-            if self.height
-                >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
-            {
-                stream.append(b);
-            } else {
-                stream.append_raw(b, 1);
-            }
+            // if self.height
+            //     >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
+            // {
+            //     stream.append(b);
+            // } else {
+            //     stream.append_raw(b, 1);
+            // }
+            stream.append(b);
         }
     }
 
@@ -405,13 +404,14 @@ impl BlockHeader {
             + rlp_part.base_price.is_some() as usize)
             ..r.item_count()?
         {
-            if rlp_part.height
-                >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
-            {
-                rlp_part.custom.push(r.val_at(i)?);
-            } else {
-                rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
-            }
+            // if rlp_part.height
+            //     >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
+            // {
+            //     rlp_part.custom.push(r.val_at(i)?);
+            // } else {
+            //     rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
+            // }
+            rlp_part.custom.push(r.val_at(i)?);
         }
 
         let mut header = BlockHeader {
@@ -675,13 +675,14 @@ impl Decodable for BlockHeader {
             + rlp_part.base_price.is_some() as usize)
             ..r.item_count()?
         {
-            if rlp_part.height
-                >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
-            {
-                rlp_part.custom.push(r.val_at(i)?);
-            } else {
-                rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
-            }
+            // if rlp_part.height
+            //     >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
+            // {
+            //     rlp_part.custom.push(r.val_at(i)?);
+            // } else {
+            //     rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
+            // }
+            rlp_part.custom.push(r.val_at(i)?);
         }
 
         let mut header = BlockHeader {

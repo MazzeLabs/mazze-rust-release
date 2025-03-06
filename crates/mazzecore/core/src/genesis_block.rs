@@ -103,10 +103,6 @@ pub fn genesis_block(
         State::new(StateDb::new(storage_manager.get_state_for_genesis_write()))
             .expect("Failed to initialize state");
 
-    state
-        .set_initial_storage_point_prop()
-        .expect("Failed to initialize storage point prop");
-
     let mut genesis_block_author = test_net_version;
     genesis_block_author.set_user_account_type_bits();
 
@@ -363,6 +359,10 @@ pub fn genesis_block(
     );
 
     state
+        .set_initial_storage_point_prop()
+        .expect("Failed to initialize storage point prop");
+
+    state
         .commit(
             genesis.block_header.hash(),
             /* debug_record = */ debug_record.as_mut(),
@@ -373,6 +373,7 @@ pub fn genesis_block(
         "genesis debug_record {}",
         serde_json::to_string(&debug_record).unwrap()
     );
+
     genesis
 }
 

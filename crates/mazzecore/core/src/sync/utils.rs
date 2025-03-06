@@ -219,8 +219,6 @@ pub fn initialize_synchronization_graph_with_data_manager(
                 era_epoch_count,
                 enable_optimistic_execution: false,
                 enable_state_expose: false,
-                cip113_main_decision_defer_epoch_count: 50,
-                cip113_transition_height: u64::MAX,
                 debug_dump_dir_invalid_state_root: None,
                 debug_invalid_state_root_epoch: None,
                 force_recompute_height_during_construct_main: None,

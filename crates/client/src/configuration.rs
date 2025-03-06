@@ -320,9 +320,6 @@ build_config! {
         // (pos_genesis_main_decision, (Option<H256>), None)
         (vrf_proposal_threshold, (U256), U256::from_str("1111111111111100000000000000000000000000000000000000000000000000").unwrap())
         // Deferred epoch count before a confirmed epoch.
-        (pos_main_decision_defer_epoch_count, (u64), 50)
-        (cip113_main_decision_defer_epoch_count, (u64), 20)
-        (cip113_transition_height, (u64), u64::MAX)
         (pos_reference_enable_height, (u64), u64::MAX)
         (pos_initial_nodes_path, (String), "./pos_config/initial_nodes.json".to_string())
         (pos_private_key_path, (String), "./pos_config/pos_key".to_string())
@@ -603,8 +600,6 @@ impl Configuration {
                 era_epoch_count: self.raw_conf.era_epoch_count,
                 enable_optimistic_execution,
                 enable_state_expose: self.raw_conf.enable_state_expose,
-                cip113_main_decision_defer_epoch_count: self.raw_conf.cip113_main_decision_defer_epoch_count,
-                cip113_transition_height: self.raw_conf.cip113_transition_height,
                 debug_dump_dir_invalid_state_root: if self
                     .raw_conf
                     .debug_invalid_state_root

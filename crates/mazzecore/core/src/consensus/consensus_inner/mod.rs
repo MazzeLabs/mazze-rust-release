@@ -72,9 +72,6 @@ pub struct ConsensusInnerConfig {
     /// Control whether we enable the state exposer for the testing purpose.
     pub enable_state_expose: bool,
 
-    pub cip113_main_decision_defer_epoch_count: u64,
-    pub cip113_transition_height: u64,
-
     /// If we hit invalid state root, we will dump the information into a
     /// directory specified here. This is useful for testing.
     pub debug_dump_dir_invalid_state_root: Option<String>,

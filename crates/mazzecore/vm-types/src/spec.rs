@@ -136,8 +136,6 @@ pub struct Spec {
     /// CIP-142: Transient Storage Opcodes
     /// CIP-143: MCOPY (0x5e) Opcode for Efficient Memory Copy
     pub cancun_opcodes: bool,
-    /// CIP-144: Point Evaluation Precompile from EIP-4844
-    pub cip144: bool,
     /// CIP-145: Fix Receipts upon `NotEnoughBalance` Error
     pub cip145: bool,
 }
@@ -269,7 +267,6 @@ impl Spec {
             cip145: true,
             cip1559: true,
             cancun_opcodes: true,
-            cip144: true,
         }
     }
 

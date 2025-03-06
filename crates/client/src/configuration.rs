@@ -1262,7 +1262,7 @@ impl Configuration {
         //
         set_conf!(
             self.raw_conf.next_hardfork_transition_number.unwrap_or(default_transition_time);
-            params.transition_numbers => {  cip144, cip145 }
+            params.transition_numbers => {  cip145 }
         );
 
         // TODO: disable 1559 test during dev

@@ -105,9 +105,7 @@ pub fn new_machine(params: CommonParams, vm_factory: VmFactory) -> Machine {
     }
 }
 
-fn new_builtin_map(
-    params: &CommonParams, space: Space,
-) -> BTreeMap<Address, Builtin> {
+fn new_builtin_map(space: Space) -> BTreeMap<Address, Builtin> {
     let mut btree = BTreeMap::new();
 
     btree.insert(
@@ -190,7 +188,7 @@ fn new_builtin_map(
         Builtin::new(
             Box::new(Linear::new(50000, 0)),
             builtin_factory("kzg_point_eval"),
-            params.transition_numbers.cip144,
+            0,
         ),
     );
     btree
@@ -199,8 +197,8 @@ fn new_builtin_map(
 pub fn new_machine_with_builtin(
     params: CommonParams, vm_factory: VmFactory,
 ) -> Machine {
-    let builtin = new_builtin_map(&params, Space::Native);
-    let builtin_evm = new_builtin_map(&params, Space::Ethereum);
+    let builtin = new_builtin_map(Space::Native);
+    let builtin_evm = new_builtin_map(Space::Ethereum);
 
     let internal_contracts = InternalContractMap::new(&params);
     Machine {

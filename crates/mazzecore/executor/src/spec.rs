@@ -66,8 +66,6 @@ pub struct TransitionsBlockNumber {
     /// CIP-142: Transient Storage Opcodes
     /// CIP-143: MCOPY (0x5e) Opcode for Efficient Memory Copy
     pub cancun_opcodes: BlockNumber,
-    /// CIP-144: Point Evaluation Precompile from EIP-4844
-    pub cip144: BlockNumber,
     /// CIP-145: Fix Receipts upon `NotEnoughBalance` Error
     pub cip145: BlockNumber,
 }
@@ -105,7 +103,7 @@ impl Default for CommonParams {
 impl CommonParams {
     pub fn spec(&self, number: BlockNumber, height: BlockHeight) -> Spec {
         let mut spec = Spec::genesis_spec();
-        spec.cip144 = number >= self.transition_numbers.cip144;
+
         spec.cip145 = number >= self.transition_numbers.cip145;
         spec.cip1559 = height >= self.transition_heights.cip1559;
         spec.cancun_opcodes = number >= self.transition_numbers.cancun_opcodes;

@@ -72,7 +72,6 @@ pub fn initialize_internal_contract_accounts(
             /* No admin; admin = */ &Address::zero(),
             /* balance = */ U256::zero(),
             Some(STORAGE_LAYOUT_REGULAR_V0),
-            false,
         )?;
     }
     Ok(())

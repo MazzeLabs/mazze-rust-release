@@ -99,8 +99,8 @@ pub mod consensus_internal {
     /// update is CPU intensive if the tree graph is in a unstable state.
     pub const CONFIRMATION_METER_UPDATE_FREQUENCY: usize = 20;
 
-    /// The initial storage point proportion after CIP107 is enabled.
-    pub const CIP107_STORAGE_POINT_PROP_INIT: u64 = ONE_MAZZE_IN_MAZZY;
+    /// The storage point proportion
+    pub const STORAGE_POINT_PROP_INIT: u64 = ONE_MAZZE_IN_MAZZY;
 
     /// The initial base price share proportion after CIP137 is enabled.
     pub const CIP137_BASEFEE_PROP_INIT: u64 = ONE_MAZZE_IN_MAZZY;

@@ -95,12 +95,11 @@ impl OverlayAccount {
         refund_from_points
     }
 
-    pub fn is_cip_107_initialized(&self) -> bool {
+    pub fn is_storage_point_prop_initialized(&self) -> bool {
         self.sponsor_info.storage_points.is_some()
     }
 
-    /// When CIP 107 is activated, half of the storage will coverte
-    pub fn initialize_cip107(&mut self, prop: U256) -> (U256, U256) {
+    pub fn initialize_account_storage_points(&mut self, prop: U256) -> (U256, U256) {
         assert!(self.is_contract());
         let total_collateral = self.sponsor_info.sponsor_balance_for_collateral
             + self.collateral_for_storage;

@@ -26,7 +26,7 @@ use mazze_executor::{
     internal_contract::{
         block_hash_slot, epoch_hash_slot, initialize_internal_contract_accounts,
     },
-    state::{initialize_cip107, initialize_cip137, State},
+    state::{initialize_cip137, State},
 };
 use mazze_vm_types::Env;
 
@@ -388,10 +388,6 @@ impl ConsensusExecutionHandler {
         let params = self.machine.params();
         let transition_numbers = &params.transition_numbers;
 
-        if block_number == transition_numbers.cip107 {
-            initialize_cip107(state)?;
-        }
-
         if block_number >= transition_numbers.cip133b {
             state.set_system_storage(
                 block_hash_slot(block_number).into(),
@@ -478,7 +474,6 @@ struct BlockProcessRecorder {
     geth_traces: Vec<GethTraceWithHash>,
     repack_tx: Vec<Arc<SignedTransaction>>,
     // staking_events: Vec<StakingEvent>,
-
     tx_idx: SpaceMap<usize>,
 }
 

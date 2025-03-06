@@ -38,11 +38,11 @@ mod reward;
 #[cfg(test)]
 mod tests;
 
+pub use collateral::set_initial_storage_point_prop;
+
 pub use self::{
-    collateral::{initialize_cip107, settle_collateral_for_all},
-    commit::StateCommitResult,
-    reward::initialize_cip137,
-    sponsor::COMMISSION_PRIVILEGE_SPECIAL_KEY,
+    collateral::settle_collateral_for_all, commit::StateCommitResult,
+    reward::initialize_cip137, sponsor::COMMISSION_PRIVILEGE_SPECIAL_KEY,
 };
 #[cfg(test)]
 pub use tests::get_state_for_genesis_write;
@@ -102,5 +102,9 @@ impl State {
 
     pub fn prefetch_account(&self, address: &AddressWithSpace) -> DbResult<()> {
         self.prefetch(address, RequireFields::Code)
+    }
+
+    pub fn set_initial_storage_point_prop(&mut self) -> DbResult<()> {
+        set_initial_storage_point_prop(self)
     }
 }

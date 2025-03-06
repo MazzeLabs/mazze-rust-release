@@ -82,7 +82,8 @@ pub struct SponsorInfo {
     pub sponsor_balance_for_gas: U256,
     /// This is the amount of tokens sponsor for collateral to the contract.
     pub sponsor_balance_for_collateral: U256,
-    /// This is the storage point introduced in CIP-107
+    /// This is the storage point used for the contract (obtained from the
+    /// sponsor balance for collateral).
     pub storage_points: Option<StoragePoints>,
 }
 

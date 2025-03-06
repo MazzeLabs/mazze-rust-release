@@ -25,7 +25,8 @@ use mazze_parameters::{
 use mazze_statedb::StateDb;
 use mazze_storage::{StorageManager, StorageManagerTrait};
 use mazze_types::{
-    address_util::AddressUtil, Address, AddressSpaceUtil, AddressWithSpace, Space, U256
+    address_util::AddressUtil, Address, AddressSpaceUtil, AddressWithSpace,
+    Space, U256,
 };
 use primitives::{
     Action, Block, BlockHeaderBuilder, BlockReceipts, SignedTransaction,
@@ -101,6 +102,10 @@ pub fn genesis_block(
     let mut state =
         State::new(StateDb::new(storage_manager.get_state_for_genesis_write()))
             .expect("Failed to initialize state");
+
+    state
+        .set_initial_storage_point_prop()
+        .expect("Failed to initialize storage point prop");
 
     let mut genesis_block_author = test_net_version;
     genesis_block_author.set_user_account_type_bits();

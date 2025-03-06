@@ -71,9 +71,8 @@ impl OverlayAccount {
     pub fn new_contract_with_admin(
         address: &AddressWithSpace, balance: U256, admin: &Address,
         pending_db_clear: bool, storage_layout: Option<StorageLayout>,
-        cip107: bool,
     ) -> Self {
-        let sponsor_info = if cip107 && address.space == Space::Native {
+        let sponsor_info = if address.space == Space::Native {
             SponsorInfo {
                 storage_points: Some(Default::default()),
                 ..Default::default()
@@ -107,7 +106,6 @@ impl OverlayAccount {
             &Address::zero(),
             pending_db_clear,
             storage_layout,
-            false,
         )
     }
 

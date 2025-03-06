@@ -322,7 +322,6 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
                 state,
                 substate,
                 &mut *self.observer.as_tracer(),
-                &context.spec,
                 dry_run,
             )?;
 

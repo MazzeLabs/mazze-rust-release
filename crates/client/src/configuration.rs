@@ -391,6 +391,7 @@ build_config! {
     }
 }
 
+#[allow(unused_macros)]
 macro_rules! set_conf {
     ($src: expr; $dst: expr => {$($field: tt),* }) => {
         {
@@ -1256,14 +1257,6 @@ impl Configuration {
         base_block_rewards
             .insert(0, INITIAL_BASE_MINING_REWARD_IN_UMAZZE.into());
         params.base_block_rewards = base_block_rewards;
-
-        //
-        // 1559 hardfork (V2.4)
-        //
-        set_conf!(
-            self.raw_conf.next_hardfork_transition_number.unwrap_or(default_transition_time);
-            params.transition_numbers => {  cip145 }
-        );
 
         // TODO: disable 1559 test during dev
         params.transition_heights.cip1559 = self

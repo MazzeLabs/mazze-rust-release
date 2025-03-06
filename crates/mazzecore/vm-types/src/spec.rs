@@ -136,8 +136,6 @@ pub struct Spec {
     /// CIP-142: Transient Storage Opcodes
     /// CIP-143: MCOPY (0x5e) Opcode for Efficient Memory Copy
     pub cancun_opcodes: bool,
-    /// CIP-145: Fix Receipts upon `NotEnoughBalance` Error
-    pub cip145: bool,
 }
 
 /// Wasm cost table
@@ -264,7 +262,6 @@ impl Spec {
             keep_unsigned_nonce: false,
             wasm: None,
             evm_gas_ratio: 2,
-            cip145: true,
             cip1559: true,
             cancun_opcodes: true,
         }

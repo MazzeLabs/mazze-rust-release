@@ -112,11 +112,7 @@ impl Executed {
         spec: &Spec,
     ) -> Self {
         let storage_sponsor_paid = cost.storage_sponsored;
-        let mut gas_sponsor_paid = cost.gas_sponsored;
-
-        if spec.cip145 {
-            gas_sponsor_paid = false;
-        }
+        let gas_sponsor_paid = false;
 
         let fee = tx.gas().saturating_mul(cost.gas_price);
 

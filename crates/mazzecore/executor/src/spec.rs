@@ -62,8 +62,6 @@ pub struct CommonParams {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsBlockNumber {
-    /// CIP-118: Query Unused Storage Points in Internal Contract
-    pub cip118: BlockNumber,
     /// CIP-119: PUSH0 instruction
     pub cip119: BlockNumber,
     /// CIP-131: Retain Whitelist on Contract Deletion
@@ -121,7 +119,6 @@ impl Default for CommonParams {
 impl CommonParams {
     pub fn spec(&self, number: BlockNumber, height: BlockHeight) -> Spec {
         let mut spec = Spec::genesis_spec();
-        spec.cip118 = number >= self.transition_numbers.cip118;
         spec.cip119 = number >= self.transition_numbers.cip119;
         spec.cip131 = number >= self.transition_numbers.cip131;
         spec.cip132 = number >= self.transition_numbers.cip132;

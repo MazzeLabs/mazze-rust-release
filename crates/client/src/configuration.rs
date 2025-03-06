@@ -144,7 +144,6 @@ build_config! {
         (initial_difficulty, (Option<u64>), None)
         (hydra_transition_number, (Option<u64>), None)
         (hydra_transition_height, (Option<u64>), None)
-        (cip118_transition_number, (Option<u64>), None)
         (cip119_transition_number, (Option<u64>), None)
         (next_hardfork_transition_number, (Option<u64>), None)
         (next_hardfork_transition_height, (Option<u64>), None)
@@ -1266,10 +1265,6 @@ impl Configuration {
         //
         // Burn collateral hardfork (V2.3)
         //
-        params.transition_numbers.cip118 = self
-            .raw_conf
-            .cip118_transition_number
-            .unwrap_or(default_transition_time);
         params.transition_numbers.cip119 = self
             .raw_conf
             .cip119_transition_number

@@ -132,8 +132,6 @@ pub struct Spec {
     pub wasm: Option<WasmCosts>,
     /// The magnification of gas storage occupying related operations.
     pub evm_gas_ratio: usize,
-    /// CIP-119: PUSH0 instruction
-    pub cip119: bool,
     /// CIP-131: Retain Whitelist on Contract Deletion
     pub cip131: bool,
     /// CIP-132: Fix Static Context Check for Internal Contracts
@@ -279,7 +277,6 @@ impl Spec {
             keep_unsigned_nonce: false,
             wasm: None,
             evm_gas_ratio: 2,
-            cip119: true,
             cip131: true,
             cip132: true,
             cip133_b: 0,

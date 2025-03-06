@@ -144,7 +144,6 @@ build_config! {
         (initial_difficulty, (Option<u64>), None)
         (hydra_transition_number, (Option<u64>), None)
         (hydra_transition_height, (Option<u64>), None)
-        (cip119_transition_number, (Option<u64>), None)
         (next_hardfork_transition_number, (Option<u64>), None)
         (next_hardfork_transition_height, (Option<u64>), None)
         (cip1559_transition_height, (Option<u64>), None)
@@ -1261,14 +1260,6 @@ impl Configuration {
         base_block_rewards
             .insert(0, INITIAL_BASE_MINING_REWARD_IN_UMAZZE.into());
         params.base_block_rewards = base_block_rewards;
-
-        //
-        // Burn collateral hardfork (V2.3)
-        //
-        params.transition_numbers.cip119 = self
-            .raw_conf
-            .cip119_transition_number
-            .unwrap_or(default_transition_time);
 
         //
         // 1559 hardfork (V2.4)

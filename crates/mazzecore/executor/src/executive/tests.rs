@@ -1763,10 +1763,6 @@ fn test_storage_commission_privilege() {
         U256::from(850_000)
     );
     assert_eq!(
-        state.staking_balance(&caller1.address()).unwrap(),
-        U256::zero()
-    );
-    assert_eq!(
         state.collateral_for_storage(&caller1.address()).unwrap(),
         *COLLATERAL_MAZZIES_PER_STORAGE_KEY,
     );
@@ -1785,10 +1781,6 @@ fn test_storage_commission_privilege() {
             .sponsor_balance_for_collateral(&address.address)
             .unwrap(),
         *COLLATERAL_MAZZIES_PER_STORAGE_KEY,
-    );
-    assert_eq!(
-        state.staking_balance(&address.address).unwrap(),
-        U256::zero()
     );
     assert_eq!(
         state.collateral_for_storage(&address.address).unwrap(),
@@ -1831,7 +1823,6 @@ fn test_push0() {
     // Test case 1 in EIP-3855
     {
         let mut spec = machine.spec_for_test(env.number);
-        spec.cip119 = true;
 
         // code:
         //
@@ -1858,7 +1849,6 @@ fn test_push0() {
     // Test case 2 in EIP-3855
     {
         let mut spec = machine.spec_for_test(env.number);
-        spec.cip119 = true;
 
         // code:
         //
@@ -1885,7 +1875,6 @@ fn test_push0() {
     // Test case 2 in EIP-3855
     {
         let mut spec = machine.spec_for_test(env.number);
-        spec.cip119 = true;
 
         // code:
         //
@@ -1900,25 +1889,5 @@ fn test_push0() {
             .expect_err("should fail");
 
         assert!(matches!(error, vm::Error::OutOfStack { .. }));
-    }
-
-    // Before activation of EIP-3855 (CIP119)
-    {
-        let mut spec = machine.spec_for_test(env.number);
-        spec.cip119 = false;
-
-        // code:
-        //
-        // 5f - push0
-        let mut params = params.clone();
-        params.code = Some(Arc::new([0x5f; 1025].to_vec()));
-
-        let mut ex = ExecutiveContext::new(&mut state, &env, &machine, &spec);
-        let error = ex
-            .call_for_test(params, &mut Substate::new(), &mut ())
-            .expect("no db error")
-            .expect_err("should fail");
-
-        assert!(matches!(error, vm::Error::BadInstruction { .. }));
     }
 }

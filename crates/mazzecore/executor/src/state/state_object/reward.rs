@@ -7,7 +7,7 @@ use mazze_types::U256;
 use mazze_statedb::global_params::*;
 
 impl State {
-    pub fn burn_by_cip1559(&mut self, by: U256) {
+    pub fn burn_by_mip1559(&mut self, by: U256) {
         // This function is called after transaction exeuction. At this time,
         // the paid transaction fee has already been in the core space.
         *self.global_stat.val::<TotalBurnt1559>() += by;

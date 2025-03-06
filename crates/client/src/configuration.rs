@@ -146,7 +146,6 @@ build_config! {
         (hydra_transition_height, (Option<u64>), None)
         (next_hardfork_transition_number, (Option<u64>), None)
         (next_hardfork_transition_height, (Option<u64>), None)
-        (cip1559_transition_height, (Option<u64>), None)
         (cancun_opcodes_transition_number, (Option<u64>), None)
         (referee_bound, (usize), REFEREE_DEFAULT_BOUND)
         (timer_chain_beta, (u64), TIMER_CHAIN_DEFAULT_BETA)
@@ -1229,6 +1228,7 @@ impl Configuration {
         self.raw_conf.node_type.unwrap_or(NodeType::Full)
     }
 
+    // TODO: remove this function
     fn set_cips(&self, params: &mut CommonParams) {
         let default_transition_time =
             if let Some(num) = self.raw_conf.default_transition_time {
@@ -1239,42 +1239,16 @@ impl Configuration {
                 u64::MAX
             };
 
-        // This is to set the default transition time for the CIPs that cannot
-        // be enabled in the genesis.
-        let non_genesis_default_transition_time =
-            match self.raw_conf.default_transition_time {
-                Some(num) if num > 0 => num,
-                _ => {
-                    if self.is_test_or_dev_mode() {
-                        1u64
-                    } else {
-                        u64::MAX
-                    }
-                }
-            };
-
         let mut base_block_rewards = BTreeMap::new();
         base_block_rewards
             .insert(0, INITIAL_BASE_MINING_REWARD_IN_UMAZZE.into());
         params.base_block_rewards = base_block_rewards;
 
-        // TODO: disable 1559 test during dev
-        params.transition_heights.cip1559 = self
-            .raw_conf
-            .cip1559_transition_height
-            .or(self.raw_conf.next_hardfork_transition_height)
-            .unwrap_or(non_genesis_default_transition_time);
         params.transition_numbers.cancun_opcodes = self
             .raw_conf
             .cancun_opcodes_transition_number
             .or(self.raw_conf.next_hardfork_transition_number)
             .unwrap_or(default_transition_time);
-
-        if params.transition_heights.cip1559
-            < self.raw_conf.pos_reference_enable_height
-        {
-            panic!("1559 can not be activated earlier than pos reference: 1559 (epoch {}), pos (epoch {})", params.transition_heights.cip1559, self.raw_conf.pos_reference_enable_height);
-        }
     }
 }
 

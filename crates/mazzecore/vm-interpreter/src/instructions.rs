@@ -373,15 +373,8 @@ impl Instruction {
         *self >= PUSH1 && *self <= PUSH32
     }
 
-    pub fn from_u8_versioned(value: u8, spec: &Spec) -> Option<Self> {
-        let mut instruction = Instruction::from_u8(value);
-        if instruction == Some(PUSH0) {
-            instruction = None;
-        }
-        if instruction == Some(BASEFEE) && !spec.cip1559 {
-            instruction = None;
-        }
-        return instruction;
+    pub fn from_u8_versioned(value: u8, _spec: &Spec) -> Option<Self> {
+        Instruction::from_u8(value)
     }
 
     pub fn u8(self) -> u8 {

@@ -92,7 +92,7 @@ pub enum ExecutionError {
 impl ExecutionOutcome {
     #[inline]
     pub fn make_receipt(
-        self, accumulated_gas_used: &mut U256, spec: &Spec,
+        self, accumulated_gas_used: &mut U256, _spec: &Spec,
     ) -> Receipt {
         *accumulated_gas_used += self.gas_used();
 
@@ -105,7 +105,7 @@ impl ExecutionOutcome {
         let storage_collateralized = self.storage_collateralized();
         let storage_released = self.storage_released();
 
-        let burnt_fee = self.burnt_fee(spec);
+        let burnt_fee = self.burnt_fee();
 
         let log_bloom = build_bloom(&transaction_logs);
 
@@ -192,13 +192,11 @@ impl ExecutionOutcome {
     }
 
     #[inline]
-    pub fn burnt_fee(&self, spec: &Spec) -> Option<U256> {
+    pub fn burnt_fee(&self) -> Option<U256> {
         if let Some(e) = self.try_as_executed() {
             e.burnt_fee
-        } else if spec.cip1559 {
-            Some(U256::zero())
         } else {
-            None
+            Some(U256::zero())
         }
     }
 

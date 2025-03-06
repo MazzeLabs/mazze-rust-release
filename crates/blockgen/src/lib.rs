@@ -141,12 +141,10 @@ impl Worker {
 
 impl BlockGenerator {
     pub fn new(
-        graph: SharedSynchronizationGraph,
-        txpool: SharedTransactionPool,
+        graph: SharedSynchronizationGraph, txpool: SharedTransactionPool,
         sync: SharedSynchronizationService,
         maybe_txgen: Option<SharedTransactionGenerator>,
-        pow_config: ProofOfWorkConfig,
-        pow: Arc<PowComputer>,
+        pow_config: ProofOfWorkConfig, pow: Arc<PowComputer>,
         mining_author: Address,
     ) -> Self {
         info!(
@@ -318,33 +316,20 @@ impl BlockGenerator {
 
         let machine = self.txpool.machine();
         let params = machine.params();
-        let cip1559_height = params.transition_heights.cip1559;
+
         let pack_height = best_info.best_epoch_number + 1;
 
-        let block_gas_limit = if pack_height >= cip1559_height {
-            (block_gas_target * ELASTICITY_MULTIPLIER as u64).into()
+        let block_gas_limit =
+            (block_gas_target * ELASTICITY_MULTIPLIER as u64).into();
+
+        let parent_base_price = if 0 == pack_height {
+            params.init_base_price()
         } else {
-            block_gas_target.into()
+            parent_block.base_price().unwrap()
         };
 
-        let (transactions, maybe_base_price) = if pack_height < cip1559_height {
-            let txs = self.txpool.pack_transactions(
-                num_txs,
-                block_gas_limit,
-                U256::zero(),
-                block_size_limit,
-                best_info.best_epoch_number,
-                best_info.best_block_number,
-            );
-            (txs, None)
-        } else {
-            let parent_base_price = if cip1559_height == pack_height {
-                params.init_base_price()
-            } else {
-                parent_block.base_price().unwrap()
-            };
-
-            let (txs, base_price) = self.txpool.pack_transactions_1559(
+        let (transactions, maybe_base_price) =
+            self.txpool.pack_transactions_1559(
                 num_txs,
                 block_gas_limit,
                 parent_base_price,
@@ -352,8 +337,6 @@ impl BlockGenerator {
                 best_info.best_epoch_number,
                 best_info.best_block_number,
             );
-            (txs, Some(base_price))
-        };
 
         Ok(self.assemble_new_block_impl(
             parent_hash,
@@ -363,7 +346,7 @@ impl BlockGenerator {
             transactions,
             difficulty,
             Some(adaptive),
-            maybe_base_price,
+            Some(maybe_base_price),
         ))
     }
 

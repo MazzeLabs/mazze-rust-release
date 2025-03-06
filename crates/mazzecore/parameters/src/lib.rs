@@ -43,7 +43,7 @@ pub mod consensus {
 
     pub const ONE_GMAZZY_IN_MAZZY: u64 = 1_000_000_000;
 
-    pub const NEXT_HARDFORK_HEADER_CUSTOM_FIRST_ELEMENT: [u8; 1] = [4];
+    pub const NEXT_HARDFORK_HEADER_CUSTOM_FIRST_ELEMENT: [u8; 1] = [1];
 }
 
 pub mod consensus_internal {

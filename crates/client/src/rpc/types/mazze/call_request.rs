@@ -20,8 +20,8 @@ use mazzekey::Password;
 use primitives::{
     transaction::{
         native_transaction::NativeTransaction as PrimitiveTransaction, Action,
-        Cip1559Transaction, Cip2930Transaction, NativeTransaction,
-        TypedNativeTransaction::*, CIP1559_TYPE, CIP2930_TYPE, LEGACY_TX_TYPE,
+        Mip1559Transaction, Mip2930Transaction, NativeTransaction,
+        TypedNativeTransaction::*, MIP1559_TYPE, MIP2930_TYPE, LEGACY_TX_TYPE,
     },
     SignedTransaction, Transaction, TransactionWithSignature,
 };
@@ -174,9 +174,9 @@ pub fn sign_call(
     let default_type_id = if request.max_fee_per_gas.is_some()
         || request.max_priority_fee_per_gas.is_some()
     {
-        CIP1559_TYPE
+        MIP1559_TYPE
     } else if request.access_list.is_some() {
-        CIP2930_TYPE
+        MIP2930_TYPE
     } else {
         LEGACY_TX_TYPE
     };
@@ -194,7 +194,7 @@ pub fn sign_call(
     let access_list = request.access_list.unwrap_or(vec![]);
 
     let transaction = match transaction_type.as_usize() as u8 {
-        LEGACY_TX_TYPE => Cip155(NativeTransaction {
+        LEGACY_TX_TYPE => Mip155(NativeTransaction {
             nonce,
             action,
             gas,
@@ -205,7 +205,7 @@ pub fn sign_call(
             chain_id,
             data,
         }),
-        CIP2930_TYPE => Cip2930(Cip2930Transaction {
+        MIP2930_TYPE => Mip2930(Mip2930Transaction {
             nonce,
             gas_price,
             gas,
@@ -217,7 +217,7 @@ pub fn sign_call(
             data,
             access_list: to_primitive_access_list(access_list),
         }),
-        CIP1559_TYPE => Cip1559(Cip1559Transaction {
+        MIP1559_TYPE => Mip1559(Mip1559Transaction {
             nonce,
             action,
             gas,

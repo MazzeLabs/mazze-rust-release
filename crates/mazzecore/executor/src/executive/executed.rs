@@ -75,7 +75,7 @@ pub type ExecutedExt = ShareDebugMap;
 impl Executed {
     pub(super) fn not_enough_balance_fee_charged(
         tx: &TransactionWithSignature, actual_gas_cost: &U256, cost: CostInfo,
-        ext_result: ExecutedExt, spec: &Spec,
+        ext_result: ExecutedExt,
     ) -> Self {
         let gas_charged = if cost.gas_price == U256::zero() {
             U256::zero()
@@ -85,10 +85,8 @@ impl Executed {
         let gas_sponsor_paid = cost.gas_sponsored;
         let storage_sponsor_paid = cost.storage_sponsored;
 
-        let burnt_fee = spec.cip1559.then(|| {
-            let target_burnt = tx.gas().saturating_mul(cost.burnt_gas_price);
-            U256::min(*actual_gas_cost, target_burnt)
-        });
+        let target_burnt = tx.gas().saturating_mul(cost.burnt_gas_price);
+        let burnt_fee = Some(U256::min(*actual_gas_cost, target_burnt));
 
         Self {
             gas_used: *tx.gas(),
@@ -109,16 +107,13 @@ impl Executed {
 
     pub(super) fn execution_error_fully_charged(
         tx: &TransactionWithSignature, cost: CostInfo, ext_result: ExecutedExt,
-        spec: &Spec,
     ) -> Self {
         let storage_sponsor_paid = cost.storage_sponsored;
         let gas_sponsor_paid = false;
 
         let fee = tx.gas().saturating_mul(cost.gas_price);
 
-        let burnt_fee = spec
-            .cip1559
-            .then(|| tx.gas().saturating_mul(cost.burnt_gas_price));
+        let burnt_fee = Some(tx.gas().saturating_mul(cost.burnt_gas_price));
 
         Self {
             gas_used: *tx.gas(),
@@ -214,8 +209,6 @@ pub fn revert_reason_decode(output: &Bytes) -> String {
         Err(_) => "".to_string(),
     }
 }
-
-use mazze_vm_types::Spec;
 
 #[cfg(test)]
 use rustc_hex::FromHex;

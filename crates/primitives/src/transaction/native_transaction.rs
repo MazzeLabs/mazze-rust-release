@@ -51,7 +51,7 @@ impl NativeTransaction {
             transaction: TransactionWithSignature {
                 transaction: TransactionWithSignatureSerializePart {
                     unsigned: Transaction::Native(
-                        TypedNativeTransaction::Cip155(self),
+                        TypedNativeTransaction::Mip155(self),
                     ),
                     r: U256::one(),
                     s: U256::one(),
@@ -78,7 +78,7 @@ impl NativeTransaction {
     Serialize,
     Deserialize,
 )]
-pub struct Cip2930Transaction {
+pub struct Mip2930Transaction {
     pub nonce: U256,
     pub gas_price: U256,
     pub gas: U256,
@@ -103,7 +103,7 @@ pub struct Cip2930Transaction {
     Serialize,
     Deserialize,
 )]
-pub struct Cip1559Transaction {
+pub struct Mip1559Transaction {
     pub nonce: U256,
     pub max_priority_fee_per_gas: U256,
     pub max_fee_per_gas: U256,
@@ -122,9 +122,9 @@ macro_rules! access_common_ref {
     ($field:ident, $ty:ty) => {
         pub fn $field(&self) -> &$ty {
             match self {
-                TypedNativeTransaction::Cip155(tx) => &tx.$field,
-                TypedNativeTransaction::Cip2930(tx) => &tx.$field,
-                TypedNativeTransaction::Cip1559(tx) => &tx.$field,
+                TypedNativeTransaction::Mip155(tx) => &tx.$field,
+                TypedNativeTransaction::Mip2930(tx) => &tx.$field,
+                TypedNativeTransaction::Mip1559(tx) => &tx.$field,
             }
         }
     };
@@ -149,42 +149,42 @@ impl TypedNativeTransaction {
 
     pub fn gas_price(&self) -> &U256 {
         match self {
-            Cip155(tx) => &tx.gas_price,
-            Cip1559(tx) => &tx.max_fee_per_gas,
-            Cip2930(tx) => &tx.gas_price,
+            Mip155(tx) => &tx.gas_price,
+            Mip1559(tx) => &tx.max_fee_per_gas,
+            Mip2930(tx) => &tx.gas_price,
         }
     }
 
     pub fn max_priority_gas_price(&self) -> &U256 {
         match self {
-            Cip155(tx) => &tx.gas_price,
-            Cip1559(tx) => &tx.max_priority_fee_per_gas,
-            Cip2930(tx) => &tx.gas_price,
+            Mip155(tx) => &tx.gas_price,
+            Mip1559(tx) => &tx.max_priority_fee_per_gas,
+            Mip2930(tx) => &tx.gas_price,
         }
     }
 
     pub fn nonce_mut(&mut self) -> &mut U256 {
         match self {
-            Cip155(tx) => &mut tx.nonce,
-            Cip2930(tx) => &mut tx.nonce,
-            Cip1559(tx) => &mut tx.nonce,
+            Mip155(tx) => &mut tx.nonce,
+            Mip2930(tx) => &mut tx.nonce,
+            Mip1559(tx) => &mut tx.nonce,
         }
     }
 
     pub fn access_list(&self) -> Option<&AccessList> {
         match self {
-            Cip155(_tx) => None,
-            Cip2930(tx) => Some(&tx.access_list),
-            Cip1559(tx) => Some(&tx.access_list),
+            Mip155(_tx) => None,
+            Mip2930(tx) => Some(&tx.access_list),
+            Mip1559(tx) => Some(&tx.access_list),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TypedNativeTransaction {
-    Cip155(NativeTransaction),
-    Cip2930(Cip2930Transaction),
-    Cip1559(Cip1559Transaction),
+    Mip155(NativeTransaction),
+    Mip2930(Mip2930Transaction),
+    Mip1559(Mip1559Transaction),
 }
 
 impl TypedNativeTransaction {

@@ -976,17 +976,17 @@ impl RpcImpl {
 
             // set fake data for latency tests
             match signed_tx.transaction.transaction.unsigned {
-                Transaction::Native(TypedNativeTransaction::Cip155(
+                Transaction::Native(TypedNativeTransaction::Mip155(
                     ref mut unsigned,
                 )) if tx_data_len > 0 => {
                     unsigned.data = vec![0; tx_data_len];
                 }
-                Transaction::Native(TypedNativeTransaction::Cip1559(
+                Transaction::Native(TypedNativeTransaction::Mip1559(
                     ref mut unsigned,
                 )) if tx_data_len > 0 => {
                     unsigned.data = vec![0; tx_data_len];
                 }
-                Transaction::Native(TypedNativeTransaction::Cip2930(
+                Transaction::Native(TypedNativeTransaction::Mip2930(
                     ref mut unsigned,
                 )) if tx_data_len > 0 => {
                     unsigned.data = vec![0; tx_data_len];

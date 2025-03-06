@@ -449,7 +449,6 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
     fn compute_refunded_gas(&self, result: &ExecutiveResult) -> RefundInfo {
         let tx = self.tx;
         let cost = &self.cost;
-        let spec = self.context.spec;
         let gas_left = match result {
             Ok(ExecutiveReturn { gas_left, .. }) => *gas_left,
             _ => 0.into(),
@@ -468,9 +467,8 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
         };
 
         let fees_value = gas_charged.saturating_mul(cost.gas_price);
-        let burnt_fees_value = spec
-            .cip1559
-            .then(|| gas_charged.saturating_mul(cost.burnt_gas_price));
+        let burnt_fees_value =
+            Some(gas_charged.saturating_mul(cost.burnt_gas_price));
 
         let refund_value = gas_refunded.saturating_mul(cost.gas_price);
 
@@ -534,7 +532,6 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
                 &actual_gas_cost,
                 self.cost,
                 make_ext_result(self.observer),
-                &self.context.spec,
             ),
         ));
     }
@@ -548,7 +545,6 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
                 self.tx,
                 self.cost,
                 make_ext_result(self.observer),
-                &self.context.spec,
             ),
         ));
     }
@@ -559,16 +555,13 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
         let tx = self.tx;
         let cost = self.cost;
         let ext_result = make_ext_result(self.observer);
-        let spec = self.context.spec;
         let tx_substate = self.substate;
 
         let outcome = match result {
             Err(vm::Error::StateDbError(e)) => bail!(e.0),
             Err(exception) => ExecutionOutcome::ExecutionErrorBumpNonce(
                 ExecutionError::VmError(exception),
-                Executed::execution_error_fully_charged(
-                    tx, cost, ext_result, spec,
-                ),
+                Executed::execution_error_fully_charged(tx, cost, ext_result),
             ),
             Ok(r) => {
                 let executed = Executed::from_executive_return(

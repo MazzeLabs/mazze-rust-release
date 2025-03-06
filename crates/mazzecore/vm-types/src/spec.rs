@@ -131,7 +131,6 @@ pub struct Spec {
     pub wasm: Option<WasmCosts>,
     /// The magnification of gas storage occupying related operations.
     pub evm_gas_ratio: usize,
-    pub cip1559: bool,
     /// CIP-141: Disable Subroutine Opcodes
     /// CIP-142: Transient Storage Opcodes
     /// CIP-143: MCOPY (0x5e) Opcode for Efficient Memory Copy
@@ -262,7 +261,6 @@ impl Spec {
             keep_unsigned_nonce: false,
             wasm: None,
             evm_gas_ratio: 2,
-            cip1559: true,
             cancun_opcodes: true,
         }
     }

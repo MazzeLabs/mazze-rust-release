@@ -791,10 +791,6 @@ impl TransactionPool {
         let current_height = parent.height() + 1;
 
         let params = self.machine.params();
-        let cip_1559_height = params.transition_heights.cip1559;
-        if current_height < cip_1559_height {
-            return Ok(None);
-        }
 
         let mut gas_used = SpaceMap::default();
         let mut min_gas_price =
@@ -814,7 +810,7 @@ impl TransactionPool {
         let gas_target =
             SpaceMap::new(core_gas_limit, eth_gas_limit).map_all(|x| x / 2);
 
-        let parent_base_price = if current_height == cip_1559_height {
+        let parent_base_price = if current_height == 0 {
             params.init_base_price()
         } else {
             parent.base_price().unwrap()
@@ -980,25 +976,13 @@ impl TransactionPool {
             consensus_best_info_clone
         );
 
-        let params = self.machine.params();
         let parent_block = self
             .data_man
             .block_header_by_hash(&consensus_best_info_clone.best_block_hash)
             // The parent block must exists.
             .expect(&concat!(file!(), ":", line!(), ":", column!()));
 
-        let cip1559_height = params.transition_heights.cip1559;
-        let pack_height = consensus_best_info_clone.best_epoch_number + 1;
-
-        (
-            consensus_best_info_clone,
-            if pack_height <= cip1559_height {
-                None
-            } else {
-                // TODO: should we compute for the current base_price?
-                Some(parent_block.base_price().unwrap())
-            },
-        )
+        (consensus_best_info_clone, parent_block.base_price())
     }
 
     pub fn get_best_info_with_packed_transactions(
@@ -1021,7 +1005,6 @@ impl TransactionPool {
 
         let params = self.machine.params();
 
-        let cip1559_height = params.transition_heights.cip1559;
         let pack_height = consensus_best_info_clone.best_epoch_number + 1;
 
         let parent_block = self
@@ -1029,12 +1012,8 @@ impl TransactionPool {
             .block_header_by_hash(&consensus_best_info_clone.best_block_hash)
             // The parent block must exists.
             .expect(&concat!(file!(), ":", line!(), ":", column!()));
-        let parent_block_gas_limit = *parent_block.gas_limit()
-            * if cip1559_height == pack_height {
-                ELASTICITY_MULTIPLIER
-            } else {
-                1
-            };
+        let parent_block_gas_limit =
+            *parent_block.gas_limit() * ELASTICITY_MULTIPLIER;
 
         let gas_limit_divisor = params.gas_limit_bound_divisor;
         let min_gas_limit = params.min_gas_limit;
@@ -1048,80 +1027,52 @@ impl TransactionPool {
             + parent_block_gas_limit / gas_limit_divisor
             - 1;
 
-        let target_gas_limit = self.config.target_block_gas_limit
-            * if pack_height >= cip1559_height {
-                ELASTICITY_MULTIPLIER as u64
-            } else {
-                1
-            };
+        let target_gas_limit =
+            self.config.target_block_gas_limit * ELASTICITY_MULTIPLIER as u64;
 
         let self_gas_limit =
             min(max(target_gas_limit.into(), gas_lower), gas_upper);
 
-        let (transactions_from_pool, maybe_base_price) = if pack_height
-            < cip1559_height
-        {
-            let evm_gas_limit = if self
-                .machine
-                .params()
-                .can_pack_evm_transaction(pack_height)
-            {
-                self_gas_limit / params.evm_transaction_gas_ratio
-            } else {
-                U256::zero()
-            };
-
-            let txs = self.pack_transactions(
-                num_txs,
-                self_gas_limit.clone(),
-                evm_gas_limit,
-                block_size_limit,
-                consensus_best_info_clone.best_epoch_number,
-                consensus_best_info_clone.best_block_number,
-            );
-            (txs, None)
+        let parent_base_price = if pack_height == 0 {
+            params.init_base_price()
         } else {
-            let parent_base_price = if pack_height == cip1559_height {
-                params.init_base_price()
-            } else {
-                parent_block.base_price().unwrap()
-            };
+            parent_block.base_price().unwrap()
+        };
 
-            let (txs, packing_base_price) = self.pack_transactions_1559(
-                num_txs,
-                self_gas_limit.clone(),
-                parent_base_price,
-                block_size_limit,
-                consensus_best_info_clone.best_epoch_number,
-                consensus_best_info_clone.best_block_number,
-            );
+        let (transactions_from_pool, packing_base_price) = self.pack_transactions_1559(
+            num_txs,
+            self_gas_limit.clone(),
+            parent_base_price,
+            block_size_limit,
+            consensus_best_info_clone.best_epoch_number,
+            consensus_best_info_clone.best_block_number,
+        );
 
-            let mut base_price = packing_base_price;
+        let mut base_price = packing_base_price;
 
-            // May only happens in test mode
-            if !additional_transactions.is_empty() {
-                let iter = additional_transactions
-                    .iter()
-                    .chain(txs.iter())
-                    .map(|x| &**x);
-                match self.compute_1559_base_price(
-                    &parent_block.hash(),
-                    self_gas_limit,
-                    iter,
-                ) {
-                    Ok(Some(p)) => {
-                        base_price = p;
-                    }
-                    Ok(None) => {
-                        warn!("Should not happen");
-                    }
-                    Err(e) => {
-                        error!("Cannot compute base price with additinal transactions: {}", e);
-                    }
+        // May only happens in test mode
+        if !additional_transactions.is_empty() {
+            let iter = additional_transactions
+                .iter()
+                .chain(transactions_from_pool.iter())
+                .map(|x| &**x);
+            match self.compute_1559_base_price(
+                &parent_block.hash(),
+                self_gas_limit,
+                iter,
+            ) {
+                Ok(Some(p)) => {
+                    base_price = p;
+                }
+                Ok(None) => {
+                    warn!("Should not happen");
+                }
+                Err(e) => {
+                    error!("Cannot compute base price with additinal transactions: {}", e);
                 }
             }
-            (txs, Some(base_price))
-        };
+        }
+        let maybe_base_price = Some(base_price);
 
         let transactions = [
             additional_transactions.as_slice(),

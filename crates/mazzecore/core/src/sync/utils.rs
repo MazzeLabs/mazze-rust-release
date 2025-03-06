@@ -172,8 +172,7 @@ pub fn initialize_synchronization_graph_with_data_manager(
     data_man: Arc<BlockDataManager>, beta: u64, h: u64, tcr: u64, tcb: u64,
     era_epoch_count: u64, pow: Arc<PowComputer>, vm: VmFactory,
 ) -> (Arc<SynchronizationGraph>, Arc<ConsensusGraph>) {
-    let mut params = CommonParams::default();
-    params.transition_heights.cip1559 = u64::MAX;
+    let params = CommonParams::default();
     let machine = Arc::new(new_machine_with_builtin(params, vm));
 
     let verification_config = VerificationConfig::new(

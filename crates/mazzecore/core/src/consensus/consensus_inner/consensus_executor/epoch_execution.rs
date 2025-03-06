@@ -257,7 +257,7 @@ impl ConsensusExecutionHandler {
             .try_as_executed()
             .and_then(|e| e.burnt_fee)
         {
-            state.burn_by_cip1559(burnt_fee);
+            state.burn_by_mip1559(burnt_fee);
         };
 
         let r = make_process_tx_outcome(

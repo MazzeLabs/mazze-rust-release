@@ -348,14 +348,8 @@ impl VerificationConfig {
             )));
         }
 
-        if header.height() >= self.machine.params().transition_heights.cip1559 {
-            if header.base_price().is_none() {
-                bail!(BlockError::MissingBaseFee);
-            }
-        } else {
-            if header.base_price().is_some() {
-                bail!(BlockError::UnexpectedBaseFee);
-            }
+        if header.base_price().is_none() {
+            bail!(BlockError::MissingBaseFee);
         }
 
         // Note that this is just used to rule out deprecated blocks, so the
@@ -484,51 +478,7 @@ impl VerificationConfig {
             total_gas[t.space()] += *t.gas_limit();
         }
 
-        if block.block_header.height()
-            >= self.machine.params().transition_heights.cip1559
-        {
-            self.check_base_fee(block, parent, total_gas)?;
-        } else {
-            self.check_hard_gas_limit(block, total_gas)?;
-        }
-        Ok(())
-    }
-
-    fn check_hard_gas_limit(
-        &self, block: &Block, total_gas: SpaceMap<U256>,
-    ) -> Result<(), Error> {
-        let block_height = block.block_header.height();
-
-        let evm_space_gas_limit =
-            if self.machine.params().can_pack_evm_transaction(block_height) {
-                *block.block_header.gas_limit()
-                    / self.machine.params().evm_transaction_gas_ratio
-            } else {
-                U256::zero()
-            };
-
-        let evm_total_gas = total_gas[Space::Ethereum];
-        let block_total_gas = total_gas.map_sum(|x| *x);
-
-        if evm_total_gas > evm_space_gas_limit {
-            return Err(From::from(BlockError::InvalidPackedGasLimit(
-                OutOfBounds {
-                    min: None,
-                    max: Some(evm_space_gas_limit),
-                    found: evm_total_gas,
-                },
-            )));
-        }
-
-        if block_total_gas > *block.block_header.gas_limit() {
-            return Err(From::from(BlockError::InvalidPackedGasLimit(
-                OutOfBounds {
-                    min: None,
-                    max: Some(*block.block_header.gas_limit()),
-                    found: block_total_gas,
-                },
-            )));
-        }
+        self.check_base_fee(block, parent, total_gas)?;
 
         Ok(())
     }
@@ -539,10 +489,7 @@ impl VerificationConfig {
         use Space::*;
 
         let params = self.machine.params();
-        let cip1559_init = params.transition_heights.cip1559;
         let block_height = block.block_header.height();
-
-        assert!(block_height >= cip1559_init);
 
         let core_gas_limit = block.block_header.gas_limit() * 9 / 10;
         let espace_gas_limit =
@@ -572,7 +519,7 @@ impl VerificationConfig {
             )));
         }
 
-        let parent_base_price = if block_height == cip1559_init {
+        let parent_base_price = if block_height == 0 {
             params.init_base_price()
         } else {
             parent.base_price().unwrap()
@@ -652,13 +599,12 @@ impl VerificationConfig {
 
     pub fn fast_recheck(
         &self, tx: &TransactionWithSignature, height: BlockHeight,
-        transitions: &TransitionsEpochHeight, spec: &Spec,
+        _transitions: &TransitionsEpochHeight, spec: &Spec,
     ) -> PackingCheckResult {
-        let cip1559 = height >= transitions.cip1559;
 
         let (can_pack, later_pack) =
             Self::fast_recheck_inner(spec, |mode: &VerifyTxMode| {
-                if !Self::check_eip1559_transaction(tx, cip1559, mode) {
+                if !Self::check_eip1559_transaction(tx, mode) {
                     return false;
                 }
 
@@ -687,7 +633,7 @@ impl VerificationConfig {
     // rules. We combine them together for convenient in the future upgrades..
     pub fn verify_transaction_common(
         &self, tx: &TransactionWithSignature, chain_id: AllChainID,
-        height: BlockHeight, transitions: &TransitionsEpochHeight,
+        height: BlockHeight, _transitions: &TransitionsEpochHeight,
         mode: VerifyTxMode,
     ) -> Result<(), TransactionError> {
         tx.check_low_s()?;
@@ -734,10 +680,9 @@ impl VerificationConfig {
         }
 
         // ******************************************
-        // Each constraint depends on a mode or a CIP should be
-        // implemented in a seperated function.
+        // Each constraint depends on a mode or a MIP should be
+        // implemented in a separated function.
         // ******************************************
-        let cip1559 = height >= transitions.cip1559;
 
         if let Transaction::Native(ref tx) = tx.unsigned {
             Self::verify_transaction_epoch_height(
@@ -752,7 +697,7 @@ impl VerificationConfig {
             bail!(TransactionError::FutureTransactionType);
         }
 
-        if !Self::check_eip1559_transaction(tx, cip1559, &mode) {
+        if !Self::check_eip1559_transaction(tx, &mode) {
             bail!(TransactionError::FutureTransactionType)
         }
 
@@ -767,18 +712,9 @@ impl VerificationConfig {
     }
 
     fn check_eip1559_transaction(
-        tx: &TransactionWithSignature, cip1559: bool, mode: &VerifyTxMode,
+        _tx: &TransactionWithSignature, _mode: &VerifyTxMode,
     ) -> bool {
-        if tx.is_legacy() {
-            return true;
-        }
-
-        use VerifyTxLocalMode::*;
-        match mode {
-            VerifyTxMode::Local(Full, _spec) => cip1559,
-            VerifyTxMode::Local(MaybeLater, _spec) => true,
-            VerifyTxMode::Remote => cip1559,
-        }
+        return true;
     }
 
     fn check_gas_limit_with_calldata(

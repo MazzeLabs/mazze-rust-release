@@ -6,9 +6,7 @@ use mazze_bytes::Bytes;
 use mazze_internal_common::{ChainIdParams, ChainIdParamsInner};
 use mazze_parameters::{
     block::{EVM_TRANSACTION_BLOCK_RATIO, EVM_TRANSACTION_GAS_RATIO},
-    consensus::{
-        NEXT_HARDFORK_HEADER_CUSTOM_FIRST_ELEMENT, ONE_UMAZZE_IN_MAZZY,
-    },
+    consensus::ONE_UMAZZE_IN_MAZZY,
     consensus_internal::{
         INITIAL_BASE_MINING_REWARD_IN_UMAZZE, OUTLIER_PENALTY_RATIO,
     },
@@ -68,10 +66,9 @@ pub struct TransitionsBlockNumber {
     pub cancun_opcodes: BlockNumber,
 }
 
+/// Empty struct for now, will be used for epoch height transitions.
 #[derive(Default, Debug, Clone)]
-pub struct TransitionsEpochHeight {
-    pub cip1559: BlockHeight,
-}
+pub struct TransitionsEpochHeight {}
 
 impl Default for CommonParams {
     fn default() -> Self {
@@ -99,10 +96,9 @@ impl Default for CommonParams {
 }
 
 impl CommonParams {
-    pub fn spec(&self, number: BlockNumber, height: BlockHeight) -> Spec {
+    pub fn spec(&self, number: BlockNumber, _height: BlockHeight) -> Spec {
         let mut spec = Spec::genesis_spec();
 
-        spec.cip1559 = height >= self.transition_heights.cip1559;
         spec.cancun_opcodes = number >= self.transition_numbers.cancun_opcodes;
         if spec.cancun_opcodes {
             spec.sload_gas = 800;
@@ -128,12 +124,13 @@ impl CommonParams {
         U512::from(start_base_ward) * U512::from(ONE_UMAZZE_IN_MAZZY)
     }
 
-    pub fn custom_prefix(&self, height: BlockHeight) -> Option<Vec<Bytes>> {
-        if height >= self.transition_heights.cip1559 {
-            Some(vec![NEXT_HARDFORK_HEADER_CUSTOM_FIRST_ELEMENT.to_vec()])
-        } else {
-            None
-        }
+    pub fn custom_prefix(&self, _height: BlockHeight) -> Option<Vec<Bytes>> {
+        // if height >= self.transition_heights.cip1559 {
+        //     Some(vec![NEXT_HARDFORK_HEADER_CUSTOM_FIRST_ELEMENT.to_vec()])
+        // } else {
+        //     None
+        // }
+        None
     }
 
     pub fn can_pack_evm_transaction(&self, height: BlockHeight) -> bool {

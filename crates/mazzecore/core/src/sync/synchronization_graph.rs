@@ -715,12 +715,7 @@ impl SynchronizationGraphInner {
             )));
         }
 
-        let parent_gas_limit = parent_gas_limit
-            * if epoch == self.machine.params().transition_heights.cip1559 {
-                ELASTICITY_MULTIPLIER
-            } else {
-                1
-            };
+        let parent_gas_limit = parent_gas_limit * ELASTICITY_MULTIPLIER;
 
         // Verify the gas limit is respected
         let self_gas_limit = *self.arena[index].block_header.gas_limit();

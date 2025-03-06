@@ -62,8 +62,6 @@ pub struct CommonParams {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsBlockNumber {
-    /// CIP-132: Fix Static Context Check for Internal Contracts
-    pub cip132: BlockNumber,
     /// CIP-133: Enhanced Block Hash Query
     pub cip133b: BlockNumber,
     /// CIP-137: Base Fee Sharing in CIP-1559
@@ -113,7 +111,6 @@ impl Default for CommonParams {
 impl CommonParams {
     pub fn spec(&self, number: BlockNumber, height: BlockHeight) -> Spec {
         let mut spec = Spec::genesis_spec();
-        spec.cip132 = number >= self.transition_numbers.cip132;
         spec.cip133_b = self.transition_numbers.cip133b;
         spec.cip133_e = self.transition_heights.cip133e;
         spec.cip133_core = number >= self.transition_numbers.cip133b;

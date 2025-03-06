@@ -132,8 +132,6 @@ pub struct Spec {
     pub wasm: Option<WasmCosts>,
     /// The magnification of gas storage occupying related operations.
     pub evm_gas_ratio: usize,
-    /// CIP-132: Fix Static Context Check for Internal Contracts
-    pub cip132: bool,
     /// CIP-133: Enhanced Block Hash Query
     pub cip133_b: BlockNumber,
     pub cip133_e: BlockHeight,
@@ -275,7 +273,6 @@ impl Spec {
             keep_unsigned_nonce: false,
             wasm: None,
             evm_gas_ratio: 2,
-            cip132: true,
             cip133_b: 0,
             cip133_e: 0,
             cip133_core: true,

@@ -20,7 +20,6 @@
 
 //! Cost spec and other parameterisations for the EVM.
 use mazze_types::{address_util::AddressUtil, Address};
-use primitives::{block::BlockHeight, BlockNumber};
 
 /// Definition of the cost spec and other parameterisations for the VM.
 #[derive(Debug, Clone)]
@@ -132,10 +131,6 @@ pub struct Spec {
     pub wasm: Option<WasmCosts>,
     /// The magnification of gas storage occupying related operations.
     pub evm_gas_ratio: usize,
-    /// CIP-133: Enhanced Block Hash Query
-    pub cip133_b: BlockNumber,
-    pub cip133_e: BlockHeight,
-    pub cip133_core: bool,
     /// CIP-137: Base Fee Sharing in CIP-1559
     pub cip137: bool,
     pub cip1559: bool,
@@ -273,9 +268,6 @@ impl Spec {
             keep_unsigned_nonce: false,
             wasm: None,
             evm_gas_ratio: 2,
-            cip133_b: 0,
-            cip133_e: 0,
-            cip133_core: true,
             cip137: true,
             cip145: true,
             cip1559: true,

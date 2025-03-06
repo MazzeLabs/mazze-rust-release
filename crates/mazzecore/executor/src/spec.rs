@@ -62,8 +62,6 @@ pub struct CommonParams {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsBlockNumber {
-    /// CIP-133: Enhanced Block Hash Query
-    pub cip133b: BlockNumber,
     /// CIP-137: Base Fee Sharing in CIP-1559
     pub cip137: BlockNumber,
     /// CIP-141: Disable Subroutine Opcodes
@@ -78,8 +76,6 @@ pub struct TransitionsBlockNumber {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsEpochHeight {
-    /// CIP-133: Enhanced Block Hash Query
-    pub cip133e: BlockHeight,
     pub cip1559: BlockHeight,
 }
 
@@ -111,9 +107,6 @@ impl Default for CommonParams {
 impl CommonParams {
     pub fn spec(&self, number: BlockNumber, height: BlockHeight) -> Spec {
         let mut spec = Spec::genesis_spec();
-        spec.cip133_b = self.transition_numbers.cip133b;
-        spec.cip133_e = self.transition_heights.cip133e;
-        spec.cip133_core = number >= self.transition_numbers.cip133b;
         spec.cip137 = number >= self.transition_numbers.cip137;
         spec.cip144 = number >= self.transition_numbers.cip144;
         spec.cip145 = number >= self.transition_numbers.cip145;

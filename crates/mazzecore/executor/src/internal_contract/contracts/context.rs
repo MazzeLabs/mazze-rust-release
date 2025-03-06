@@ -20,7 +20,7 @@ fn generate_fn_table() -> SolFnTable {
 
 group_impl_is_active!(|_spec: &Spec| true, EpochNumber,);
 
-group_impl_is_active!(|spec: &Spec| spec.cip133_core, EpochHash);
+group_impl_is_active!(|_spec: &Spec| true, EpochHash);
 
 make_solidity_function! {
     struct EpochNumber((), "epochNumber()", U256);
@@ -53,7 +53,6 @@ impl SimpleExecutionTrait for EpochHash {
 
         let number = number.as_u64();
 
-        return_if!(number < context.spec.cip133_e);
         return_if!(number > context.env.epoch_height);
         return_if!(number
             .checked_add(65536)

@@ -10,7 +10,7 @@ use mazze_executor::{
 use super::observer::{
     exec_tracer::ErrorUnwind, gasman::GasLimitEstimation, Observer,
 };
-use mazze_parameters::{consensus::ONE_MAZZE_IN_MAZZY, collateral::*};
+use mazze_parameters::{collateral::*, consensus::ONE_MAZZE_IN_MAZZY};
 use mazze_statedb::Result as DbResult;
 use mazze_types::{
     address_util::AddressUtil, Address, AddressSpaceUtil, Space, U256,
@@ -133,7 +133,7 @@ impl<'a> EstimationContext<'a> {
     pub fn transact_virtual(
         &mut self, mut tx: SignedTransaction, request: EstimateRequest,
     ) -> DbResult<(ExecutionOutcome, EstimateExt)> {
-        if let Some(outcome) = self.check_cip130(&tx, &request) {
+        if let Some(outcome) = self.check_gas_limit_sufficiency(&tx, &request) {
             return Ok(outcome);
         }
 
@@ -171,7 +171,7 @@ impl<'a> EstimationContext<'a> {
         )
     }
 
-    fn check_cip130(
+    fn check_gas_limit_sufficiency(
         &self, tx: &SignedTransaction, request: &EstimateRequest,
     ) -> Option<(ExecutionOutcome, EstimateExt)> {
         let min_gas_limit = U256::from(tx.data().len() * 100);
@@ -399,11 +399,11 @@ impl<'a> EstimationContext<'a> {
 }
 
 fn estimated_gas_limit(executed: &Executed, tx: &SignedTransaction) -> U256 {
-    let cip130_min_gas_limit = U256::from(tx.data().len() * 100);
+    let min_gas_limit = U256::from(tx.data().len() * 100);
     let estimated =
         executed.ext_result.get::<GasLimitEstimation>().unwrap() * 7 / 6
             + executed.base_gas;
-    U256::max(estimated, cip130_min_gas_limit)
+    U256::max(estimated, min_gas_limit)
 }
 
 fn storage_limit(executed: &Executed) -> u64 {

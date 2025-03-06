@@ -82,8 +82,6 @@ pub struct TransitionsBlockNumber {
 
 #[derive(Default, Debug, Clone)]
 pub struct TransitionsEpochHeight {
-    /// CIP-130: Aligning Gas Limit with Transaction Size
-    pub cip130: BlockHeight,
     /// CIP-133: Enhanced Block Hash Query
     pub cip133e: BlockHeight,
     pub cip1559: BlockHeight,

@@ -26,7 +26,7 @@ use mazze_executor::{
     internal_contract::{
         block_hash_slot, epoch_hash_slot, initialize_internal_contract_accounts,
     },
-    state::{initialize_cip137, State},
+    state::State,
 };
 use mazze_vm_types::Env;
 
@@ -382,17 +382,10 @@ impl ConsensusExecutionHandler {
     pub fn before_block_execution(
         &self, state: &mut State, block_number: BlockNumber, block: &Block,
     ) -> DbResult<U256> {
-        let params = self.machine.params();
-        let transition_numbers = &params.transition_numbers;
-
         state.set_system_storage(
             block_hash_slot(block_number).into(),
             U256::from_big_endian(&block.hash().0),
         )?;
-
-        if block_number == transition_numbers.cip137 {
-            initialize_cip137(state);
-        }
 
         initialize_internal_contract_accounts(
             state,

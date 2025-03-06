@@ -131,8 +131,6 @@ pub struct Spec {
     pub wasm: Option<WasmCosts>,
     /// The magnification of gas storage occupying related operations.
     pub evm_gas_ratio: usize,
-    /// CIP-137: Base Fee Sharing in CIP-1559
-    pub cip137: bool,
     pub cip1559: bool,
     /// CIP-141: Disable Subroutine Opcodes
     /// CIP-142: Transient Storage Opcodes
@@ -268,7 +266,6 @@ impl Spec {
             keep_unsigned_nonce: false,
             wasm: None,
             evm_gas_ratio: 2,
-            cip137: true,
             cip145: true,
             cip1559: true,
             cancun_opcodes: true,

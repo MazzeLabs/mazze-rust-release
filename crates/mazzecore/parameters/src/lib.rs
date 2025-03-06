@@ -101,8 +101,8 @@ pub mod consensus_internal {
     /// The storage point proportion
     pub const STORAGE_POINT_PROP_INIT: u64 = ONE_MAZZE_IN_MAZZY;
 
-    /// The initial base price share proportion after CIP137 is enabled.
-    pub const CIP137_BASEFEE_PROP_INIT: u64 = ONE_MAZZE_IN_MAZZY;
+    /// The initial base price share proportion
+    pub const BASEFEE_PROP_INIT: u64 = ONE_MAZZE_IN_MAZZY;
 
     /// The initial and minimum base price
     pub const INITIAL_1559_CORE_BASE_PRICE: u64 = ONE_GMAZZY_IN_MAZZY;

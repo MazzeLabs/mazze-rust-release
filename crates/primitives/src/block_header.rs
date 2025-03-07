@@ -292,7 +292,7 @@ impl BlockHeader {
             // {
             //     stream.append(b);
             // } else {
-            //     stream.append_raw(b, 1);
+                // stream.append_raw(b, 1);
             // }
             stream.append(b);
         }
@@ -330,7 +330,7 @@ impl BlockHeader {
             // {
             //     stream.append(b);
             // } else {
-            //     stream.append_raw(b, 1);
+                // stream.append_raw(b, 1);
             // }
             stream.append(b);
         }
@@ -372,7 +372,7 @@ impl BlockHeader {
             // {
             //     stream.append(b);
             // } else {
-            //     stream.append_raw(b, 1);
+                // stream.append_raw(b, 1);
             // }
             stream.append(b);
         }
@@ -409,9 +409,9 @@ impl BlockHeader {
             // {
             //     rlp_part.custom.push(r.val_at(i)?);
             // } else {
-            //     rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
+                rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
             // }
-            rlp_part.custom.push(r.val_at(i)?);
+            // rlp_part.custom.push(r.val_at(i)?);
         }
 
         let mut header = BlockHeader {
@@ -680,9 +680,9 @@ impl Decodable for BlockHeader {
             // {
             //     rlp_part.custom.push(r.val_at(i)?);
             // } else {
-            //     rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
+                rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
             // }
-            rlp_part.custom.push(r.val_at(i)?);
+            // rlp_part.custom.push(r.val_at(i)?);
         }
 
         let mut header = BlockHeader {

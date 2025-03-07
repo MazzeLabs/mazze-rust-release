@@ -519,7 +519,7 @@ impl VerificationConfig {
             )));
         }
 
-        let parent_base_price = if block_height == 0 {
+        let parent_base_price = if block_height <= 1 {
             params.init_base_price()
         } else {
             parent.base_price().unwrap()
@@ -601,7 +601,6 @@ impl VerificationConfig {
         &self, tx: &TransactionWithSignature, height: BlockHeight,
         _transitions: &TransitionsEpochHeight, spec: &Spec,
     ) -> PackingCheckResult {
-
         let (can_pack, later_pack) =
             Self::fast_recheck_inner(spec, |mode: &VerifyTxMode| {
                 if !Self::check_eip1559_transaction(tx, mode) {

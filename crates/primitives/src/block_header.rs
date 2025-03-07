@@ -292,9 +292,9 @@ impl BlockHeader {
             // {
             //     stream.append(b);
             // } else {
-            //     stream.append_raw(b, 1);
+            stream.append_raw(b, 1);
             // }
-            stream.append(b);
+            // stream.append(b);
         }
     }
 
@@ -325,14 +325,14 @@ impl BlockHeader {
             stream.append(&self.base_price);
         }
         for b in &self.custom {
-           // if self.height
+            // if self.height
             //     >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
             // {
             //     stream.append(b);
             // } else {
-            //     stream.append_raw(b, 1);
+            stream.append_raw(b, 1);
             // }
-            stream.append(b);
+            // stream.append(b);
         }
     }
 
@@ -372,9 +372,9 @@ impl BlockHeader {
             // {
             //     stream.append(b);
             // } else {
-            //     stream.append_raw(b, 1);
+            stream.append_raw(b, 1);
             // }
-            stream.append(b);
+            // stream.append(b);
         }
     }
 
@@ -400,9 +400,8 @@ impl BlockHeader {
         };
         let pow_hash = r.val_at(14)?;
 
-        for i in (15
-            + rlp_part.base_price.is_some() as usize)
-            ..r.item_count()?
+        for i in
+            (15 + rlp_part.base_price.is_some() as usize)..r.item_count()?
         {
             // if rlp_part.height
             //     >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
@@ -411,7 +410,12 @@ impl BlockHeader {
             // } else {
             //     rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
             // }
-            rlp_part.custom.push(r.val_at(i)?);
+            // rlp_part.custom.push(r.val_at(i)?);
+            // if rlp_part.height <= 1 {
+            // } else {
+            // rlp_part.custom.push(r.val_at(i)?);
+            // }
+            rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
         }
 
         let mut header = BlockHeader {
@@ -671,9 +675,8 @@ impl Decodable for BlockHeader {
             nonce: r.val_at(13)?,
             base_price: r.val_at(15).unwrap_or(None),
         };
-        for i in (14
-            + rlp_part.base_price.is_some() as usize)
-            ..r.item_count()?
+        for i in
+            (14 + rlp_part.base_price.is_some() as usize)..r.item_count()?
         {
             // if rlp_part.height
             //     >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
@@ -682,7 +685,12 @@ impl Decodable for BlockHeader {
             // } else {
             //     rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
             // }
-            rlp_part.custom.push(r.val_at(i)?);
+            // rlp_part.custom.push(r.val_at(i)?);
+            // if rlp_part.height <= 1 {
+            // } else {
+            // rlp_part.custom.push(r.val_at(i)?);
+            // }
+            rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
         }
 
         let mut header = BlockHeader {

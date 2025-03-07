@@ -322,7 +322,7 @@ impl BlockGenerator {
         let block_gas_limit =
             (block_gas_target * ELASTICITY_MULTIPLIER as u64).into();
 
-        let parent_base_price = if 0 == pack_height {
+        let parent_base_price = if pack_height <= 1 {
             params.init_base_price()
         } else {
             parent_block.base_price().unwrap()

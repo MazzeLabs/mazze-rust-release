@@ -810,7 +810,7 @@ impl TransactionPool {
         let gas_target =
             SpaceMap::new(core_gas_limit, eth_gas_limit).map_all(|x| x / 2);
 
-        let parent_base_price = if current_height == 0 {
+        let parent_base_price = if current_height <= 1 {
             params.init_base_price()
         } else {
             parent.base_price().unwrap()

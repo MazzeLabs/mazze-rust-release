@@ -292,9 +292,9 @@ impl BlockHeader {
             // {
             //     stream.append(b);
             // } else {
-                // stream.append_raw(b, 1);
+                stream.append_raw(b, 1);
             // }
-            stream.append(b);
+            // stream.append(b);
         }
     }
 
@@ -330,9 +330,9 @@ impl BlockHeader {
             // {
             //     stream.append(b);
             // } else {
-                // stream.append_raw(b, 1);
+                stream.append_raw(b, 1);
             // }
-            stream.append(b);
+            // stream.append(b);
         }
     }
 
@@ -372,9 +372,9 @@ impl BlockHeader {
             // {
             //     stream.append(b);
             // } else {
-                // stream.append_raw(b, 1);
+                stream.append_raw(b, 1);
             // }
-            stream.append(b);
+            // stream.append(b);
         }
     }
 

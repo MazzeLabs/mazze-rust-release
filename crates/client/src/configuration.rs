@@ -1259,7 +1259,7 @@ impl Configuration {
         params.base_block_rewards = base_block_rewards;
 
         // TODO: disable 1559 test during dev
-        params.transition_heights.cip1559 = 0;
+        params.transition_heights.cip1559 = 1;
         params.transition_numbers.cancun_opcodes = self
             .raw_conf
             .cancun_opcodes_transition_number

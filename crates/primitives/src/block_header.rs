@@ -292,9 +292,9 @@ impl BlockHeader {
             // {
             //     stream.append(b);
             // } else {
-            stream.append_raw(b, 1);
+            // stream.append_raw(b, 1);
             // }
-            // stream.append(b);
+            stream.append(b);
         }
     }
 
@@ -330,9 +330,9 @@ impl BlockHeader {
             // {
             //     stream.append(b);
             // } else {
-            stream.append_raw(b, 1);
+            // stream.append_raw(b, 1);
             // }
-            // stream.append(b);
+            stream.append(b);
         }
     }
 
@@ -372,9 +372,9 @@ impl BlockHeader {
             // {
             //     stream.append(b);
             // } else {
-            stream.append_raw(b, 1);
+            // stream.append_raw(b, 1);
             // }
-            // stream.append(b);
+            stream.append(b);
         }
     }
 
@@ -396,16 +396,20 @@ impl BlockHeader {
             referee_hashes: r.list_at(12)?,
             custom: vec![],
             nonce: r.val_at(13)?,
-            base_price: r.val_at(14).unwrap_or(None),
+            base_price: None,  // Will set this properly below
         };
 
-        // pow_hash should come after base_price if it exists
-        let pow_hash_idx = 14 + rlp_part.base_price.is_some() as usize;
-        let pow_hash = r.val_at(pow_hash_idx)?;
-
-        // custom fields start after pow_hash
-        let custom_start_idx = pow_hash_idx + 1;
-
+        // We need to decode pow_hash first, then base_price
+        let pow_hash = r.val_at(14)?;
+        
+        // Try to decode base_price if it exists (at index 15)
+        if r.item_count()? > 15 {
+            rlp_part.base_price = r.val_at(15).unwrap_or(None);
+        }
+        
+        // Calculate the starting index for custom fields
+        let custom_start_idx = 15 + rlp_part.base_price.is_some() as usize;
+        
         for i in custom_start_idx..r.item_count()? {
             rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
         }

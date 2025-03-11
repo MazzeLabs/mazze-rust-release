@@ -1033,7 +1033,7 @@ impl TransactionPool {
         let self_gas_limit =
             min(max(target_gas_limit.into(), gas_lower), gas_upper);
 
-        let parent_base_price = if pack_height == 0 {
+        let parent_base_price = if pack_height == 1 {
             params.init_base_price()
         } else {
             parent_block.base_price().unwrap()

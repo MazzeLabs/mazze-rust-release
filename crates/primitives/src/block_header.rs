@@ -292,7 +292,7 @@ impl BlockHeader {
             // {
             //     stream.append(b);
             // } else {
-            //     stream.append_raw(b, 1);
+            // stream.append_raw(b, 1);
             // }
             stream.append(b);
         }
@@ -325,12 +325,12 @@ impl BlockHeader {
             stream.append(&self.base_price);
         }
         for b in &self.custom {
-           // if self.height
+            // if self.height
             //     >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
             // {
             //     stream.append(b);
             // } else {
-            //     stream.append_raw(b, 1);
+            // stream.append_raw(b, 1);
             // }
             stream.append(b);
         }
@@ -372,7 +372,7 @@ impl BlockHeader {
             // {
             //     stream.append(b);
             // } else {
-            //     stream.append_raw(b, 1);
+            // stream.append_raw(b, 1);
             // }
             stream.append(b);
         }
@@ -396,22 +396,22 @@ impl BlockHeader {
             referee_hashes: r.list_at(12)?,
             custom: vec![],
             nonce: r.val_at(13)?,
-            base_price: r.val_at(16).unwrap_or(None),
+            base_price: None,  // Will set this properly below
         };
-        let pow_hash = r.val_at(14)?;
 
-        for i in (15
-            + rlp_part.base_price.is_some() as usize)
-            ..r.item_count()?
-        {
-            // if rlp_part.height
-            //     >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
-            // {
-            //     rlp_part.custom.push(r.val_at(i)?);
-            // } else {
-            //     rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
-            // }
-            rlp_part.custom.push(r.val_at(i)?);
+        // We need to decode pow_hash first, then base_price
+        let pow_hash = r.val_at(14)?;
+        
+        // Try to decode base_price if it exists (at index 15)
+        if r.item_count()? > 15 {
+            rlp_part.base_price = r.val_at(15).unwrap_or(None);
+        }
+        
+        // Calculate the starting index for custom fields
+        let custom_start_idx = 15 + rlp_part.base_price.is_some() as usize;
+        
+        for i in custom_start_idx..r.item_count()? {
+            rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
         }
 
         let mut header = BlockHeader {
@@ -669,20 +669,14 @@ impl Decodable for BlockHeader {
             referee_hashes: r.list_at(12)?,
             custom: vec![],
             nonce: r.val_at(13)?,
-            base_price: r.val_at(15).unwrap_or(None),
+            base_price: r.val_at(14).unwrap_or(None),
         };
-        for i in (14
-            + rlp_part.base_price.is_some() as usize)
-            ..r.item_count()?
-        {
-            // if rlp_part.height
-            //     >= *CIP112_TRANSITION_HEIGHT.get().expect("initialized")
-            // {
-            //     rlp_part.custom.push(r.val_at(i)?);
-            // } else {
-            //     rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
-            // }
-            rlp_part.custom.push(r.val_at(i)?);
+
+        // Fix the starting index for custom fields based on whether base_price exists
+        let custom_start_idx = 14 + rlp_part.base_price.is_some() as usize;
+
+        for i in custom_start_idx..r.item_count()? {
+            rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
         }
 
         let mut header = BlockHeader {

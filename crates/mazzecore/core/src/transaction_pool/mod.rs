@@ -1012,8 +1012,7 @@ impl TransactionPool {
             .block_header_by_hash(&consensus_best_info_clone.best_block_hash)
             // The parent block must exists.
             .expect(&concat!(file!(), ":", line!(), ":", column!()));
-        let parent_block_gas_limit =
-            *parent_block.gas_limit() * ELASTICITY_MULTIPLIER;
+        let parent_block_gas_limit = *parent_block.gas_limit();
 
         let gas_limit_divisor = params.gas_limit_bound_divisor;
         let min_gas_limit = params.min_gas_limit;
@@ -1039,14 +1038,15 @@ impl TransactionPool {
             parent_block.base_price().unwrap()
         };
 
-        let (transactions_from_pool, packing_base_price) = self.pack_transactions_1559(
-            num_txs,
-            self_gas_limit.clone(),
-            parent_base_price,
-            block_size_limit,
-            consensus_best_info_clone.best_epoch_number,
-            consensus_best_info_clone.best_block_number,
-        );
+        let (transactions_from_pool, packing_base_price) = self
+            .pack_transactions_1559(
+                num_txs,
+                self_gas_limit.clone(),
+                parent_base_price,
+                block_size_limit,
+                consensus_best_info_clone.best_epoch_number,
+                consensus_best_info_clone.best_block_number,
+            );
 
         let mut base_price = packing_base_price;
 

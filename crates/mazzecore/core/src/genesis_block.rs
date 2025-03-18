@@ -165,7 +165,7 @@ pub fn genesis_block(
 
         for i in CREATE2FACTORY_TX_INDEX..=contract_name_list.len() {
             execute_genesis_transaction(
-                genesis_transactions[i].as_ref(),
+                genesis_transactions[i - 1].as_ref(),
                 &mut state,
                 machine.clone(),
             );
@@ -175,7 +175,7 @@ pub fn genesis_block(
                 0,
                 &genesis_account_address,
                 &(i - 1).into(),
-                genesis_transactions[i].as_ref().data(),
+                genesis_transactions[i - 1].as_ref().data(),
             );
 
             state

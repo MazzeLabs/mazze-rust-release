@@ -82,9 +82,6 @@ use mazze_executor::state::State;
 use mazze_parameters::{
     collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
     consensus_internal::REWARD_EPOCH_COUNT,
-    genesis::{
-        genesis_contract_address_four_year, genesis_contract_address_two_year,
-    },
 };
 use mazze_storage::state::StateDbGetOriginalMethods;
 use mazzecore::{
@@ -1429,23 +1426,12 @@ impl RpcImpl {
                 .get_state_db_by_epoch_number(epoch, "epoch")?,
         )?;
         let total_issued = state.total_issued_tokens();
-        let total_staking = U256::zero();
         let total_collateral = state.total_storage_tokens();
-        let two_year_unlock_address = genesis_contract_address_two_year();
-        let four_year_unlock_address = genesis_contract_address_four_year();
-        let two_year_locked = state
-            .balance(&two_year_unlock_address)
-            .unwrap_or(U256::zero());
-        let four_year_locked = state
-            .balance(&four_year_unlock_address)
-            .unwrap_or(U256::zero());
-        let total_circulating =
-            total_issued - two_year_locked - four_year_locked;
+        let total_circulating = total_issued;
         let total_espace_tokens = state.total_espace_tokens();
         Ok(TokenSupplyInfo {
             total_circulating,
             total_issued,
-            total_staking,
             total_collateral,
             total_espace_tokens,
         })

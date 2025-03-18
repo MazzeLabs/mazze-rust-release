@@ -22,7 +22,6 @@ pub mod epoch;
 pub mod filter;
 pub mod is_default;
 pub mod log_entry;
-pub mod pos; // TODO: remove this
 pub mod receipt;
 pub mod state_root;
 pub mod static_bool;

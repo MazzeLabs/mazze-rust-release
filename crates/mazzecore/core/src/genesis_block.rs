@@ -17,9 +17,7 @@ use mazze_executor::internal_contract::initialize_internal_contract_accounts;
 use mazze_internal_common::debug::ComputeEpochDebugRecord;
 use mazze_parameters::{
     consensus::{GENESIS_GAS_LIMIT, ONE_MAZZE_IN_MAZZY},
-    consensus_internal::{
-        GENESIS_TOKEN_COUNT_IN_MAZZE, TWO_YEAR_UNLOCK_TOKEN_COUNT_IN_MAZZE,
-    },
+    consensus_internal::GENESIS_TOKEN_COUNT_IN_MAZZE,
     genesis::*,
 };
 use mazze_statedb::StateDb;
@@ -126,11 +124,6 @@ pub fn genesis_block(
     let genesis_token_count = U256::from(GENESIS_TOKEN_COUNT_IN_MAZZE)
         * U256::from(ONE_MAZZE_IN_MAZZY);
     state.add_total_issued(genesis_token_count);
-    let two_year_unlock_token_count =
-        U256::from(TWO_YEAR_UNLOCK_TOKEN_COUNT_IN_MAZZE)
-            * U256::from(ONE_MAZZE_IN_MAZZY);
-    let four_year_unlock_token_count =
-        genesis_token_count - two_year_unlock_token_count;
 
     let genesis_account_init_balance =
         U256::from(ONE_MAZZE_IN_MAZZY) * 100 + genesis_token_count;
@@ -162,139 +155,13 @@ pub fn genesis_block(
     create_create2factory_transaction.gas_price = 1.into();
     create_create2factory_transaction.storage_limit = 512;
 
-    let mut create_genesis_token_manager_two_year_unlock_transaction =
-        NativeTransaction::default();
-    create_genesis_token_manager_two_year_unlock_transaction.nonce = 1.into();
-    create_genesis_token_manager_two_year_unlock_transaction.data =
-        GENESIS_TRANSACTION_CREATE_GENESIS_TOKEN_MANAGER_TWO_YEAR_UNLOCK
-            .from_hex()
-            .unwrap();
-    create_genesis_token_manager_two_year_unlock_transaction.value =
-        two_year_unlock_token_count;
-    create_genesis_token_manager_two_year_unlock_transaction.action =
-        Action::Create;
-    create_genesis_token_manager_two_year_unlock_transaction.chain_id =
-        genesis_chain_id;
-    create_genesis_token_manager_two_year_unlock_transaction.gas =
-        4000000.into();
-    create_genesis_token_manager_two_year_unlock_transaction.gas_price =
-        1.into();
-    create_genesis_token_manager_two_year_unlock_transaction.storage_limit =
-        16000;
-
-    let mut create_genesis_token_manager_four_year_unlock_transaction =
-        NativeTransaction::default();
-    create_genesis_token_manager_four_year_unlock_transaction.nonce = 2.into();
-    create_genesis_token_manager_four_year_unlock_transaction.data =
-        GENESIS_TRANSACTION_CREATE_GENESIS_TOKEN_MANAGER_FOUR_YEAR_UNLOCK
-            .from_hex()
-            .unwrap();
-    create_genesis_token_manager_four_year_unlock_transaction.value =
-        four_year_unlock_token_count;
-    create_genesis_token_manager_four_year_unlock_transaction.action =
-        Action::Create;
-    create_genesis_token_manager_four_year_unlock_transaction.chain_id =
-        genesis_chain_id;
-    create_genesis_token_manager_four_year_unlock_transaction.gas =
-        8000000.into();
-    create_genesis_token_manager_four_year_unlock_transaction.gas_price =
-        1.into();
-    create_genesis_token_manager_four_year_unlock_transaction.storage_limit =
-        32000;
-
-    let mut create_genesis_investor_fund_transaction =
-        NativeTransaction::default();
-    create_genesis_investor_fund_transaction.nonce = 3.into();
-    create_genesis_investor_fund_transaction.data =
-        GENESIS_TRANSACTION_CREATE_FUND_POOL.from_hex().unwrap();
-    create_genesis_investor_fund_transaction.action = Action::Create;
-    create_genesis_investor_fund_transaction.chain_id = genesis_chain_id;
-    create_genesis_investor_fund_transaction.gas = 4000000.into();
-    create_genesis_investor_fund_transaction.gas_price = 1.into();
-    create_genesis_investor_fund_transaction.storage_limit = 1000;
-
-    let mut create_genesis_team_fund_transaction = NativeTransaction::default();
-    create_genesis_team_fund_transaction.nonce = 4.into();
-    create_genesis_team_fund_transaction.data =
-        GENESIS_TRANSACTION_CREATE_FUND_POOL.from_hex().unwrap();
-    create_genesis_team_fund_transaction.action = Action::Create;
-    create_genesis_team_fund_transaction.chain_id = genesis_chain_id;
-    create_genesis_team_fund_transaction.gas = 4000000.into();
-    create_genesis_team_fund_transaction.gas_price = 1.into();
-    create_genesis_team_fund_transaction.storage_limit = 1000;
-
-    let mut create_genesis_eco_fund_transaction = NativeTransaction::default();
-    create_genesis_eco_fund_transaction.nonce = 5.into();
-    create_genesis_eco_fund_transaction.data =
-        GENESIS_TRANSACTION_CREATE_FUND_POOL.from_hex().unwrap();
-    create_genesis_eco_fund_transaction.action = Action::Create;
-    create_genesis_eco_fund_transaction.chain_id = genesis_chain_id;
-    create_genesis_eco_fund_transaction.gas = 4000000.into();
-    create_genesis_eco_fund_transaction.gas_price = 1.into();
-    create_genesis_eco_fund_transaction.storage_limit = 1000;
-
-    let mut create_genesis_community_fund_transaction =
-        NativeTransaction::default();
-    create_genesis_community_fund_transaction.nonce = 6.into();
-    create_genesis_community_fund_transaction.data =
-        GENESIS_TRANSACTION_CREATE_FUND_POOL.from_hex().unwrap();
-    create_genesis_community_fund_transaction.action = Action::Create;
-    create_genesis_community_fund_transaction.chain_id = genesis_chain_id;
-    create_genesis_community_fund_transaction.gas = 4000000.into();
-    create_genesis_community_fund_transaction.gas_price = 1.into();
-    create_genesis_community_fund_transaction.storage_limit = 1000;
-
-    let genesis_transactions = vec![
-        Arc::new(genesis_transaction.fake_sign(Default::default())),
-        Arc::new(
-            create_create2factory_transaction
-                .fake_sign(genesis_account_address),
-        ),
-        Arc::new(
-            create_genesis_token_manager_two_year_unlock_transaction
-                .fake_sign(genesis_account_address),
-        ),
-        Arc::new(
-            create_genesis_token_manager_four_year_unlock_transaction
-                .fake_sign(genesis_account_address),
-        ),
-        Arc::new(
-            create_genesis_investor_fund_transaction
-                .fake_sign(genesis_account_address),
-        ),
-        Arc::new(
-            create_genesis_team_fund_transaction
-                .fake_sign(genesis_account_address),
-        ),
-        Arc::new(
-            create_genesis_eco_fund_transaction
-                .fake_sign(genesis_account_address),
-        ),
-        Arc::new(
-            create_genesis_community_fund_transaction
-                .fake_sign(genesis_account_address),
-        ),
-    ];
+    let genesis_transactions = vec![Arc::new(
+        create_create2factory_transaction.fake_sign(genesis_account_address),
+    )];
 
     if need_to_execute {
         const CREATE2FACTORY_TX_INDEX: usize = 1;
-        /*
-        const TWO_YEAR_UNLOCK_TX_INDEX: usize = 2;
-        const FOUR_YEAR_UNLOCK_TX_INDEX: usize = 3;
-        const INVESTOR_FUND_TX_INDEX: usize = 4;
-        const TEAM_FUND_TX_INDEX: usize = 5;
-        const ECO_FUND_TX_INDEX: usize = 6;
-        const COMMUNITY_FUND_TX_INDEX: usize = 7;
-        */
-        let contract_name_list = vec![
-            "CREATE2FACTORY",
-            "TWO_YEAR_UNLOCK",
-            "FOUR_YEAR_UNLOCK",
-            "INVESTOR_FUND",
-            "TEAM_FUND",
-            "ECO_FUND",
-            "COMMUNITY_FUND",
-        ];
+        let contract_name_list = vec!["CREATE2FACTORY"];
 
         for i in CREATE2FACTORY_TX_INDEX..=contract_name_list.len() {
             execute_genesis_transaction(

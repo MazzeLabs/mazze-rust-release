@@ -1,7 +1,4 @@
 use super::State;
-use mazze_parameters::genesis::{
-    genesis_contract_address_four_year, genesis_contract_address_two_year,
-};
 use mazze_statedb::{global_params::*, Result as DbResult};
 use mazze_types::{Address, AddressSpaceUtil, U256};
 
@@ -49,9 +46,7 @@ impl State {
 
     pub fn total_circulating_tokens(&self) -> DbResult<U256> {
         Ok(self.total_issued_tokens()
-            - self.balance(&Address::zero().with_native_space())?
-            - self.balance(&genesis_contract_address_four_year())?
-            - self.balance(&genesis_contract_address_two_year())?)
+            - self.balance(&Address::zero().with_native_space())?)
     }
 
     pub fn add_converted_storage_point(

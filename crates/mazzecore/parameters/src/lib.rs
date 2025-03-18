@@ -63,11 +63,7 @@ pub mod consensus_internal {
     // The average number of blocks mined per quarter.
     pub const MINED_BLOCK_COUNT_PER_QUARTER: u64 = 15_768_000;
 
-    pub const GENESIS_TOKEN_COUNT_IN_MAZZE: u64 = 5_000_000_000;
-    pub const TWO_YEAR_UNLOCK_TOKEN_COUNT_IN_MAZZE: u64 = 800_000_000;
-
-    // How many quarters that the mining reward keep decaying.
-    pub const MINING_REWARD_DECAY_PERIOD_IN_QUARTER: usize = 32;
+    pub const GENESIS_TOKEN_COUNT_IN_MAZZE: u64 = 2_500_000_000;
 
     /// This is the cap of the size of the outlier barrier. If we have more
     /// than this number we will use the brute_force O(n) algorithm instead.

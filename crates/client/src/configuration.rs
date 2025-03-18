@@ -1219,7 +1219,7 @@ impl Configuration {
         params.evm_transaction_gas_ratio =
             self.raw_conf.evm_transaction_gas_ratio;
 
-        self.set_cips(&mut params);
+        self.set_mips(&mut params);
 
         params
     }
@@ -1228,8 +1228,7 @@ impl Configuration {
         self.raw_conf.node_type.unwrap_or(NodeType::Full)
     }
 
-    // TODO: remove this function
-    fn set_cips(&self, params: &mut CommonParams) {
+    fn set_mips(&self, params: &mut CommonParams) {
         let default_transition_time =
             if let Some(num) = self.raw_conf.default_transition_time {
                 num
@@ -1238,11 +1237,6 @@ impl Configuration {
             } else {
                 u64::MAX
             };
-
-        let mut base_block_rewards = BTreeMap::new();
-        base_block_rewards
-            .insert(0, INITIAL_BASE_MINING_REWARD_IN_UMAZZE.into());
-        params.base_block_rewards = base_block_rewards;
 
         params.transition_numbers.cancun_opcodes = self
             .raw_conf

@@ -41,6 +41,8 @@ pub mod consensus {
 
     pub const ONE_UMAZZE_IN_MAZZY: u64 = 1_000_000_000_000;
 
+    pub const ONE_MAZZE_IN_UMAZZE: u64 = ONE_MAZZE_IN_MAZZY / ONE_UMAZZE_IN_MAZZY;
+
     pub const ONE_GMAZZY_IN_MAZZY: u64 = 1_000_000_000;
 
     pub const NEXT_HARDFORK_HEADER_CUSTOM_FIRST_ELEMENT: [u8; 1] = [1];
@@ -59,11 +61,11 @@ pub mod consensus_internal {
     /// The maximum number of blocks to be executed in each epoch
     pub const EPOCH_EXECUTED_BLOCK_BOUND: usize = 200;
     // The initial base mining reward in uMAZZE.
-    pub const INITIAL_BASE_MINING_REWARD_IN_UMAZZE: u64 = 2_000_000;
-    // The average number of blocks mined per quarter.
-    pub const MINED_BLOCK_COUNT_PER_QUARTER: u64 = 15_768_000;
+    pub const INITIAL_BASE_MINING_REWARD_IN_UMAZZE: u64 = 4_000_000;
 
     pub const GENESIS_TOKEN_COUNT_IN_MAZZE: u64 = 2_500_000_000;
+    pub const MAX_SUPPLY_TOKEN_COUNT_IN_MAZZE: u64 = 5_000_000_000;
+    pub const HALVING_INTERVAL_IN_BLOCKS: u64 = 312_500_000;
 
     /// This is the cap of the size of the outlier barrier. If we have more
     /// than this number we will use the brute_force O(n) algorithm instead.

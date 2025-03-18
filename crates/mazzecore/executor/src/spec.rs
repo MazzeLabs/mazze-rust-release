@@ -8,7 +8,8 @@ use mazze_parameters::{
     block::{EVM_TRANSACTION_BLOCK_RATIO, EVM_TRANSACTION_GAS_RATIO},
     consensus::ONE_UMAZZE_IN_MAZZY,
     consensus_internal::{
-        INITIAL_BASE_MINING_REWARD_IN_UMAZZE, OUTLIER_PENALTY_RATIO,
+        HALVING_INTERVAL_IN_BLOCKS, INITIAL_BASE_MINING_REWARD_IN_UMAZZE,
+        OUTLIER_PENALTY_RATIO,
     },
 };
 use mazze_types::{AllChainID, Space, SpaceMap, U256, U512};
@@ -72,9 +73,6 @@ pub struct TransitionsEpochHeight {}
 
 impl Default for CommonParams {
     fn default() -> Self {
-        let mut base_block_rewards = BTreeMap::new();
-        base_block_rewards
-            .insert(0, INITIAL_BASE_MINING_REWARD_IN_UMAZZE.into());
         CommonParams {
             maximum_extra_data_size: 0x20,
             network_id: 0x1,
@@ -84,7 +82,7 @@ impl Default for CommonParams {
             gas_limit_bound_divisor: 0x0400.into(),
             max_transaction_size: 300 * 1024,
             outlier_penalty_ratio: OUTLIER_PENALTY_RATIO,
-            base_block_rewards,
+            base_block_rewards: Self::get_block_rewards_config(),
             evm_transaction_block_ratio: EVM_TRANSACTION_BLOCK_RATIO,
             evm_transaction_gas_ratio: EVM_TRANSACTION_GAS_RATIO,
             early_set_internal_contracts_states: false,
@@ -125,11 +123,6 @@ impl CommonParams {
     }
 
     pub fn custom_prefix(&self, _height: BlockHeight) -> Option<Vec<Bytes>> {
-        // if height >= self.transition_heights.cip1559 {
-        //     Some(vec![NEXT_HARDFORK_HEADER_CUSTOM_FIRST_ELEMENT.to_vec()])
-        // } else {
-        //     None
-        // }
         None
     }
 
@@ -160,5 +153,96 @@ impl CommonParams {
 
     pub fn min_base_price(&self) -> SpaceMap<U256> {
         self.min_base_price
+    }
+
+    fn get_block_rewards_config() -> BTreeMap<u64, U256> {
+        let mut base_block_rewards = BTreeMap::new();
+
+        // Initial reward
+        let mut current_reward = INITIAL_BASE_MINING_REWARD_IN_UMAZZE;
+        let mut blocks_passed = 0;
+
+        // Keep adding halving periods until reward reaches zero through integer division
+        while current_reward > 0 {
+            // Add entry for this reward period
+            base_block_rewards
+                .insert(blocks_passed, U256::from(current_reward));
+
+            // Move to next halving interval
+            blocks_passed += HALVING_INTERVAL_IN_BLOCKS;
+
+            // Halve the reward (integer division)
+            current_reward /= 2;
+        }
+
+        // Add final zero entry to mark end of issuance
+        if !base_block_rewards.contains_key(&blocks_passed) {
+            base_block_rewards.insert(blocks_passed, U256::from(0));
+        }
+
+        base_block_rewards
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use mazze_parameters::{
+        consensus::ONE_MAZZE_IN_UMAZZE,
+        consensus_internal::{
+            GENESIS_TOKEN_COUNT_IN_MAZZE, MAX_SUPPLY_TOKEN_COUNT_IN_MAZZE,
+        },
+    };
+    use mazze_types::U256;
+
+    #[test]
+    fn test_total_issuance_matches_max_supply() {
+        let schedule = CommonParams::get_block_rewards_config();
+
+        let mut issuance = String::new();
+
+        let total =
+            schedule.iter().fold(U256::zero(), |acc, (height, reward)| {
+                let next_change = schedule
+                    .range((height + 1)..)
+                    .next()
+                    .map(|(h, _)| *h)
+                    .unwrap_or(u64::MAX);
+                let blocks_at_this_reward = next_change - height;
+                issuance.push_str(&format!(
+                    "{}\t{}\t{}\n",
+                    height, reward, blocks_at_this_reward
+                ));
+                acc + (*reward * U256::from(blocks_at_this_reward))
+            });
+
+        let expected = U256::from(
+            MAX_SUPPLY_TOKEN_COUNT_IN_MAZZE - GENESIS_TOKEN_COUNT_IN_MAZZE,
+        ) * U256::from(ONE_MAZZE_IN_UMAZZE);
+
+        // With Bitcoin-style halving, we expect slightly less than the maximum supply
+        // due to integer division rounding
+
+        // Ensure we don't exceed max supply
+        assert!(total <= expected, "Total issuance exceeds max supply");
+
+        // Check that we're reasonably close (within 0.001% of max supply)
+        let difference = expected - total;
+        let max_acceptable_difference = expected / 100_000; // 0.001% difference
+
+        assert!(
+            difference <= max_acceptable_difference,
+            "Total issuance is too far below max supply. Difference: {} ({}%)",
+            difference,
+            (difference * U256::from(100_000)) / expected
+        );
+
+        // Print the actual percentage of max supply distributed
+        println!(
+            "Issued {}/{} tokens ({}%)",
+            total,
+            expected,
+            (total * U256::from(100)) / expected
+        );
     }
 }

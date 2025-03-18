@@ -1,4 +1,3 @@
-use crate::core::IntoChunks;
 use log::{debug, info, trace};
 use mazze_types::{H256, U256};
 use mazzecore::pow::ProofOfWorkProblem;

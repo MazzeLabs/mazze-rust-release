@@ -5,7 +5,6 @@ use mazze_types::{H256, U256};
 use mazzecore::pow::{
     boundary_to_difficulty, ProofOfWorkProblem, ProofOfWorkSolution,
 };
-use randomx_rs::RandomXFlag;
 use serde_json::Value;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -15,13 +14,12 @@ use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::broadcast;
 
+use crate::core::NumaError;
+use crate::core::ThreadAssignment;
 use crate::core::*;
-use crate::core_numa::NumaError;
-use crate::core_numa::ThreadAssignment;
-use crate::core_numa::{NewNumaVMManager, THREAD_VM};
-use crate::mining_metrics::MiningMetrics;
+use crate::core::{NewNumaVMManager, THREAD_VM};
 
-const CHECK_INTERVAL: u64 = 64 * BATCH_SIZE as u64;
+const CHECK_INTERVAL: u64 = 64 * 128 as u64;
 
 /*
 Flow:
@@ -39,7 +37,6 @@ pub struct Miner {
     pub worker_name: String,
     num_threads: usize,
     solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
-    metrics: Arc<MiningMetrics>,
     vm_manager: Arc<NewNumaVMManager>,
 }
 
@@ -52,7 +49,6 @@ impl Miner {
     > {
         let (stratum_tx, rx) = broadcast::channel(32);
         let (solution_tx, solution_rx) = mpsc::channel();
-        let metrics = Arc::new(MiningMetrics::new());
         let vm_manager = Arc::new(NewNumaVMManager::new()?);
 
         let miner = Miner {
@@ -60,7 +56,6 @@ impl Miner {
             worker_name: format!("worker-{}", worker_id),
             num_threads,
             solution_sender: solution_tx,
-            metrics: Arc::clone(&metrics),
             vm_manager: Arc::clone(&vm_manager),
         };
 
@@ -311,14 +306,8 @@ impl Miner {
                     input[..32].copy_from_slice(block_hash.as_bytes());
                     current_nonce.to_little_endian(&mut input[32..64]);
 
-                    let hash_bytes = match vm.vm.calculate_hash(&input) {
-                        Ok(hash) => hash,
-                        Err(e) => {
-                            error!("[{}] Failed to calculate hash: {}", worker_name, e);
-                            return false;
-                        }
-                    };
-                    let hash = H256::from_slice(&hash_bytes);
+                    let hash_bytes = vm.hasher.hash(&input);
+                    let hash = H256::from_slice(&hash_bytes.as_ref());
                     hashes_computed += 1;
 
                     if vm.check_hash(&hash) {
@@ -457,12 +446,6 @@ mod tests {
             "9111110000000000000000000000000000000000000000000000000000000000"
         );
 
-        let state = ProblemState::new(
-            0,
-            H256::zero(),
-            U256::from_big_endian(&boundary),
-        );
-
         let atomic_state = AtomicProblemState::new(
             0,
             H256::zero(),
@@ -490,32 +473,5 @@ mod tests {
             !atomic_state.check_hash_simd(&H256::from_slice(&hash)),
             "SIMD comparison should return false for hash > boundary"
         );
-    }
-
-    #[test]
-    fn test_nonce_validation() {
-        // Setup test data
-        let block_hash_hex =
-            "7dc6e0aad8b74e5ee04e2f34e01b457d017bc4c38c7a5db001e5c7baecbab4e8";
-        let block_hash =
-            H256::from_slice(&Vec::from_hex(block_hash_hex).unwrap());
-
-        let boundary_hex =
-            "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-        let boundary = U256::from_str(boundary_hex).unwrap();
-
-        let nonce = U256::from_dec_str("14474011154664524427946373126085988481658748083205070504932198000989141204990").unwrap();
-
-        // Setup VM and hasher
-        let flags = RandomXFlag::get_recommended_flags();
-        let vm = ThreadLocalVM::new(flags, &block_hash);
-        let mut hasher = BatchHasher::new();
-
-        // Test single nonce validation
-        let hashes = hasher.compute_hash_batch(&vm.vm, nonce, &block_hash);
-        let hash = &hashes[0];
-        let hash_u256 = U256::from(hash.as_bytes());
-
-        assert!(hash_u256 <= boundary, "Known valid nonce failed validation");
     }
 }

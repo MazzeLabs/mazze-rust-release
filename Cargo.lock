@@ -3859,7 +3859,7 @@ dependencies = [
  "mazzecore",
  "parking_lot 0.12.3",
  "rand 0.8.5",
- "randomx-rs",
+ "rust-randomx",
  "serde",
  "serde_json",
  "thread_local",
@@ -6109,6 +6109,15 @@ version = "0.1.0"
 dependencies = [
  "futures 0.1.31",
  "tokio 0.1.22",
+]
+
+[[package]]
+name = "rust-randomx"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7acb42e1a327828013c1d23bcc40c4a45c336ff898b8f978045d704908cae9c5"
+dependencies = [
+ "cmake",
 ]
 
 [[package]]

@@ -1,7 +1,8 @@
 use log::{debug, info, warn};
 use mazze_types::{H256, U256};
 use mazzecore::pow::ProofOfWorkProblem;
-use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag, RandomXVM};
+use rust_randomx::{Context as RandomXContext, Hasher};
+// use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag, RandomXVM};
 use std::cell::RefCell;
 use std::{str::FromStr, sync::Arc};
 
@@ -9,64 +10,31 @@ use super::{NumaError, NumaTopology, ThreadAssignment};
 use crate::core::{AtomicProblemState, ProblemState};
 
 pub struct ThreadLocalVM {
-    pub vm: RandomXVM,
+    pub hasher: Hasher,
     problem_state: AtomicProblemState,
 }
 
 impl ThreadLocalVM {
-    pub fn new(node_id: usize) -> Result<Self, NumaError> {
+    pub fn new(
+        node_id: usize, ctx: Arc<RandomXContext>,
+    ) -> Result<Self, NumaError> {
         info!("Creating new thread-local VM for NUMA node {}", node_id);
 
         let topology = NumaTopology::detect()?;
         topology.bind_thread_to_node(node_id)?;
 
-        // TODO: init with new seed hash
-        let temp_seed_hash = [0u8; 32];
-
-        // let temp_seed_hash: H256 = H256::from_str(
-        //     "ef6e5a0dd08b7c8be526c5d6ce7d2fcf8e4dd2449d690af4023f4ea989fd2a4e",
-        // )
-        // .expect("Invalid seed hash");
-
-        let mut flags = RandomXFlag::get_recommended_flags();
-        flags |= RandomXFlag::FLAG_FULL_MEM;
-        debug!("Initializing RandomX with flags: {:?}", flags);
-
-        // Initialize with genesis block
-        info!("Creating RandomX cache with genesis block");
-        let cache = RandomXCache::new(flags, &temp_seed_hash).map_err(|e| {
-            warn!("Failed to create RandomX cache: {}", e);
-            NumaError::RandomXError(e)
-        })?;
-        debug!("RandomX cache created successfully");
-
-        info!("Creating RandomX dataset...");
-        let dataset =
-            RandomXDataset::new(flags, cache.clone(), 0).map_err(|e| {
-                warn!("Failed to create RandomX dataset: {}", e);
-                NumaError::RandomXError(e)
-            })?;
-        info!("RandomX dataset created successfully");
-
-        info!("Creating RandomX VM...");
-        let vm = RandomXVM::new(flags, Some(cache), Some(dataset))
-            .map_err(NumaError::RandomXError)?;
-        info!("RandomX VM created successfully");
+        let hasher = Hasher::new(ctx);
 
         // Initialize with genesis state
-        let problem_state = AtomicProblemState::new(
-            0, // Initial height
-            H256::from_slice(&temp_seed_hash),
-            U256::from(4), // Initial difficulty
-        );
-        debug!("Initialized problem state with genesis block");
+        let problem_state = AtomicProblemState::default();
+        debug!("Initialized problem state with default block");
 
         info!(
             "Thread-local VM initialization complete for NUMA node {}",
             node_id
         );
 
-        Ok(Self { vm, problem_state })
+        Ok(Self { hasher, problem_state })
     }
 
     pub fn get_current_block_hash(&self) -> H256 {
@@ -96,13 +64,21 @@ thread_local! {
 pub struct NewNumaVMManager {
     pub topology: NumaTopology,
     reference_state: AtomicProblemState,
+    context: Arc<RandomXContext>,
 }
 
 impl NewNumaVMManager {
     pub fn new() -> Result<Self, NumaError> {
+        // TODO: init with new seed hash
+        info!("Initializing RandomX context");
+        let temp_seed_hash = [0u8; 32];
+        let context = Arc::new(RandomXContext::new(&temp_seed_hash, true));
+        info!("RandomX context initialized");
+
         Ok(Self {
             topology: NumaTopology::detect()?,
             reference_state: AtomicProblemState::default(),
+            context,
         })
     }
 
@@ -123,7 +99,10 @@ impl NewNumaVMManager {
         THREAD_VM.with(|vm| {
             let mut vm_ref = vm.borrow_mut();
             if vm_ref.is_none() {
-                *vm_ref = Some(ThreadLocalVM::new(assignment.node_id)?);
+                *vm_ref = Some(ThreadLocalVM::new(
+                    assignment.node_id,
+                    self.context.clone(),
+                )?);
             }
             Ok(f(vm_ref.as_mut().unwrap()))
         })

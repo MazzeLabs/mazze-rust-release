@@ -2,7 +2,7 @@
 #![allow(unused_imports)]
 
 use parking_lot::Mutex;
-use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
+use rust_randomx::{Context as RandomXContext, Hasher};
 
 use super::{
     compute::Light,
@@ -25,13 +25,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const INITIAL_VMS_PER_STAGE: usize = 4;
 
 pub struct RandomXCacheBuilder {
-    global_queue: Worker<Arc<RandomXVM>>,
-    stealers: Vec<Stealer<Arc<RandomXVM>>>,
+    global_queue: Worker<Arc<Hasher>>,
+    stealers: Vec<Stealer<Arc<Hasher>>>,
+
+    context: Arc<RandomXContext>,
     current_stage: AtomicU64,
 }
 
 pub struct VMHandle {
-    vm: Option<Arc<RandomXVM>>,
+    vm: Option<Arc<Hasher>>,
     cache_builder: Arc<RandomXCacheBuilder>,
 }
 
@@ -40,10 +42,14 @@ impl RandomXCacheBuilder {
         let global_queue = Worker::new_fifo();
         let stealers = vec![global_queue.stealer()];
 
+        let temp_seed_hash = [0u8; 32];
+        let context = Arc::new(RandomXContext::new(&temp_seed_hash, false));
+
         let builder = RandomXCacheBuilder {
             global_queue,
             stealers,
             current_stage: AtomicU64::new(0),
+            context,
         };
 
         // Initialize with some VMs
@@ -55,16 +61,8 @@ impl RandomXCacheBuilder {
         Arc::new(builder)
     }
 
-    fn initialize_new_vm(&self, _block_height: u64) -> Arc<RandomXVM> {
-        let flags = RandomXFlag::get_recommended_flags();
-        let temp_seed_hash = [0u8; 32];
-        // let key = self.get_stage_key(block_height);
-        let cache = RandomXCache::new(flags, &temp_seed_hash)
-            .expect("Failed to create cache");
-        Arc::new(
-            RandomXVM::new(flags, Some(cache), None)
-                .expect("Failed to create VM"),
-        )
+    fn initialize_new_vm(&self, _block_height: u64) -> Arc<Hasher> {
+        Arc::new(Hasher::new(self.context.clone()))
     }
 
     fn get_stage_key(&self, block_height: u64) -> Vec<u8> {
@@ -72,7 +70,7 @@ impl RandomXCacheBuilder {
         format!("stage_{}", stage).into_bytes()
     }
 
-    fn acquire_vm(&self) -> Arc<RandomXVM> {
+    fn acquire_vm(&self) -> Arc<Hasher> {
         if let Some(vm) = self.global_queue.pop() {
             return vm;
         }
@@ -93,7 +91,7 @@ impl RandomXCacheBuilder {
         self.initialize_new_vm(current_stage)
     }
 
-    fn return_vm_handler(&self, vm: Arc<RandomXVM>) {
+    fn return_vm_handler(&self, vm: Arc<Hasher>) {
         self.global_queue.push(vm);
     }
 
@@ -106,7 +104,7 @@ impl RandomXCacheBuilder {
 }
 
 impl VMHandle {
-    pub fn get_vm(&self) -> &RandomXVM {
+    pub fn get_vm(&self) -> &Hasher {
         self.vm.as_ref().expect("VM should exist").as_ref()
     }
 }

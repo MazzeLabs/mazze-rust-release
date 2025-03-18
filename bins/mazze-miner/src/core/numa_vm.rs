@@ -2,7 +2,6 @@ use log::{debug, info, warn};
 use mazze_types::{H256, U256};
 use mazzecore::pow::ProofOfWorkProblem;
 use rust_randomx::{Context as RandomXContext, Hasher};
-// use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag, RandomXVM};
 use std::cell::RefCell;
 use std::{str::FromStr, sync::Arc};
 

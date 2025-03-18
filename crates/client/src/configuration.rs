@@ -3,7 +3,7 @@
 // See http://www.gnu.org/licenses/
 
 // TODO: Cleanup this file
-use std::{collections::BTreeMap, convert::TryInto, path::PathBuf, sync::Arc};
+use std::{convert::TryInto, path::PathBuf, sync::Arc};
 
 use lazy_static::*;
 use parking_lot::RwLock;

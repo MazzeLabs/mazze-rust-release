@@ -275,9 +275,10 @@ impl PowComputer {
 
         let handle = self.cache_builder.get_vm_handler();
         let vm = handle.get_vm();
-        let hash = vm.calculate_hash(&input).expect("Failed to compute hash");
+        let hash_bytes = vm.hash(&input);
+        let hash = H256::from_slice(&hash_bytes.as_ref());
 
-        H256::from_slice(&hash)
+        hash
     }
 }
 

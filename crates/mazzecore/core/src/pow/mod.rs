@@ -33,6 +33,8 @@ pub struct ProofOfWorkProblem {
     pub block_hash: H256,
     pub difficulty: U256,
     pub boundary: U256,
+    pub seed_hash: H256,
+    pub next_seed_hash: Option<H256>,
 }
 
 impl ProofOfWorkProblem {
@@ -45,6 +47,8 @@ impl ProofOfWorkProblem {
             block_hash,
             difficulty,
             boundary,
+            seed_hash: H256::default(),
+            next_seed_hash: None,
         }
     }
 
@@ -57,9 +61,25 @@ impl ProofOfWorkProblem {
             block_hash,
             difficulty,
             boundary,
+            seed_hash: H256::default(),
+            next_seed_hash: None,
         }
     }
 
+    pub fn new_from_boundary_with_seed_hash(
+        block_height: u64, block_hash: H256, boundary: U256, seed_hash: H256,
+        next_seed_hash: Option<H256>,
+    ) -> Self {
+        let difficulty = boundary_to_difficulty(&boundary);
+        Self {
+            block_height,
+            block_hash,
+            difficulty,
+            boundary,
+            seed_hash,
+            next_seed_hash,
+        }
+    }
     #[inline]
     pub fn validate_hash_against_boundary(
         hash: &H256, _nonce: &U256, boundary: &U256,

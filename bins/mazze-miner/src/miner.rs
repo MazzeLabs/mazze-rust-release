@@ -91,14 +91,25 @@ impl Miner {
     pub fn parse_job(
         &mut self, params: &[Value],
     ) -> Result<ProofOfWorkProblem, String> {
-        if params.len() < 4 {
+        if params.len() != 6 {
             return Err("Invalid job data: not enough parameters".into());
         }
 
+        let block_height = params[1]
+            .as_str()
+            .ok_or("Invalid block height: not a string")?
+            .parse::<u64>()
+            .map_err(|e| format!("Invalid block height: {}", e))?;
         let pow_hash_str =
             params[2].as_str().ok_or("Invalid pow_hash: not a string")?;
         let boundary_str =
             params[3].as_str().ok_or("Invalid boundary: not a string")?;
+        let seed_hash_str = params[4]
+            .as_str()
+            .ok_or("Invalid seed_hash: not a string")?;
+        let next_seed_hash_str = params[5]
+            .as_str()
+            .ok_or("Invalid next_seed_hash: not a string")?;
 
         let pow_hash = H256::from_slice(
             &hex::decode(pow_hash_str.trim_start_matches("0x"))
@@ -108,27 +119,39 @@ impl Miner {
         let boundary = U256::from_str(boundary_str.trim_start_matches("0x"))
             .map_err(|e| format!("Invalid boundary: {}", e))?;
 
-        let block_height = params[1]
-            .as_str()
-            .ok_or("Invalid block height: not a string")?
-            .parse::<u64>()
-            .map_err(|e| format!("Invalid block height: {}", e))?;
-
         let difficulty = boundary_to_difficulty(&boundary);
 
+        let seed_hash = H256::from_slice(
+            &hex::decode(seed_hash_str.trim_start_matches("0x"))
+                .map_err(|e| format!("Invalid seed_hash: {}", e))?,
+        );
+
+        let next_seed_hash = if next_seed_hash_str.is_empty() {
+            None
+        } else {
+            Some(H256::from_slice(
+                &hex::decode(next_seed_hash_str.trim_start_matches("0x"))
+                    .map_err(|e| format!("Invalid next_seed_hash: {}", e))?,
+            ))
+        };
+
         info!(
-            "Parsed job: block_height={}, pow_hash={:.4}…{:.4}, boundary=0x{:x}, calculated difficulty={}",
+            "Parsed job: block_height={}, pow_hash={:.4}…{:.4}, boundary=0x{:x}, calculated difficulty={}, seed_hash={}, next_seed_hash={:?}",
             block_height,
             pow_hash,
             hex::encode(&pow_hash.as_bytes()[28..32]),
             boundary,
-            difficulty
+            difficulty,
+            seed_hash,
+            next_seed_hash
         );
 
-        let problem = ProofOfWorkProblem::new_from_boundary(
+        let problem = ProofOfWorkProblem::new_from_boundary_with_seed_hash(
             block_height,
             pow_hash,
             boundary,
+            seed_hash,
+            next_seed_hash,
         );
 
         self.mine(&problem);

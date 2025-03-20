@@ -250,10 +250,10 @@ impl VerificationConfig {
     #[inline]
     /// Note that this function returns *pow_hash* of the block, not its quality
     pub fn get_or_fill_header_pow_hash(
-        pow: &PowComputer, header: &mut BlockHeader,
+        pow: &PowComputer, header: &mut BlockHeader, seed_hash: &H256,
     ) -> H256 {
         if header.pow_hash.is_none() {
-            let computed_hash = Self::compute_pow_hash(pow, header);
+            let computed_hash = Self::compute_pow_hash(pow, header, seed_hash);
             info!(
                 "Computed PoW hash: {:?} for nonce: {:?}",
                 computed_hash,
@@ -265,31 +265,34 @@ impl VerificationConfig {
     }
 
     pub fn get_or_fill_header_pow_quality(
-        pow: &PowComputer, header: &mut BlockHeader,
+        pow: &PowComputer, header: &mut BlockHeader, seed_hash: &H256,
     ) -> U256 {
-        let pow_hash = Self::get_or_fill_header_pow_hash(pow, header);
+        let pow_hash =
+            Self::get_or_fill_header_pow_hash(pow, header, seed_hash);
         pow::pow_hash_to_quality(&pow_hash, &header.nonce())
     }
 
     pub fn get_or_compute_header_pow_quality(
-        pow: &PowComputer, header: &BlockHeader,
+        pow: &PowComputer, header: &BlockHeader, seed_hash: &H256,
     ) -> U256 {
         let pow_hash = header
             .pow_hash
-            .unwrap_or_else(|| Self::compute_pow_hash(pow, header));
+            .unwrap_or_else(|| Self::compute_pow_hash(pow, header, seed_hash));
         pow::pow_hash_to_quality(&pow_hash, &header.nonce())
     }
 
-    fn compute_pow_hash(pow: &PowComputer, header: &BlockHeader) -> H256 {
+    fn compute_pow_hash(
+        pow: &PowComputer, header: &BlockHeader, seed_hash: &H256,
+    ) -> H256 {
         let nonce = header.nonce();
         let hash = header.problem_hash();
 
-        pow.compute(&nonce, &hash)
+        pow.compute(&nonce, &hash, seed_hash)
     }
 
     #[inline]
     pub fn verify_pow(
-        &self, pow: &PowComputer, header: &mut BlockHeader,
+        &self, pow: &PowComputer, header: &mut BlockHeader, seed_hash: &H256,
     ) -> Result<(), Error> {
         let difficulty: U256 = header.difficulty().into();
         if difficulty.is_zero() {
@@ -303,7 +306,7 @@ impl VerificationConfig {
 
         // TODO: add seed management - Simple hash computation without seed management for now
         let nonce = header.nonce();
-        let hash = pow.compute(&nonce, &header.problem_hash());
+        let hash = pow.compute(&nonce, &header.problem_hash(), seed_hash);
         let quality = pow::pow_hash_to_quality(&hash, &nonce);
         let boundary = pow::difficulty_to_boundary(&difficulty);
 
@@ -334,7 +337,7 @@ impl VerificationConfig {
     /// This does not require header to be graph or parental tree ready.
     #[inline]
     pub fn verify_header_params(
-        &self, pow: &PowComputer, header: &mut BlockHeader,
+        &self, pow: &PowComputer, header: &mut BlockHeader, seed_hash: &H256,
     ) -> Result<(), Error> {
         // Check header custom data length
         let custom_len = header.custom().iter().fold(0, |acc, x| acc + x.len());
@@ -380,7 +383,7 @@ impl VerificationConfig {
         }
 
         // verify POW
-        self.verify_pow(pow, header)?;
+        self.verify_pow(pow, header, seed_hash)?;
 
         // A block will be invalid if it has more than REFEREE_BOUND referees
         if header.referee_hashes().len() > self.referee_bound {
@@ -601,7 +604,6 @@ impl VerificationConfig {
         &self, tx: &TransactionWithSignature, height: BlockHeight,
         _transitions: &TransitionsEpochHeight, spec: &Spec,
     ) -> PackingCheckResult {
-
         let (can_pack, later_pack) =
             Self::fast_recheck_inner(spec, |mode: &VerifyTxMode| {
                 if !Self::check_eip1559_transaction(tx, mode) {

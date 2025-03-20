@@ -95,7 +95,9 @@ impl RandomXCacheBuilder {
         self.global_queue.push(vm);
     }
 
-    pub fn get_vm_handler(self: &Arc<Self>) -> VMHandle {
+    pub fn get_vm_handler(
+        self: &Arc<Self>, seed_hash: &H256,
+    ) -> VMHandle {
         VMHandle {
             vm: Some(self.acquire_vm()),
             cache_builder: Arc::clone(self),

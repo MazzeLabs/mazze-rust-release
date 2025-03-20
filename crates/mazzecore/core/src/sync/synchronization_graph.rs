@@ -1473,6 +1473,9 @@ impl SynchronizationGraph {
             return (BlockHeaderInsertionResult::Invalid, Vec::new());
         }
 
+        let best_epoch = self.consensus.best_epoch_number();
+        let block_seed_hash =
+            self.data_man.db_manager.get_current_seed_hash(best_epoch);
         if let Some(info) = local_info_opt {
             // If the block is ordered before current era genesis or it has
             // already entered consensus graph in this run, we do not need to
@@ -1486,7 +1489,9 @@ impl SynchronizationGraph {
                     // Compute pow_quality, because the input header may be used
                     // as a part of block later
                     VerificationConfig::get_or_fill_header_pow_quality(
-                        &self.pow, header,
+                        &self.pow,
+                        header,
+                        &block_seed_hash,
                     );
                 }
                 return (
@@ -1501,7 +1506,9 @@ impl SynchronizationGraph {
                 // Compute pow_quality, because the input header may be used as
                 // a part of block later
                 VerificationConfig::get_or_fill_header_pow_quality(
-                    &self.pow, header,
+                    &self.pow,
+                    header,
+                    &block_seed_hash,
                 );
             }
             return (
@@ -1517,7 +1524,11 @@ impl SynchronizationGraph {
                 || !(self.parent_or_referees_invalid(header)
                     || self
                         .verification_config
-                        .verify_header_params(&self.pow, header)
+                        .verify_header_params(
+                            &self.pow,
+                            header,
+                            &block_seed_hash,
+                        )
                         .or_else(|e| {
                             warn!(
                                 "Invalid header: err={} header={:?}",
@@ -1528,7 +1539,11 @@ impl SynchronizationGraph {
                         .is_err())
         } else {
             if !bench_mode && !self.is_consortium() {
-                match self.verification_config.verify_pow(&self.pow, header) {
+                match self.verification_config.verify_pow(
+                    &self.pow,
+                    header,
+                    &block_seed_hash,
+                ) {
                     Ok(_) => {}
                     Err(e) => {
                         error!("PoW verification failed for local mined block: {:?}", e);

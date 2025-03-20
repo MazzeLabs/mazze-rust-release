@@ -1702,6 +1702,9 @@ impl ConsensusGraphInner {
             U512::from(VerificationConfig::get_or_compute_header_pow_quality(
                 &self.pow,
                 block_header,
+                &self.data_man
+                    .db_manager
+                    .get_current_seed_hash(block_header.height()),
             ));
         let is_heavy = pow_quality
             >= U512::from(self.inner_conf.heavy_block_difficulty_ratio)

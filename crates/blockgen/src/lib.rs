@@ -108,10 +108,11 @@ impl Worker {
                         trace!("problem is {:?}", problem);
                         let boundary = problem.as_ref().unwrap().boundary;
                         let block_hash = problem.as_ref().unwrap().block_hash;
+                        let seed_hash = problem.as_ref().unwrap().seed_hash;
                         let mut nonce: u64 = rand::random();
                         for _i in 0..MINING_ITERATION {
                             let nonce_u256 = U256::from(nonce);
-                            let hash = bg_pow.compute(&nonce_u256, &block_hash);
+                            let hash = bg_pow.compute(&nonce_u256, &block_hash, &seed_hash);
                             if ProofOfWorkProblem::validate_hash_against_boundary(&hash, &nonce_u256, &boundary) {
                                 // problem solved
                                 match solution_sender
@@ -859,7 +860,11 @@ impl BlockGenerator {
         let mut hashes_checked = 0;
 
         while start_time.elapsed() < timeout {
-            let hash = pow_computer.compute(&nonce, &problem.block_hash);
+            let hash = pow_computer.compute(
+                &nonce,
+                &problem.block_hash,
+                &problem.seed_hash,
+            );
             hashes_checked += 1;
 
             if ProofOfWorkProblem::validate_hash_against_boundary(

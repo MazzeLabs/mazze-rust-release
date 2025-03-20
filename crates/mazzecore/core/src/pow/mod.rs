@@ -283,7 +283,9 @@ impl PowComputer {
         }
     }
 
-    pub fn compute(&self, nonce: &U256, block_hash: &H256) -> H256 {
+    pub fn compute(
+        &self, nonce: &U256, block_hash: &H256, seed_hash: &H256,
+    ) -> H256 {
         let input = {
             let mut buf = [0u8; 64];
             for i in 0..32 {
@@ -293,7 +295,9 @@ impl PowComputer {
             buf
         };
 
-        let handle = self.cache_builder.get_vm_handler();
+        let handle = self
+            .cache_builder
+            .get_vm_handler(seed_hash.as_fixed_bytes());
         let vm = handle.get_vm();
         let hash_bytes = vm.hash(&input);
         let hash = H256::from_slice(&hash_bytes.as_ref());
@@ -308,7 +312,7 @@ pub fn validate(
 ) -> bool {
     let nonce = solution.nonce;
 
-    let hash = pow.compute(&nonce, &problem.block_hash);
+    let hash = pow.compute(&nonce, &problem.block_hash, &problem.seed_hash);
     ProofOfWorkProblem::validate_hash_against_boundary(
         &hash,
         &nonce,
@@ -499,5 +503,5 @@ fn test_pow() {
             .unwrap();
 
     let start_nonce = 0x2333333333u64 & (!0x1f);
-    pow.compute(&U256::from(start_nonce), &block_hash);
+    pow.compute(&U256::from(start_nonce), &block_hash, &H256::default());
 }

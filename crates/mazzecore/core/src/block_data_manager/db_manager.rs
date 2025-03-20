@@ -7,8 +7,7 @@ use crate::{
     },
     db::{
         COL_BLAMED_HEADER_VERIFIED_ROOTS, COL_BLOCKS, COL_BLOCK_TRACES,
-        COL_EPOCH_NUMBER, COL_HASH_BY_BLOCK_NUMBER, COL_MISC,
-        COL_TX_INDEX,
+        COL_EPOCH_NUMBER, COL_HASH_BY_BLOCK_NUMBER, COL_MISC, COL_TX_INDEX,
     },
     pow::PowComputer,
     verification::VerificationConfig,
@@ -169,12 +168,17 @@ impl DBManager {
     }
 
     pub fn block_header_from_db(&self, hash: &H256) -> Option<BlockHeader> {
-        let mut block_header =
+        let mut block_header: BlockHeader =
             self.load_decodable_val(DBTable::Blocks, hash.as_bytes())?;
+
+        let seed_hash = self.get_current_seed_hash(block_header.height());
+
         VerificationConfig::get_or_fill_header_pow_quality(
             &self.pow,
             &mut block_header,
+            &seed_hash,
         );
+
         Some(block_header)
     }
 
@@ -551,6 +555,57 @@ impl DBManager {
     {
         let encoded = self.load_from_db(table, db_key)?;
         Some(db_decode_list(&encoded).expect("decode succeeds"))
+    }
+
+    pub fn get_current_seed_hash(&self, epoch_height: u64) -> H256 {
+        const RANDOMX_EPOCH_LENGTH: u64 = 2048; // TODO: move to const params
+
+        let randomx_epoch_height = epoch_height / RANDOMX_EPOCH_LENGTH;
+        let seed_hash_pos = randomx_epoch_height * RANDOMX_EPOCH_LENGTH
+            - RANDOMX_EPOCH_LENGTH / 2;
+
+        // For early epochs, handle gracefully
+        if seed_hash_pos > epoch_height || seed_hash_pos == 0 {
+            // Use genesis block hash or earliest available
+            return self
+                .executed_epoch_set_hashes_from_db(0)
+                .and_then(|hashes| hashes.last().cloned())
+                .unwrap_or_default();
+        }
+
+        // Since DBManager doesn't have direct access to consensus graph,
+        // we use executed_epoch_set_hashes_from_db which is the fallback
+        // method used in get_main_hash_from_epoch_number
+        self.executed_epoch_set_hashes_from_db(seed_hash_pos)
+            .and_then(|hashes| hashes.last().cloned())
+            .unwrap_or_default()
+    }
+
+    // Implementation of get_next_seed_hash for completeness
+    pub fn get_next_seed_hash(&self, epoch_height: u64) -> Option<H256> {
+        const RANDOMX_EPOCH_LENGTH: u64 = 2048; // TODO: move to const params
+
+        let randomx_epoch_height = epoch_height / RANDOMX_EPOCH_LENGTH;
+        let seed_hash_pos = randomx_epoch_height * RANDOMX_EPOCH_LENGTH
+            + RANDOMX_EPOCH_LENGTH / 2;
+        let conf_height = seed_hash_pos + RANDOMX_EPOCH_LENGTH / 4;
+
+        if conf_height > epoch_height {
+            return None;
+        }
+
+        self.executed_epoch_set_hashes_from_db(seed_hash_pos)
+            .and_then(|hashes| hashes.last().cloned())
+    }
+
+    // Public method to get seed hash status
+    pub fn get_seed_hash_status(
+        &self, epoch_height: u64,
+    ) -> (H256, Option<H256>) {
+        let current_seed_hash = self.get_current_seed_hash(epoch_height);
+        let next_seed_hash = self.get_next_seed_hash(epoch_height);
+
+        (current_seed_hash, next_seed_hash)
     }
 }
 

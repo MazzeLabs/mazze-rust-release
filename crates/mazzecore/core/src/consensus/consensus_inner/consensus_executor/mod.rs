@@ -183,12 +183,10 @@ pub struct ConsensusExecutor {
 
 impl ConsensusExecutor {
     pub fn start(
-        tx_pool: SharedTransactionPool,
-        data_man: Arc<BlockDataManager>,
+        tx_pool: SharedTransactionPool, data_man: Arc<BlockDataManager>,
         consensus_inner: Arc<RwLock<ConsensusGraphInner>>,
         config: ConsensusExecutionConfiguration,
-        verification_config: VerificationConfig,
-        bench_mode: bool,
+        verification_config: VerificationConfig, bench_mode: bool,
     ) -> Arc<Self> {
         let machine = tx_pool.machine();
         let handler = Arc::new(ConsensusExecutionHandler::new(
@@ -829,11 +827,9 @@ pub struct ConsensusExecutionHandler {
 
 impl ConsensusExecutionHandler {
     pub fn new(
-        tx_pool: SharedTransactionPool,
-        data_man: Arc<BlockDataManager>,
+        tx_pool: SharedTransactionPool, data_man: Arc<BlockDataManager>,
         config: ConsensusExecutionConfiguration,
-        verification_config: VerificationConfig,
-        machine: Arc<Machine>,
+        verification_config: VerificationConfig, machine: Arc<Machine>,
     ) -> Self {
         ConsensusExecutionHandler {
             tx_pool,
@@ -1220,6 +1216,10 @@ impl ConsensusExecutionHandler {
                     VerificationConfig::get_or_compute_header_pow_quality(
                         &self.data_man.pow,
                         &block.block_header,
+                        &self
+                            .data_man
+                            .db_manager
+                            .get_current_seed_hash(block.block_header.height()),
                     );
                 let mut reward = if pow_quality >= *epoch_difficulty {
                     base_reward_per_block

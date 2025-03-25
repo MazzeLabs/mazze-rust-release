@@ -37,7 +37,7 @@ pub struct Miner {
     pub worker_name: String,
     num_threads: usize,
     solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
-    vm_manager: Arc<Mutex<VMManager>>,
+    vm_manager: Arc<VMManager>,
 }
 
 impl Miner {
@@ -49,7 +49,7 @@ impl Miner {
     > {
         let (stratum_tx, stratum_rx) = broadcast::channel(32);
         let (solution_tx, solution_rx) = mpsc::channel();
-        let vm_manager = Arc::new(Mutex::new(VMManager::new()?));
+        let vm_manager = Arc::new(VMManager::new()?);
 
         let miner = Miner {
             worker_id,
@@ -81,9 +81,7 @@ impl Miner {
         );
 
         // Update VMs before mining
-        if let Err(e) =
-            self.vm_manager.lock().unwrap().update_if_needed(problem)
-        {
+        if let Err(e) = self.vm_manager.update_if_needed(problem) {
             error!("[{}] Failed to update VMs: {:?}", self.worker_name, e);
             return;
         }
@@ -94,7 +92,7 @@ impl Miner {
     pub fn parse_job(
         &mut self, params: &[Value],
     ) -> Result<ProofOfWorkProblem, String> {
-        if params.len() != 6 {
+        if params.len() != 5 {
             return Err("Invalid job data: not enough parameters".into());
         }
 
@@ -162,14 +160,7 @@ impl Miner {
             let barrier = Arc::clone(&barrier);
             let assignment = ThreadAssignment {
                 thread_id,
-                node_id: thread_id
-                    % self
-                        .vm_manager
-                        .lock()
-                        .unwrap()
-                        .topology
-                        .get_nodes()
-                        .len(),
+                node_id: thread_id % self.vm_manager.topology.get_nodes().len(),
                 core_id: thread_id,
             };
 
@@ -221,8 +212,8 @@ impl Miner {
     fn run_mining_thread_numa(
         assignment: &ThreadAssignment, worker_name: String,
         solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
-        vm_manager: Arc<Mutex<VMManager>>, num_threads: usize,
-        barrier: Arc<Barrier>, client_seed: H256,
+        vm_manager: Arc<VMManager>, num_threads: usize, barrier: Arc<Barrier>,
+        client_seed: H256,
     ) {
         info!(
             "[{}] Starting mining thread {} on NUMA node {} core {}",
@@ -248,7 +239,7 @@ impl Miner {
 
         // Mining loop
         loop {
-            let result = vm_manager.lock().unwrap().with_vm(assignment, |vm| {
+            let result = vm_manager.with_vm(assignment, |vm| {
                 let start_nonce = Self::get_nonce_range_start(
                     assignment.thread_id,
                     num_threads,
@@ -289,14 +280,14 @@ impl Miner {
                             "[{}] Checking if block hash matches",
                             worker_name
                         );
-                        if !vm_manager.lock().unwrap().is_block_hash_matching(&vm.get_current_block_hash()) {
+                        if !vm_manager.is_block_hash_matching(&vm.get_current_block_hash()) {
                             debug!(
                                 "[{}] Block hash does not match, updating reference state",
                                 worker_name
                             );
                             vm.update(
-                                vm_manager.lock().unwrap().get_reference_state(),
-                                vm_manager.lock().unwrap().get_context()
+                                vm_manager.get_reference_state(),
+                                vm_manager.get_context()
                             )
                             .unwrap();
 
@@ -344,11 +335,11 @@ impl Miner {
                         // Wait for new block
                         loop {
                             thread::sleep(Duration::from_millis(50));
-                            if !vm_manager.lock().unwrap().is_block_hash_matching(&vm.get_current_block_hash()) {
+                            if !vm_manager.is_block_hash_matching(&vm.get_current_block_hash()) {
                                 debug!("[{}] New block detected after solution, resuming mining", worker_name);
                                 vm.update(
-                                    vm_manager.lock().unwrap().get_reference_state(),
-                                    vm_manager.lock().unwrap().get_context()
+                                    vm_manager.get_reference_state(),
+                                    vm_manager.get_context()
                                 )
                                 .unwrap();
                                 return false; // Exit closure to restart mining loop

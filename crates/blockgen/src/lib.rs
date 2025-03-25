@@ -109,6 +109,7 @@ impl Worker {
                         let boundary = problem.as_ref().unwrap().boundary;
                         let block_hash = problem.as_ref().unwrap().block_hash;
                         let seed_hash = problem.as_ref().unwrap().seed_hash;
+                        info!("Blockgen #1: Mining problem hash {:?} with seed hash: {:?}", block_hash, seed_hash);
                         let mut nonce: u64 = rand::random();
                         for _i in 0..MINING_ITERATION {
                             let nonce_u256 = U256::from(nonce);
@@ -687,6 +688,10 @@ impl BlockGenerator {
             block.block_header.height(),
             block.block_header.problem_hash(),
             *difficulty,
+            self.consensus_graph()
+                .get_data_manager()
+                .db_manager
+                .get_current_seed_hash(block.block_header.height()),
         );
         let mut nonce: u64 = rand::random();
         loop {
@@ -814,6 +819,10 @@ impl BlockGenerator {
                     new_block.block_header.height(),
                     new_block.block_header.problem_hash(),
                     *new_block.block_header.difficulty(),
+                    bg.consensus_graph()
+                        .get_data_manager()
+                        .db_manager
+                        .get_current_seed_hash(new_block.block_header.height()),
                 );
 
                 current_mining_block = Some(new_block);
@@ -865,6 +874,10 @@ impl BlockGenerator {
         let mut hashes_checked = 0;
 
         while start_time.elapsed() < timeout {
+            info!(
+                "Blockgen #2: Mining problem hash {:?} with seed hash: {:?}",
+                problem.block_hash, problem.seed_hash
+            );
             let hash = pow_computer.compute(
                 &nonce,
                 &problem.block_hash,
@@ -939,18 +952,23 @@ impl BlockGenerator {
                     .block_header
                     .difficulty();
                 debug!("Current difficulty: {:?}", current_difficulty);
+                let height = current_mining_block
+                    .as_ref()
+                    .unwrap()
+                    .block_header
+                    .height();
                 let problem = ProofOfWorkProblem::new(
-                    current_mining_block
-                        .as_ref()
-                        .unwrap()
-                        .block_header
-                        .height(),
+                    height,
                     current_mining_block
                         .as_ref()
                         .unwrap()
                         .block_header
                         .problem_hash(),
                     *current_difficulty,
+                    bg.consensus_graph()
+                        .get_data_manager()
+                        .db_manager
+                        .get_current_seed_hash(height),
                 );
                 last_assemble = SystemTime::now();
                 trace!("send problem: {:?}", problem);

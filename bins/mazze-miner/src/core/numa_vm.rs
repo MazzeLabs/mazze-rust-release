@@ -120,15 +120,13 @@ impl VMManager {
     }
 
     pub fn update_if_needed(
-        &mut self, problem: &ProofOfWorkProblem,
+        &self, problem: &ProofOfWorkProblem,
     ) -> Result<(), NumaError> {
         let problem_seed_hash = problem.seed_hash.as_bytes();
         if problem_seed_hash != self.reference_state.get_seed_hash() {
             // TODO: Update context
             // self.context =
             //     Arc::new(RandomXContext::new(problem_seed_hash, true));
-            self.context =
-                Arc::new(RandomXContext::new(problem_seed_hash, true));
         }
 
         debug!(

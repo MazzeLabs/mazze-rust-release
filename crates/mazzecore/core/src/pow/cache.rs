@@ -62,6 +62,7 @@ impl RandomXCacheBuilder {
     }
 
     fn update_context(&self, seed_hash: &H256) {
+        info!("Updating context for seed hash: {:?}", seed_hash);
         let mut current_hash = self.current_seed_hash.write();
         if *current_hash != *seed_hash {
             // Create new context with the new seed hash

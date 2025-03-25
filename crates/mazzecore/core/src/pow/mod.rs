@@ -37,14 +37,16 @@ pub struct ProofOfWorkProblem {
 impl ProofOfWorkProblem {
     pub const NO_BOUNDARY: U256 = U256::MAX;
 
-    pub fn new(block_height: u64, block_hash: H256, difficulty: U256) -> Self {
+    pub fn new(
+        block_height: u64, block_hash: H256, difficulty: U256, seed_hash: H256,
+    ) -> Self {
         let boundary = difficulty_to_boundary(&difficulty);
         Self {
             block_height,
             block_hash,
             difficulty,
             boundary,
-            seed_hash: H256::default(),
+            seed_hash,
         }
     }
 
@@ -309,6 +311,10 @@ pub fn validate(
 ) -> bool {
     let nonce = solution.nonce;
 
+    info!(
+        "pow->validate called for block hash {:?} with seed hash {:?}",
+        problem.block_hash, problem.seed_hash
+    );
     let hash = pow.compute(&nonce, &problem.block_hash, &problem.seed_hash);
     ProofOfWorkProblem::validate_hash_against_boundary(
         &hash,
@@ -461,6 +467,7 @@ impl Default for ProofOfWorkProblem {
             u64::default(),
             H256::default(),
             U256::default(),
+            H256::default(),
         )
     }
 }

@@ -5,9 +5,7 @@ use parking_lot::Mutex;
 use rust_randomx::{Context as RandomXContext, Hasher};
 
 use super::{
-    compute::Light,
     keccak::{keccak_512, H256},
-    seed_compute::SeedHashCompute,
     shared::{
         get_cache_size, Node, NODE_BYTES, POW_CACHE_ROUNDS, POW_STAGE_LENGTH,
     },
@@ -37,18 +35,17 @@ pub struct VMHandle {
 }
 
 impl RandomXCacheBuilder {
-    pub fn new() -> Arc<Self> {
+    pub fn new(seed_hash: H256) -> Arc<Self> {
         let global_queue = Worker::new_fifo();
         let stealers = vec![global_queue.stealer()];
 
-        let temp_seed_hash = H256::default();
-        let context = Arc::new(RandomXContext::new(&temp_seed_hash, false));
+        let context = Arc::new(RandomXContext::new(&seed_hash, false));
 
         let builder = Arc::new(RandomXCacheBuilder {
             global_queue,
             stealers,
             context: RwLock::new(context),
-            current_seed_hash: RwLock::new(temp_seed_hash),
+            current_seed_hash: RwLock::new(seed_hash),
         });
 
         // Initialize with some VMs
@@ -69,51 +66,77 @@ impl RandomXCacheBuilder {
         if *current_hash != *seed_hash {
             // Create new context with the new seed hash
             let new_context = Arc::new(RandomXContext::new(seed_hash, false));
-            
+
             // Update the context with new one
             *self.context.write() = new_context;
-            
+
             // Update seed hash
             *current_hash = *seed_hash;
-            
-            // Clear existing VMs as they're using the old context
-            while let Some(_) = self.global_queue.pop() {}
-            
-            // Repopulate with new VMs
-            for _ in 0..INITIAL_VMS_PER_STAGE {
-                let vm = self.initialize_new_vm();
-                self.global_queue.push(vm);
-            }
         }
     }
 
-    fn get_stage_key(&self, block_height: u64) -> Vec<u8> {
-        let stage = block_height / 2048;
-        format!("stage_{}", stage).into_bytes()
+    pub fn get_seed_hash(&self) -> H256 {
+        self.current_seed_hash.read().clone()
     }
 
     fn acquire_vm(&self) -> Arc<Hasher> {
+        let current_context = self.context.read().clone();
+        let current_key = current_context.key();
+
+        // Try to get a VM from our queue
         if let Some(vm) = self.global_queue.pop() {
-            return vm;
+            // Check if VM needs an update
+            let vm_key = vm.context().key();
+            if vm_key == current_key {
+                return vm; // VM is up-to-date
+            }
+
+            // VM needs an update - clone it and update its context
+            // Note: We need to clone because Arc prevents mutation
+            let new_vm = Hasher::new(current_context);
+            return Arc::new(new_vm);
         }
 
+        // Try to steal from other workers
         for stealer in &self.stealers {
             match stealer.steal() {
-                Steal::Success(vm) => return vm,
+                Steal::Success(vm) => {
+                    let vm_key = vm.context().key();
+                    if vm_key == current_key {
+                        return vm;
+                    }
+                    let new_vm = Hasher::new(current_context.clone());
+                    return Arc::new(new_vm);
+                }
                 Steal::Empty => continue,
                 Steal::Retry => {
                     if let Steal::Success(vm) = stealer.steal() {
-                        return vm;
+                        let vm_key = vm.context().key();
+                        if vm_key == current_key {
+                            return vm;
+                        }
+                        let new_vm = Hasher::new(current_context.clone());
+                        return Arc::new(new_vm);
                     }
                 }
             }
         }
 
+        // No VM available, create a new one
         self.initialize_new_vm()
     }
 
     fn return_vm_handler(&self, vm: Arc<Hasher>) {
-        self.global_queue.push(vm);
+        // Optionally, we could check if VM's context is current before returning it
+        let current_context = self.context.read().clone();
+        let current_key = current_context.key();
+        let vm_key = vm.context().key();
+
+        if vm_key == current_key {
+            // VM is current, return it to the queue
+            self.global_queue.push(vm);
+        }
+        // If VM is outdated, let it be dropped
     }
 
     pub fn get_vm_handler(self: &Arc<Self>, seed_hash: &H256) -> VMHandle {

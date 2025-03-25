@@ -213,27 +213,22 @@ impl StratumJobDispatcher {
     /// Serializes payload for stratum service
     fn payload(
         &self, block_height: u64, pow_hash: H256, boundary: U256,
-        seed_hash: H256, next_seed_hash: Option<H256>,
+        seed_hash: H256,
     ) -> String {
         let pow_hash_str = format!("0x{:064x}", pow_hash);
         let boundary_str = format!("0x{:064x}", boundary);
         let seed_hash_str = format!("0x{:064x}", seed_hash);
-        let next_seed_hash_str = match next_seed_hash {
-            Some(hash) => format!("0x{:064x}", hash),
-            None => "".to_string(),
-        };
 
         let stratum_payload = format!(
-            r#"["{}", "{}", "{}", "{}", "{}", "{}"]"#,
+            r#"["{}", "{}", "{}", "{}", "{}"]"#,
             pow_hash_str,
             block_height,
             pow_hash_str,
             boundary_str,
             seed_hash_str,
-            next_seed_hash_str
         );
         trace!(
-            "STRATUM PAYLOAD (block_height, pow_hash, boundary, seed_hash, next_seed_hash): {}",
+            "STRATUM PAYLOAD (pow_hash,block_height, pow_hash, boundary, seed_hash): {}",
             stratum_payload
         );
 
@@ -276,7 +271,7 @@ impl NotifyWork for Stratum {
         self.service.push_work_all(
             self.dispatcher.payload(
                 prob.block_height, prob.block_hash, prob.boundary,
-                prob.seed_hash, prob.next_seed_hash,
+                prob.seed_hash,
             )
         ).unwrap_or_else(
             |e| warn!(target: "stratum", "Error while pushing work: {:?}", e)

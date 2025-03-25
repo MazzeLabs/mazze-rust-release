@@ -264,7 +264,7 @@ pub fn initialize_synchronization_graph_with_data_manager(
 /// This method is only used in tests and benchmarks.
 pub fn initialize_synchronization_graph(
     db_dir: &str, beta: u64, h: u64, tcr: u64, tcb: u64, era_epoch_count: u64,
-    dbtype: DbType,
+    dbtype: DbType, seed_hash: H256,
 ) -> (
     Arc<SynchronizationGraph>,
     Arc<ConsensusGraph>,
@@ -272,7 +272,7 @@ pub fn initialize_synchronization_graph(
     Arc<Block>,
 ) {
     let vm = VmFactory::new(1024 * 32);
-    let pow = Arc::new(PowComputer::new());
+    let pow = Arc::new(PowComputer::new(seed_hash));
 
     let (data_man, genesis_block) =
         initialize_data_manager(db_dir, dbtype, pow.clone(), vm.clone());

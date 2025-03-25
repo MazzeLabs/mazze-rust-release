@@ -3,9 +3,7 @@
 // See http://www.gnu.org/licenses/
 
 mod cache;
-mod compute;
 mod keccak;
-mod seed_compute;
 mod shared;
 
 pub use self::shared::POW_STAGE_LENGTH;
@@ -34,7 +32,6 @@ pub struct ProofOfWorkProblem {
     pub difficulty: U256,
     pub boundary: U256,
     pub seed_hash: H256,
-    pub next_seed_hash: Option<H256>,
 }
 
 impl ProofOfWorkProblem {
@@ -48,27 +45,11 @@ impl ProofOfWorkProblem {
             difficulty,
             boundary,
             seed_hash: H256::default(),
-            next_seed_hash: None,
         }
     }
 
     pub fn new_from_boundary(
-        block_height: u64, block_hash: H256, boundary: U256,
-    ) -> Self {
-        let difficulty = boundary_to_difficulty(&boundary);
-        Self {
-            block_height,
-            block_hash,
-            difficulty,
-            boundary,
-            seed_hash: H256::default(),
-            next_seed_hash: None,
-        }
-    }
-
-    pub fn new_from_boundary_with_seed_hash(
         block_height: u64, block_hash: H256, boundary: U256, seed_hash: H256,
-        next_seed_hash: Option<H256>,
     ) -> Self {
         let difficulty = boundary_to_difficulty(&boundary);
         Self {
@@ -77,7 +58,19 @@ impl ProofOfWorkProblem {
             difficulty,
             boundary,
             seed_hash,
-            next_seed_hash,
+        }
+    }
+
+    pub fn new_from_boundary_with_seed_hash(
+        block_height: u64, block_hash: H256, boundary: U256, seed_hash: H256,
+    ) -> Self {
+        let difficulty = boundary_to_difficulty(&boundary);
+        Self {
+            block_height,
+            block_hash,
+            difficulty,
+            boundary,
+            seed_hash,
         }
     }
     #[inline]
@@ -277,9 +270,9 @@ unsafe impl Send for PowComputer {}
 unsafe impl Sync for PowComputer {}
 
 impl PowComputer {
-    pub fn new() -> Self {
+    pub fn new(seed_hash: H256) -> Self {
         PowComputer {
-            cache_builder: RandomXCacheBuilder::new(),
+            cache_builder: RandomXCacheBuilder::new(seed_hash.into()),
         }
     }
 
@@ -303,6 +296,10 @@ impl PowComputer {
         let hash = H256::from_slice(&hash_bytes.as_ref());
 
         hash
+    }
+
+    pub fn get_seed_hash(&self) -> H256 {
+        self.cache_builder.get_seed_hash().into()
     }
 }
 
@@ -495,7 +492,7 @@ impl TargetDifficultyManager {
 
 #[test]
 fn test_pow() {
-    let pow = PowComputer::new();
+    let pow = PowComputer::new(H256::default());
 
     let block_hash =
         "4d99d0b41c7eb0dd1a801c35aae2df28ae6b53bc7743f0818a34b6ec97f5b4ae"

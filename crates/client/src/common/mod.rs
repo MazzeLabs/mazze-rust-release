@@ -282,7 +282,7 @@ pub fn initialize_common_modules(
     debug!("Initialize genesis_block={:?}", genesis_block);
 
     let pow_config = conf.pow_config();
-    let pow = Arc::new(PowComputer::new());
+    let pow = Arc::new(PowComputer::new(genesis_block.hash()));
 
     let data_man = Arc::new(BlockDataManager::new(
         cache_config,
@@ -537,10 +537,11 @@ pub fn initialize_not_light_node_modules(
         }
         if blockgen.pow_config.enable_mining() {
             let bg = blockgen.clone();
+            let seed_hash = pow.get_seed_hash();
             thread::Builder::new()
                 .name("mining".into())
                 .spawn(move || {
-                    BlockGenerator::start_mining(bg, 0);
+                    BlockGenerator::start_mining(bg, 0, seed_hash);
                 })
                 .expect("Mining thread spawn error");
         }

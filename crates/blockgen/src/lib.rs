@@ -74,7 +74,7 @@ impl Worker {
     pub fn new(
         bg: Arc<BlockGenerator>,
         solution_sender: mpsc::Sender<ProofOfWorkSolution>,
-        problem_receiver: mpsc::Receiver<ProofOfWorkProblem>,
+        problem_receiver: mpsc::Receiver<ProofOfWorkProblem>, seed_hash: H256,
     ) -> Self {
         let bg_handle = bg;
 
@@ -83,7 +83,7 @@ impl Worker {
             .spawn(move || {
                 let sleep_duration = time::Duration::from_millis(100);
                 let mut problem: Option<ProofOfWorkProblem> = None;
-                let bg_pow = Arc::new(PowComputer::new());
+                let bg_pow = Arc::new(PowComputer::new(seed_hash));
 
                 loop {
                     match *bg_handle.state.read() {
@@ -728,7 +728,7 @@ impl BlockGenerator {
 
     /// Start num_worker new workers
     pub fn start_new_worker(
-        num_worker: u32, bg: Arc<BlockGenerator>,
+        num_worker: u32, bg: Arc<BlockGenerator>, seed_hash: H256,
     ) -> mpsc::Receiver<ProofOfWorkSolution> {
         let (solution_sender, solution_receiver) = mpsc::channel();
         let mut workers = bg.workers.lock();
@@ -739,6 +739,7 @@ impl BlockGenerator {
                     bg.clone(),
                     solution_sender.clone(),
                     problem_receiver,
+                    seed_hash,
                 ),
                 problem_sender,
             ));
@@ -767,7 +768,9 @@ impl BlockGenerator {
         solution_receiver
     }
 
-    pub fn start_mining(bg: Arc<BlockGenerator>, _payload_len: u32) {
+    pub fn start_mining(
+        bg: Arc<BlockGenerator>, _payload_len: u32, seed_hash: H256,
+    ) {
         match bg.pow_config.mining_type {
             MiningType::Disable => {
                 debug!("Mining is disabled.");
@@ -775,7 +778,7 @@ impl BlockGenerator {
             }
             MiningType::CPU => {
                 debug!("Starting CPU mining.");
-                BlockGenerator::start_cpu_mining(bg, _payload_len);
+                BlockGenerator::start_cpu_mining(bg, _payload_len, seed_hash);
             }
             MiningType::Stratum => {
                 debug!("Starting Stratum mining server.");
@@ -784,8 +787,10 @@ impl BlockGenerator {
         }
     }
 
-    fn start_cpu_mining(bg: Arc<BlockGenerator>, _payload_len: u32) {
-        let pow_computer = Arc::new(PowComputer::new());
+    fn start_cpu_mining(
+        bg: Arc<BlockGenerator>, _payload_len: u32, seed_hash: H256,
+    ) {
+        let pow_computer = Arc::new(PowComputer::new(seed_hash));
         let mut current_mining_block: Option<Block> = None;
         let mut current_problem: Option<ProofOfWorkProblem> = None;
         let mut last_assemble = SystemTime::now();

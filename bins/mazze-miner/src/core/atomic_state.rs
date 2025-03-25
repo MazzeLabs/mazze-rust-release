@@ -9,10 +9,13 @@ pub struct ProblemState {
     block_height: u64,
     block_hash: [u8; 32],
     boundary: [u8; 32],
+    seed_hash: [u8; 32],
 }
 
 impl ProblemState {
-    pub fn new(block_height: u64, block_hash: H256, boundary: U256) -> Self {
+    pub fn new(
+        block_height: u64, block_hash: H256, boundary: U256, seed_hash: H256,
+    ) -> Self {
         let mut boundary_bytes = [0u8; 32];
         boundary.to_big_endian(&mut boundary_bytes);
 
@@ -20,6 +23,7 @@ impl ProblemState {
             block_height,
             block_hash: block_hash.as_bytes().try_into().unwrap(),
             boundary: boundary_bytes,
+            seed_hash: seed_hash.as_bytes().try_into().unwrap(),
         }
     }
 }
@@ -33,6 +37,7 @@ impl From<&ProofOfWorkProblem> for ProblemState {
             block_height: problem.block_height,
             block_hash: problem.block_hash.as_bytes().try_into().unwrap(),
             boundary: boundary_bytes,
+            seed_hash: problem.seed_hash.as_bytes().try_into().unwrap(),
         }
     }
 }
@@ -43,9 +48,9 @@ impl From<&AtomicProblemState> for ProblemState {
     }
 }
 
-impl From<(u64, H256, U256)> for ProblemState {
-    fn from(details: (u64, H256, U256)) -> Self {
-        ProblemState::new(details.0, details.1, details.2)
+impl From<(u64, H256, U256, H256)> for ProblemState {
+    fn from(details: (u64, H256, U256, H256)) -> Self {
+        ProblemState::new(details.0, details.1, details.2, details.3)
     }
 }
 
@@ -61,6 +66,7 @@ impl Default for AtomicProblemState {
             block_height: 0,
             block_hash: H256::zero().as_bytes().try_into().unwrap(),
             boundary: [0u8; 32],
+            seed_hash: [0u8; 32],
         };
         Self {
             state: AtomicPtr::new(Box::into_raw(Box::new(initial_state))),
@@ -70,7 +76,9 @@ impl Default for AtomicProblemState {
 }
 
 impl AtomicProblemState {
-    pub fn new(block_height: u64, block_hash: H256, boundary: U256) -> Self {
+    pub fn new(
+        block_height: u64, block_hash: H256, boundary: U256, seed_hash: H256,
+    ) -> Self {
         let mut boundary_bytes = [0u8; 32];
         boundary.to_big_endian(&mut boundary_bytes);
 
@@ -78,6 +86,7 @@ impl AtomicProblemState {
             block_height,
             block_hash: block_hash.as_bytes().try_into().unwrap(),
             boundary: boundary_bytes,
+            seed_hash: seed_hash.as_bytes().try_into().unwrap(),
         };
         Self {
             state: AtomicPtr::new(Box::into_raw(Box::new(initial_state))),
@@ -91,7 +100,7 @@ impl AtomicProblemState {
         F: FnOnce(&ProblemState) -> R,
     {
         let ptr = self.state.load(Ordering::Acquire);
-        
+
         // SAFETY: ptr is always valid due to our update mechanism
         unsafe { f(&*ptr) }
     }
@@ -112,7 +121,7 @@ impl AtomicProblemState {
         trace!("Updated atomic state");
     }
 
-    pub fn get_problem_details(&self) -> (u64, H256, U256) {
+    pub fn get_problem_details(&self) -> (u64, H256, U256, H256) {
         self.with_state(|state| {
             let boundary = U256::from_big_endian(&state.boundary);
 
@@ -120,6 +129,7 @@ impl AtomicProblemState {
                 state.block_height,
                 H256::from_slice(&state.block_hash),
                 boundary,
+                H256::from_slice(&state.seed_hash),
             )
         })
     }
@@ -142,6 +152,10 @@ impl AtomicProblemState {
 
     pub fn get_block_height(&self) -> u64 {
         self.with_state(|state| state.block_height)
+    }
+
+    pub fn get_seed_hash(&self) -> [u8; 32] {
+        self.with_state(|state| state.seed_hash)
     }
 
     pub fn calculate_nonce_range(
@@ -302,8 +316,12 @@ mod tests {
             let invalid_hash =
                 H256::from_slice(&hex::decode(invalid_hash_hex).unwrap());
 
-            let atomic_state =
-                AtomicProblemState::new(1, H256::zero(), boundary);
+            let atomic_state = AtomicProblemState::new(
+                1,
+                H256::zero(),
+                boundary,
+                H256::zero(),
+            );
 
             // Debug prints for verification
             trace!("Testing valid hash comparison:");
@@ -340,7 +358,8 @@ mod tests {
             "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
         let boundary = U256::from_str(boundary_hex).unwrap();
 
-        let atomic_state = AtomicProblemState::new(1, H256::zero(), boundary);
+        let atomic_state =
+            AtomicProblemState::new(1, H256::zero(), boundary, H256::zero());
 
         let recovered_boundary = atomic_state.get_boundary();
         assert_eq!(boundary, recovered_boundary, "Boundary conversion failed");
@@ -353,8 +372,12 @@ mod tests {
         let block_hash =
             H256::from_slice(&hex::decode(block_hash_hex).unwrap());
 
-        let atomic_state =
-            AtomicProblemState::new(1, block_hash, U256::from(1000000));
+        let atomic_state = AtomicProblemState::new(
+            1,
+            block_hash,
+            U256::from(1000000),
+            H256::zero(),
+        );
 
         let recovered_hash = atomic_state.get_block_hash();
         assert_eq!(block_hash, recovered_hash, "Block hash conversion failed");
@@ -370,7 +393,8 @@ mod tests {
         let boundary_hex =
             "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
         let boundary = U256::from_str(boundary_hex).unwrap();
-        let atomic_state = AtomicProblemState::new(1, block_hash, boundary);
+        let atomic_state =
+            AtomicProblemState::new(1, block_hash, boundary, H256::zero());
 
         // Test a few hashes from the logs
         let test_cases = [

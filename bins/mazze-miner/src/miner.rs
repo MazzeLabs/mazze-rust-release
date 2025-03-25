@@ -107,9 +107,6 @@ impl Miner {
         let seed_hash_str = params[4]
             .as_str()
             .ok_or("Invalid seed_hash: not a string")?;
-        let next_seed_hash_str = params[5]
-            .as_str()
-            .ok_or("Invalid next_seed_hash: not a string")?;
 
         let pow_hash = H256::from_slice(
             &hex::decode(pow_hash_str.trim_start_matches("0x"))
@@ -126,24 +123,14 @@ impl Miner {
                 .map_err(|e| format!("Invalid seed_hash: {}", e))?,
         );
 
-        let next_seed_hash = if next_seed_hash_str.is_empty() {
-            None
-        } else {
-            Some(H256::from_slice(
-                &hex::decode(next_seed_hash_str.trim_start_matches("0x"))
-                    .map_err(|e| format!("Invalid next_seed_hash: {}", e))?,
-            ))
-        };
-
         info!(
-            "Parsed job: block_height={}, pow_hash={:.4}…{:.4}, boundary=0x{:x}, calculated difficulty={}, seed_hash={}, next_seed_hash={:?}",
+            "Parsed job: block_height={}, pow_hash={:.4}…{:.4}, boundary=0x{:x}, calculated difficulty={}, seed_hash={}",
             block_height,
             pow_hash,
             hex::encode(&pow_hash.as_bytes()[28..32]),
             boundary,
             difficulty,
             seed_hash,
-            next_seed_hash
         );
 
         let problem = ProofOfWorkProblem::new_from_boundary_with_seed_hash(
@@ -151,7 +138,6 @@ impl Miner {
             pow_hash,
             boundary,
             seed_hash,
-            next_seed_hash,
         );
 
         self.mine(&problem);
@@ -473,6 +459,7 @@ mod tests {
             0,
             H256::zero(),
             U256::from_big_endian(&boundary),
+            H256::zero(),
         );
 
         // This should print false because 0x91... > 0x12...

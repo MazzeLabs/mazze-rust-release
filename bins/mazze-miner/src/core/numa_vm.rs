@@ -33,7 +33,10 @@ impl ThreadLocalVM {
             node_id
         );
 
-        Ok(Self { hasher, problem_state })
+        Ok(Self {
+            hasher,
+            problem_state,
+        })
     }
 
     pub fn get_current_block_hash(&self) -> H256 {
@@ -52,6 +55,10 @@ impl ThreadLocalVM {
         &mut self, reference_state: ProblemState,
     ) -> Result<(), NumaError> {
         self.problem_state.update(reference_state);
+        if self.hasher.context().key() != self.problem_state.get_seed_hash() {
+            //TODO: update hasher with new context
+        }
+
         Ok(())
     }
 }
@@ -110,6 +117,13 @@ impl NewNumaVMManager {
     pub fn update_if_needed(
         &self, problem: &ProofOfWorkProblem,
     ) -> Result<(), NumaError> {
+        let problem_seed_hash = problem.seed_hash.as_bytes();
+        if problem_seed_hash != self.reference_state.get_seed_hash() {
+            // TODO: Update context
+            // self.context =
+            //     Arc::new(RandomXContext::new(problem_seed_hash, true));
+        }
+
         debug!(
             "Updating reference state to new block hash: {}",
             problem.block_hash

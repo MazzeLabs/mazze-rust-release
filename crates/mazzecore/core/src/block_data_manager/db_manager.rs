@@ -560,53 +560,44 @@ impl DBManager {
     pub fn get_current_seed_hash(&self, epoch_height: u64) -> H256 {
         const RANDOMX_EPOCH_LENGTH: u64 = 2048; // TODO: move to const params
 
-        let randomx_epoch_height = epoch_height / RANDOMX_EPOCH_LENGTH;
-        let seed_hash_pos = randomx_epoch_height * RANDOMX_EPOCH_LENGTH
-            - RANDOMX_EPOCH_LENGTH / 2;
+        // Calculate the current epoch
+        let current_epoch = epoch_height / RANDOMX_EPOCH_LENGTH;
 
-        // For early epochs, handle gracefully
-        if seed_hash_pos > epoch_height || seed_hash_pos == 0 {
-            // Use genesis block hash or earliest available
+        // For epoch 0, use genesis block
+        if current_epoch == 0 {
             return self
                 .executed_epoch_set_hashes_from_db(0)
                 .and_then(|hashes| hashes.last().cloned())
                 .unwrap_or_default();
         }
 
-        // Since DBManager doesn't have direct access to consensus graph,
-        // we use executed_epoch_set_hashes_from_db which is the fallback
-        // method used in get_main_hash_from_epoch_number
-        self.executed_epoch_set_hashes_from_db(seed_hash_pos)
+        // For all other epochs, use the block at the start of the previous epoch
+        // floor((height - 1) / epoch_length) * epoch_length - epoch_length
+        let seed_height = (current_epoch - 1) * RANDOMX_EPOCH_LENGTH;
+
+        self.executed_epoch_set_hashes_from_db(seed_height)
             .and_then(|hashes| hashes.last().cloned())
             .unwrap_or_default()
     }
 
-    // Implementation of get_next_seed_hash for completeness
-    pub fn get_next_seed_hash(&self, epoch_height: u64) -> Option<H256> {
-        const RANDOMX_EPOCH_LENGTH: u64 = 2048; // TODO: move to const params
+    // pub fn get_next_seed_hash(&self, epoch_height: u64) -> Option<H256> {
+    //     const RANDOMX_EPOCH_LENGTH: u64 = 2048; // TODO: move to const params
 
-        let randomx_epoch_height = epoch_height / RANDOMX_EPOCH_LENGTH;
-        let seed_hash_pos = randomx_epoch_height * RANDOMX_EPOCH_LENGTH
-            + RANDOMX_EPOCH_LENGTH / 2;
-        let conf_height = seed_hash_pos + RANDOMX_EPOCH_LENGTH / 4;
+    //     // Calculate the current epoch
+    //     let current_epoch = epoch_height / RANDOMX_EPOCH_LENGTH;
 
-        if conf_height > epoch_height {
-            return None;
-        }
+    //     // The next seed will be used starting at the next epoch boundary
+    //     // It comes from the block at the start of the current epoch
+    //     let next_seed_height = current_epoch * RANDOMX_EPOCH_LENGTH;
 
-        self.executed_epoch_set_hashes_from_db(seed_hash_pos)
-            .and_then(|hashes| hashes.last().cloned())
-    }
+    //     // Only return a value if we've reached this height (the seed is known)
+    //     if epoch_height < next_seed_height {
+    //         return None;
+    //     }
 
-    // Public method to get seed hash status
-    pub fn get_seed_hash_status(
-        &self, epoch_height: u64,
-    ) -> (H256, Option<H256>) {
-        let current_seed_hash = self.get_current_seed_hash(epoch_height);
-        let next_seed_hash = self.get_next_seed_hash(epoch_height);
-
-        (current_seed_hash, next_seed_hash)
-    }
+    //     self.executed_epoch_set_hashes_from_db(next_seed_height)
+    //         .and_then(|hashes| hashes.last().cloned())
+    // }
 }
 
 fn append_suffix(h: &H256, suffix: u8) -> Vec<u8> {

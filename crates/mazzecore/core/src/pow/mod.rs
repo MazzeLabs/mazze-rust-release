@@ -8,7 +8,7 @@ mod keccak;
 mod seed_compute;
 mod shared;
 
-pub use self::{cache::CacheBuilder, shared::POW_STAGE_LENGTH};
+pub use self::shared::POW_STAGE_LENGTH;
 
 use crate::block_data_manager::BlockDataManager;
 use cache::RandomXCacheBuilder;

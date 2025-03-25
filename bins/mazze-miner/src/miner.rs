@@ -8,7 +8,7 @@ use mazzecore::pow::{
 use serde_json::Value;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::{mpsc, Barrier};
+use std::sync::{mpsc, Barrier, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -17,7 +17,7 @@ use tokio::sync::broadcast;
 use crate::core::NumaError;
 use crate::core::ThreadAssignment;
 use crate::core::*;
-use crate::core::{NewNumaVMManager, THREAD_VM};
+use crate::core::{VMManager, THREAD_VM};
 
 const CHECK_INTERVAL: u64 = 64 * 128 as u64;
 
@@ -37,7 +37,7 @@ pub struct Miner {
     pub worker_name: String,
     num_threads: usize,
     solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
-    vm_manager: Arc<NewNumaVMManager>,
+    vm_manager: Arc<Mutex<VMManager>>,
 }
 
 impl Miner {
@@ -47,9 +47,9 @@ impl Miner {
         (Self, broadcast::Receiver<(ProofOfWorkSolution, u64)>),
         NumaError,
     > {
-        let (stratum_tx, rx) = broadcast::channel(32);
+        let (stratum_tx, stratum_rx) = broadcast::channel(32);
         let (solution_tx, solution_rx) = mpsc::channel();
-        let vm_manager = Arc::new(NewNumaVMManager::new()?);
+        let vm_manager = Arc::new(Mutex::new(VMManager::new()?));
 
         let miner = Miner {
             worker_id,
@@ -68,19 +68,22 @@ impl Miner {
         // Spawn mining threads
         miner.spawn_numa_mining_threads(client_seed)?;
 
-        Ok((miner, rx))
+        Ok((miner, stratum_rx))
     }
 
     pub fn mine(&mut self, problem: &ProofOfWorkProblem) {
         debug!(
-            "[{}] mine() called with new height={}, hash={:.8}",
+            "[{}] mine() called with new height={}, hash={:.8}, seed_hash={}",
             self.worker_name,
             problem.block_height,
-            hex::encode(&problem.block_hash.as_bytes()[..4])
+            hex::encode(&problem.block_hash.as_bytes()[..4]),
+            hex::encode(problem.seed_hash.as_bytes())
         );
 
         // Update VMs before mining
-        if let Err(e) = self.vm_manager.update_if_needed(problem) {
+        if let Err(e) =
+            self.vm_manager.lock().unwrap().update_if_needed(problem)
+        {
             error!("[{}] Failed to update VMs: {:?}", self.worker_name, e);
             return;
         }
@@ -159,7 +162,14 @@ impl Miner {
             let barrier = Arc::clone(&barrier);
             let assignment = ThreadAssignment {
                 thread_id,
-                node_id: thread_id % self.vm_manager.topology.get_nodes().len(),
+                node_id: thread_id
+                    % self
+                        .vm_manager
+                        .lock()
+                        .unwrap()
+                        .topology
+                        .get_nodes()
+                        .len(),
                 core_id: thread_id,
             };
 
@@ -211,7 +221,7 @@ impl Miner {
     fn run_mining_thread_numa(
         assignment: &ThreadAssignment, worker_name: String,
         solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
-        vm_manager: Arc<NewNumaVMManager>, num_threads: usize,
+        vm_manager: Arc<Mutex<VMManager>>, num_threads: usize,
         barrier: Arc<Barrier>, client_seed: H256,
     ) {
         info!(
@@ -235,13 +245,10 @@ impl Miner {
         }
 
         barrier.wait();
-        info!(
-            "[{}] Thread passed barrier, starting mining loop",
-            worker_name
-        );
 
+        // Mining loop
         loop {
-            let result = vm_manager.with_vm(assignment, |vm| {
+            let result = vm_manager.lock().unwrap().with_vm(assignment, |vm| {
                 let start_nonce = Self::get_nonce_range_start(
                     assignment.thread_id,
                     num_threads,
@@ -282,13 +289,16 @@ impl Miner {
                             "[{}] Checking if block hash matches",
                             worker_name
                         );
-                        if !vm_manager.is_block_hash_matching(&vm.get_current_block_hash()) {
+                        if !vm_manager.lock().unwrap().is_block_hash_matching(&vm.get_current_block_hash()) {
                             debug!(
                                 "[{}] Block hash does not match, updating reference state",
                                 worker_name
                             );
-                            vm.update(vm_manager.get_reference_state())
-                                .unwrap();
+                            vm.update(
+                                vm_manager.lock().unwrap().get_reference_state(),
+                                vm_manager.lock().unwrap().get_context()
+                            )
+                            .unwrap();
 
                             debug!(
                                 "[{}] Reference state updated successfully to {}",
@@ -334,9 +344,13 @@ impl Miner {
                         // Wait for new block
                         loop {
                             thread::sleep(Duration::from_millis(50));
-                            if !vm_manager.is_block_hash_matching(&vm.get_current_block_hash()) {
+                            if !vm_manager.lock().unwrap().is_block_hash_matching(&vm.get_current_block_hash()) {
                                 debug!("[{}] New block detected after solution, resuming mining", worker_name);
-                                vm.update(vm_manager.get_reference_state()).unwrap();
+                                vm.update(
+                                    vm_manager.lock().unwrap().get_reference_state(),
+                                    vm_manager.lock().unwrap().get_context()
+                                )
+                                .unwrap();
                                 return false; // Exit closure to restart mining loop
                             } else {
                                 trace!("[{}] Waiting for new block", worker_name);

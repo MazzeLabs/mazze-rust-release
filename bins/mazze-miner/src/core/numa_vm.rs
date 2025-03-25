@@ -15,11 +15,10 @@ pub struct ThreadLocalVM {
 
 impl ThreadLocalVM {
     pub fn new(
-        node_id: usize, ctx: Arc<RandomXContext>,
+        node_id: usize, ctx: Arc<RandomXContext>, topology: &NumaTopology,
     ) -> Result<Self, NumaError> {
         info!("Creating new thread-local VM for NUMA node {}", node_id);
 
-        let topology = NumaTopology::detect()?;
         topology.bind_thread_to_node(node_id)?;
 
         let hasher = Hasher::new(ctx);
@@ -52,11 +51,12 @@ impl ThreadLocalVM {
     }
 
     pub fn update(
-        &mut self, reference_state: ProblemState,
+        &mut self, reference_state: ProblemState, context: Arc<RandomXContext>,
     ) -> Result<(), NumaError> {
         self.problem_state.update(reference_state);
+
         if self.hasher.context().key() != self.problem_state.get_seed_hash() {
-            //TODO: update hasher with new context
+            self.hasher.update(context);
         }
 
         Ok(())
@@ -67,13 +67,13 @@ thread_local! {
     pub static THREAD_VM: RefCell<Option<ThreadLocalVM>> = RefCell::new(None);
 }
 
-pub struct NewNumaVMManager {
+pub struct VMManager {
     pub topology: NumaTopology,
     reference_state: AtomicProblemState,
     context: Arc<RandomXContext>,
 }
 
-impl NewNumaVMManager {
+impl VMManager {
     pub fn new() -> Result<Self, NumaError> {
         // TODO: init with new seed hash
         info!("Initializing RandomX context");
@@ -96,6 +96,10 @@ impl NewNumaVMManager {
         ProblemState::from(&self.reference_state)
     }
 
+    pub fn get_context(&self) -> Arc<RandomXContext> {
+        self.context.clone()
+    }
+
     pub fn with_vm<F, R>(
         &self, assignment: &ThreadAssignment, f: F,
     ) -> Result<R, NumaError>
@@ -108,6 +112,7 @@ impl NewNumaVMManager {
                 *vm_ref = Some(ThreadLocalVM::new(
                     assignment.node_id,
                     self.context.clone(),
+                    &self.topology,
                 )?);
             }
             Ok(f(vm_ref.as_mut().unwrap()))
@@ -115,13 +120,15 @@ impl NewNumaVMManager {
     }
 
     pub fn update_if_needed(
-        &self, problem: &ProofOfWorkProblem,
+        &mut self, problem: &ProofOfWorkProblem,
     ) -> Result<(), NumaError> {
         let problem_seed_hash = problem.seed_hash.as_bytes();
         if problem_seed_hash != self.reference_state.get_seed_hash() {
             // TODO: Update context
             // self.context =
             //     Arc::new(RandomXContext::new(problem_seed_hash, true));
+            self.context =
+                Arc::new(RandomXContext::new(problem_seed_hash, true));
         }
 
         debug!(

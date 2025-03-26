@@ -390,6 +390,7 @@ impl VerificationConfig {
         }
 
         // verify POW
+        info!("verify_header_params verify_pow called for block: {:?} with seed hash {:?}", header.hash(), seed_hash);
         self.verify_pow(pow, header, seed_hash)?;
 
         // A block will be invalid if it has more than REFEREE_BOUND referees

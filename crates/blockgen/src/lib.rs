@@ -695,6 +695,10 @@ impl BlockGenerator {
         );
         let mut nonce: u64 = rand::random();
         loop {
+            info!(
+                "Blockgen #3: Calling pow->validate for block hash {:?} with seed hash {:?}",
+                problem.block_hash, problem.seed_hash
+            );
             if validate(
                 self.pow.clone(),
                 &problem,
@@ -992,6 +996,11 @@ impl BlockGenerator {
                     }
 
                     for index in 0..recent_mining_problems.len() {
+                        info!(
+                            "Blockgen #4: Calling pow->validate for block hash {:?} with seed hash {:?}",
+                            recent_mining_problems[index].block_hash,
+                            recent_mining_problems[index].seed_hash
+                        );
                         if validate(
                             bg.pow.clone(),
                             &recent_mining_problems[index],

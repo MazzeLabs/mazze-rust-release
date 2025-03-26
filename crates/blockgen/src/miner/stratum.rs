@@ -149,6 +149,10 @@ impl JobDispatcher for StratumJobDispatcher {
                             ).into(),
                         ));
                     } else if validate(self.pow.clone(), pow_prob, &sol) {
+                        info!(
+                            "Just called validate from stratum for block hash {:?} with seed hash {:?}",
+                            pow_prob.block_hash, pow_prob.seed_hash
+                        );
                         solved_nonce.insert(sol.nonce);
                         info!(
                             "Stratum worker {} mined a block!",

@@ -558,6 +558,10 @@ impl DBManager {
     }
 
     pub fn get_current_seed_hash(&self, epoch_height: u64) -> H256 {
+        info!(
+            "get_current_seed hash called for epoch height {:?}",
+            epoch_height
+        );
         const RANDOMX_EPOCH_LENGTH: u64 = 2048; // TODO: move to const params
 
         // Calculate the current epoch
@@ -565,19 +569,26 @@ impl DBManager {
 
         // For epoch 0, use genesis block
         if current_epoch == 0 {
-            return self
+            let seed_hash = self
                 .executed_epoch_set_hashes_from_db(0)
                 .and_then(|hashes| hashes.last().cloned())
                 .unwrap_or_default();
+            info!("get_current_seed hash for epoch 0: {:?}", seed_hash);
+            return seed_hash;
         }
 
         // For all other epochs, use the block at the start of the previous epoch
         // floor((height - 1) / epoch_length) * epoch_length - epoch_length
         let seed_height = (current_epoch - 1) * RANDOMX_EPOCH_LENGTH;
-
-        self.executed_epoch_set_hashes_from_db(seed_height)
+        let seed_hash = self
+            .executed_epoch_set_hashes_from_db(seed_height)
             .and_then(|hashes| hashes.last().cloned())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        info!(
+            "get_current_seed hash for epoch {}: {:?}",
+            current_epoch, seed_hash
+        );
+        seed_hash
     }
 
     // pub fn get_next_seed_hash(&self, epoch_height: u64) -> Option<H256> {

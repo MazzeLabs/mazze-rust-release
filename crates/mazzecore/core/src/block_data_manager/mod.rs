@@ -183,10 +183,15 @@ impl BlockDataManager {
             worker_pool,
         );
         let db_manager = match config.db_type {
-            DbType::Rocksdb => DBManager::new_from_rocksdb(db, pow.clone()),
+            DbType::Rocksdb => DBManager::new_from_rocksdb(
+                db,
+                pow.clone(),
+                true_genesis.hash(),
+            ),
             DbType::Sqlite => DBManager::new_from_sqlite(
                 Path::new("./sqlite_db"),
                 pow.clone(),
+                true_genesis.hash(),
             ),
         };
         let previous_db_progress =
@@ -1197,13 +1202,9 @@ impl BlockDataManager {
 
     /// Check if all executed results of an epoch exist
     pub fn epoch_executed_and_recovered(
-        &self,
-        epoch_hash: &H256,
-        epoch_block_hashes: &Vec<H256>,
-        on_local_main: bool,
-        update_trace: bool,
-        reward_execution_info: &Option<RewardExecutionInfo>,
-        evm_chain_id: u32,
+        &self, epoch_hash: &H256, epoch_block_hashes: &Vec<H256>,
+        on_local_main: bool, update_trace: bool,
+        reward_execution_info: &Option<RewardExecutionInfo>, evm_chain_id: u32,
     ) -> bool {
         if !self.epoch_executed(epoch_hash) {
             return false;

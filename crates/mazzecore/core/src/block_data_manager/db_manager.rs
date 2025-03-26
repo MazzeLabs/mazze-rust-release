@@ -78,10 +78,13 @@ fn sqlite_db_table(table: DBTable) -> String {
 pub struct DBManager {
     table_db: HashMap<DBTable, Box<dyn KeyValueDbTrait<ValueType = Box<[u8]>>>>,
     pow: Arc<PowComputer>,
+    genesis_hash: H256,
 }
 
 impl DBManager {
-    pub fn new_from_rocksdb(db: Arc<SystemDB>, pow: Arc<PowComputer>) -> Self {
+    pub fn new_from_rocksdb(
+        db: Arc<SystemDB>, pow: Arc<PowComputer>, genesis_hash: H256,
+    ) -> Self {
         let mut table_db = HashMap::new();
 
         for table in DBTable::iter() {
@@ -94,12 +97,18 @@ impl DBManager {
                     as Box<dyn KeyValueDbTrait<ValueType = Box<[u8]>>>,
             );
         }
-        Self { table_db, pow }
+        Self {
+            table_db,
+            pow,
+            genesis_hash,
+        }
     }
 }
 
 impl DBManager {
-    pub fn new_from_sqlite(db_path: &Path, pow: Arc<PowComputer>) -> Self {
+    pub fn new_from_sqlite(
+        db_path: &Path, pow: Arc<PowComputer>, genesis_hash: H256,
+    ) -> Self {
         if let Err(e) = fs::create_dir_all(db_path) {
             panic!("Error creating database directory: {:?}", e);
         }
@@ -128,7 +137,11 @@ impl DBManager {
                     as Box<dyn KeyValueDbTrait<ValueType = Box<[u8]>>>,
             );
         }
-        Self { table_db, pow }
+        Self {
+            table_db,
+            pow,
+            genesis_hash,
+        }
     }
 }
 
@@ -569,12 +582,8 @@ impl DBManager {
 
         // For epoch 0, use genesis block
         if current_epoch == 0 {
-            let seed_hash = self
-                .executed_epoch_set_hashes_from_db(0)
-                .and_then(|hashes| hashes.last().cloned())
-                .unwrap_or_default();
-            info!("get_current_seed hash for epoch 0: {:?}", seed_hash);
-            return seed_hash;
+            info!("get_current_seed hash for epoch 0: {:?}", self.genesis_hash);
+            return self.genesis_hash;
         }
 
         // For all other epochs, use the block at the start of the previous epoch

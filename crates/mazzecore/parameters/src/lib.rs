@@ -41,7 +41,8 @@ pub mod consensus {
 
     pub const ONE_UMAZZE_IN_MAZZY: u64 = 1_000_000_000_000;
 
-    pub const ONE_MAZZE_IN_UMAZZE: u64 = ONE_MAZZE_IN_MAZZY / ONE_UMAZZE_IN_MAZZY;
+    pub const ONE_MAZZE_IN_UMAZZE: u64 =
+        ONE_MAZZE_IN_MAZZY / ONE_UMAZZE_IN_MAZZY;
 
     pub const ONE_GMAZZY_IN_MAZZY: u64 = 1_000_000_000;
 
@@ -190,7 +191,10 @@ pub mod pow {
 
     // TODO: compute a more appropriate initial difficulty
     // previous initial difficulty: 20_000_000_000;
-    pub const INITIAL_DIFFICULTY: u64 = 50;
+    pub const INITIAL_DIFFICULTY: u64 = 500;
+
+    // The amount of epochs to use for switching mining seed hash
+    pub const RANDOMX_EPOCH_LENGTH: u64 = 2048;
 }
 
 pub mod tx_pool {

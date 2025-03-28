@@ -18,6 +18,7 @@ use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use mazze_internal_common::{
     DatabaseDecodable, DatabaseEncodable, EpochExecutionCommitment,
 };
+use mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
 use mazze_storage::{
     storage_db::KeyValueDbTrait, KvdbRocksdb, KvdbSqlite, KvdbSqliteStatements,
 };
@@ -571,8 +572,6 @@ impl DBManager {
     }
 
     pub fn get_current_seed_hash(&self, epoch_height: u64) -> H256 {
-        const RANDOMX_EPOCH_LENGTH: u64 = 128; // TODO: move to const params
-
         // Calculate the current epoch
         let current_epoch = epoch_height / RANDOMX_EPOCH_LENGTH;
 

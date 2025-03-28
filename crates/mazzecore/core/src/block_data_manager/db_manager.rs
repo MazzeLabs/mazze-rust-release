@@ -575,7 +575,7 @@ impl DBManager {
             "get_current_seed hash called for epoch height {:?}",
             epoch_height
         );
-        const RANDOMX_EPOCH_LENGTH: u64 = 2048; // TODO: move to const params
+        const RANDOMX_EPOCH_LENGTH: u64 = 128; // TODO: move to const params
 
         // Calculate the current epoch
         let current_epoch = epoch_height / RANDOMX_EPOCH_LENGTH;

@@ -594,25 +594,6 @@ impl DBManager {
         );
         seed_hash
     }
-
-    // pub fn get_next_seed_hash(&self, epoch_height: u64) -> Option<H256> {
-    //     const RANDOMX_EPOCH_LENGTH: u64 = 2048; // TODO: move to const params
-
-    //     // Calculate the current epoch
-    //     let current_epoch = epoch_height / RANDOMX_EPOCH_LENGTH;
-
-    //     // The next seed will be used starting at the next epoch boundary
-    //     // It comes from the block at the start of the current epoch
-    //     let next_seed_height = current_epoch * RANDOMX_EPOCH_LENGTH;
-
-    //     // Only return a value if we've reached this height (the seed is known)
-    //     if epoch_height < next_seed_height {
-    //         return None;
-    //     }
-
-    //     self.executed_epoch_set_hashes_from_db(next_seed_height)
-    //         .and_then(|hashes| hashes.last().cloned())
-    // }
 }
 
 fn append_suffix(h: &H256, suffix: u8) -> Vec<u8> {

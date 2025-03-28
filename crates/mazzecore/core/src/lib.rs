@@ -17,7 +17,6 @@ extern crate error_chain;
 extern crate db as ext_db;
 #[macro_use]
 extern crate lazy_static;
-#[macro_use]
 extern crate static_assertions;
 extern crate sha3_macro;
 extern crate substrate_bn as bn;

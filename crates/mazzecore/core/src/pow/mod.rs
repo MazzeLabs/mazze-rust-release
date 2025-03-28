@@ -3,10 +3,6 @@
 // See http://www.gnu.org/licenses/
 
 mod cache;
-mod keccak;
-mod shared;
-
-pub use self::shared::POW_STAGE_LENGTH;
 
 use crate::block_data_manager::BlockDataManager;
 use cache::RandomXCacheBuilder;

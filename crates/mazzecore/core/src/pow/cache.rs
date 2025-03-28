@@ -4,23 +4,17 @@
 use parking_lot::Mutex;
 use rust_randomx::{Context as RandomXContext, Hasher};
 
-use super::{
-    keccak::{keccak_512, H256},
-    shared::{
-        get_cache_size, Node, NODE_BYTES, POW_CACHE_ROUNDS, POW_STAGE_LENGTH,
-    },
-};
 use std::str::FromStr;
 
 use std::{collections::HashMap, slice, sync::Arc};
-
-pub type Cache = Vec<Node>;
 
 use crossbeam_deque::{Steal, Stealer, Worker};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const INITIAL_VMS_PER_STAGE: usize = 4;
+
+pub type H256 = [u8; 32];
 
 pub struct RandomXCacheBuilder {
     global_queue: Worker<Arc<Hasher>>,

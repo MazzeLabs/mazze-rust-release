@@ -8,7 +8,7 @@ use mazzecore::pow::{
 use serde_json::Value;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::{mpsc, Barrier};
+use std::sync::{mpsc, Barrier, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -17,7 +17,7 @@ use tokio::sync::broadcast;
 use crate::core::NumaError;
 use crate::core::ThreadAssignment;
 use crate::core::*;
-use crate::core::{NewNumaVMManager, THREAD_VM};
+use crate::core::{VMManager, THREAD_VM};
 
 const CHECK_INTERVAL: u64 = 64 * 128 as u64;
 
@@ -37,7 +37,7 @@ pub struct Miner {
     pub worker_name: String,
     num_threads: usize,
     solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
-    vm_manager: Arc<NewNumaVMManager>,
+    vm_manager: Arc<VMManager>,
 }
 
 impl Miner {
@@ -47,9 +47,9 @@ impl Miner {
         (Self, broadcast::Receiver<(ProofOfWorkSolution, u64)>),
         NumaError,
     > {
-        let (stratum_tx, rx) = broadcast::channel(32);
+        let (stratum_tx, stratum_rx) = broadcast::channel(32);
         let (solution_tx, solution_rx) = mpsc::channel();
-        let vm_manager = Arc::new(NewNumaVMManager::new()?);
+        let vm_manager = Arc::new(VMManager::new()?);
 
         let miner = Miner {
             worker_id,
@@ -68,15 +68,16 @@ impl Miner {
         // Spawn mining threads
         miner.spawn_numa_mining_threads(client_seed)?;
 
-        Ok((miner, rx))
+        Ok((miner, stratum_rx))
     }
 
     pub fn mine(&mut self, problem: &ProofOfWorkProblem) {
         debug!(
-            "[{}] mine() called with new height={}, hash={:.8}",
+            "[{}] mine() called with new height={}, hash={:.8}, seed_hash={}",
             self.worker_name,
             problem.block_height,
-            hex::encode(&problem.block_hash.as_bytes()[..4])
+            hex::encode(&problem.block_hash.as_bytes()[..4]),
+            hex::encode(problem.seed_hash.as_bytes())
         );
 
         // Update VMs before mining
@@ -91,7 +92,7 @@ impl Miner {
     pub fn parse_job(
         &mut self, params: &[Value],
     ) -> Result<ProofOfWorkProblem, String> {
-        if params.len() != 6 {
+        if params.len() != 5 {
             return Err("Invalid job data: not enough parameters".into());
         }
 
@@ -107,9 +108,6 @@ impl Miner {
         let seed_hash_str = params[4]
             .as_str()
             .ok_or("Invalid seed_hash: not a string")?;
-        let next_seed_hash_str = params[5]
-            .as_str()
-            .ok_or("Invalid next_seed_hash: not a string")?;
 
         let pow_hash = H256::from_slice(
             &hex::decode(pow_hash_str.trim_start_matches("0x"))
@@ -126,24 +124,14 @@ impl Miner {
                 .map_err(|e| format!("Invalid seed_hash: {}", e))?,
         );
 
-        let next_seed_hash = if next_seed_hash_str.is_empty() {
-            None
-        } else {
-            Some(H256::from_slice(
-                &hex::decode(next_seed_hash_str.trim_start_matches("0x"))
-                    .map_err(|e| format!("Invalid next_seed_hash: {}", e))?,
-            ))
-        };
-
         info!(
-            "Parsed job: block_height={}, pow_hash={:.4}…{:.4}, boundary=0x{:x}, calculated difficulty={}, seed_hash={}, next_seed_hash={:?}",
+            "Parsed job: block_height={}, pow_hash={:.4}…{:.4}, boundary=0x{:x}, calculated difficulty={}, seed_hash={}",
             block_height,
             pow_hash,
             hex::encode(&pow_hash.as_bytes()[28..32]),
             boundary,
             difficulty,
             seed_hash,
-            next_seed_hash
         );
 
         let problem = ProofOfWorkProblem::new_from_boundary_with_seed_hash(
@@ -151,7 +139,6 @@ impl Miner {
             pow_hash,
             boundary,
             seed_hash,
-            next_seed_hash,
         );
 
         self.mine(&problem);
@@ -225,8 +212,8 @@ impl Miner {
     fn run_mining_thread_numa(
         assignment: &ThreadAssignment, worker_name: String,
         solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
-        vm_manager: Arc<NewNumaVMManager>, num_threads: usize,
-        barrier: Arc<Barrier>, client_seed: H256,
+        vm_manager: Arc<VMManager>, num_threads: usize, barrier: Arc<Barrier>,
+        client_seed: H256,
     ) {
         info!(
             "[{}] Starting mining thread {} on NUMA node {} core {}",
@@ -249,11 +236,8 @@ impl Miner {
         }
 
         barrier.wait();
-        info!(
-            "[{}] Thread passed barrier, starting mining loop",
-            worker_name
-        );
 
+        // Mining loop
         loop {
             let result = vm_manager.with_vm(assignment, |vm| {
                 let start_nonce = Self::get_nonce_range_start(
@@ -301,8 +285,11 @@ impl Miner {
                                 "[{}] Block hash does not match, updating reference state",
                                 worker_name
                             );
-                            vm.update(vm_manager.get_reference_state())
-                                .unwrap();
+                            vm.update(
+                                vm_manager.get_reference_state(),
+                                vm_manager.get_context()
+                            )
+                            .unwrap();
 
                             debug!(
                                 "[{}] Reference state updated successfully to {}",
@@ -350,7 +337,11 @@ impl Miner {
                             thread::sleep(Duration::from_millis(50));
                             if !vm_manager.is_block_hash_matching(&vm.get_current_block_hash()) {
                                 debug!("[{}] New block detected after solution, resuming mining", worker_name);
-                                vm.update(vm_manager.get_reference_state()).unwrap();
+                                vm.update(
+                                    vm_manager.get_reference_state(),
+                                    vm_manager.get_context()
+                                )
+                                .unwrap();
                                 return false; // Exit closure to restart mining loop
                             } else {
                                 trace!("[{}] Waiting for new block", worker_name);
@@ -473,6 +464,7 @@ mod tests {
             0,
             H256::zero(),
             U256::from_big_endian(&boundary),
+            H256::zero(),
         );
 
         // This should print false because 0x91... > 0x12...

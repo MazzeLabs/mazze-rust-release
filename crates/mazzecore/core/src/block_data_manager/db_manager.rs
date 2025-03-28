@@ -7,8 +7,7 @@ use crate::{
     },
     db::{
         COL_BLAMED_HEADER_VERIFIED_ROOTS, COL_BLOCKS, COL_BLOCK_TRACES,
-        COL_EPOCH_NUMBER, COL_HASH_BY_BLOCK_NUMBER, COL_MISC,
-        COL_TX_INDEX,
+        COL_EPOCH_NUMBER, COL_HASH_BY_BLOCK_NUMBER, COL_MISC, COL_TX_INDEX,
     },
     pow::PowComputer,
     verification::VerificationConfig,
@@ -79,10 +78,13 @@ fn sqlite_db_table(table: DBTable) -> String {
 pub struct DBManager {
     table_db: HashMap<DBTable, Box<dyn KeyValueDbTrait<ValueType = Box<[u8]>>>>,
     pow: Arc<PowComputer>,
+    genesis_hash: H256,
 }
 
 impl DBManager {
-    pub fn new_from_rocksdb(db: Arc<SystemDB>, pow: Arc<PowComputer>) -> Self {
+    pub fn new_from_rocksdb(
+        db: Arc<SystemDB>, pow: Arc<PowComputer>, genesis_hash: H256,
+    ) -> Self {
         let mut table_db = HashMap::new();
 
         for table in DBTable::iter() {
@@ -95,12 +97,18 @@ impl DBManager {
                     as Box<dyn KeyValueDbTrait<ValueType = Box<[u8]>>>,
             );
         }
-        Self { table_db, pow }
+        Self {
+            table_db,
+            pow,
+            genesis_hash,
+        }
     }
 }
 
 impl DBManager {
-    pub fn new_from_sqlite(db_path: &Path, pow: Arc<PowComputer>) -> Self {
+    pub fn new_from_sqlite(
+        db_path: &Path, pow: Arc<PowComputer>, genesis_hash: H256,
+    ) -> Self {
         if let Err(e) = fs::create_dir_all(db_path) {
             panic!("Error creating database directory: {:?}", e);
         }
@@ -129,7 +137,11 @@ impl DBManager {
                     as Box<dyn KeyValueDbTrait<ValueType = Box<[u8]>>>,
             );
         }
-        Self { table_db, pow }
+        Self {
+            table_db,
+            pow,
+            genesis_hash,
+        }
     }
 }
 
@@ -169,12 +181,17 @@ impl DBManager {
     }
 
     pub fn block_header_from_db(&self, hash: &H256) -> Option<BlockHeader> {
-        let mut block_header =
+        let mut block_header: BlockHeader =
             self.load_decodable_val(DBTable::Blocks, hash.as_bytes())?;
+
+        let seed_hash = self.get_current_seed_hash(block_header.height());
+
         VerificationConfig::get_or_fill_header_pow_quality(
             &self.pow,
             &mut block_header,
+            &seed_hash,
         );
+
         Some(block_header)
     }
 
@@ -552,6 +569,55 @@ impl DBManager {
         let encoded = self.load_from_db(table, db_key)?;
         Some(db_decode_list(&encoded).expect("decode succeeds"))
     }
+
+    pub fn get_current_seed_hash(&self, epoch_height: u64) -> H256 {
+        info!(
+            "get_current_seed hash called for epoch height {:?}",
+            epoch_height
+        );
+        const RANDOMX_EPOCH_LENGTH: u64 = 128; // TODO: move to const params
+
+        // Calculate the current epoch
+        let current_epoch = epoch_height / RANDOMX_EPOCH_LENGTH;
+
+        // For epoch 0, use genesis block
+        if current_epoch == 0 {
+            info!("get_current_seed hash for epoch 0: {:?}", self.genesis_hash);
+            return self.genesis_hash;
+        }
+
+        // For all other epochs, use the block at the start of the previous epoch
+        // floor((height - 1) / epoch_length) * epoch_length - epoch_length
+        let seed_height = (current_epoch - 1) * RANDOMX_EPOCH_LENGTH;
+        let seed_hash = self
+            .executed_epoch_set_hashes_from_db(seed_height)
+            .and_then(|hashes| hashes.last().cloned())
+            .unwrap_or_default();
+        info!(
+            "get_current_seed hash for epoch {}: {:?}",
+            current_epoch, seed_hash
+        );
+        seed_hash
+    }
+
+    // pub fn get_next_seed_hash(&self, epoch_height: u64) -> Option<H256> {
+    //     const RANDOMX_EPOCH_LENGTH: u64 = 2048; // TODO: move to const params
+
+    //     // Calculate the current epoch
+    //     let current_epoch = epoch_height / RANDOMX_EPOCH_LENGTH;
+
+    //     // The next seed will be used starting at the next epoch boundary
+    //     // It comes from the block at the start of the current epoch
+    //     let next_seed_height = current_epoch * RANDOMX_EPOCH_LENGTH;
+
+    //     // Only return a value if we've reached this height (the seed is known)
+    //     if epoch_height < next_seed_height {
+    //         return None;
+    //     }
+
+    //     self.executed_epoch_set_hashes_from_db(next_seed_height)
+    //         .and_then(|hashes| hashes.last().cloned())
+    // }
 }
 
 fn append_suffix(h: &H256, suffix: u8) -> Vec<u8> {

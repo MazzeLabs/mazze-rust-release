@@ -74,7 +74,7 @@ impl Worker {
     pub fn new(
         bg: Arc<BlockGenerator>,
         solution_sender: mpsc::Sender<ProofOfWorkSolution>,
-        problem_receiver: mpsc::Receiver<ProofOfWorkProblem>,
+        problem_receiver: mpsc::Receiver<ProofOfWorkProblem>, seed_hash: H256,
     ) -> Self {
         let bg_handle = bg;
 
@@ -83,7 +83,7 @@ impl Worker {
             .spawn(move || {
                 let sleep_duration = time::Duration::from_millis(100);
                 let mut problem: Option<ProofOfWorkProblem> = None;
-                let bg_pow = Arc::new(PowComputer::new());
+                let bg_pow = Arc::new(PowComputer::new(seed_hash));
 
                 loop {
                     match *bg_handle.state.read() {
@@ -108,10 +108,12 @@ impl Worker {
                         trace!("problem is {:?}", problem);
                         let boundary = problem.as_ref().unwrap().boundary;
                         let block_hash = problem.as_ref().unwrap().block_hash;
+                        let seed_hash = problem.as_ref().unwrap().seed_hash;
+                        info!("Blockgen #1: Mining problem hash {:?} with seed hash: {:?}", block_hash, seed_hash);
                         let mut nonce: u64 = rand::random();
                         for _i in 0..MINING_ITERATION {
                             let nonce_u256 = U256::from(nonce);
-                            let hash = bg_pow.compute(&nonce_u256, &block_hash);
+                            let hash = bg_pow.compute(&nonce_u256, &block_hash, &seed_hash);
                             if ProofOfWorkProblem::validate_hash_against_boundary(&hash, &nonce_u256, &boundary) {
                                 // problem solved
                                 match solution_sender
@@ -686,9 +688,17 @@ impl BlockGenerator {
             block.block_header.height(),
             block.block_header.problem_hash(),
             *difficulty,
+            self.consensus_graph()
+                .get_data_manager()
+                .db_manager
+                .get_current_seed_hash(block.block_header.height()),
         );
         let mut nonce: u64 = rand::random();
         loop {
+            info!(
+                "Blockgen #3: Calling pow->validate for block hash {:?} with seed hash {:?}",
+                problem.block_hash, problem.seed_hash
+            );
             if validate(
                 self.pow.clone(),
                 &problem,
@@ -727,7 +737,7 @@ impl BlockGenerator {
 
     /// Start num_worker new workers
     pub fn start_new_worker(
-        num_worker: u32, bg: Arc<BlockGenerator>,
+        num_worker: u32, bg: Arc<BlockGenerator>, seed_hash: H256,
     ) -> mpsc::Receiver<ProofOfWorkSolution> {
         let (solution_sender, solution_receiver) = mpsc::channel();
         let mut workers = bg.workers.lock();
@@ -738,6 +748,7 @@ impl BlockGenerator {
                     bg.clone(),
                     solution_sender.clone(),
                     problem_receiver,
+                    seed_hash,
                 ),
                 problem_sender,
             ));
@@ -766,7 +777,9 @@ impl BlockGenerator {
         solution_receiver
     }
 
-    pub fn start_mining(bg: Arc<BlockGenerator>, _payload_len: u32) {
+    pub fn start_mining(
+        bg: Arc<BlockGenerator>, _payload_len: u32, seed_hash: H256,
+    ) {
         match bg.pow_config.mining_type {
             MiningType::Disable => {
                 debug!("Mining is disabled.");
@@ -774,7 +787,7 @@ impl BlockGenerator {
             }
             MiningType::CPU => {
                 debug!("Starting CPU mining.");
-                BlockGenerator::start_cpu_mining(bg, _payload_len);
+                BlockGenerator::start_cpu_mining(bg, _payload_len, seed_hash);
             }
             MiningType::Stratum => {
                 debug!("Starting Stratum mining server.");
@@ -783,8 +796,10 @@ impl BlockGenerator {
         }
     }
 
-    fn start_cpu_mining(bg: Arc<BlockGenerator>, _payload_len: u32) {
-        let pow_computer = Arc::new(PowComputer::new());
+    fn start_cpu_mining(
+        bg: Arc<BlockGenerator>, _payload_len: u32, seed_hash: H256,
+    ) {
+        let pow_computer = Arc::new(PowComputer::new(seed_hash));
         let mut current_mining_block: Option<Block> = None;
         let mut current_problem: Option<ProofOfWorkProblem> = None;
         let mut last_assemble = SystemTime::now();
@@ -808,6 +823,10 @@ impl BlockGenerator {
                     new_block.block_header.height(),
                     new_block.block_header.problem_hash(),
                     *new_block.block_header.difficulty(),
+                    bg.consensus_graph()
+                        .get_data_manager()
+                        .db_manager
+                        .get_current_seed_hash(new_block.block_header.height()),
                 );
 
                 current_mining_block = Some(new_block);
@@ -859,7 +878,15 @@ impl BlockGenerator {
         let mut hashes_checked = 0;
 
         while start_time.elapsed() < timeout {
-            let hash = pow_computer.compute(&nonce, &problem.block_hash);
+            info!(
+                "Blockgen #2: Mining problem hash {:?} with seed hash: {:?}",
+                problem.block_hash, problem.seed_hash
+            );
+            let hash = pow_computer.compute(
+                &nonce,
+                &problem.block_hash,
+                &problem.seed_hash,
+            );
             hashes_checked += 1;
 
             if ProofOfWorkProblem::validate_hash_against_boundary(
@@ -929,18 +956,23 @@ impl BlockGenerator {
                     .block_header
                     .difficulty();
                 debug!("Current difficulty: {:?}", current_difficulty);
+                let height = current_mining_block
+                    .as_ref()
+                    .unwrap()
+                    .block_header
+                    .height();
                 let problem = ProofOfWorkProblem::new(
-                    current_mining_block
-                        .as_ref()
-                        .unwrap()
-                        .block_header
-                        .height(),
+                    height,
                     current_mining_block
                         .as_ref()
                         .unwrap()
                         .block_header
                         .problem_hash(),
                     *current_difficulty,
+                    bg.consensus_graph()
+                        .get_data_manager()
+                        .db_manager
+                        .get_current_seed_hash(height),
                 );
                 last_assemble = SystemTime::now();
                 trace!("send problem: {:?}", problem);
@@ -964,6 +996,11 @@ impl BlockGenerator {
                     }
 
                     for index in 0..recent_mining_problems.len() {
+                        info!(
+                            "Blockgen #4: Calling pow->validate for block hash {:?} with seed hash {:?}",
+                            recent_mining_problems[index].block_hash,
+                            recent_mining_problems[index].seed_hash
+                        );
                         if validate(
                             bg.pow.clone(),
                             &recent_mining_problems[index],

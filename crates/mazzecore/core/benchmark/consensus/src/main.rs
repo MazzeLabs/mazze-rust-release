@@ -176,6 +176,7 @@ fn main() {
             timer_beta,
             era_epoch_count,
             DbType::Sqlite,
+            H256::zero(),
         );
 
     let mut hashes = Vec::new();
@@ -351,7 +352,7 @@ fn main() {
 
     data_man.initialize_instance_id();
 
-    let pow = Arc::new(PowComputer::new());
+    let pow = Arc::new(PowComputer::new(genesis_hash));
     let (_sync_n, consensus_n) =
         initialize_synchronization_graph_with_data_manager(
             data_man,

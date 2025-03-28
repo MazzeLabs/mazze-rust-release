@@ -6,10 +6,7 @@ mod admin;
 mod context;
 pub(super) mod cross_space;
 mod future;
-pub(super) mod params_control;
-pub(super) mod pos;
 mod sponsor;
-mod staking;
 pub(super) mod system_storage;
 
 mod preludes {
@@ -49,13 +46,11 @@ mod preludes {
 pub fn all_internal_contracts() -> Vec<Box<dyn super::InternalContractTrait>> {
     vec![
         Box::new(admin::AdminControl::instance()),
-        Box::new(staking::Staking::instance()),
         Box::new(sponsor::SponsorWhitelistControl::instance()),
         Box::new(context::Context::instance()),
-        Box::new(pos::PoSRegister::instance()),
         Box::new(cross_space::CrossSpaceCall::instance()),
-        Box::new(params_control::ParamsControl::instance()),
         Box::new(system_storage::SystemStorage::instance()),
+        Box::new(future::Reserved2::instance()),
         Box::new(future::Reserved3::instance()),
         Box::new(future::Reserved8::instance()),
         Box::new(future::Reserved9::instance()),
@@ -77,7 +72,6 @@ pub fn initialize_internal_contract_accounts(
             /* No admin; admin = */ &Address::zero(),
             /* balance = */ U256::zero(),
             Some(STORAGE_LAYOUT_REGULAR_V0),
-            false,
         )?;
     }
     Ok(())

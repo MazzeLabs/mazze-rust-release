@@ -16,7 +16,7 @@ use crate::{
     state::settle_collateral_for_all,
     substate::{cleanup_mode, Substate},
 };
-use mazze_parameters::staking::code_collateral_units;
+use mazze_parameters::collateral::code_collateral_units;
 use mazze_vm_types::{
     self as vm, ActionParams, ActionValue, CallType, CreateContractAddress,
     CreateType,
@@ -31,7 +31,7 @@ pub(super) struct PreCheckedExecutive<'a, O: ExecutiveObserver> {
     pub context: ExecutiveContext<'a>,
     pub tx: &'a SignedTransaction,
     pub observer: O,
-    pub settings: TransactSettings,
+    pub settings: TransactSettings, // TODO: check why this is not used and if it should be used
     pub cost: CostInfo,
     pub substate: Substate,
 }
@@ -45,7 +45,8 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
 
         if insufficient_sender_balance {
             if self.tx.space() == Space::Ethereum {
-                self.context.state.sub_total_evm_tokens(actual_gas_cost);
+                // TODO: check this out
+                // self.context.state.sub_total_evm_tokens(actual_gas_cost);
             }
             return self.finalize_on_insufficient_balance(actual_gas_cost);
         }
@@ -62,11 +63,12 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
         let refund_info = self.compute_refunded_gas(&result);
         self.refund_gas(&params, refund_info.refund_value)?;
 
-        if self.tx.space() == Space::Ethereum {
-            self.context
-                .state
-                .sub_total_evm_tokens(refund_info.fees_value);
-        }
+        // TODO: check this out
+        // if self.tx.space() == Space::Ethereum {
+        //     self.context
+        //         .state
+        //         .sub_total_evm_tokens(refund_info.fees_value);
+        // }
 
         // perform suicides
         self.kill_process()?;
@@ -320,7 +322,6 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
                 state,
                 substate,
                 &mut *self.observer.as_tracer(),
-                &context.spec,
                 dry_run,
             )?;
 
@@ -368,7 +369,6 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
             state.record_storage_and_whitelist_entries_release(
                 &address.address,
                 &mut substate,
-                spec.cip131,
             )?;
 
             assert!(state.is_fresh_storage(address)?);
@@ -376,14 +376,6 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
 
         // Kill process does not occupy new storage entries.
         // The storage recycling process should never occupy new collateral.
-        settle_collateral_for_all(
-            state,
-            &substate,
-            &mut *tracer,
-            &spec,
-            false,
-        )?
-        .expect("Should success");
 
         for contract_address in parent_substate
             .suicides
@@ -435,18 +427,6 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
         }
 
         for contract_address in &parent_substate.suicides {
-            if contract_address.space == Space::Native {
-                let contract_address = contract_address.address;
-                let staking_balance =
-                    state.staking_balance(&contract_address)?;
-                tracer.trace_internal_transfer(
-                    AddressPocket::StakingBalance(contract_address),
-                    AddressPocket::MintBurn,
-                    staking_balance.clone(),
-                );
-                state.sub_total_issued(staking_balance);
-            }
-
             let contract_balance = state.balance(contract_address)?;
             tracer.trace_internal_transfer(
                 AddressPocket::Balance(*contract_address),
@@ -469,7 +449,6 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
     fn compute_refunded_gas(&self, result: &ExecutiveResult) -> RefundInfo {
         let tx = self.tx;
         let cost = &self.cost;
-        let spec = self.context.spec;
         let gas_left = match result {
             Ok(ExecutiveReturn { gas_left, .. }) => *gas_left,
             _ => 0.into(),
@@ -488,9 +467,8 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
         };
 
         let fees_value = gas_charged.saturating_mul(cost.gas_price);
-        let burnt_fees_value = spec
-            .cip1559
-            .then(|| gas_charged.saturating_mul(cost.burnt_gas_price));
+        let burnt_fees_value =
+            Some(gas_charged.saturating_mul(cost.burnt_gas_price));
 
         let refund_value = gas_refunded.saturating_mul(cost.gas_price);
 
@@ -554,7 +532,6 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
                 &actual_gas_cost,
                 self.cost,
                 make_ext_result(self.observer),
-                &self.context.spec,
             ),
         ));
     }
@@ -568,7 +545,6 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
                 self.tx,
                 self.cost,
                 make_ext_result(self.observer),
-                &self.context.spec,
             ),
         ));
     }
@@ -579,16 +555,13 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
         let tx = self.tx;
         let cost = self.cost;
         let ext_result = make_ext_result(self.observer);
-        let spec = self.context.spec;
         let tx_substate = self.substate;
 
         let outcome = match result {
             Err(vm::Error::StateDbError(e)) => bail!(e.0),
             Err(exception) => ExecutionOutcome::ExecutionErrorBumpNonce(
                 ExecutionError::VmError(exception),
-                Executed::execution_error_fully_charged(
-                    tx, cost, ext_result, spec,
-                ),
+                Executed::execution_error_fully_charged(tx, cost, ext_result),
             ),
             Ok(r) => {
                 let executed = Executed::from_executive_return(
@@ -597,7 +570,6 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
                     cost,
                     tx_substate,
                     ext_result,
-                    spec,
                 );
 
                 if r.apply_state {

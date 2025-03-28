@@ -4,7 +4,7 @@
 
 use mazze_statedb::Result as DbResult;
 use mazze_types::U256;
-use mazze_vm_types::{self as vm, ActionParams, CallType, GasLeft};
+use mazze_vm_types::{self as vm, ActionParams, GasLeft};
 use solidity_abi::{ABIDecodable, ABIEncodable};
 
 use super::{InternalRefContext, InternalTrapResult, IsActive};
@@ -169,12 +169,8 @@ impl<T: PreExecCheckConfTrait> PreExecCheckTrait for T {
             ));
         }
 
-        let spec = context.spec;
-        // Check static context before CIP-132
-        let mut static_context = context.callstack.in_reentrancy(spec)
-            || params.call_type == CallType::StaticCall;
-        // Add the lost constraint after CIP-132
-        static_context |= spec.cip132 && context.static_flag;
+        let mut static_context = context.callstack.in_reentrancy(context.spec);
+        static_context |= context.static_flag;
 
         if Self::HAS_WRITE_OP && static_context {
             return Err(vm::Error::MutableCallInStaticContext);

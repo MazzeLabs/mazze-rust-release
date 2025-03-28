@@ -46,9 +46,6 @@ solidity-abi = { path= "../../util/solidity-abi" }
 strum_macros = "0.20"
 # bls-signatures = {git = "https://github.com/MazzeLabs/bls-signatures.git", rev = "0cf4158a4d17d1405d3bdc10dd4065e4e00e88dd", default-features = false, features = ["multicore"]}
 # tiny-keccak = {version = "2.0",  features = ["keccak"]}
-# diem-crypto = { path = "../src/pos/crypto/crypto" }
-# diem-types = { path = "../src/pos/types" }
-pow-types = {path = "../core/src/pos/types/pow-types" }
 # impl-trait-for-tuples = "^0.2"
 # impl-tools = "^0.10"
 typemap = { package = "typemap-ors", version = "1.0"}

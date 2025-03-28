@@ -26,7 +26,6 @@ use crate::{
     },
     ConsensusGraph, NodeType,
 };
-use diem_types::validator_config::{ConsensusPublicKey, ConsensusVRFPublicKey};
 use io::TimerToken;
 use malloc_size_of::{new_malloc_size_ops, MallocSizeOf};
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
@@ -432,10 +431,7 @@ pub struct ProtocolConfiguration {
     pub max_chunk_number_in_manifest: usize,
     pub allow_phase_change_without_peer: bool,
     pub min_phase_change_normal_peer_count: usize,
-    pub pos_genesis_main_decision: H256,
     pub check_status_genesis: bool,
-
-    pub pos_started_as_voter: bool,
 }
 
 impl SynchronizationProtocolHandler {
@@ -1898,7 +1894,6 @@ impl NetworkProtocolHandler for SynchronizationProtocolHandler {
     fn on_peer_connected(
         &self, io: &dyn NetworkContext, node_id: &NodeId,
         peer_protocol_version: ProtocolVersion,
-        _pos_public_key: Option<(ConsensusPublicKey, ConsensusVRFPublicKey)>,
     ) {
         debug!(
             "Peer connected: peer={:?}, version={}",

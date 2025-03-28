@@ -2,16 +2,13 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-use std::{collections::BTreeMap, convert::TryInto, path::PathBuf, sync::Arc};
+// TODO: Cleanup this file
+use std::{convert::TryInto, path::PathBuf, sync::Arc};
 
 use lazy_static::*;
 use parking_lot::RwLock;
 use rand::Rng;
 
-use diem_types::term_state::{
-    pos_state_config::PosStateConfig, IN_QUEUE_LOCKED_VIEWS,
-    OUT_QUEUE_LOCKED_VIEWS, ROUND_PER_TERM, TERM_ELECTED_SIZE, TERM_MAX_SIZE,
-};
 use mazze_addr::{mazze_addr_decode, Network};
 use mazze_executor::{machine::Machine, spec::CommonParams};
 use mazze_internal_common::{
@@ -35,7 +32,7 @@ use mazzecore::{
     },
     consensus::{
         consensus_inner::consensus_executor::ConsensusExecutionConfiguration,
-        pos_handler::PosVerifier, ConsensusConfig, ConsensusInnerConfig,
+        ConsensusConfig, ConsensusInnerConfig,
     },
     consensus_internal_parameters::*,
     consensus_parameters::*,
@@ -47,7 +44,6 @@ use mazzecore::{
 };
 use metrics::MetricsConfiguration;
 use network::DiscoveryConfiguration;
-use primitives::block_header::CIP112_TRANSITION_HEIGHT;
 use txgen::TransactionGeneratorConfig;
 
 use crate::rpc::{
@@ -146,27 +142,12 @@ build_config! {
         (genesis_accounts, (Option<String>), None)
         (genesis_secrets, (Option<String>), None)
         (initial_difficulty, (Option<u64>), None)
-        (tanzanite_transition_height, (u64), TANZANITE_HEIGHT)
         (hydra_transition_number, (Option<u64>), None)
         (hydra_transition_height, (Option<u64>), None)
-        (dao_vote_transition_number, (Option<u64>), None)
-        (dao_vote_transition_height, (Option<u64>), None)
-        (cip43_init_end_number, (Option<u64>), None)
-        (cip78_patch_transition_number,(Option<u64>),None)
-        (cip90_transition_height,(Option<u64>),None)
-        (cip90_transition_number,(Option<u64>),None)
-        (cip105_transition_number, (Option<u64>), None)
-        (sigma_fix_transition_number, (Option<u64>), None)
-        (cip107_transition_number, (Option<u64>), None)
-        (cip112_transition_height, (Option<u64>), None)
-        (cip118_transition_number, (Option<u64>), None)
-        (cip119_transition_number, (Option<u64>), None)
         (next_hardfork_transition_number, (Option<u64>), None)
         (next_hardfork_transition_height, (Option<u64>), None)
-        (cip1559_transition_height, (Option<u64>), None)
         (cancun_opcodes_transition_number, (Option<u64>), None)
         (referee_bound, (usize), REFEREE_DEFAULT_BOUND)
-        (params_dao_vote_period, (u64), DAO_PARAMETER_VOTE_PERIOD)
         (timer_chain_beta, (u64), TIMER_CHAIN_DEFAULT_BETA)
         (timer_chain_block_difficulty_ratio, (u64), TIMER_CHAIN_BLOCK_DEFAULT_DIFFICULTY_RATIO)
         (min_native_base_price, (Option<u64>), None)
@@ -333,28 +314,18 @@ build_config! {
         // DAG-Embedded Tree Structure (DETS) Section.
         (is_consortium, (bool), false)
         (pos_config_path, (Option<String>), Some("./pos_config/pos_config.yaml".to_string()))
-        (pos_genesis_main_decision, (Option<H256>), None)
+        // (pos_genesis_main_decision, (Option<H256>), None)
         (vrf_proposal_threshold, (U256), U256::from_str("1111111111111100000000000000000000000000000000000000000000000000").unwrap())
         // Deferred epoch count before a confirmed epoch.
-        (pos_main_decision_defer_epoch_count, (u64), 50)
-        (cip113_main_decision_defer_epoch_count, (u64), 20)
-        (cip113_transition_height, (u64), u64::MAX)
         (pos_reference_enable_height, (u64), u64::MAX)
         (pos_initial_nodes_path, (String), "./pos_config/initial_nodes.json".to_string())
         (pos_private_key_path, (String), "./pos_config/pos_key".to_string())
-        (pos_round_per_term, (u64), ROUND_PER_TERM)
-        (pos_term_max_size, (usize), TERM_MAX_SIZE)
-        (pos_term_elected_size, (usize), TERM_ELECTED_SIZE)
-        (pos_in_queue_locked_views, (u64), IN_QUEUE_LOCKED_VIEWS)
-        (pos_out_queue_locked_views, (u64), OUT_QUEUE_LOCKED_VIEWS)
-        (pos_cip99_transition_view, (u64), u64::MAX)
-        (pos_cip99_in_queue_locked_views, (u64), IN_QUEUE_LOCKED_VIEWS)
-        (pos_cip99_out_queue_locked_views, (u64), OUT_QUEUE_LOCKED_VIEWS)
+        // (pos_round_per_term, (u64), ROUND_PER_TERM)
+        // (pos_term_max_size, (usize), TERM_MAX_SIZE)
+        // (pos_term_elected_size, (usize), TERM_ELECTED_SIZE)
+        // (pos_in_queue_locked_views, (u64), IN_QUEUE_LOCKED_VIEWS)
+        // (pos_out_queue_locked_views, (u64), OUT_QUEUE_LOCKED_VIEWS)
         (nonce_limit_transition_view, (u64), u64::MAX)
-        (pos_cip136_transition_view, (u64), u64::MAX)
-        (pos_cip136_in_queue_locked_views, (u64), IN_QUEUE_LOCKED_VIEWS)
-        (pos_cip136_out_queue_locked_views, (u64), OUT_QUEUE_LOCKED_VIEWS)
-        (pos_cip136_round_per_term, (u64), ROUND_PER_TERM)
         (dev_pos_private_key_encryption_password, (Option<String>), None)
         (pos_started_as_voter, (bool), true)
 
@@ -419,6 +390,7 @@ build_config! {
     }
 }
 
+#[allow(unused_macros)]
 macro_rules! set_conf {
     ($src: expr; $dst: expr => {$($field: tt),* }) => {
         {
@@ -453,10 +425,6 @@ impl Configuration {
         } else if matches.is_present("light") {
             config.raw_conf.node_type = Some(NodeType::Light);
         }
-
-        CIP112_TRANSITION_HEIGHT
-            .set(config.raw_conf.cip112_transition_height.unwrap_or(u64::MAX))
-            .expect("called once");
 
         Ok(config)
     }
@@ -626,9 +594,6 @@ impl Configuration {
                 era_epoch_count: self.raw_conf.era_epoch_count,
                 enable_optimistic_execution,
                 enable_state_expose: self.raw_conf.enable_state_expose,
-                pos_main_decision_defer_epoch_count: self.raw_conf.pos_main_decision_defer_epoch_count,
-                cip113_main_decision_defer_epoch_count: self.raw_conf.cip113_main_decision_defer_epoch_count,
-                cip113_transition_height: self.raw_conf.cip113_transition_height,
                 debug_dump_dir_invalid_state_root: if self
                     .raw_conf
                     .debug_invalid_state_root
@@ -710,12 +675,11 @@ impl Configuration {
             self.raw_conf.stratum_port,
             stratum_secret,
             self.raw_conf.pow_problem_window_size,
-            self.common_params().transition_heights.cip86,
         )
     }
 
     pub fn verification_config(
-        &self, machine: Arc<Machine>, pos_verifier: Arc<PosVerifier>,
+        &self, machine: Arc<Machine>,
     ) -> VerificationConfig {
         VerificationConfig::new(
             self.is_test_mode(),
@@ -724,7 +688,7 @@ impl Configuration {
             self.raw_conf.transaction_epoch_bound,
             self.raw_conf.tx_pool_nonce_bits,
             machine,
-            pos_verifier,
+            // pos_verifier,
         )
     }
 
@@ -802,10 +766,6 @@ impl Configuration {
                 }
             },
             single_mpt_space: self.raw_conf.single_mpt_space.clone(),
-            cip90a: self
-                .raw_conf
-                .cip90_transition_height
-                .unwrap_or(self.raw_conf.hydra_transition_height.unwrap_or(0)),
             keep_snapshot_before_stable_checkpoint: self
                 .raw_conf
                 .keep_snapshot_before_stable_checkpoint,
@@ -912,12 +872,7 @@ impl Configuration {
             min_phase_change_normal_peer_count: self
                 .raw_conf
                 .min_phase_change_normal_peer_count,
-            pos_genesis_main_decision: self
-                .raw_conf
-                .pos_genesis_main_decision
-                .expect("set to genesis if none"),
             check_status_genesis: self.raw_conf.check_status_genesis,
-            pos_started_as_voter: self.raw_conf.pos_started_as_voter,
         }
     }
 
@@ -1264,9 +1219,7 @@ impl Configuration {
         params.evm_transaction_gas_ratio =
             self.raw_conf.evm_transaction_gas_ratio;
 
-        params.params_dao_vote_period = self.raw_conf.params_dao_vote_period;
-
-        self.set_cips(&mut params);
+        self.set_mips(&mut params);
 
         params
     }
@@ -1275,29 +1228,7 @@ impl Configuration {
         self.raw_conf.node_type.unwrap_or(NodeType::Full)
     }
 
-    pub fn pos_state_config(&self) -> PosStateConfig {
-        // The current implementation requires the round number to be an even
-        // number.
-        assert_eq!(self.raw_conf.pos_round_per_term % 2, 0);
-        PosStateConfig::new(
-            self.raw_conf.pos_round_per_term,
-            self.raw_conf.pos_term_max_size,
-            self.raw_conf.pos_term_elected_size,
-            self.raw_conf.pos_in_queue_locked_views,
-            self.raw_conf.pos_out_queue_locked_views,
-            self.raw_conf.pos_cip99_transition_view,
-            self.raw_conf.pos_cip99_in_queue_locked_views,
-            self.raw_conf.pos_cip99_out_queue_locked_views,
-            self.raw_conf.nonce_limit_transition_view,
-            20_000, // 2 * 10^7 MAZZE
-            self.raw_conf.pos_cip136_transition_view,
-            self.raw_conf.pos_cip136_in_queue_locked_views,
-            self.raw_conf.pos_cip136_out_queue_locked_views,
-            self.raw_conf.pos_cip136_round_per_term,
-        )
-    }
-
-    fn set_cips(&self, params: &mut CommonParams) {
+    fn set_mips(&self, params: &mut CommonParams) {
         let default_transition_time =
             if let Some(num) = self.raw_conf.default_transition_time {
                 num
@@ -1307,148 +1238,11 @@ impl Configuration {
                 u64::MAX
             };
 
-        // This is to set the default transition time for the CIPs that cannot
-        // be enabled in the genesis.
-        let non_genesis_default_transition_time =
-            match self.raw_conf.default_transition_time {
-                Some(num) if num > 0 => num,
-                _ => {
-                    if self.is_test_or_dev_mode() {
-                        1u64
-                    } else {
-                        u64::MAX
-                    }
-                }
-            };
-
-        //
-        // Tanzanite hardfork
-        //
-        params.transition_heights.cip40 =
-            self.raw_conf.tanzanite_transition_height;
-        let mut base_block_rewards = BTreeMap::new();
-        base_block_rewards
-            .insert(0, INITIAL_BASE_MINING_REWARD_IN_UMAZZE.into());
-        base_block_rewards.insert(
-            params.transition_heights.cip40,
-            MINING_REWARD_TANZANITE_IN_UMAZZE.into(),
-        );
-        params.base_block_rewards = base_block_rewards;
-
-        //
-        // Hydra hardfork (V2.0)
-        //
-        set_conf!(
-            self.raw_conf.hydra_transition_number.unwrap_or(default_transition_time);
-            params.transition_numbers => { cip43a, cip64, cip71, cip78a, cip92 }
-        );
-        set_conf!(
-            self.raw_conf.hydra_transition_height.unwrap_or(default_transition_time);
-            params.transition_heights => { cip76, cip86 }
-        );
-        params.transition_numbers.cip43b = self
-            .raw_conf
-            .cip43_init_end_number
-            .unwrap_or(if self.is_test_or_dev_mode() {
-                u64::MAX
-            } else {
-                params.transition_numbers.cip43a
-            });
-        params.transition_numbers.cip62 = if self.is_test_or_dev_mode() {
-            0u64
-        } else {
-            BN128_ENABLE_NUMBER
-        };
-        params.transition_numbers.cip78b = self
-            .raw_conf
-            .cip78_patch_transition_number
-            .unwrap_or(params.transition_numbers.cip78a);
-        params.transition_heights.cip90a = self
-            .raw_conf
-            .cip90_transition_height
-            .or(self.raw_conf.hydra_transition_height)
-            .unwrap_or(default_transition_time);
-        params.transition_numbers.cip90b = self
-            .raw_conf
-            .cip90_transition_number
-            .or(self.raw_conf.hydra_transition_number)
-            .unwrap_or(default_transition_time);
-
-        //
-        // DAO vote hardfork (V2.1)
-        //
-        set_conf!(
-            self.raw_conf.dao_vote_transition_number.unwrap_or(default_transition_time);
-            params.transition_numbers => { cip97, cip98 }
-        );
-        params.transition_numbers.cip94n = self
-            .raw_conf
-            .dao_vote_transition_number
-            .unwrap_or(non_genesis_default_transition_time);
-        params.transition_heights.cip94h = self
-            .raw_conf
-            .dao_vote_transition_height
-            .unwrap_or(non_genesis_default_transition_time);
-        params.transition_numbers.cip105 = self
-            .raw_conf
-            .cip105_transition_number
-            .or(self.raw_conf.dao_vote_transition_number)
-            .unwrap_or(default_transition_time);
-
-        //
-        // Sigma protocol fix hardfork (V2.2)
-        //
-        params.transition_numbers.cip_sigma_fix = self
-            .raw_conf
-            .sigma_fix_transition_number
-            .unwrap_or(default_transition_time);
-
-        //
-        // Burn collateral hardfork (V2.3)
-        //
-        params.transition_numbers.cip107 = self
-            .raw_conf
-            .cip107_transition_number
-            .unwrap_or(default_transition_time);
-        params.transition_heights.cip112 =
-            *CIP112_TRANSITION_HEIGHT.get().expect("initialized");
-        params.transition_numbers.cip118 = self
-            .raw_conf
-            .cip118_transition_number
-            .unwrap_or(default_transition_time);
-        params.transition_numbers.cip119 = self
-            .raw_conf
-            .cip119_transition_number
-            .unwrap_or(default_transition_time);
-
-        //
-        // 1559 hardfork (V2.4)
-        //
-        set_conf!(
-            self.raw_conf.next_hardfork_transition_number.unwrap_or(default_transition_time);
-            params.transition_numbers => { cip131, cip132, cip133b, cip137, cip144, cip145 }
-        );
-        set_conf!(
-            self.raw_conf.next_hardfork_transition_height.unwrap_or(default_transition_time);
-            params.transition_heights => { cip130, cip133e }
-        );
-        // TODO: disable 1559 test during dev
-        params.transition_heights.cip1559 = self
-            .raw_conf
-            .cip1559_transition_height
-            .or(self.raw_conf.next_hardfork_transition_height)
-            .unwrap_or(non_genesis_default_transition_time);
         params.transition_numbers.cancun_opcodes = self
             .raw_conf
             .cancun_opcodes_transition_number
             .or(self.raw_conf.next_hardfork_transition_number)
             .unwrap_or(default_transition_time);
-
-        if params.transition_heights.cip1559
-            < self.raw_conf.pos_reference_enable_height
-        {
-            panic!("1559 can not be activated earlier than pos reference: 1559 (epoch {}), pos (epoch {})", params.transition_heights.cip1559, self.raw_conf.pos_reference_enable_height);
-        }
     }
 }
 

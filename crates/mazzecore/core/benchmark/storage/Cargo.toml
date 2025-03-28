@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2018"
 
 [dependencies]
-mazzecore = { path = "../..", features = ["bls-blst"] }
+mazzecore = { path = "../.." }
 mazze-types = { path = "../../../../mazze_types", features=["storage_benchmark_no_account_space_check"] }
 mazze-statedb = { path = "../../../../dbs/statedb" }
 mazze-storage = { path = "../../../../dbs/storage" }

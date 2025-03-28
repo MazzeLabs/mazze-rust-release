@@ -160,8 +160,6 @@ enum OwnedStorageKey {
         address_bytes: Vec<u8>,
         code_hash_bytes: Vec<u8>,
     },
-    DepositListKey(Vec<u8>),
-    VoteListKey(Vec<u8>),
 }
 
 impl OwnedStorageKey {
@@ -190,12 +188,6 @@ impl OwnedStorageKey {
                 address_bytes: &address_bytes,
                 code_hash_bytes: &code_hash_bytes,
             },
-            OwnedStorageKey::DepositListKey(k) => {
-                StorageKey::DepositListKey(k.as_slice())
-            }
-            OwnedStorageKey::VoteListKey(k) => {
-                StorageKey::VoteListKey(k.as_slice())
-            }
         }
     }
 }
@@ -240,12 +232,6 @@ impl<'a> From<StorageKey<'a>> for OwnedStorageKey {
             } => OwnedStorageKey::CodeKey {
                 address_bytes: address_bytes.to_vec(),
                 code_hash_bytes: code_hash_bytes.to_vec(),
-            },
-            StorageKey::DepositListKey(k) => {
-                OwnedStorageKey::DepositListKey(k.to_vec())
-            }
-            StorageKey::VoteListKey(k) => {
-                OwnedStorageKey::VoteListKey(k.to_vec())
             }
         }
     }

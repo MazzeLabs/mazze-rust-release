@@ -259,7 +259,7 @@ pub fn call_to_evmcore(
         &value,
         cleanup_mode(context.substate, context.spec),
     )?;
-    context.state.add_total_evm_tokens(value);
+    // context.state.add_total_evm_tokens(value);
     context.tracer.trace_internal_transfer(
         AddressPocket::Balance(params.address.with_native_space()),
         AddressPocket::Balance(mapped_sender),
@@ -339,7 +339,7 @@ pub fn create_to_evmcore(
         &value,
         cleanup_mode(context.substate, context.spec),
     )?;
-    context.state.add_total_evm_tokens(value);
+    // context.state.add_total_evm_tokens(value);
     context.tracer.trace_internal_transfer(
         AddressPocket::Balance(params.address.with_native_space()),
         AddressPocket::Balance(mapped_sender),
@@ -416,7 +416,7 @@ pub fn withdraw_from_evmcore(
         &value,
         cleanup_mode(context.substate, context.spec),
     )?;
-    context.state.sub_total_evm_tokens(value);
+    // context.state.sub_total_evm_tokens(value);
     context.tracer.trace_internal_transfer(
         AddressPocket::Balance(mapped_address),
         AddressPocket::Balance(sender.with_native_space()),

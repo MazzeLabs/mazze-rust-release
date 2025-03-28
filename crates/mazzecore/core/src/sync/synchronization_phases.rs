@@ -431,12 +431,8 @@ impl SynchronizationPhaseTrait for CatchUpFillBlockBodyPhase {
     ) {
         info!("start phase {:?}", self.name());
         {
-            let full_state_start_height = self
-                .graph
-                .data_man
-                .storage_manager
-                .config()
-                .full_state_start_height();
+            // TODO: remove this after the full state is enabled
+            let full_state_start_height = Some(0u64);
             let full_state_space = self
                 .graph
                 .data_man

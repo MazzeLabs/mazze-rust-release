@@ -41,16 +41,12 @@ pub mod consensus {
 
     pub const ONE_UMAZZE_IN_MAZZY: u64 = 1_000_000_000_000;
 
+    pub const ONE_MAZZE_IN_UMAZZE: u64 =
+        ONE_MAZZE_IN_MAZZY / ONE_UMAZZE_IN_MAZZY;
+
     pub const ONE_GMAZZY_IN_MAZZY: u64 = 1_000_000_000;
 
-    /// About 2020.12.11-15:30 for both the height and the block number.
-    pub const TANZANITE_HEIGHT: u64 = 3_615_000;
-    pub const BN128_ENABLE_NUMBER: u64 = 7_600_000;
-
-    pub const TANZANITE_HEADER_CUSTOM_FIRST_ELEMENT: [u8; 1] = [1];
-    pub const DAO_VOTE_HEADER_CUSTOM_FIRST_ELEMENT: [u8; 1] = [2];
-    pub const CIP112_HEADER_CUSTOM_FIRST_ELEMENT: [u8; 1] = [3];
-    pub const NEXT_HARDFORK_HEADER_CUSTOM_FIRST_ELEMENT: [u8; 1] = [4];
+    pub const NEXT_HARDFORK_HEADER_CUSTOM_FIRST_ELEMENT: [u8; 1] = [1];
 }
 
 pub mod consensus_internal {
@@ -66,16 +62,11 @@ pub mod consensus_internal {
     /// The maximum number of blocks to be executed in each epoch
     pub const EPOCH_EXECUTED_BLOCK_BOUND: usize = 200;
     // The initial base mining reward in uMAZZE.
-    pub const INITIAL_BASE_MINING_REWARD_IN_UMAZZE: u64 = 2_000_000;
-    // The average number of blocks mined per quarter.
-    pub const MINED_BLOCK_COUNT_PER_QUARTER: u64 = 15_768_000;
+    pub const INITIAL_BASE_MINING_REWARD_IN_UMAZZE: u64 = 4_000_000;
 
-    pub const MINING_REWARD_TANZANITE_IN_UMAZZE: u64 = 2_000_000;
-    pub const GENESIS_TOKEN_COUNT_IN_MAZZE: u64 = 5_000_000_000;
-    pub const TWO_YEAR_UNLOCK_TOKEN_COUNT_IN_MAZZE: u64 = 800_000_000;
-
-    // How many quarters that the mining reward keep decaying.
-    pub const MINING_REWARD_DECAY_PERIOD_IN_QUARTER: usize = 32;
+    pub const GENESIS_TOKEN_COUNT_IN_MAZZE: u64 = 2_500_000_000;
+    pub const MAX_SUPPLY_TOKEN_COUNT_IN_MAZZE: u64 = 5_000_000_000;
+    pub const HALVING_INTERVAL_IN_BLOCKS: u64 = 312_500_000;
 
     /// This is the cap of the size of the outlier barrier. If we have more
     /// than this number we will use the brute_force O(n) algorithm instead.
@@ -106,20 +97,11 @@ pub mod consensus_internal {
     /// update is CPU intensive if the tree graph is in a unstable state.
     pub const CONFIRMATION_METER_UPDATE_FREQUENCY: usize = 20;
 
-    // The number of blocks to settle a DAO parameter vote.
-    // It's set to two months now.
-    pub const DAO_PARAMETER_VOTE_PERIOD: u64 =
-        super::staking::BLOCKS_PER_DAY * 30 * 2;
-    // DAO votes are only effective if the total vote count reaches this minimal
-    // percentage of pos staking tokens.
-    // The condition is checked against each voted parameter separately.
-    pub const DAO_MIN_VOTE_PERCENTAGE: u64 = 5;
+    /// The storage point proportion
+    pub const STORAGE_POINT_PROP_INIT: u64 = ONE_MAZZE_IN_MAZZY;
 
-    /// The initial storage point proportion after CIP107 is enabled.
-    pub const CIP107_STORAGE_POINT_PROP_INIT: u64 = ONE_MAZZE_IN_MAZZY;
-
-    /// The initial base price share proportion after CIP137 is enabled.
-    pub const CIP137_BASEFEE_PROP_INIT: u64 = ONE_MAZZE_IN_MAZZY;
+    /// The initial base price share proportion
+    pub const BASEFEE_PROP_INIT: u64 = ONE_MAZZE_IN_MAZZY;
 
     /// The initial and minimum base price
     pub const INITIAL_1559_CORE_BASE_PRICE: u64 = ONE_GMAZZY_IN_MAZZY;
@@ -195,8 +177,7 @@ pub mod pow {
     // where D is the old difficulty.
     pub const DIFFICULTY_ADJUSTMENT_FACTOR: usize = 2;
 
-    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD: u64 = 500;
-    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD_CIP: u64 = 25;
+    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD: u64 = 25;
     // Time unit is micro-second (usec)
     // We target two blocks per second. This strikes a good balance between the
     // growth of the metadata, the memory consumption of the consensus graph,
@@ -211,6 +192,9 @@ pub mod pow {
     // TODO: compute a more appropriate initial difficulty
     // previous initial difficulty: 20_000_000_000;
     pub const INITIAL_DIFFICULTY: u64 = 500;
+
+    // The amount of epochs to use for switching mining seed hash
+    pub const RANDOMX_EPOCH_LENGTH: u64 = 2048;
 }
 
 pub mod tx_pool {
@@ -257,24 +241,9 @@ pub mod block {
     pub const CROSS_SPACE_GAS_RATIO: u64 = 10;
 }
 
-pub mod staking {
-    use super::pow::{TARGET_AVERAGE_BLOCK_GENERATION_PERIOD, ONE_SECOND_IN_USEC};
+pub mod collateral {
     use crate::consensus::ONE_MAZZE_IN_MAZZY;
     use mazze_types::U256;
-
-    pub const BLOCKS_PER_SECOND: u64 = ONE_SECOND_IN_USEC / TARGET_AVERAGE_BLOCK_GENERATION_PERIOD;
-
-    // 8 blocks per second
-    pub const BLOCKS_PER_MINUTE: u64 = BLOCKS_PER_SECOND * 60;
-
-    /// This is the number of blocks per hour.
-    pub const BLOCKS_PER_HOUR: u64 = BLOCKS_PER_MINUTE * 60;
-    /// This is the number of blocks per day.
-    pub const BLOCKS_PER_DAY: u64 = BLOCKS_PER_HOUR * 24;
-    /// This is the number of blocks per year.
-    pub const BLOCKS_PER_YEAR: u64 = BLOCKS_PER_DAY * 365;
-    /// The inverse of interest rate
-    pub const INVERSE_INTEREST_RATE: u64 = 25;
 
     /// This is the storage collateral units for each KiB of code, amount in
     /// COLLATERAL_UNITs. Code collateral is calculated by each whole KiB
@@ -292,30 +261,6 @@ pub mod staking {
         pub static ref COLLATERAL_MAZZIES_PER_STORAGE_KEY: U256 =
             *MAZZIES_PER_STORAGE_COLLATERAL_UNIT
             * COLLATERAL_UNITS_PER_STORAGE_KEY;
-        /// This is the scale factor for accumulated interest rate:
-        /// `BLOCKS_PER_YEAR * 2 ^ 80`.
-        /// The actual accumulate interest rate stored will be
-        /// `accumulate_interest_rate / INTEREST_RATE_SCALE`.
-        pub static ref ACCUMULATED_INTEREST_RATE_SCALE: U256 =
-            U256::from(BLOCKS_PER_YEAR) << 80;
-        /// The initial annual interest is 4%, which means the initial interest
-        /// rate per block will be
-        /// `4% / BLOCKS_PER_YEAR`. We will multiply it with scale factor and
-        /// store it as an integer.
-        /// This is the scale factor of initial interest rate per block.
-        pub static ref INTEREST_RATE_PER_BLOCK_SCALE: U256 =
-            U256::from(BLOCKS_PER_YEAR * 1000000);
-        /// This is the initial interest rate per block with scale:
-        /// `4% / BLOCKS_PER_YEAR * INTEREST_RATE_PER_BLOCK_SCALE`.
-        pub static ref INITIAL_INTEREST_RATE_PER_BLOCK: U256 =
-            U256::from(40000);
-        /// This is the service charge rate for withdraw,
-        /// `SERVICE_CHARGE_RATE /
-        /// SERVICE_CHARGE_RATE_SCALE = 0.05%`
-        pub static ref SERVICE_CHARGE_RATE: U256 = U256::from(5);
-        pub static ref SERVICE_CHARGE_RATE_SCALE: U256 = U256::from(10000);
-        /// This controls the tokens required for one PoS vote
-        pub static ref POS_VOTE_PRICE: U256 = U256::from(1000)*ONE_MAZZE_IN_MAZZY;
     }
 
     pub fn code_collateral_units(len: usize) -> u64 {
@@ -437,5 +382,4 @@ pub const WORKER_COMPUTATION_PARALLELISM: usize = 8;
 
 pub struct DaoControlParameters {
     pub pow_base_reward: U256,
-    pub pos_annual_interest_rate: U256,
 }

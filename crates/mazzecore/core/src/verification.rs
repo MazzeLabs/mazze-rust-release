@@ -3,14 +3,11 @@
 // See http://www.gnu.org/licenses/
 
 use crate::{
-    consensus::pos_handler::PosVerifier,
     error::{BlockError, Error},
     pow::{self, PowComputer},
     sync::{Error as SyncError, ErrorKind as SyncErrorKind},
 };
-use mazze_executor::{
-    executive::gas_required_for, machine::Machine, spec::TransitionsEpochHeight,
-};
+use mazze_executor::{machine::Machine, spec::TransitionsEpochHeight};
 use mazze_parameters::{block::*, consensus_internal::ELASTICITY_MULTIPLIER};
 use mazze_storage::{
     into_simple_mpt_key, make_simple_mpt, simple_mpt_merkle_root,
@@ -44,7 +41,6 @@ pub struct VerificationConfig {
     pub transaction_epoch_bound: u64,
     pub max_nonce: Option<U256>,
     machine: Arc<Machine>,
-    pos_verifier: Arc<PosVerifier>,
 }
 
 /// Create an MPT from the ordered list of block transactions.
@@ -223,7 +219,7 @@ impl VerificationConfig {
     pub fn new(
         test_mode: bool, referee_bound: usize, max_block_size_in_bytes: usize,
         transaction_epoch_bound: u64, tx_pool_nonce_bits: usize,
-        machine: Arc<Machine>, pos_verifier: Arc<PosVerifier>,
+        machine: Arc<Machine>,
     ) -> Self {
         let max_nonce = if tx_pool_nonce_bits < 256 {
             Some((U256::one() << tx_pool_nonce_bits) - 1)
@@ -237,7 +233,6 @@ impl VerificationConfig {
                 max_block_size_in_bytes,
                 transaction_epoch_bound,
                 machine,
-                pos_verifier,
                 max_nonce,
             }
         } else {
@@ -247,7 +242,6 @@ impl VerificationConfig {
                 max_block_size_in_bytes,
                 transaction_epoch_bound,
                 machine,
-                pos_verifier,
                 max_nonce,
             }
         }
@@ -256,10 +250,10 @@ impl VerificationConfig {
     #[inline]
     /// Note that this function returns *pow_hash* of the block, not its quality
     pub fn get_or_fill_header_pow_hash(
-        pow: &PowComputer, header: &mut BlockHeader,
+        pow: &PowComputer, header: &mut BlockHeader, seed_hash: &H256,
     ) -> H256 {
         if header.pow_hash.is_none() {
-            let computed_hash = Self::compute_pow_hash(pow, header);
+            let computed_hash = Self::compute_pow_hash(pow, header, seed_hash);
             info!(
                 "Computed PoW hash: {:?} for nonce: {:?}",
                 computed_hash,
@@ -271,31 +265,34 @@ impl VerificationConfig {
     }
 
     pub fn get_or_fill_header_pow_quality(
-        pow: &PowComputer, header: &mut BlockHeader,
+        pow: &PowComputer, header: &mut BlockHeader, seed_hash: &H256,
     ) -> U256 {
-        let pow_hash = Self::get_or_fill_header_pow_hash(pow, header);
+        let pow_hash =
+            Self::get_or_fill_header_pow_hash(pow, header, seed_hash);
         pow::pow_hash_to_quality(&pow_hash, &header.nonce())
     }
 
     pub fn get_or_compute_header_pow_quality(
-        pow: &PowComputer, header: &BlockHeader,
+        pow: &PowComputer, header: &BlockHeader, seed_hash: &H256,
     ) -> U256 {
         let pow_hash = header
             .pow_hash
-            .unwrap_or_else(|| Self::compute_pow_hash(pow, header));
+            .unwrap_or_else(|| Self::compute_pow_hash(pow, header, seed_hash));
         pow::pow_hash_to_quality(&pow_hash, &header.nonce())
     }
 
-    fn compute_pow_hash(pow: &PowComputer, header: &BlockHeader) -> H256 {
+    fn compute_pow_hash(
+        pow: &PowComputer, header: &BlockHeader, seed_hash: &H256,
+    ) -> H256 {
         let nonce = header.nonce();
         let hash = header.problem_hash();
 
-        pow.compute(&nonce, &hash)
+        pow.compute(&nonce, &hash, seed_hash)
     }
 
     #[inline]
     pub fn verify_pow(
-        &self, pow: &PowComputer, header: &mut BlockHeader,
+        &self, pow: &PowComputer, header: &mut BlockHeader, seed_hash: &H256,
     ) -> Result<(), Error> {
         let difficulty: U256 = header.difficulty().into();
         if difficulty.is_zero() {
@@ -307,9 +304,8 @@ impl VerificationConfig {
             .into());
         }
 
-        // TODO: add seed management - Simple hash computation without seed management for now
         let nonce = header.nonce();
-        let hash = pow.compute(&nonce, &header.problem_hash());
+        let hash = pow.compute(&nonce, &header.problem_hash(), seed_hash);
         let quality = pow::pow_hash_to_quality(&hash, &nonce);
         let boundary = pow::difficulty_to_boundary(&difficulty);
 
@@ -340,7 +336,7 @@ impl VerificationConfig {
     /// This does not require header to be graph or parental tree ready.
     #[inline]
     pub fn verify_header_params(
-        &self, pow: &PowComputer, header: &mut BlockHeader,
+        &self, pow: &PowComputer, header: &mut BlockHeader, seed_hash: &H256,
     ) -> Result<(), Error> {
         // Check header custom data length
         let custom_len = header.custom().iter().fold(0, |acc, x| acc + x.len());
@@ -354,24 +350,8 @@ impl VerificationConfig {
             )));
         }
 
-        if self.pos_verifier.is_enabled_at_height(header.height()) {
-            if header.pos_reference().is_none() {
-                bail!(BlockError::MissingPosReference);
-            }
-        } else {
-            if header.pos_reference().is_some() {
-                bail!(BlockError::UnexpectedPosReference);
-            }
-        }
-
-        if header.height() >= self.machine.params().transition_heights.cip1559 {
-            if header.base_price().is_none() {
-                bail!(BlockError::MissingBaseFee);
-            }
-        } else {
-            if header.base_price().is_some() {
-                bail!(BlockError::UnexpectedBaseFee);
-            }
+        if header.base_price().is_none() {
+            bail!(BlockError::MissingBaseFee);
         }
 
         // Note that this is just used to rule out deprecated blocks, so the
@@ -402,7 +382,7 @@ impl VerificationConfig {
         }
 
         // verify POW
-        self.verify_pow(pow, header)?;
+        self.verify_pow(pow, header, seed_hash)?;
 
         // A block will be invalid if it has more than REFEREE_BOUND referees
         if header.referee_hashes().len() > self.referee_bound {
@@ -500,51 +480,7 @@ impl VerificationConfig {
             total_gas[t.space()] += *t.gas_limit();
         }
 
-        if block.block_header.height()
-            >= self.machine.params().transition_heights.cip1559
-        {
-            self.check_base_fee(block, parent, total_gas)?;
-        } else {
-            self.check_hard_gas_limit(block, total_gas)?;
-        }
-        Ok(())
-    }
-
-    fn check_hard_gas_limit(
-        &self, block: &Block, total_gas: SpaceMap<U256>,
-    ) -> Result<(), Error> {
-        let block_height = block.block_header.height();
-
-        let evm_space_gas_limit =
-            if self.machine.params().can_pack_evm_transaction(block_height) {
-                *block.block_header.gas_limit()
-                    / self.machine.params().evm_transaction_gas_ratio
-            } else {
-                U256::zero()
-            };
-
-        let evm_total_gas = total_gas[Space::Ethereum];
-        let block_total_gas = total_gas.map_sum(|x| *x);
-
-        if evm_total_gas > evm_space_gas_limit {
-            return Err(From::from(BlockError::InvalidPackedGasLimit(
-                OutOfBounds {
-                    min: None,
-                    max: Some(evm_space_gas_limit),
-                    found: evm_total_gas,
-                },
-            )));
-        }
-
-        if block_total_gas > *block.block_header.gas_limit() {
-            return Err(From::from(BlockError::InvalidPackedGasLimit(
-                OutOfBounds {
-                    min: None,
-                    max: Some(*block.block_header.gas_limit()),
-                    found: block_total_gas,
-                },
-            )));
-        }
+        self.check_base_fee(block, parent, total_gas)?;
 
         Ok(())
     }
@@ -555,10 +491,7 @@ impl VerificationConfig {
         use Space::*;
 
         let params = self.machine.params();
-        let cip1559_init = params.transition_heights.cip1559;
         let block_height = block.block_header.height();
-
-        assert!(block_height >= cip1559_init);
 
         let core_gas_limit = block.block_header.gas_limit() * 9 / 10;
         let espace_gas_limit =
@@ -588,7 +521,7 @@ impl VerificationConfig {
             )));
         }
 
-        let parent_base_price = if block_height == cip1559_init {
+        let parent_base_price = if block_height == 1 {
             params.init_base_price()
         } else {
             parent.base_price().unwrap()
@@ -668,14 +601,11 @@ impl VerificationConfig {
 
     pub fn fast_recheck(
         &self, tx: &TransactionWithSignature, height: BlockHeight,
-        transitions: &TransitionsEpochHeight, spec: &Spec,
+        _transitions: &TransitionsEpochHeight, spec: &Spec,
     ) -> PackingCheckResult {
-        let cip90a = height >= transitions.cip90a;
-        let cip1559 = height >= transitions.cip1559;
-
         let (can_pack, later_pack) =
             Self::fast_recheck_inner(spec, |mode: &VerifyTxMode| {
-                if !Self::check_eip1559_transaction(tx, cip1559, mode) {
+                if !Self::check_eip1559_transaction(tx, mode) {
                     return false;
                 }
 
@@ -688,7 +618,7 @@ impl VerificationConfig {
                     )
                     .is_ok()
                 } else {
-                    Self::check_eip155_transaction(tx, cip90a, mode)
+                    Self::check_eip155_transaction(tx, mode)
                 }
             });
 
@@ -704,7 +634,7 @@ impl VerificationConfig {
     // rules. We combine them together for convenient in the future upgrades..
     pub fn verify_transaction_common(
         &self, tx: &TransactionWithSignature, chain_id: AllChainID,
-        height: BlockHeight, transitions: &TransitionsEpochHeight,
+        height: BlockHeight, _transitions: &TransitionsEpochHeight,
         mode: VerifyTxMode,
     ) -> Result<(), TransactionError> {
         tx.check_low_s()?;
@@ -751,13 +681,9 @@ impl VerificationConfig {
         }
 
         // ******************************************
-        // Each constraint depends on a mode or a CIP should be
-        // implemented in a seperated function.
+        // Each constraint depends on a mode or a MIP should be
+        // implemented in a separated function.
         // ******************************************
-        let cip76 = height >= transitions.cip76;
-        let cip90a = height >= transitions.cip90a;
-        let cip130 = height >= transitions.cip130;
-        let cip1559 = height >= transitions.cip1559;
 
         if let Transaction::Native(ref tx) = tx.unsigned {
             Self::verify_transaction_epoch_height(
@@ -768,88 +694,33 @@ impl VerificationConfig {
             )?;
         }
 
-        if !Self::check_eip155_transaction(tx, cip90a, &mode) {
+        if !Self::check_eip155_transaction(tx, &mode) {
             bail!(TransactionError::FutureTransactionType);
         }
 
-        if !Self::check_eip1559_transaction(tx, cip1559, &mode) {
+        if !Self::check_eip1559_transaction(tx, &mode) {
             bail!(TransactionError::FutureTransactionType)
         }
 
-        Self::check_gas_limit(tx, cip76, &mode)?;
-        Self::check_gas_limit_with_calldata(tx, cip130)?;
+        Self::check_gas_limit_with_calldata(tx)?;
         Ok(())
     }
 
     fn check_eip155_transaction(
-        tx: &TransactionWithSignature, cip90a: bool, mode: &VerifyTxMode,
+        _tx: &TransactionWithSignature, _mode: &VerifyTxMode,
     ) -> bool {
-        if tx.space() == Space::Native {
-            return true;
-        }
-
-        use VerifyTxLocalMode::*;
-        match mode {
-            VerifyTxMode::Local(Full, spec) => cip90a && spec.cip90,
-            VerifyTxMode::Local(MaybeLater, _spec) => true,
-            VerifyTxMode::Remote => cip90a,
-        }
+        return true;
     }
 
     fn check_eip1559_transaction(
-        tx: &TransactionWithSignature, cip1559: bool, mode: &VerifyTxMode,
+        _tx: &TransactionWithSignature, _mode: &VerifyTxMode,
     ) -> bool {
-        if tx.is_legacy() {
-            return true;
-        }
-
-        use VerifyTxLocalMode::*;
-        match mode {
-            VerifyTxMode::Local(Full, _spec) => cip1559,
-            VerifyTxMode::Local(MaybeLater, _spec) => true,
-            VerifyTxMode::Remote => cip1559,
-        }
-    }
-
-    /// Check transaction intrinsic gas. Influenced by CIP-76.
-    fn check_gas_limit(
-        tx: &TransactionWithSignature, cip76: bool, mode: &VerifyTxMode,
-    ) -> Result<(), TransactionError> {
-        const GENESIS_SPEC: Spec = Spec::genesis_spec();
-        let maybe_spec = if let VerifyTxMode::Local(_, spec) = mode {
-            // In local mode, we check gas limit as usual.
-            Some(*spec)
-        } else if !cip76 {
-            // In remote mode, we only check gas limit before cip-76 activated.
-            Some(&GENESIS_SPEC)
-        } else {
-            None
-        };
-
-        if let Some(spec) = maybe_spec {
-            let tx_intrinsic_gas = gas_required_for(
-                *tx.action() == Action::Create,
-                &tx.data(),
-                tx.access_list(),
-                &spec,
-            );
-            if *tx.gas() < (tx_intrinsic_gas as usize).into() {
-                bail!(TransactionError::NotEnoughBaseGas {
-                    required: tx_intrinsic_gas.into(),
-                    got: *tx.gas()
-                });
-            }
-        }
-
-        Ok(())
+        return true;
     }
 
     fn check_gas_limit_with_calldata(
-        tx: &TransactionWithSignature, cip130: bool,
+        tx: &TransactionWithSignature,
     ) -> Result<(), TransactionError> {
-        if !cip130 {
-            return Ok(());
-        }
         let data_length = tx.data().len();
         let min_gas_limit = data_length.saturating_mul(100);
         if tx.gas() < &U256::from(min_gas_limit) {

@@ -559,7 +559,6 @@ chain_id = 1990
 evm_chain_id = 1991
 hydra_transition_number = 1
 hydra_transition_height = 1
-cip43_init_end_number = 1
 pos_reference_enable_height = 1
 
 

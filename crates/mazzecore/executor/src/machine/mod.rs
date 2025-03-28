@@ -105,9 +105,7 @@ pub fn new_machine(params: CommonParams, vm_factory: VmFactory) -> Machine {
     }
 }
 
-fn new_builtin_map(
-    params: &CommonParams, space: Space,
-) -> BTreeMap<Address, Builtin> {
+fn new_builtin_map(space: Space) -> BTreeMap<Address, Builtin> {
     let mut btree = BTreeMap::new();
 
     btree.insert(
@@ -150,7 +148,7 @@ fn new_builtin_map(
         Builtin::new(
             Box::new(ModexpPricer::new(20)),
             builtin_factory("modexp"),
-            params.transition_numbers.cip62,
+            0,
         ),
     );
     btree.insert(
@@ -158,7 +156,7 @@ fn new_builtin_map(
         Builtin::new(
             Box::new(Linear::new(500, 0)),
             builtin_factory("alt_bn128_add"),
-            params.transition_numbers.cip62,
+            0,
         ),
     );
     btree.insert(
@@ -166,7 +164,7 @@ fn new_builtin_map(
         Builtin::new(
             Box::new(Linear::new(40_000, 0)),
             builtin_factory("alt_bn128_mul"),
-            params.transition_numbers.cip62,
+            0,
         ),
     );
     btree.insert(
@@ -174,7 +172,7 @@ fn new_builtin_map(
         Builtin::new(
             Box::new(AltBn128PairingPricer::new(100_000, 80_000)),
             builtin_factory("alt_bn128_pairing"),
-            params.transition_numbers.cip62,
+            0,
         ),
     );
     btree.insert(
@@ -182,7 +180,7 @@ fn new_builtin_map(
         Builtin::new(
             Box::new(Blake2FPricer::new(1)),
             builtin_factory("blake2_f"),
-            params.transition_numbers.cip92,
+            0
         ),
     );
     btree.insert(
@@ -190,7 +188,7 @@ fn new_builtin_map(
         Builtin::new(
             Box::new(Linear::new(50000, 0)),
             builtin_factory("kzg_point_eval"),
-            params.transition_numbers.cip144,
+            0,
         ),
     );
     btree
@@ -199,8 +197,8 @@ fn new_builtin_map(
 pub fn new_machine_with_builtin(
     params: CommonParams, vm_factory: VmFactory,
 ) -> Machine {
-    let builtin = new_builtin_map(&params, Space::Native);
-    let builtin_evm = new_builtin_map(&params, Space::Ethereum);
+    let builtin = new_builtin_map(Space::Native);
+    let builtin_evm = new_builtin_map(Space::Ethereum);
 
     let internal_contracts = InternalContractMap::new(&params);
     Machine {

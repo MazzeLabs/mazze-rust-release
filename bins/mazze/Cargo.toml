@@ -55,13 +55,6 @@ parity-wordlist = "1.3.0"
 rustc-hex = "2.1"
 env_logger = "0.5"
 malloc_size_of = {path= "../../crates/util/malloc_size_of" }
-diem-crypto = { path= "../../crates/mazzecore/core/src/pos/crypto/crypto" }
-diem-types = { path= "../../crates/mazzecore/core/src/pos/types" }
-pos-ledger-db = { path = "../../crates/mazzecore/core/src/pos/storage/pos-ledger-db" }
-executor-types = { path = "../../crates/mazzecore/core/src/pos/types/executor-types" }
-executor = { path = "../../crates/mazzecore/core/src/pos/consensus/executor" }
-storage-interface = { path = "../../crates/mazzecore/core/src/pos/storage/storage-interface" }
-move-core-types = { path = "../../crates/mazzecore/core/src/pos/types/move-core-types" }
 bcs = "0.1.3"
 tempdir = "0.3.7"
 hex = "0.3.0"
@@ -80,17 +73,10 @@ path = "../../crates/mazzecore/core/benchmark/consensus/src/main.rs"
 name = "mazze-gen-dot"
 path = "../mazze-gen-dot/main.rs"
 
-[[bin]]
-name = "pos-genesis-tool"
-path = "../pos-genesis-tool/main.rs"
-
 [features]
-default = ["jemalloc-global", "bls-blst"]
+default = ["jemalloc-global"]
 deadlock-detection = ["parking_lot/deadlock_detection"]
 jemalloc-global = ["jemallocator", "malloc_size_of/jemalloc-global"]
-bls-blst = ["mazzecore/bls-blst", "diem-crypto/bls-blst"]
-bls-pairing = ["mazzecore/bls-pairing", "diem-crypto/bls-pairing"]
-blst-portable = ["mazzecore/blst-portable", "diem-crypto/blst-portable"]
 u64-mpt-db-key = ["client/u64_mpt_db_key"]
 
 [lints.rust]

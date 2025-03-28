@@ -4,12 +4,12 @@ use crate::{
     return_if, try_loaded,
 };
 use mazze_parameters::{
-    consensus_internal::CIP107_STORAGE_POINT_PROP_INIT,
-    staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
+    collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
+    consensus_internal::STORAGE_POINT_PROP_INIT,
 };
 use mazze_statedb::{global_params::*, Result as DbResult};
 use mazze_types::{address_util::AddressUtil, Address, AddressSpaceUtil, U256};
-use mazze_vm_types::{self as vm, Spec};
+use mazze_vm_types::{self as vm};
 
 impl State {
     pub fn collateral_for_storage(&self, address: &Address) -> DbResult<U256> {
@@ -92,18 +92,19 @@ impl State {
         self.get_system_storage(&storage_point_prop())
     }
 
-    fn initialize_cip107(
+    fn initialize_account_storage_points(
         &mut self, address: &Address,
     ) -> DbResult<(U256, U256)> {
-        debug!("Check initialize CIP-107");
+        debug!("Check initialize storage point prop");
 
         let prop: U256 = self.storage_point_prop()?;
         let mut account =
             self.write_account_or_new_lock(&address.with_native_space())?;
         return_if!(!account.is_contract());
-        return_if!(account.is_cip_107_initialized());
+        return_if!(account.is_storage_point_prop_initialized());
 
-        let (from_balance, from_collateral) = account.initialize_cip107(prop);
+        let (from_balance, from_collateral) =
+            account.initialize_account_storage_points(prop);
         std::mem::drop(account);
 
         self.add_converted_storage_point(from_balance, from_collateral);
@@ -120,8 +121,7 @@ impl State {
         substate: &mut Substate, tracer: &mut dyn TracerTrait, spec: &Spec,
         dry_run: bool,
     ) -> DbResult<CollateralCheckResult> {
-        let res =
-            settle_collateral_for_all(self, substate, tracer, spec, dry_run)?;
+        let res = settle_collateral_for_all(self, substate, tracer, dry_run)?;
         Ok(if res.is_ok() {
             self.check_storage_limit(storage_owner, storage_limit, dry_run)?
         } else {
@@ -156,7 +156,7 @@ impl State {
 /// Charges or refund storage collateral and update `total_storage_tokens`.
 fn settle_collateral_for_address(
     state: &mut State, addr: &Address, substate: &Substate,
-    tracer: &mut dyn TracerTrait, spec: &Spec, dry_run: bool,
+    tracer: &mut dyn TracerTrait, dry_run: bool,
 ) -> DbResult<CollateralCheckResult> {
     let addr_with_space = addr.with_native_space();
     let (inc_collaterals, sub_collaterals) =
@@ -168,12 +168,10 @@ fn settle_collateral_for_address(
 
     let is_contract = state.is_contract_with_code(&addr_with_space)?;
 
-    // Initialize CIP-107
-    if spec.cip107
-        && addr.is_contract_address()
-        && (!sub.is_zero() || !inc.is_zero())
-    {
-        let (from_balance, from_collateral) = state.initialize_cip107(addr)?;
+    // Initialize account storage points
+    if addr.is_contract_address() && (!sub.is_zero() || !inc.is_zero()) {
+        let (from_balance, from_collateral) =
+            state.initialize_account_storage_points(addr)?;
         tracer.trace_convert_storage_points(
             *addr,
             from_balance,
@@ -214,11 +212,11 @@ fn settle_collateral_for_address(
 /// of a transaction.
 pub fn settle_collateral_for_all(
     state: &mut State, substate: &Substate, tracer: &mut dyn TracerTrait,
-    spec: &Spec, dry_run: bool,
+    dry_run: bool,
 ) -> DbResult<CollateralCheckResult> {
     for address in substate.keys_for_collateral_changed().iter() {
         let res = settle_collateral_for_address(
-            state, &address, substate, tracer, spec, dry_run,
+            state, &address, substate, tracer, dry_run,
         )?;
         if res.is_err() {
             return Ok(res);
@@ -227,15 +225,14 @@ pub fn settle_collateral_for_all(
     Ok(Ok(()))
 }
 
-/// Initialize CIP-107 for the whole system.
-pub fn initialize_cip107(state: &mut State) -> DbResult<()> {
+pub fn set_initial_storage_point_prop(state: &mut State) -> DbResult<()> {
     debug!(
         "set storage_point_prop to {}",
-        CIP107_STORAGE_POINT_PROP_INIT
+        STORAGE_POINT_PROP_INIT
     );
     state.set_system_storage(
         storage_point_prop().to_vec(),
-        CIP107_STORAGE_POINT_PROP_INIT.into(),
+        STORAGE_POINT_PROP_INIT.into(),
     )
 }
 

@@ -10,16 +10,15 @@ use std::{
 };
 
 use crate::rpc::{
-    impls::pos::hash_value_to_h256,
     types::{
-        errors::check_rpc_address_network, pos::PoSEpochReward,
-        AccountPendingInfo, AccountPendingTransactions, Block as RpcBlock,
-        BlockHashOrEpochNumber, Bytes, CheckBalanceAgainstTransactionResponse,
-        EpochNumber, FeeHistory, MazzeFeeHistory, RpcAddress,
-        Status as RpcStatus, Transaction as RpcTransaction,
-        TxPoolPendingNonceRange, TxPoolStatus, TxWithPoolInfo, U64 as HexU64,
+        errors::check_rpc_address_network, AccountPendingInfo,
+        AccountPendingTransactions, Block as RpcBlock, BlockHashOrEpochNumber,
+        Bytes, CheckBalanceAgainstTransactionResponse, EpochNumber, FeeHistory,
+        MazzeFeeHistory, RpcAddress, Status as RpcStatus,
+        Transaction as RpcTransaction, TxPoolPendingNonceRange, TxPoolStatus,
+        TxWithPoolInfo, U64 as HexU64,
     },
-    RpcErrorKind, RpcResult,
+    RpcResult,
 };
 
 use bigdecimal::BigDecimal;
@@ -31,24 +30,17 @@ use keccak_hash::keccak;
 use num_bigint::{BigInt, ToBigInt};
 use parking_lot::{Condvar, Mutex};
 
-use crate::rpc::types::pos::{Block as RpcPosBlock, Decision};
-use diem_crypto::hash::HashValue;
-use diem_types::{
-    account_address::{from_consensus_public_key, AccountAddress},
-    block_info::MainBlockDecision,
-    transaction::TransactionPayload,
-};
 use mazze_addr::Network;
 use mazze_parameters::{
-    rpc::GAS_PRICE_DEFAULT_VALUE, staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
+    rpc::GAS_PRICE_DEFAULT_VALUE, collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
 };
 use mazze_types::{
     Address, AddressSpaceUtil, Space, H160, H256, H520, U128, U256, U512, U64,
 };
 use mazzecore::{
-    consensus::pos_handler::PosVerifier, genesis_block::register_transaction,
-    rpc_errors::invalid_params_check, BlockDataManager, ConsensusGraph,
-    ConsensusGraphTrait, PeerInfo, SharedConsensusGraph, SharedTransactionPool,
+    rpc_errors::invalid_params_check,
+    BlockDataManager, ConsensusGraph, ConsensusGraphTrait, PeerInfo,
+    SharedConsensusGraph, SharedTransactionPool,
 };
 use mazzecore_accounts::AccountProvider;
 use mazzekey::Password;
@@ -58,7 +50,6 @@ use network::{
     NetworkService, SessionDetails, UpdateNodeOperation,
 };
 use primitives::{Account, Action, Block, SignedTransaction, Transaction};
-use storage_interface::DBReaderForPoW;
 
 fn grouped_txs<T, F>(
     txs: Vec<Arc<SignedTransaction>>, converter: F,
@@ -159,14 +150,15 @@ pub struct RpcImpl {
     network: Arc<NetworkService>,
     tx_pool: SharedTransactionPool,
     accounts: Arc<AccountProvider>,
-    pub pos_handler: Arc<PosVerifier>,
 }
 
 impl RpcImpl {
     pub fn new(
-        exit: Arc<(Mutex<bool>, Condvar)>, consensus: SharedConsensusGraph,
-        network: Arc<NetworkService>, tx_pool: SharedTransactionPool,
-        accounts: Arc<AccountProvider>, pos_verifier: Arc<PosVerifier>,
+        exit: Arc<(Mutex<bool>, Condvar)>,
+        consensus: SharedConsensusGraph,
+        network: Arc<NetworkService>,
+        tx_pool: SharedTransactionPool,
+        accounts: Arc<AccountProvider>,
     ) -> Self {
         let data_man = consensus.get_data_manager().clone();
 
@@ -177,7 +169,6 @@ impl RpcImpl {
             network,
             tx_pool,
             accounts,
-            pos_handler: pos_verifier,
         }
     }
 
@@ -263,7 +254,8 @@ impl RpcImpl {
         }
     }
 
-    fn primitive_block_by_epoch_number(
+    // TODO: is this still needed?
+    fn _primitive_block_by_epoch_number(
         &self, epoch_num: EpochNumber,
     ) -> Option<Arc<Block>> {
         let consensus_graph = self.consensus_graph();
@@ -277,62 +269,6 @@ impl RpcImpl {
 
         self.data_man
             .block_by_hash(&main_hash, false /* update_cache */)
-    }
-
-    pub fn get_pos_reward_by_epoch(
-        &self, epoch: EpochNumber,
-    ) -> JsonRpcResult<Option<PoSEpochReward>> {
-        let maybe_block = self.primitive_block_by_epoch_number(epoch);
-        if maybe_block.is_none() {
-            return Ok(None);
-        }
-        let block = maybe_block.unwrap();
-        if block.block_header.pos_reference().is_none() {
-            return Ok(None);
-        }
-        match self
-            .data_man
-            .block_by_hash(block.block_header.parent_hash(), false)
-        {
-            None => Ok(None),
-            Some(parent_block) => {
-                if parent_block.block_header.pos_reference().is_none() {
-                    return Ok(None);
-                }
-                let block_pos_ref = block.block_header.pos_reference().unwrap();
-                let parent_pos_ref =
-                    parent_block.block_header.pos_reference().unwrap();
-
-                if block_pos_ref == parent_pos_ref {
-                    return Ok(None);
-                }
-
-                let hash = HashValue::from_slice(parent_pos_ref.as_bytes())
-                    .map_err(|_| RpcError::internal_error())?;
-                let pos_block = self
-                    .pos_handler
-                    .pos_ledger_db()
-                    .get_committed_block_by_hash(&hash)
-                    .map_err(|_| RpcError::internal_error())?;
-                let maybe_epoch_rewards =
-                    self.data_man.pos_reward_by_pos_epoch(pos_block.epoch);
-                if maybe_epoch_rewards.is_none() {
-                    return Ok(None);
-                }
-                let epoch_rewards = maybe_epoch_rewards.unwrap();
-                if epoch_rewards.execution_epoch_hash
-                    != block.block_header.hash()
-                {
-                    return Ok(None);
-                }
-                let reward_info: PoSEpochReward = PoSEpochReward::try_from(
-                    epoch_rewards,
-                    *self.network.get_network_type(),
-                )
-                .map_err(|_| RpcError::internal_error())?;
-                Ok(Some(reward_info))
-            }
-        }
     }
 
     pub fn confirmation_risk_by_hash(
@@ -841,10 +777,6 @@ impl RpcImpl {
             .get_height_from_epoch_number(EpochNumber::LatestState.into())?
             .into();
 
-        let latest_finalized = consensus_graph
-            .get_height_from_epoch_number(EpochNumber::LatestFinalized.into())?
-            .into();
-
         Ok(RpcStatus {
             best_hash: best_info.best_block_hash.into(),
             block_number: block_number.into(),
@@ -856,7 +788,6 @@ impl RpcImpl {
             epoch_number: best_info.best_epoch_number.into(),
             latest_checkpoint,
             latest_confirmed,
-            latest_finalized,
             latest_state,
             network_id: self.network.network_id().into(),
             pending_tx_number: tx_count.into(),
@@ -872,177 +803,6 @@ impl RpcImpl {
         self.exit.1.notify_all();
 
         Ok(())
-    }
-
-    pub fn pos_register(
-        &self, voting_power: U64, version: Option<u8>,
-    ) -> JsonRpcResult<(Bytes, AccountAddress)> {
-        let legacy = version.map_or(false, |x| x == 0);
-        let tx = register_transaction(
-            self.pos_handler.config().bls_key.private_key(),
-            self.pos_handler.config().vrf_key.public_key(),
-            voting_power.as_u64(),
-            0,
-            legacy,
-        );
-        let identifier = from_consensus_public_key(
-            &self.pos_handler.config().bls_key.public_key(),
-            &self.pos_handler.config().vrf_key.public_key(),
-        );
-        Ok((tx.data.into(), identifier))
-    }
-
-    pub fn pos_update_voting_power(
-        &self, _pos_account: AccountAddress, _increased_voting_power: U64,
-    ) -> JsonRpcResult<()> {
-        unimplemented!()
-    }
-
-    pub fn pos_stop_election(&self) -> JsonRpcResult<Option<u64>> {
-        self.pos_handler.stop_election().map_err(|e| {
-            warn!("stop_election: err={:?}", e);
-            RpcError::internal_error().into()
-        })
-    }
-
-    pub fn pos_start_voting(&self, initialize: bool) -> RpcResult<()> {
-        info!("RPC Request: pos_start_voting, initialize={}", initialize);
-        self.pos_handler.start_voting(initialize).map_err(|e| {
-            warn!("start_voting: err={:?}", e);
-            RpcErrorKind::Custom(e.to_string()).into()
-        })
-    }
-
-    pub fn pos_stop_voting(&self) -> RpcResult<()> {
-        info!("RPC Request: pos_stop_voting");
-        self.pos_handler.stop_voting().map_err(|e| {
-            warn!("stop_voting: err={:?}", e);
-            RpcErrorKind::Custom(e.to_string()).into()
-        })
-    }
-
-    pub fn pos_voting_status(&self) -> RpcResult<bool> {
-        self.pos_handler.voting_status().map_err(|e| {
-            warn!("voting_status: err={:?}", e);
-            RpcErrorKind::Custom(e.to_string()).into()
-        })
-    }
-
-    pub fn pos_start(&self) -> RpcResult<()> {
-        self.pos_handler
-            .initialize(self.consensus.clone().to_arc_consensus())?;
-        Ok(())
-    }
-
-    pub fn pos_force_vote_proposal(&self, block_id: H256) -> RpcResult<()> {
-        if !self.network.is_test_mode() {
-            // Reject force vote if test RPCs are enabled in a mainnet node,
-            // because this may cause staked MAZZEs locked
-            // permanently.
-            bail!(RpcError::internal_error())
-        }
-        self.pos_handler.force_vote_proposal(block_id).map_err(|e| {
-            warn!("force_vote_proposal: err={:?}", e);
-            RpcError::internal_error().into()
-        })
-    }
-
-    pub fn pos_force_propose(
-        &self, round: U64, parent_block_id: H256,
-        payload: Vec<TransactionPayload>,
-    ) -> RpcResult<()> {
-        if !self.network.is_test_mode() {
-            // Reject force vote if test RPCs are enabled in a mainnet node,
-            // because this may cause staked MAZZEs locked
-            // permanently.
-            bail!(RpcError::internal_error())
-        }
-        self.pos_handler
-            .force_propose(round, parent_block_id, payload)
-            .map_err(|e| {
-                warn!("pos_force_propose: err={:?}", e);
-                RpcError::internal_error().into()
-            })
-    }
-
-    pub fn pos_trigger_timeout(&self, timeout_type: String) -> RpcResult<()> {
-        if !self.network.is_test_mode() {
-            // Reject force vote if test RPCs are enabled in a mainnet node,
-            // because this may cause staked MAZZEs locked
-            // permanently.
-            bail!(RpcError::internal_error())
-        }
-        debug!("pos_trigger_timeout: type={}", timeout_type);
-        self.pos_handler.trigger_timeout(timeout_type).map_err(|e| {
-            warn!("pos_trigger_timeout: err={:?}", e);
-            RpcError::internal_error().into()
-        })
-    }
-
-    pub fn pos_force_sign_main_decision(
-        &self, block_hash: H256, height: U64,
-    ) -> RpcResult<()> {
-        if !self.network.is_test_mode() {
-            // Reject force vote if test RPCs are enabled in a mainnet node,
-            // because this may cause staked MAZZEs locked
-            // permanently.
-            bail!(RpcError::internal_error())
-        }
-        self.pos_handler
-            .force_sign_main_decision(MainBlockDecision {
-                block_hash,
-                height: height.as_u64(),
-            })
-            .map_err(|e| {
-                warn!("pos_trigger_timeout: err={:?}", e);
-                RpcError::internal_error().into()
-            })
-    }
-
-    pub fn pos_get_chosen_proposal(&self) -> RpcResult<Option<RpcPosBlock>> {
-        let maybe_block = self
-            .pos_handler
-            .get_chosen_proposal()
-            .map_err(|e| {
-                warn!("pos_get_chosen_proposal: err={:?}", e);
-                RpcError::internal_error()
-            })?
-            .and_then(|b| {
-                let block_hash = b.id();
-                self.pos_handler
-                    .cached_db()
-                    .get_block(&block_hash)
-                    .ok()
-                    .map(|executed_block| {
-                        let executed_block = executed_block.lock();
-                        RpcPosBlock {
-                            hash: hash_value_to_h256(b.id()),
-                            epoch: U64::from(b.epoch()),
-                            round: U64::from(b.round()),
-                            last_tx_number: executed_block
-                                .output()
-                                .version()
-                                .unwrap_or_default()
-                                .into(),
-                            miner: b.author().map(|a| H256::from(a.to_u8())),
-                            parent_hash: hash_value_to_h256(b.parent_id()),
-                            timestamp: U64::from(b.timestamp_usecs()),
-                            main_decision: executed_block
-                                .output()
-                                .main_block()
-                                .as_ref()
-                                .map(|d| Decision::from(d)),
-                            height: executed_block
-                                .output()
-                                .executed_trees()
-                                .pos_state()
-                                .current_view()
-                                .into(),
-                            signatures: vec![],
-                        }
-                    })
-            });
-        Ok(maybe_block)
     }
 }
 

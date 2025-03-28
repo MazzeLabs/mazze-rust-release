@@ -4,7 +4,7 @@
 
 use super::RpcAddress;
 use mazze_addr::Network;
-use mazze_parameters::staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT;
+use mazze_parameters::collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT;
 use mazze_types::U256;
 use primitives::SponsorInfo as PrimitiveSponsorInfo;
 

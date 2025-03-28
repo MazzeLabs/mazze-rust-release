@@ -8,11 +8,11 @@ use rlp::Rlp;
 use mazze_internal_common::debug::ComputeEpochDebugRecord;
 use mazze_types::{AddressWithSpace, H256, U256};
 use primitives::{
-    is_default::IsDefault, Account, CodeInfo, DepositList, StorageKey,
-    StorageKeyWithSpace, VoteStakeList,
+    is_default::IsDefault, Account, CodeInfo, StorageKey,
+    StorageKeyWithSpace,
 };
 
-use crate::global_params::{GlobalParamKey, InterestRate};
+use crate::global_params::GlobalParamKey;
 
 use super::{Result, StateDbGeneric};
 
@@ -35,14 +35,6 @@ pub trait StateDbExt {
     fn get_code(
         &self, address: &AddressWithSpace, code_hash: &H256,
     ) -> Result<Option<CodeInfo>>;
-
-    fn get_deposit_list(
-        &self, address: &AddressWithSpace,
-    ) -> Result<Option<DepositList>>;
-
-    fn get_vote_list(
-        &self, address: &AddressWithSpace,
-    ) -> Result<Option<VoteStakeList>>;
 
     fn get_system_storage(&self, key: &[u8]) -> Result<U256>;
 
@@ -113,29 +105,6 @@ impl StateDbExt for StateDbGeneric {
         )
     }
 
-    fn get_deposit_list(
-        &self, address: &AddressWithSpace,
-    ) -> Result<Option<DepositList>> {
-        address.assert_native();
-        self.get::<DepositList>(
-            StorageKey::new_deposit_list_key(&address.address)
-                .with_native_space(),
-        )
-    }
-
-    fn get_vote_list(
-        &self, address: &AddressWithSpace,
-    ) -> Result<Option<VoteStakeList>> {
-        address.assert_native();
-        self.get::<VoteStakeList>(
-            StorageKey::new_vote_list_key(&address.address).with_native_space(),
-        )
-    }
-
-    fn get_global_param<T: GlobalParamKey>(&self) -> Result<U256> {
-        Ok(self.get::<U256>(T::STORAGE_KEY)?.unwrap_or_default())
-    }
-
     fn get_system_storage(&self, key: &[u8]) -> Result<U256> {
         let storage_key = StorageKey::StorageKey {
             address_bytes: SYSTEM_STORAGE_ADDRESS.as_bytes(),
@@ -143,6 +112,10 @@ impl StateDbExt for StateDbGeneric {
         }
         .with_native_space();
         Ok(self.get::<U256>(storage_key)?.unwrap_or_default())
+    }
+
+    fn get_global_param<T: GlobalParamKey>(&self) -> Result<U256> {
+        Ok(self.get::<U256>(T::STORAGE_KEY)?.unwrap_or_default())
     }
 
     fn set_global_param<T: GlobalParamKey>(
@@ -153,7 +126,6 @@ impl StateDbExt for StateDbGeneric {
     }
 
     fn is_initialized(&self) -> Result<bool> {
-        let interest_rate_opt = self.get::<U256>(InterestRate::STORAGE_KEY)?;
-        Ok(interest_rate_opt.is_some())
+        Ok(true)
     }
 }

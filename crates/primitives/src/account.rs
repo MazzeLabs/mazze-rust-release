@@ -9,13 +9,8 @@ use mazze_types::{
 };
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use rlp_derive::{RlpDecodable, RlpEncodable};
-use serde_derive::{Deserialize, Serialize};
 
-use std::{
-    fmt,
-    ops::{Deref, DerefMut},
-    sync::Arc,
-};
+use std::{fmt, sync::Arc};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum AddressSpace {
@@ -29,191 +24,6 @@ pub enum AccountError {
     ReservedAddressSpace(Address),
     AddressSpaceMismatch(Address, AddressSpace),
     InvalidRlp(DecoderError),
-}
-
-#[derive(
-    Clone,
-    Debug,
-    RlpDecodable,
-    RlpEncodable,
-    Ord,
-    PartialOrd,
-    Eq,
-    PartialEq,
-    Serialize,
-    Deserialize,
-)]
-#[serde(rename_all = "camelCase")]
-pub struct DepositInfo {
-    /// This is the number of tokens in this deposit.
-    pub amount: U256,
-    /// This is the timestamp when this deposit happened, measured in the
-    /// number of past blocks. It will be used to calculate
-    /// the service charge.
-    pub deposit_time: U256,
-    /// This is the accumulated interest rate when this deposit happened.
-    pub accumulated_interest_rate: U256,
-}
-
-#[derive(
-    Clone,
-    Debug,
-    RlpDecodable,
-    RlpEncodable,
-    Ord,
-    PartialOrd,
-    Eq,
-    PartialEq,
-    Serialize,
-    Deserialize,
-)]
-#[serde(rename_all = "camelCase")]
-pub struct VoteStakeInfo {
-    /// This is the number of tokens should be locked before
-    /// `unlock_block_number`.
-    pub amount: U256,
-    /// This is the timestamp when the vote right will be invalid, measured in
-    /// the number of past blocks.
-    pub unlock_block_number: U256,
-}
-
-#[derive(Clone, Debug, Default, Ord, PartialOrd, Eq, PartialEq)]
-pub struct DepositList(pub Vec<DepositInfo>);
-
-impl Encodable for DepositList {
-    fn rlp_append(&self, s: &mut RlpStream) {
-        s.append_list(&self.0);
-    }
-}
-
-impl Decodable for DepositList {
-    fn decode(d: &Rlp) -> Result<Self, DecoderError> {
-        let deposit_vec = d.as_list()?;
-        Ok(DepositList(deposit_vec))
-    }
-}
-
-impl Deref for DepositList {
-    type Target = Vec<DepositInfo>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for DepositList {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-#[derive(Clone, Debug, Default, Ord, PartialOrd, Eq, PartialEq)]
-pub struct VoteStakeList(pub Vec<VoteStakeInfo>);
-
-impl Encodable for VoteStakeList {
-    fn rlp_append(&self, s: &mut RlpStream) {
-        s.append_list(&self.0);
-    }
-}
-
-impl Decodable for VoteStakeList {
-    fn decode(d: &Rlp) -> Result<Self, DecoderError> {
-        let vote_vec = d.as_list()?;
-        Ok(VoteStakeList(vote_vec))
-    }
-}
-
-impl Deref for VoteStakeList {
-    type Target = Vec<VoteStakeInfo>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for VoteStakeList {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl VoteStakeList {
-    pub fn withdrawable_staking_balance(
-        &self, staking_balance: U256, block_number: u64,
-    ) -> U256 {
-        let block_number: U256 = block_number.into();
-        if !self.is_empty() {
-            // Find first index whose `unlock_block_number` is greater than
-            // timestamp and all entries before the index could be
-            // ignored.
-            let idx = self
-                .binary_search_by(|vote_info| {
-                    vote_info.unlock_block_number.cmp(&(block_number + 1))
-                })
-                .unwrap_or_else(|x| x);
-            if idx == self.len() {
-                staking_balance
-            } else {
-                staking_balance - self[idx].amount
-            }
-        } else {
-            staking_balance
-        }
-    }
-
-    pub fn remove_expired_vote_stake_info(&mut self, block_number: u64) {
-        let block_number: U256 = block_number.into();
-        if !self.is_empty() && self[0].unlock_block_number <= block_number {
-            // Find first index whose `unlock_block_number` is greater than
-            // timestamp and all entries before the index could be
-            // removed.
-            let idx = self
-                .binary_search_by(|vote_info| {
-                    vote_info.unlock_block_number.cmp(&(block_number + 1))
-                })
-                .unwrap_or_else(|x| x);
-            self.0 = self.split_off(idx)
-        }
-    }
-
-    pub fn vote_lock(&mut self, amount: U256, unlock_block_number: u64) {
-        let unlock_block_number: U256 = unlock_block_number.into();
-        let mut updated = false;
-        let mut updated_index = 0;
-        match self.binary_search_by(|vote_info| {
-            vote_info.unlock_block_number.cmp(&unlock_block_number)
-        }) {
-            Ok(index) => {
-                if amount > self[index].amount {
-                    self[index].amount = amount;
-                    updated = true;
-                    updated_index = index;
-                }
-            }
-            Err(index) => {
-                if index >= self.len() || self[index].amount < amount {
-                    self.insert(
-                        index,
-                        VoteStakeInfo {
-                            amount,
-                            unlock_block_number,
-                        },
-                    );
-                    updated = true;
-                    updated_index = index;
-                }
-            }
-        }
-        if updated {
-            let rest = self.split_off(updated_index);
-            while !self.is_empty()
-                && self.last().unwrap().amount <= rest[0].amount
-            {
-                self.pop();
-            }
-            self.extend_from_slice(&rest);
-        }
-    }
 }
 
 #[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
@@ -272,7 +82,8 @@ pub struct SponsorInfo {
     pub sponsor_balance_for_gas: U256,
     /// This is the amount of tokens sponsor for collateral to the contract.
     pub sponsor_balance_for_collateral: U256,
-    /// This is the storage point introduced in CIP-107
+    /// This is the storage point used for the contract (obtained from the
+    /// sponsor balance for collateral).
     pub storage_points: Option<StoragePoints>,
 }
 
@@ -340,13 +151,13 @@ pub struct Account {
     pub balance: U256,
     pub nonce: U256,
     pub code_hash: H256,
-    /// This is the number of tokens used in staking.
-    pub staking_balance: U256,
+    // /// This is the number of tokens used in staking.
+    // pub staking_balance: U256,
     /// This is the number of tokens used as collateral for storage, which will
     /// be returned to balance if the storage is released.
     pub collateral_for_storage: U256,
     /// This is the accumulated interest return.
-    pub accumulated_interest_return: U256,
+    // pub accumulated_interest_return: U256,
     /// This is the address of the administrator of the contract.
     pub admin: Address,
     /// This is the sponsor information of the contract.
@@ -356,15 +167,16 @@ pub struct Account {
 /// Defined for Rlp serialization/deserialization.
 #[derive(RlpEncodable, RlpDecodable)]
 pub struct BasicAccount {
+    dummy_diferentiator: u8,
     pub balance: U256,
     pub nonce: U256,
-    /// This is the number of tokens used in staking.
-    pub staking_balance: U256,
+    // /// This is the number of tokens used in staking.
+    // pub staking_balance: U256,
     /// This is the number of tokens used as collateral for storage, which will
     /// be returned to balance if the storage is released.
     pub collateral_for_storage: U256,
-    /// This is the accumulated interest return.
-    pub accumulated_interest_return: U256,
+    // /// This is the accumulated interest return.
+    // pub accumulated_interest_return: U256,
 }
 
 /// Defined for Rlp serialization/deserialization.
@@ -373,13 +185,13 @@ pub struct ContractAccount {
     pub balance: U256,
     pub nonce: U256,
     pub code_hash: H256,
-    /// This is the number of tokens used in staking.
-    pub staking_balance: U256,
+    // /// This is the number of tokens used in staking.
+    // pub staking_balance: U256,
     /// This is the number of tokens used as collateral for storage, which will
     /// be returned to balance if the storage is released.
     pub collateral_for_storage: U256,
-    /// This is the accumulated interest return.
-    pub accumulated_interest_return: U256,
+    // /// This is the accumulated interest return.
+    // pub accumulated_interest_return: U256,
     /// This is the address of the administrator of the contract.
     pub admin: Address,
     /// This is the sponsor information of the contract.
@@ -414,9 +226,9 @@ impl Account {
             balance: *balance,
             nonce: *nonce,
             code_hash: KECCAK_EMPTY,
-            staking_balance: 0.into(),
+            // staking_balance: 0.into(),
             collateral_for_storage: 0.into(),
-            accumulated_interest_return: 0.into(),
+            // accumulated_interest_return: 0.into(),
             admin: Address::zero(),
             sponsor_info: Default::default(),
         }
@@ -428,9 +240,9 @@ impl Account {
             balance: a.balance,
             nonce: a.nonce,
             code_hash: KECCAK_EMPTY,
-            staking_balance: a.staking_balance,
+            // staking_balance: a.staking_balance,
             collateral_for_storage: a.collateral_for_storage,
-            accumulated_interest_return: a.accumulated_interest_return,
+            // accumulated_interest_return: a.accumulated_interest_return,
             admin: Address::zero(),
             sponsor_info: Default::default(),
         }
@@ -442,9 +254,9 @@ impl Account {
             balance: a.balance,
             nonce: a.nonce,
             code_hash: a.code_hash,
-            staking_balance: a.staking_balance,
+            // staking_balance: a.staking_balance,
             collateral_for_storage: a.collateral_for_storage,
-            accumulated_interest_return: a.accumulated_interest_return,
+            // accumulated_interest_return: a.accumulated_interest_return,
             admin: a.admin,
             sponsor_info: a.sponsor_info,
         }
@@ -464,11 +276,12 @@ impl Account {
     pub fn to_basic_account(&self) -> BasicAccount {
         assert_eq!(self.address_local_info.space, Space::Native);
         BasicAccount {
+            dummy_diferentiator: 1,
             balance: self.balance,
             nonce: self.nonce,
-            staking_balance: self.staking_balance,
+            // staking_balance: self.staking_balance,
             collateral_for_storage: self.collateral_for_storage,
-            accumulated_interest_return: self.accumulated_interest_return,
+            // accumulated_interest_return: self.accumulated_interest_return,
         }
     }
 
@@ -478,9 +291,9 @@ impl Account {
             balance: self.balance,
             nonce: self.nonce,
             code_hash: self.code_hash,
-            staking_balance: self.staking_balance,
+            // staking_balance: self.staking_balance,
             collateral_for_storage: self.collateral_for_storage,
-            accumulated_interest_return: self.accumulated_interest_return,
+            // accumulated_interest_return: self.accumulated_interest_return,
             admin: self.admin,
             sponsor_info: self.sponsor_info.clone(),
         }
@@ -488,9 +301,9 @@ impl Account {
 
     pub fn to_evm_account(&self) -> EthereumAccount {
         assert_eq!(self.address_local_info.space, Space::Ethereum);
-        assert!(self.staking_balance.is_zero());
+        // assert!(self.staking_balance.is_zero());
         assert!(self.collateral_for_storage.is_zero());
-        assert!(self.accumulated_interest_return.is_zero());
+        // assert!(self.accumulated_interest_return.is_zero());
         assert!(self.admin.is_zero());
         assert_eq!(self.sponsor_info, Default::default());
         EthereumAccount {
@@ -504,11 +317,12 @@ impl Account {
         address: Address, rlp: &Rlp,
     ) -> Result<Self, AccountError> {
         let account = match rlp.item_count()? {
-            8 => Self::from_contract_account(
+            6 => Self::from_contract_account(
                 address,
                 ContractAccount::decode(rlp)?,
             ),
-            5 => Self::from_basic_account(address, BasicAccount::decode(rlp)?),
+            // TODO: fix this; both ethereum and native accounts have 3 fields
+            4 => Self::from_basic_account(address, BasicAccount::decode(rlp)?),
             3 => Self::from_ethereum_account(
                 address,
                 EthereumAccount::decode(rlp)?,
@@ -612,9 +426,9 @@ fn test_random_account(
                 balance: 1000.into(),
                 nonce: 123.into(),
                 code_hash,
-                staking_balance: 10000000.into(),
+                // staking_balance: 10000000.into(),
                 collateral_for_storage: 23.into(),
-                accumulated_interest_return: 456.into(),
+                // accumulated_interest_return: 456.into(),
                 admin,
                 sponsor_info,
             },
@@ -623,11 +437,12 @@ fn test_random_account(
         Account::from_basic_account(
             address,
             BasicAccount {
+                dummy_diferentiator: 1,
                 balance: 1000.into(),
                 nonce: 123.into(),
-                staking_balance: 10000000.into(),
+                // staking_balance: 10000000.into(),
                 collateral_for_storage: 23.into(),
-                accumulated_interest_return: 456.into(),
+                // accumulated_interest_return: 456.into(),
             },
         )
     };

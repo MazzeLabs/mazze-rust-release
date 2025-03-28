@@ -4,7 +4,7 @@ use super::Substate;
 use super::StorageLayout;
 use mazze_parameters::{
     internal_contract_addresses::SYSTEM_STORAGE_ADDRESS,
-    staking::COLLATERAL_UNITS_PER_STORAGE_KEY,
+    collateral::COLLATERAL_UNITS_PER_STORAGE_KEY,
 };
 use mazze_statedb::{Result as DbResult, StateDbExt, StateDbGeneric};
 use mazze_types::{Address, Space, U256};

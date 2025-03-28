@@ -25,16 +25,14 @@ pub struct SingleMptStorageManager {
 
     /// If it's None, we will keep data for both spaces.
     pub space: Option<Space>,
-    /// The state is available from (including) this height.
-    pub available_height: u64,
 
     pub genesis_hash: Mutex<EpochId>,
 }
 
 impl SingleMptStorageManager {
     pub fn new_arc(
-        db_path: PathBuf, space: Option<Space>, available_height: u64,
-        cache_start_size: u32, cache_size: u32, idle_size: u32,
+        db_path: PathBuf, space: Option<Space>, cache_start_size: u32,
+        cache_size: u32, idle_size: u32,
     ) -> Arc<Self> {
         if !db_path.exists() {
             fs::create_dir_all(&db_path).expect("db path create error");
@@ -62,7 +60,6 @@ impl SingleMptStorageManager {
             node_memory_manager,
             mpt,
             space,
-            available_height,
             // This is only used after `notify_genesis_hash` called.
             genesis_hash: Default::default(),
         })

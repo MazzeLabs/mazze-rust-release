@@ -3,12 +3,6 @@
 // See http://www.gnu.org/licenses/
 
 mod cache;
-mod compute;
-mod keccak;
-mod seed_compute;
-mod shared;
-
-pub use self::{cache::CacheBuilder, shared::POW_STAGE_LENGTH};
 
 use crate::block_data_manager::BlockDataManager;
 use cache::RandomXCacheBuilder;
@@ -33,23 +27,27 @@ pub struct ProofOfWorkProblem {
     pub block_hash: H256,
     pub difficulty: U256,
     pub boundary: U256,
+    pub seed_hash: H256,
 }
 
 impl ProofOfWorkProblem {
     pub const NO_BOUNDARY: U256 = U256::MAX;
 
-    pub fn new(block_height: u64, block_hash: H256, difficulty: U256) -> Self {
+    pub fn new(
+        block_height: u64, block_hash: H256, difficulty: U256, seed_hash: H256,
+    ) -> Self {
         let boundary = difficulty_to_boundary(&difficulty);
         Self {
             block_height,
             block_hash,
             difficulty,
             boundary,
+            seed_hash,
         }
     }
 
     pub fn new_from_boundary(
-        block_height: u64, block_hash: H256, boundary: U256,
+        block_height: u64, block_hash: H256, boundary: U256, seed_hash: H256,
     ) -> Self {
         let difficulty = boundary_to_difficulty(&boundary);
         Self {
@@ -57,9 +55,22 @@ impl ProofOfWorkProblem {
             block_hash,
             difficulty,
             boundary,
+            seed_hash,
         }
     }
 
+    pub fn new_from_boundary_with_seed_hash(
+        block_height: u64, block_hash: H256, boundary: U256, seed_hash: H256,
+    ) -> Self {
+        let difficulty = boundary_to_difficulty(&boundary);
+        Self {
+            block_height,
+            block_hash,
+            difficulty,
+            boundary,
+            seed_hash,
+        }
+    }
     #[inline]
     pub fn validate_hash_against_boundary(
         hash: &H256, _nonce: &U256, boundary: &U256,
@@ -104,7 +115,6 @@ pub struct ProofOfWorkConfig {
     pub stratum_port: u16,
     pub stratum_secret: Option<H256>,
     pub pow_problem_window_size: usize,
-    pub cip86_height: u64,
 }
 
 impl ProofOfWorkConfig {
@@ -112,7 +122,6 @@ impl ProofOfWorkConfig {
         test_mode: bool, mining_type: &str, initial_difficulty: Option<u64>,
         stratum_listen_addr: String, stratum_port: u16,
         stratum_secret: Option<H256>, pow_problem_window_size: usize,
-        cip86_height: u64,
     ) -> Self {
         if test_mode {
             ProofOfWorkConfig {
@@ -124,7 +133,6 @@ impl ProofOfWorkConfig {
                 stratum_port,
                 stratum_secret,
                 pow_problem_window_size,
-                cip86_height,
             }
         } else {
             ProofOfWorkConfig {
@@ -136,20 +144,15 @@ impl ProofOfWorkConfig {
                 stratum_port,
                 stratum_secret,
                 pow_problem_window_size,
-                cip86_height,
             }
         }
     }
 
-    pub fn difficulty_adjustment_epoch_period(&self, cur_height: u64) -> u64 {
+    pub fn difficulty_adjustment_epoch_period(&self) -> u64 {
         if self.test_mode {
             20
         } else {
-            if cur_height > self.cip86_height {
-                DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD_CIP
-            } else {
-                DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD
-            }
+            DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD
         }
     }
 
@@ -265,13 +268,15 @@ unsafe impl Send for PowComputer {}
 unsafe impl Sync for PowComputer {}
 
 impl PowComputer {
-    pub fn new() -> Self {
+    pub fn new(seed_hash: H256) -> Self {
         PowComputer {
-            cache_builder: RandomXCacheBuilder::new(),
+            cache_builder: RandomXCacheBuilder::new(seed_hash.into()),
         }
     }
 
-    pub fn compute(&self, nonce: &U256, block_hash: &H256) -> H256 {
+    pub fn compute(
+        &self, nonce: &U256, block_hash: &H256, seed_hash: &H256,
+    ) -> H256 {
         let input = {
             let mut buf = [0u8; 64];
             for i in 0..32 {
@@ -281,11 +286,18 @@ impl PowComputer {
             buf
         };
 
-        let handle = self.cache_builder.get_vm_handler();
+        let handle = self
+            .cache_builder
+            .get_vm_handler(seed_hash.as_fixed_bytes());
         let vm = handle.get_vm();
-        let hash = vm.calculate_hash(&input).expect("Failed to compute hash");
+        let hash_bytes = vm.hash(&input);
+        let hash = H256::from_slice(&hash_bytes.as_ref());
 
-        H256::from_slice(&hash)
+        hash
+    }
+
+    pub fn get_seed_hash(&self) -> H256 {
+        self.cache_builder.get_seed_hash().into()
     }
 }
 
@@ -294,8 +306,8 @@ pub fn validate(
     solution: &ProofOfWorkSolution,
 ) -> bool {
     let nonce = solution.nonce;
+    let hash = pow.compute(&nonce, &problem.block_hash, &problem.seed_hash);
 
-    let hash = pow.compute(&nonce, &problem.block_hash);
     ProofOfWorkProblem::validate_hash_against_boundary(
         &hash,
         &nonce,
@@ -329,8 +341,8 @@ where
     assert_ne!(epoch, 0);
     debug_assert!(
         epoch
-            == (epoch / pow_config.difficulty_adjustment_epoch_period(epoch))
-                * pow_config.difficulty_adjustment_epoch_period(epoch)
+            == (epoch / pow_config.difficulty_adjustment_epoch_period())
+                * pow_config.difficulty_adjustment_epoch_period()
     );
 
     let mut cur = cur_hash.clone();
@@ -340,7 +352,7 @@ where
     let mut min_time = 0;
 
     // Collect the total block count and the timespan in the current period
-    for _ in 0..pow_config.difficulty_adjustment_epoch_period(epoch) {
+    for _ in 0..pow_config.difficulty_adjustment_epoch_period() {
         block_count += num_blocks_in_epoch(&cur) as u64;
         cur = cur_header.parent_hash().clone();
         cur_header = data_man.block_header_by_hash(&cur).unwrap();
@@ -358,11 +370,7 @@ where
     // d_{t+1}=0.8*d_t+0.2*d'
     // where d_t is the difficulty of the current period, and d' is the
     // expected difficulty to reach the ideal block_generation_period.
-    let mut target_diff = if epoch < pow_config.cip86_height {
-        expected_diff
-    } else {
-        cur_difficulty / 5 * 4 + expected_diff / 5
-    };
+    let mut target_diff = cur_difficulty / 5 * 4 + expected_diff / 5;
 
     let (lower, upper) = pow_config.get_adjustment_bound(cur_difficulty);
     if target_diff > upper {
@@ -451,6 +459,7 @@ impl Default for ProofOfWorkProblem {
             u64::default(),
             H256::default(),
             U256::default(),
+            H256::default(),
         )
     }
 }
@@ -482,7 +491,7 @@ impl TargetDifficultyManager {
 
 #[test]
 fn test_pow() {
-    let pow = PowComputer::new();
+    let pow = PowComputer::new(H256::default());
 
     let block_hash =
         "4d99d0b41c7eb0dd1a801c35aae2df28ae6b53bc7743f0818a34b6ec97f5b4ae"
@@ -490,5 +499,5 @@ fn test_pow() {
             .unwrap();
 
     let start_nonce = 0x2333333333u64 & (!0x1f);
-    pow.compute(&U256::from(start_nonce), &block_hash);
+    pow.compute(&U256::from(start_nonce), &block_hash, &H256::default());
 }

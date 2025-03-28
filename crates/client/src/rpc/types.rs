@@ -15,8 +15,6 @@ mod filter;
 mod index;
 mod log;
 pub mod mazze;
-pub mod pos;
-mod pos_economics;
 mod provenance;
 pub mod pubsub;
 mod receipt;
@@ -32,7 +30,6 @@ mod trace_filter;
 mod transaction;
 mod tx_pool;
 mod variadic_u64;
-mod vote_params_info;
 
 pub use self::{
     account::Account,
@@ -56,7 +53,6 @@ pub use self::{
         },
         MazzeFeeHistory,
     },
-    pos_economics::PoSEconomics,
     provenance::Origin,
     receipt::Receipt,
     reward_info::RewardInfo,
@@ -77,5 +73,4 @@ pub use self::{
         TxPoolPendingNonceRange, TxPoolStatus, TxWithPoolInfo,
     },
     variadic_u64::U64,
-    vote_params_info::VoteParamsInfo,
 };

@@ -30,7 +30,6 @@ use crate::{
     sync::{message::Throttled, SynchronizationGraph},
     Notifications, UniqueId,
 };
-use diem_types::validator_config::{ConsensusPublicKey, ConsensusVRFPublicKey};
 use io::TimerToken;
 use mazze_internal_common::ChainIdParamsDeprecated;
 use mazze_parameters::light::{
@@ -986,7 +985,6 @@ impl NetworkProtocolHandler for Handler {
     fn on_peer_connected(
         &self, io: &dyn NetworkContext, node_id: &NodeId,
         peer_protocol_version: ProtocolVersion,
-        _pos_public_key: Option<(ConsensusPublicKey, ConsensusVRFPublicKey)>,
     ) {
         debug!("on_peer_connected: peer={:?}", node_id);
 

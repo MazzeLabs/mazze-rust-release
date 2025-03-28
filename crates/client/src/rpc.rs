@@ -53,7 +53,6 @@ use self::{
         mazze::{LocalRpcImpl, MazzeHandler, RpcImpl, TestRpcImpl},
         mazze_filter::MazzeFilterClient,
         pool::TransactionPoolHandler,
-        pos::{PoSInterceptor, PosHandler},
         pubsub::PubSubClient,
         trace::TraceHandler,
     },
@@ -66,7 +65,6 @@ use self::{
         },
         mazze::{Mazze, MazzeFilter},
         pool::TransactionPool,
-        pos::Pos,
         pubsub::PubSub,
         test::TestRpc,
         trace::Trace,
@@ -385,18 +383,6 @@ fn setup_rpc_apis(
                     throttling_section,
                 );
             }
-            Api::Pos => {
-                let pos = PosHandler::new(
-                    common.pos_handler.clone(),
-                    rpc.consensus.get_data_manager().clone(),
-                    *rpc.sync.network.get_network_type(),
-                    rpc.consensus.clone(),
-                )
-                .to_delegate();
-                let pos_interceptor =
-                    PoSInterceptor::new(common.pos_handler.clone());
-                handler.extend_with(RpcProxy::new(pos, pos_interceptor));
-            }
         }
     }
 
@@ -527,9 +513,6 @@ fn setup_rpc_apis_light(
             }
             Api::TxPool => {
                 warn!("Light nodes do not support txpool RPC");
-            }
-            Api::Pos => {
-                warn!("Light nodes do not support PoS RPC");
             }
         }
     }

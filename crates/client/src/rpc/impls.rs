@@ -22,7 +22,6 @@ pub struct RpcImplConfiguration {
 
 pub mod eth;
 pub mod mazze;
-pub mod pos;
 pub mod trace;
 
 pub use eth::{debug, eth_filter, eth_handler::EthHandler, eth_pubsub};

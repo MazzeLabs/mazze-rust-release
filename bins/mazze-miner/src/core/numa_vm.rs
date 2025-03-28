@@ -135,7 +135,7 @@ impl VMManager {
             let mut context_write = self.context.write().unwrap();
             *context_write =
                 Arc::new(RandomXContext::new(problem_seed_hash, true));
-            info!("RandomX context updated with new seed hash");
+            debug!("RandomX context updated with new seed hash");
         }
 
         debug!(

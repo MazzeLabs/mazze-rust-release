@@ -109,7 +109,6 @@ impl Worker {
                         let boundary = problem.as_ref().unwrap().boundary;
                         let block_hash = problem.as_ref().unwrap().block_hash;
                         let seed_hash = problem.as_ref().unwrap().seed_hash;
-                        info!("Blockgen #1: Mining problem hash {:?} with seed hash: {:?}", block_hash, seed_hash);
                         let mut nonce: u64 = rand::random();
                         for _i in 0..MINING_ITERATION {
                             let nonce_u256 = U256::from(nonce);
@@ -695,10 +694,6 @@ impl BlockGenerator {
         );
         let mut nonce: u64 = rand::random();
         loop {
-            info!(
-                "Blockgen #3: Calling pow->validate for block hash {:?} with seed hash {:?}",
-                problem.block_hash, problem.seed_hash
-            );
             if validate(
                 self.pow.clone(),
                 &problem,
@@ -878,10 +873,6 @@ impl BlockGenerator {
         let mut hashes_checked = 0;
 
         while start_time.elapsed() < timeout {
-            info!(
-                "Blockgen #2: Mining problem hash {:?} with seed hash: {:?}",
-                problem.block_hash, problem.seed_hash
-            );
             let hash = pow_computer.compute(
                 &nonce,
                 &problem.block_hash,
@@ -996,11 +987,6 @@ impl BlockGenerator {
                     }
 
                     for index in 0..recent_mining_problems.len() {
-                        info!(
-                            "Blockgen #4: Calling pow->validate for block hash {:?} with seed hash {:?}",
-                            recent_mining_problems[index].block_hash,
-                            recent_mining_problems[index].seed_hash
-                        );
                         if validate(
                             bg.pow.clone(),
                             &recent_mining_problems[index],

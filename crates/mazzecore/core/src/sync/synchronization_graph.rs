@@ -1477,7 +1477,7 @@ impl SynchronizationGraph {
             .data_man
             .db_manager
             .get_current_seed_hash(header.height());
-        info!("insert_block_header verify_pow called for block: {:?} with seed hash {:?} at epoch {}", header.hash(), block_seed_hash, header.height());
+
         if let Some(info) = local_info_opt {
             // If the block is ordered before current era genesis or it has
             // already entered consensus graph in this run, we do not need to

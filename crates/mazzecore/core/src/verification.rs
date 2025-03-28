@@ -286,10 +286,7 @@ impl VerificationConfig {
     ) -> H256 {
         let nonce = header.nonce();
         let hash = header.problem_hash();
-        info!(
-            "Verification #1: Mining problem hash {:?} with seed hash: {:?}",
-            hash, seed_hash
-        );
+
         pow.compute(&nonce, &hash, seed_hash)
     }
 
@@ -307,11 +304,6 @@ impl VerificationConfig {
             .into());
         }
 
-        info!(
-            "Verification #2: Mining problem hash {:?} with seed hash: {:?}",
-            header.problem_hash(),
-            seed_hash
-        );
         let nonce = header.nonce();
         let hash = pow.compute(&nonce, &header.problem_hash(), seed_hash);
         let quality = pow::pow_hash_to_quality(&hash, &nonce);
@@ -390,7 +382,6 @@ impl VerificationConfig {
         }
 
         // verify POW
-        info!("verify_header_params verify_pow called for block: {:?} with seed hash {:?}", header.hash(), seed_hash);
         self.verify_pow(pow, header, seed_hash)?;
 
         // A block will be invalid if it has more than REFEREE_BOUND referees

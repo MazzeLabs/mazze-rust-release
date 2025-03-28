@@ -310,12 +310,8 @@ pub fn validate(
     solution: &ProofOfWorkSolution,
 ) -> bool {
     let nonce = solution.nonce;
-
-    info!(
-        "pow->validate called for block hash {:?} with seed hash {:?}",
-        problem.block_hash, problem.seed_hash
-    );
     let hash = pow.compute(&nonce, &problem.block_hash, &problem.seed_hash);
+
     ProofOfWorkProblem::validate_hash_against_boundary(
         &hash,
         &nonce,

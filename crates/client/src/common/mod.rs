@@ -245,18 +245,10 @@ pub fn initialize_common_modules(
             Some(ref file) => {
                 genesis::load_secrets_file(file, secret_store.as_ref())?
             }
-            None => genesis::default(conf.is_test_or_dev_mode()),
+            None => genesis::default(true),
         }
     } else {
-        match conf.raw_conf.genesis_accounts {
-            Some(ref file) => genesis::load_file(file, |addr_str| {
-                parse_config_address_string(
-                    addr_str,
-                    network_config.get_network_type(),
-                )
-            })?,
-            None => genesis::default(conf.is_test_or_dev_mode()),
-        }
+        genesis::default(false)
     };
 
     let consensus_conf = conf.consensus_config();

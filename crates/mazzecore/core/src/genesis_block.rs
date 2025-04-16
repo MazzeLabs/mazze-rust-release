@@ -43,25 +43,37 @@ use mazze_vm_types::{CreateContractAddress, Env};
 use primitives::transaction::native_transaction::NativeTransaction;
 
 pub fn default(dev_or_test_mode: bool) -> HashMap<AddressWithSpace, U256> {
-    if !dev_or_test_mode {
-        return HashMap::new();
-    }
     let mut accounts: HashMap<AddressWithSpace, U256> = HashMap::new();
-    // FIXME: Decide the genesis initialization for mainnet.
-    let balance = U256::from_dec_str("5000000000000000000000000000000000")
-        .expect("Not overflow"); // 5*10^33
-    accounts
-        .insert(DEV_GENESIS_KEY_PAIR.address().with_native_space(), balance);
-    accounts.insert(
-        DEV_GENESIS_KEY_PAIR_2.address().with_native_space(),
-        balance,
-    );
-    accounts
-        .insert(DEV_GENESIS_KEY_PAIR.evm_address().with_evm_space(), balance);
-    accounts.insert(
-        DEV_GENESIS_KEY_PAIR_2.evm_address().with_evm_space(),
-        balance,
-    );
+    if dev_or_test_mode {
+        // FIXME: Decide the genesis initialization for mainnet.
+        let balance = U256::from_dec_str("5000000000000000000000000000000000")
+            .expect("Not overflow"); // 5*10^33
+        accounts.insert(
+            DEV_GENESIS_KEY_PAIR.address().with_native_space(),
+            balance,
+        );
+        accounts.insert(
+            DEV_GENESIS_KEY_PAIR_2.address().with_native_space(),
+            balance,
+        );
+        accounts.insert(
+            DEV_GENESIS_KEY_PAIR.evm_address().with_evm_space(),
+            balance,
+        );
+        accounts.insert(
+            DEV_GENESIS_KEY_PAIR_2.evm_address().with_evm_space(),
+            balance,
+        );
+    }
+
+    let genesis_address = "0x144c9f06748b745fe9c74d91d8d089af8ba32167"
+        .trim_start_matches("0x")
+        .parse::<Address>()
+        .unwrap();
+    let balance = U256::from_dec_str("2500000000000000000000000000")
+        .expect("Not overflow"); // 2.5B
+    accounts.insert(genesis_address.with_native_space(), balance);
+
     accounts
 }
 

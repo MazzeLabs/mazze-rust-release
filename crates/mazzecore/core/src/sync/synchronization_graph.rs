@@ -15,7 +15,6 @@ use std::{
 };
 
 use futures::executor::block_on;
-use mazze_parameters::consensus_internal::ELASTICITY_MULTIPLIER;
 use parking_lot::RwLock;
 use slab::Slab;
 use tokio02::sync::mpsc::error::TryRecvError;
@@ -30,14 +29,13 @@ use metrics::{
     register_meter_with_group, register_queue, Meter, MeterTimer, Queue,
 };
 use primitives::{
-    pos::PosBlockId, transaction::SignedTransaction, Block, BlockHeader,
-    EpochNumber,
+    transaction::SignedTransaction, Block, BlockHeader, EpochNumber,
 };
 
 use crate::{
     block_data_manager::{BlockDataManager, BlockStatus},
     channel::Channel,
-    consensus::{pos_handler::PosVerifier, SharedConsensusGraph},
+    consensus::SharedConsensusGraph,
     error::{BlockError, Error, ErrorKind},
     pow::{PowComputer, ProofOfWorkConfig},
     state_exposer::{SyncGraphBlockState, STATE_EXPOSER},
@@ -190,7 +188,7 @@ pub struct SynchronizationGraphInner {
     /// `CatchUpFillBlockBodyPhase`.
     pub block_to_fill_set: HashSet<H256>,
     machine: Arc<Machine>,
-    pub pos_verifier: Arc<PosVerifier>,
+    // pub pos_verifier: Arc<PosVerifier>,
 }
 
 impl MallocSizeOf for SynchronizationGraphInner {
@@ -210,10 +208,13 @@ impl MallocSizeOf for SynchronizationGraphInner {
 
 impl SynchronizationGraphInner {
     pub fn with_genesis_block(
-        genesis_header: Arc<BlockHeader>, pow_config: ProofOfWorkConfig,
-        pow: Arc<PowComputer>, config: SyncGraphConfig,
-        data_man: Arc<BlockDataManager>, machine: Arc<Machine>,
-        pos_verifier: Arc<PosVerifier>,
+        genesis_header: Arc<BlockHeader>,
+        pow_config: ProofOfWorkConfig,
+        pow: Arc<PowComputer>,
+        config: SyncGraphConfig,
+        data_man: Arc<BlockDataManager>,
+        machine: Arc<Machine>,
+        // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         let mut inner = SynchronizationGraphInner {
             arena: Slab::new(),
@@ -231,7 +232,7 @@ impl SynchronizationGraphInner {
             block_to_fill_set: Default::default(),
             locked_for_catchup: false,
             machine,
-            pos_verifier,
+            // pos_verifier,
         };
         let genesis_hash = genesis_header.hash();
         let genesis_block_index = inner.insert(genesis_header);
@@ -575,26 +576,26 @@ impl SynchronizationGraphInner {
             }
         }
 
-        if !self.is_pos_reference_graph_ready(
-            index,
-            genesis_seq_num,
-            minimal_status,
-        ) {
-            debug!(
-                "Block {:?} not ready for its pos_reference: {:?}",
-                self.arena[index].block_header.hash(),
-                self.pos_verifier.get_main_decision(
-                    self.arena[index]
-                        .block_header
-                        .pos_reference()
-                        .as_ref()
-                        .unwrap()
-                )
-            );
-            // All its future will remain not ready.
-            self.pos_not_ready_blocks_frontier.insert(index);
-            return false;
-        }
+        // if !self.is_pos_reference_graph_ready(
+        //     index,
+        //     genesis_seq_num,
+        //     minimal_status,
+        // ) {
+        //     debug!(
+        //         "Block {:?} not ready for its pos_reference: {:?}",
+        //         self.arena[index].block_header.hash(),
+        //         self.pos_verifier.get_main_decision(
+        //             self.arena[index]
+        //                 .block_header
+        //                 .pos_reference()
+        //                 .as_ref()
+        //                 .unwrap()
+        //         )
+        //     );
+        //     // All its future will remain not ready.
+        //     self.pos_not_ready_blocks_frontier.insert(index);
+        //     return false;
+        // }
 
         // parent and referees are all header graph ready.
         true
@@ -609,49 +610,16 @@ impl SynchronizationGraphInner {
             && self.arena[index].block_ready
     }
 
-    fn is_pos_reference_graph_ready(
-        &self, index: usize, genesis_seq_num: u64, minimal_status: u8,
-    ) -> bool {
-        // Check if the pos reference is committed.
-        match self.arena[index].block_header.pos_reference() {
-            // TODO(lpl): Should we check if the pos reference will never be
-            // committed?
-            Some(pos_reference) => {
-                match self.pos_verifier.get_main_decision(pos_reference) {
-                    // The pos reference has not been committed.
-                    None => false,
-                    Some(main_decision) => {
-                        // Check if this main_decision is graph_ready.
-                        match self.hash_to_arena_indices.get(&main_decision) {
-                            None => self.is_graph_ready_in_db(
-                                &main_decision,
-                                genesis_seq_num,
-                            ),
-                            Some(index) => {
-                                self.arena[*index].graph_status
-                                    >= minimal_status
-                            }
-                        }
-                    }
-                }
-            }
-            None => true,
-        }
-    }
-
-    // Get parent (height, timestamp, gas_limit, difficulty,
-    // parent_and_referee_pos_references) This function assumes that the
+    // Get parent (height, timestamp, gas_limit, difficulty)
+    // This function assumes that the
     // parent and referee information MUST exist in memory or in disk.
     fn get_parent_and_referee_info(
         &self, index: usize,
-    ) -> (u64, u64, U256, U256, Vec<Option<PosBlockId>>) {
+    ) -> (u64, u64, U256, U256) {
         let parent_height;
         let parent_timestamp;
         let parent_gas_limit;
         let parent_difficulty;
-        // Since eventually all blocks should have pos_references, we do not
-        // try to avoid loading them here before PoS is enabled.
-        let mut pos_references = Vec::new();
         let parent = self.arena[index].parent;
 
         // Get info for parent.
@@ -660,8 +628,6 @@ impl SynchronizationGraphInner {
             parent_timestamp = self.arena[parent].block_header.timestamp();
             parent_gas_limit = *self.arena[parent].block_header.gas_limit();
             parent_difficulty = *self.arena[parent].block_header.difficulty();
-            pos_references
-                .push(self.arena[parent].block_header.pos_reference().clone())
         } else {
             let parent_hash = self.arena[index].block_header.parent_hash();
             let parent_header = self
@@ -673,28 +639,13 @@ impl SynchronizationGraphInner {
             parent_timestamp = parent_header.timestamp();
             parent_gas_limit = *parent_header.gas_limit();
             parent_difficulty = *parent_header.difficulty();
-            pos_references.push(parent_header.pos_reference().clone());
         }
 
         // Get pos references for referees.
         let mut referee_hash_in_mem = HashSet::new();
         for referee in self.arena[index].referees.iter() {
-            pos_references.push(
-                self.arena[*referee].block_header.pos_reference().clone(),
-            );
             referee_hash_in_mem
                 .insert(self.arena[*referee].block_header.hash());
-        }
-
-        for referee_hash in self.arena[index].block_header.referee_hashes() {
-            if !referee_hash_in_mem.contains(referee_hash) {
-                let referee_header = self
-                    .data_man
-                    .block_header_by_hash(referee_hash)
-                    .unwrap()
-                    .clone();
-                pos_references.push(referee_header.pos_reference().clone());
-            }
         }
 
         (
@@ -702,7 +653,6 @@ impl SynchronizationGraphInner {
             parent_timestamp,
             parent_gas_limit,
             parent_difficulty,
-            pos_references,
         )
     }
 
@@ -715,7 +665,6 @@ impl SynchronizationGraphInner {
             parent_timestamp,
             parent_gas_limit,
             parent_difficulty,
-            predecessor_pos_references,
         ) = self.get_parent_and_referee_info(index);
 
         // Verify the height and epoch numbers are correct
@@ -765,12 +714,7 @@ impl SynchronizationGraphInner {
             )));
         }
 
-        let parent_gas_limit = parent_gas_limit
-            * if epoch == self.machine.params().transition_heights.cip1559 {
-                ELASTICITY_MULTIPLIER
-            } else {
-                1
-            };
+        let parent_gas_limit = parent_gas_limit;
 
         // Verify the gas limit is respected
         let self_gas_limit = *self.arena[index].block_header.gas_limit();
@@ -801,9 +745,7 @@ impl SynchronizationGraphInner {
                 self.pow_config.initial_difficulty.into();
 
             if parent_height
-                < self
-                    .pow_config
-                    .difficulty_adjustment_epoch_period(parent_height)
+                < self.pow_config.difficulty_adjustment_epoch_period()
             {
                 if my_diff != initial_difficulty {
                     difficulty_invalid = true;
@@ -812,12 +754,8 @@ impl SynchronizationGraphInner {
                 }
             } else {
                 let last_period_upper = (parent_height
-                    / self
-                        .pow_config
-                        .difficulty_adjustment_epoch_period(parent_height))
-                    * self
-                        .pow_config
-                        .difficulty_adjustment_epoch_period(parent_height);
+                    / self.pow_config.difficulty_adjustment_epoch_period())
+                    * self.pow_config.difficulty_adjustment_epoch_period();
                 if last_period_upper != parent_height {
                     // parent_epoch should not trigger difficulty adjustment
                     if my_diff != parent_difficulty {
@@ -847,22 +785,23 @@ impl SynchronizationGraphInner {
             }
         }
 
-        if let Some(pos_reference) =
-            self.arena[index].block_header.pos_reference()
-        {
-            let mut pred_pos_ref_list = Vec::new();
-            for maybe_pos_ref in predecessor_pos_references {
-                if let Some(pos_ref) = maybe_pos_ref {
-                    pred_pos_ref_list.push(pos_ref);
-                }
-            }
-            if !self
-                .pos_verifier
-                .verify_against_predecessors(pos_reference, &pred_pos_ref_list)
-            {
-                bail!(BlockError::InvalidPosReference);
-            }
-        }
+        // TODO: investigate the need of "verify_against_predecessors"
+        // if let Some(pos_reference) =
+        //     self.arena[index].block_header.pos_reference()
+        // {
+        //     let mut pred_pos_ref_list = Vec::new();
+        //     for maybe_pos_ref in predecessor_pos_references {
+        //         if let Some(pos_ref) = maybe_pos_ref {
+        //             pred_pos_ref_list.push(pos_ref);
+        //         }
+        //     }
+        //     if !self
+        //         .pos_verifier
+        //         .verify_against_predecessors(pos_reference, &pred_pos_ref_list)
+        //     {
+        //         bail!(BlockError::InvalidPosReference);
+        //     }
+        // }
 
         Ok(())
     }
@@ -1041,10 +980,13 @@ pub type SharedSynchronizationGraph = Arc<SynchronizationGraph>;
 impl SynchronizationGraph {
     pub fn new(
         consensus: SharedConsensusGraph,
-        verification_config: VerificationConfig, pow_config: ProofOfWorkConfig,
-        pow: Arc<PowComputer>, sync_config: SyncGraphConfig,
-        notifications: Arc<Notifications>, machine: Arc<Machine>,
-        pos_verifier: Arc<PosVerifier>,
+        verification_config: VerificationConfig,
+        pow_config: ProofOfWorkConfig,
+        pow: Arc<PowComputer>,
+        sync_config: SyncGraphConfig,
+        notifications: Arc<Notifications>,
+        machine: Arc<Machine>,
+        // pos_verifier: Arc<PosVerifier>,
     ) -> Self {
         let data_man = consensus.get_data_manager().clone();
         let genesis_hash = data_man.get_cur_consensus_era_genesis_hash();
@@ -1064,7 +1006,7 @@ impl SynchronizationGraph {
                 sync_config,
                 data_man.clone(),
                 machine.clone(),
-                pos_verifier.clone(),
+                // pos_verifier.clone(),
             ),
         ));
         let sync_graph = SynchronizationGraph {
@@ -1142,12 +1084,12 @@ impl SynchronizationGraph {
                                         cnt += 1;
                                     }
                                 }
-                                if let Some(main_decision) = header.pos_reference().as_ref().and_then(|pos_reference| pos_verifier.get_main_decision(pos_reference)) {
-                                    if let Some(v) = reverse_map.get_mut(&main_decision) {
-                                        v.push(hash.clone());
-                                        cnt += 1;
-                                    }
-                                }
+                                // if let Some(main_decision) = header.pos_reference().as_ref().and_then(|pos_reference| pos_verifier.get_main_decision(pos_reference)) {
+                                //     if let Some(v) = reverse_map.get_mut(&main_decision) {
+                                //         v.push(hash.clone());
+                                //         cnt += 1;
+                                //     }
+                                // }
                                 reverse_map.insert(hash.clone(), Vec::new());
                                 if cnt == 0 {
                                     let epoch_number = consensus.get_block_epoch_number(parent_hash).unwrap_or(0);
@@ -1531,6 +1473,11 @@ impl SynchronizationGraph {
             return (BlockHeaderInsertionResult::Invalid, Vec::new());
         }
 
+        let block_seed_hash = self
+            .data_man
+            .db_manager
+            .get_current_seed_hash(header.height());
+
         if let Some(info) = local_info_opt {
             // If the block is ordered before current era genesis or it has
             // already entered consensus graph in this run, we do not need to
@@ -1544,7 +1491,9 @@ impl SynchronizationGraph {
                     // Compute pow_quality, because the input header may be used
                     // as a part of block later
                     VerificationConfig::get_or_fill_header_pow_quality(
-                        &self.pow, header,
+                        &self.pow,
+                        header,
+                        &block_seed_hash,
                     );
                 }
                 return (
@@ -1559,7 +1508,9 @@ impl SynchronizationGraph {
                 // Compute pow_quality, because the input header may be used as
                 // a part of block later
                 VerificationConfig::get_or_fill_header_pow_quality(
-                    &self.pow, header,
+                    &self.pow,
+                    header,
+                    &block_seed_hash,
                 );
             }
             return (
@@ -1575,7 +1526,11 @@ impl SynchronizationGraph {
                 || !(self.parent_or_referees_invalid(header)
                     || self
                         .verification_config
-                        .verify_header_params(&self.pow, header)
+                        .verify_header_params(
+                            &self.pow,
+                            header,
+                            &block_seed_hash,
+                        )
                         .or_else(|e| {
                             warn!(
                                 "Invalid header: err={} header={:?}",
@@ -1586,7 +1541,15 @@ impl SynchronizationGraph {
                         .is_err())
         } else {
             if !bench_mode && !self.is_consortium() {
-                match self.verification_config.verify_pow(&self.pow, header) {
+                info!(
+                    "sync graph verify_pow called for block: {:?}",
+                    header.hash()
+                );
+                match self.verification_config.verify_pow(
+                    &self.pow,
+                    header,
+                    &block_seed_hash,
+                ) {
                     Ok(_) => {}
                     Err(e) => {
                         error!("PoW verification failed for local mined block: {:?}", e);
@@ -2112,49 +2075,6 @@ impl SynchronizationGraph {
                 }
             }
         }
-    }
-
-    pub fn get_current_randomx_epoch(&self) -> u64 {
-        let best_info = self.consensus.best_info();
-        let best_epoch_height = best_info.best_epoch_number;
-
-        // TODO: move this to config
-        let randomx_epoch_size: u64 = 2048;
-
-        best_epoch_height / randomx_epoch_size
-    }
-
-    pub fn get_randomx_epoch_transition_height(&self, epoch: u64) -> u64 {
-        if epoch == 0 {
-            return 0;
-        }
-
-        // TODO: move this to config
-        let randomx_epoch_size: u64 = 2048;
-
-        epoch * randomx_epoch_size
-    }
-
-    pub fn get_randomx_epoch_seed_hash(&self, epoch: u64) -> H256 {
-        if epoch == 0 {
-            return H256::zero();
-        }
-
-        // TODO: move this to config
-        let seed_offset: u64 = 64;
-
-        let transition_epoch = self.get_randomx_epoch_transition_height(epoch);
-        let seed_epoch = transition_epoch - seed_offset;
-
-        self.consensus
-            .get_hash_from_epoch_number(EpochNumber::Number(seed_epoch.into()))
-            .expect("get_hash_from_epoch_number should not fail")
-    }
-
-    pub fn get_current_randomx_epoch_seed(&self) -> H256 {
-        let current_epoch = self.get_current_randomx_epoch();
-
-        self.get_randomx_epoch_seed_hash(current_epoch)
     }
 }
 

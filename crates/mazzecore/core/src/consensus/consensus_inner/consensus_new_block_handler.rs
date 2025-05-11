@@ -12,7 +12,6 @@ use crate::{
             consensus_executor::{ConsensusExecutor, EpochExecutionTask},
             ConsensusGraphInner, NULL,
         },
-        pos_handler::PosVerifier,
         ConsensusConfig,
     },
     state_exposer::{ConsensusGraphBlockState, STATE_EXPOSER},
@@ -39,7 +38,6 @@ pub struct ConsensusNewBlockHandler {
     txpool: SharedTransactionPool,
     data_man: Arc<BlockDataManager>,
     executor: Arc<ConsensusExecutor>,
-    pos_verifier: Arc<PosVerifier>,
     statistics: SharedStatistics,
 
     /// Channel used to send epochs to PubSub
@@ -58,17 +56,19 @@ pub struct ConsensusNewBlockHandler {
 /// object accordingly.
 impl ConsensusNewBlockHandler {
     pub fn new(
-        conf: ConsensusConfig, txpool: SharedTransactionPool,
-        data_man: Arc<BlockDataManager>, executor: Arc<ConsensusExecutor>,
-        statistics: SharedStatistics, notifications: Arc<Notifications>,
-        node_type: NodeType, pos_verifier: Arc<PosVerifier>,
+        conf: ConsensusConfig,
+        txpool: SharedTransactionPool,
+        data_man: Arc<BlockDataManager>,
+        executor: Arc<ConsensusExecutor>,
+        statistics: SharedStatistics,
+        notifications: Arc<Notifications>,
+        node_type: NodeType,
     ) -> Self {
         let epochs_sender = notifications.epochs_ordered.clone();
         let blame_verifier =
             Mutex::new(BlameVerifier::new(data_man.clone(), notifications));
 
         Self {
-            pos_verifier,
             conf,
             txpool,
             data_man,
@@ -678,35 +678,6 @@ impl ConsensusNewBlockHandler {
             }
         }
 
-        // TODO: enable PoS reference - disabled for block processing debugging
-        // Check if `new` is in the subtree of its pos reference.
-        // if self
-        //     .pos_verifier
-        //     .is_enabled_at_height(inner.arena[new].height)
-        // {
-        //     let main_decision = inner
-        //         .get_pos_reference_main_decision(&inner.arena[new].hash)
-        //         .expect("pos reference checked");
-        //     match inner.hash_to_arena_indices.get(&main_decision) {
-        //         // Main decision is before checkpoint or fake.
-        //         // Check if it's on the main chain.
-        //         None => {
-        //             warn!("Possibly partial invalid due to pos_reference's
-        // main decision not in consensus graph");             return
-        // inner.main_block_processed(&main_decision);         }
-        //         Some(main_decision_arena_index) => {
-        //             if inner.lca(new, *main_decision_arena_index)
-        //                 != *main_decision_arena_index
-        //             {
-        //                 warn!("Partial invalid due to not in the subtree of
-        // pos_reference's main decision");                 // Not in
-        // the subtree of main_decision, mark as partial
-        // // invalid.                 return false;
-        //             }
-        //         }
-        //     }
-        // }
-
         return true;
     }
 
@@ -1028,13 +999,8 @@ impl ConsensusNewBlockHandler {
                     inner, me, &outlier,
                 );
 
-            inner.arena[me].data.force_confirm = inner
-                .compute_block_force_confirm(
-                    &timer_chain_tuple,
-                    self.data_man
-                        .pos_reference_by_hash(&inner.arena[me].hash)
-                        .expect("header exist"),
-                );
+            inner.arena[me].data.force_confirm =
+                inner.compute_block_force_confirm(&timer_chain_tuple);
             debug!(
                 "Force confirm block index {} in the past view of block index={}",
                 inner.arena[me].data.force_confirm, me
@@ -1144,9 +1110,6 @@ impl ConsensusNewBlockHandler {
         // chain height (end of the main chain).
         let mut fork_at;
         let old_main_chain_len = inner.main_chain.len();
-
-        // Update consensus inner with a possibly new pos_reference.
-        inner.update_pos_main_decision(me);
 
         // Now we are going to maintain the timer chain.
         let diff = inner.arena[me].data.past_view_timer_longest_difficulty

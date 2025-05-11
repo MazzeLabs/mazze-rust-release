@@ -10,7 +10,7 @@ pub use eth_transaction::{
     EthereumTransaction,
 };
 pub use native_transaction::{
-    Cip1559Transaction, Cip2930Transaction, NativeTransaction,
+    Mip1559Transaction, Mip2930Transaction, NativeTransaction,
     TypedNativeTransaction,
 };
 
@@ -40,8 +40,8 @@ pub const TYPED_NATIVE_TX_PREFIX_BYTE: u8 = TYPED_NATIVE_TX_PREFIX[0];
 pub const LEGACY_TX_TYPE: u8 = 0x00;
 pub const EIP2930_TYPE: u8 = 0x01;
 pub const EIP1559_TYPE: u8 = 0x02;
-pub const CIP2930_TYPE: u8 = 0x01;
-pub const CIP1559_TYPE: u8 = 0x02;
+pub const MIP2930_TYPE: u8 = 0x01;
+pub const MIP1559_TYPE: u8 = 0x02;
 
 /// Shorter id for transactions in compact blocks
 // TODO should be u48
@@ -272,13 +272,13 @@ pub enum Transaction {
 
 impl Default for Transaction {
     fn default() -> Self {
-        Transaction::Native(TypedNativeTransaction::Cip155(Default::default()))
+        Transaction::Native(TypedNativeTransaction::Mip155(Default::default()))
     }
 }
 
 impl From<NativeTransaction> for Transaction {
     fn from(tx: NativeTransaction) -> Self {
-        Self::Native(TypedNativeTransaction::Cip155(tx))
+        Self::Native(TypedNativeTransaction::Mip155(tx))
     }
 }
 
@@ -348,13 +348,13 @@ impl Transaction {
 
     pub fn type_id(&self) -> u8 {
         match self {
-            Transaction::Native(TypedNativeTransaction::Cip155(_))
+            Transaction::Native(TypedNativeTransaction::Mip155(_))
             | Transaction::Ethereum(EthereumTransaction::Eip155(_)) => 0,
 
-            Transaction::Native(TypedNativeTransaction::Cip2930(_))
+            Transaction::Native(TypedNativeTransaction::Mip2930(_))
             | Transaction::Ethereum(EthereumTransaction::Eip2930(_)) => 1,
 
-            Transaction::Native(TypedNativeTransaction::Cip1559(_))
+            Transaction::Native(TypedNativeTransaction::Mip1559(_))
             | Transaction::Ethereum(EthereumTransaction::Eip1559(_)) => 2,
         }
     }
@@ -362,7 +362,7 @@ impl Transaction {
     pub fn is_legacy(&self) -> bool {
         matches!(
             self,
-            Transaction::Native(TypedNativeTransaction::Cip155(_))
+            Transaction::Native(TypedNativeTransaction::Mip155(_))
                 | Transaction::Ethereum(EthereumTransaction::Eip155(_))
         )
     }
@@ -374,7 +374,7 @@ impl Transaction {
     pub fn after_1559(&self) -> bool {
         matches!(
             self,
-            Transaction::Native(TypedNativeTransaction::Cip1559(_))
+            Transaction::Native(TypedNativeTransaction::Mip1559(_))
                 | Transaction::Ethereum(EthereumTransaction::Eip1559(_))
         )
     }
@@ -406,18 +406,18 @@ impl Transaction {
         let mut s = RlpStream::new();
         let mut type_prefix = vec![];
         match self {
-            Transaction::Native(TypedNativeTransaction::Cip155(tx)) => {
+            Transaction::Native(TypedNativeTransaction::Mip155(tx)) => {
                 s.append(tx);
             }
-            Transaction::Native(TypedNativeTransaction::Cip1559(tx)) => {
+            Transaction::Native(TypedNativeTransaction::Mip1559(tx)) => {
                 s.append(tx);
                 type_prefix.extend_from_slice(TYPED_NATIVE_TX_PREFIX);
-                type_prefix.push(CIP1559_TYPE);
+                type_prefix.push(MIP1559_TYPE);
             }
-            Transaction::Native(TypedNativeTransaction::Cip2930(tx)) => {
+            Transaction::Native(TypedNativeTransaction::Mip2930(tx)) => {
                 s.append(tx);
                 type_prefix.extend_from_slice(TYPED_NATIVE_TX_PREFIX);
-                type_prefix.push(CIP2930_TYPE);
+                type_prefix.push(MIP2930_TYPE);
             }
             Transaction::Ethereum(EthereumTransaction::Eip155(tx)) => {
                 s.append(tx);
@@ -494,7 +494,7 @@ pub struct TransactionWithSignatureSerializePart {
 impl Encodable for TransactionWithSignatureSerializePart {
     fn rlp_append(&self, s: &mut RlpStream) {
         match self.unsigned {
-            Transaction::Native(TypedNativeTransaction::Cip155(ref tx)) => {
+            Transaction::Native(TypedNativeTransaction::Mip155(ref tx)) => {
                 s.begin_list(4);
                 s.append(tx);
                 s.append(&self.v);
@@ -557,18 +557,18 @@ impl Encodable for TransactionWithSignatureSerializePart {
                 s.append(&self.r);
                 s.append(&self.s);
             }
-            Transaction::Native(TypedNativeTransaction::Cip2930(ref tx)) => {
+            Transaction::Native(TypedNativeTransaction::Mip2930(ref tx)) => {
                 s.append_raw(TYPED_NATIVE_TX_PREFIX, 0);
-                s.append_raw(&[CIP2930_TYPE], 0);
+                s.append_raw(&[MIP2930_TYPE], 0);
                 s.begin_list(4);
                 s.append(tx);
                 s.append(&self.v);
                 s.append(&self.r);
                 s.append(&self.s);
             }
-            Transaction::Native(TypedNativeTransaction::Cip1559(ref tx)) => {
+            Transaction::Native(TypedNativeTransaction::Mip1559(ref tx)) => {
                 s.append_raw(TYPED_NATIVE_TX_PREFIX, 0);
-                s.append_raw(&[CIP1559_TYPE], 0);
+                s.append_raw(&[MIP1559_TYPE], 0);
                 s.begin_list(4);
                 s.append(tx);
                 s.append(&self.v);
@@ -593,7 +593,7 @@ impl Decodable for TransactionWithSignatureSerializePart {
                     let s: U256 = rlp.val_at(3)?;
                     Ok(TransactionWithSignatureSerializePart {
                         unsigned: Transaction::Native(
-                            TypedNativeTransaction::Cip155(unsigned),
+                            TypedNativeTransaction::Mip155(unsigned),
                         ),
                         v,
                         r,
@@ -652,7 +652,7 @@ impl Decodable for TransactionWithSignatureSerializePart {
                         return Err(DecoderError::RlpInvalidLength);
                     }
                     match rlp.as_raw()[3] {
-                        CIP2930_TYPE => {
+                        MIP2930_TYPE => {
                             let rlp = Rlp::new(&rlp.as_raw()[4..]);
                             if rlp.item_count()? != 4 {
                                 return Err(DecoderError::RlpIncorrectListLen);
@@ -664,14 +664,14 @@ impl Decodable for TransactionWithSignatureSerializePart {
                             let s = rlp.val_at(3)?;
                             Ok(TransactionWithSignatureSerializePart {
                                 unsigned: Transaction::Native(
-                                    TypedNativeTransaction::Cip2930(tx),
+                                    TypedNativeTransaction::Mip2930(tx),
                                 ),
                                 v,
                                 r,
                                 s,
                             })
                         }
-                        CIP1559_TYPE => {
+                        MIP1559_TYPE => {
                             let rlp = Rlp::new(&rlp.as_raw()[4..]);
                             if rlp.item_count()? != 4 {
                                 return Err(DecoderError::RlpIncorrectListLen);
@@ -683,7 +683,7 @@ impl Decodable for TransactionWithSignatureSerializePart {
                             let s = rlp.val_at(3)?;
                             Ok(TransactionWithSignatureSerializePart {
                                 unsigned: Transaction::Native(
-                                    TypedNativeTransaction::Cip1559(tx),
+                                    TypedNativeTransaction::Mip1559(tx),
                                 ),
                                 v,
                                 r,
@@ -825,7 +825,7 @@ impl Decodable for TransactionWithSignature {
 impl Encodable for TransactionWithSignature {
     fn rlp_append(&self, s: &mut RlpStream) {
         match &self.transaction.unsigned {
-            Transaction::Native(TypedNativeTransaction::Cip155(_))
+            Transaction::Native(TypedNativeTransaction::Mip155(_))
             | Transaction::Ethereum(EthereumTransaction::Eip155(_)) => {
                 s.append_internal(&self.transaction);
             }

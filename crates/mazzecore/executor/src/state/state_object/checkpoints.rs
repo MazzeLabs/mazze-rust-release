@@ -4,7 +4,7 @@
 use mazze_types::AddressWithSpace;
 use std::collections::{hash_map::Entry::*, HashMap};
 
-use super::{AccountEntry, GlobalStat, OverlayAccount, State};
+use super::{AccountEntry, OverlayAccount, State};
 use crate::unwrap_or_return;
 
 /// An account entry in the checkpoint
@@ -35,8 +35,6 @@ impl CheckpointEntry {
 /// across transactions.
 
 pub(super) struct CheckpointLayer {
-    /// Checkpoint for global statistic variables.
-    global_stat: GlobalStat,
     /// Checkpoint for  modified account entries.
     ///
     /// An account will only be added only if its cache version is modified. If
@@ -61,7 +59,6 @@ impl State {
         let checkpoints = self.checkpoints.get_mut();
         let index = checkpoints.len();
         checkpoints.push(CheckpointLayer {
-            global_stat: self.global_stat,
             entries: HashMap::new(),
         });
         index
@@ -90,10 +87,7 @@ impl State {
     pub fn revert_to_checkpoint(&mut self) {
         let CheckpointLayer {
             entries: mut checkpoint,
-            global_stat,
         } = unwrap_or_return!(self.checkpoints.get_mut().pop());
-
-        self.global_stat = global_stat;
 
         for (k, v) in checkpoint.drain() {
             let mut entry_in_cache =
@@ -164,6 +158,5 @@ impl State {
     pub fn clear(&mut self) {
         assert!(self.checkpoints.get_mut().is_empty());
         self.cache.get_mut().clear();
-        self.global_stat = GlobalStat::loaded(&self.db).expect("no db error");
     }
 }

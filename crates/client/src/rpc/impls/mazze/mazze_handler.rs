@@ -6,28 +6,19 @@ use crate::rpc::{
     error_codes::{internal_error_msg, invalid_params_msg},
     types::{
         call_request::rpc_call_request_network,
-        errors::check_rpc_address_network, pos::PoSEpochReward,
-        MazzeFeeHistory, PoSEconomics, RpcAddress, SponsorInfo, StatOnGasLoad,
-        TokenSupplyInfo, VoteParamsInfo, WrapTransaction, U64 as HexU64,
+        errors::check_rpc_address_network, MazzeFeeHistory, RpcAddress,
+        SponsorInfo, StatOnGasLoad, StorageCollateralInfo, TokenSupplyInfo,
+        WrapTransaction, U64 as HexU64,
     },
 };
 use blockgen::BlockGenerator;
 use delegate::delegate;
-use diem_types::transaction::TransactionPayload;
 use jsonrpc_core::{BoxFuture, Error as JsonRpcError, Result as JsonRpcResult};
 use mazze_execute_helper::estimation::{decode_error, EstimateExt};
-use mazze_executor::{
-    executive::{ExecutionError, ExecutionOutcome, TxDropError},
-    internal_contract::storage_point_prop,
+use mazze_executor::executive::{
+    ExecutionError, ExecutionOutcome, TxDropError,
 };
-use mazze_statedb::{
-    global_params::{
-        AccumulateInterestRate, BaseFeeProp, DistributablePoSInterest,
-        InterestRate, LastDistributeBlock, PowBaseReward, TotalBurnt1559,
-        TotalPosStaking,
-    },
-    StateDbExt,
-};
+use mazze_statedb::{global_params::TotalBurnt1559, StateDbExt};
 use mazze_types::{
     Address, AddressSpaceUtil, BigEndianHash, Space, H256, H520, U128, U256,
     U64,
@@ -48,9 +39,8 @@ use network::{
 use parking_lot::Mutex;
 use primitives::{
     filter::LogFilter, receipt::EVM_SPACE_SUCCESS, Account, Block, BlockHeader,
-    BlockReceipts, DepositInfo, SignedTransaction, StorageKey, StorageRoot,
-    StorageValue, Transaction, TransactionIndex, TransactionStatus,
-    TransactionWithSignature, VoteStakeInfo,
+    BlockReceipts, SignedTransaction, StorageKey, StorageRoot, StorageValue,
+    Transaction, TransactionIndex, TransactionStatus, TransactionWithSignature,
 };
 use random_crash::*;
 use rlp::Rlp;
@@ -73,30 +63,25 @@ use crate::{
         },
         traits::{debug::LocalRpc, mazze::Mazze, test::TestRpc},
         types::{
-            eth::Transaction as EthTransaction, pos::Block as PosBlock,
-            sign_call, Account as RpcAccount, AccountPendingInfo,
+            eth::Transaction as EthTransaction, sign_call,
+            Account as RpcAccount, AccountPendingInfo,
             AccountPendingTransactions, BlameInfo, Block as RpcBlock,
             BlockHashOrEpochNumber, Bytes, CallRequest,
             CheckBalanceAgainstTransactionResponse, ConsensusGraphStates,
             EpochNumber, EstimateGasAndCollateralResponse, Log as RpcLog,
             MazzeRpcLogFilter, PackedOrExecuted, Receipt as RpcReceipt,
             RewardInfo as RpcRewardInfo, SendTxRequest, Status as RpcStatus,
-            StorageCollateralInfo, SyncGraphStates,
-            Transaction as RpcTransaction,
+            SyncGraphStates, Transaction as RpcTransaction,
         },
         RpcResult,
     },
 };
-use diem_types::account_address::AccountAddress;
 use mazze_addr::Network;
 use mazze_execute_helper::estimation::EstimateRequest;
 use mazze_executor::state::State;
 use mazze_parameters::{
+    collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
     consensus_internal::REWARD_EPOCH_COUNT,
-    genesis::{
-        genesis_contract_address_four_year, genesis_contract_address_two_year,
-    },
-    staking::{BLOCKS_PER_YEAR, MAZZIES_PER_STORAGE_COLLATERAL_UNIT},
 };
 use mazze_storage::state::StateDbGetOriginalMethods;
 use mazzecore::{
@@ -295,72 +280,6 @@ impl RpcImpl {
         }
     }
 
-    fn staking_balance(
-        &self, address: RpcAddress, num: Option<EpochNumber>,
-    ) -> RpcResult<U256> {
-        self.check_address_network(address.network)?;
-        let epoch_num = num.unwrap_or(EpochNumber::LatestState).into();
-
-        info!(
-            "RPC Request: mazze_getStakingBalance address={:?} epoch_num={:?}",
-            address, epoch_num
-        );
-
-        let state_db = self
-            .consensus
-            .get_state_db_by_epoch_number(epoch_num, "num")?;
-        let acc =
-            state_db.get_account(&address.hex_address.with_native_space())?;
-
-        Ok(acc.map_or(U256::zero(), |acc| acc.staking_balance).into())
-    }
-
-    fn deposit_list(
-        &self, address: RpcAddress, num: Option<EpochNumber>,
-    ) -> RpcResult<Vec<DepositInfo>> {
-        self.check_address_network(address.network)?;
-        let epoch_num = num.unwrap_or(EpochNumber::LatestState).into();
-
-        info!(
-            "RPC Request: mazze_getDepositList address={:?} epoch_num={:?}",
-            address, epoch_num
-        );
-
-        let state_db = self
-            .consensus
-            .get_state_db_by_epoch_number(epoch_num, "num")?;
-
-        match state_db
-            .get_deposit_list(&address.hex_address.with_native_space())?
-        {
-            None => Ok(vec![]),
-            Some(deposit_list) => Ok(deposit_list.0),
-        }
-    }
-
-    fn vote_list(
-        &self, address: RpcAddress, num: Option<EpochNumber>,
-    ) -> RpcResult<Vec<VoteStakeInfo>> {
-        self.check_address_network(address.network)?;
-        let epoch_num = num.unwrap_or(EpochNumber::LatestState).into();
-
-        info!(
-            "RPC Request: mazze_getVoteList address={:?} epoch_num={:?}",
-            address, epoch_num
-        );
-
-        let state_db = self
-            .consensus
-            .get_state_db_by_epoch_number(epoch_num, "num")?;
-
-        match state_db
-            .get_vote_list(&address.hex_address.with_native_space())?
-        {
-            None => Ok(vec![]),
-            Some(vote_list) => Ok(vote_list.0),
-        }
-    }
-
     fn collateral_for_storage(
         &self, address: RpcAddress, num: Option<EpochNumber>,
     ) -> RpcResult<U256> {
@@ -416,50 +335,6 @@ impl RpcImpl {
             };
 
         Ok(RpcAccount::try_from(account, network)?)
-    }
-
-    /// Returns interest rate of the given epoch
-    fn interest_rate(&self, epoch_num: Option<EpochNumber>) -> RpcResult<U256> {
-        let epoch_num = epoch_num.unwrap_or(EpochNumber::LatestState).into();
-        let state_db = self
-            .consensus
-            .get_state_db_by_epoch_number(epoch_num, "epoch_num")?;
-
-        Ok(state_db.get_global_param::<InterestRate>()?.into())
-    }
-
-    /// Returns accumulate interest rate of the given epoch
-    fn accumulate_interest_rate(
-        &self, epoch_num: Option<EpochNumber>,
-    ) -> RpcResult<U256> {
-        let epoch_num = epoch_num.unwrap_or(EpochNumber::LatestState).into();
-        let state_db = self
-            .consensus
-            .get_state_db_by_epoch_number(epoch_num, "epoch_num")?;
-
-        Ok(state_db
-            .get_global_param::<AccumulateInterestRate>()?
-            .into())
-    }
-
-    /// Returns accumulate interest rate of the given epoch
-    fn pos_economics(
-        &self, epoch_num: Option<EpochNumber>,
-    ) -> RpcResult<PoSEconomics> {
-        let epoch_num = epoch_num.unwrap_or(EpochNumber::LatestState).into();
-        let state_db = self
-            .consensus
-            .get_state_db_by_epoch_number(epoch_num, "epoch_num")?;
-
-        Ok(PoSEconomics {
-            total_pos_staking_tokens: state_db
-                .get_global_param::<TotalPosStaking>()?,
-            distributable_pos_interest: state_db
-                .get_global_param::<DistributablePoSInterest>()?,
-            last_distribute_block: U64::from(
-                state_db.get_global_param::<LastDistributeBlock>()?.as_u64(),
-            ),
-        })
     }
 
     fn send_raw_transaction(&self, raw: Bytes) -> RpcResult<H256> {
@@ -984,11 +859,11 @@ impl RpcImpl {
 
     fn generate_fixed_block(
         &self, parent_hash: H256, referee: Vec<H256>, num_txs: usize,
-        adaptive: bool, difficulty: Option<u64>, pos_reference: Option<H256>,
+        adaptive: bool, difficulty: Option<u64>,
     ) -> RpcResult<H256> {
         info!(
-            "RPC Request: generate_fixed_block({:?}, {:?}, {:?}, {:?}, {:?})",
-            parent_hash, referee, num_txs, difficulty, pos_reference,
+            "RPC Request: generate_fixed_block({:?}, {:?}, {:?}, {:?})",
+            parent_hash, referee, num_txs, difficulty,
         );
 
         Ok(self.block_gen.generate_fixed_block(
@@ -997,7 +872,6 @@ impl RpcImpl {
             num_txs,
             difficulty.unwrap_or(0),
             adaptive,
-            pos_reference,
         )?)
     }
 
@@ -1099,17 +973,17 @@ impl RpcImpl {
 
             // set fake data for latency tests
             match signed_tx.transaction.transaction.unsigned {
-                Transaction::Native(TypedNativeTransaction::Cip155(
+                Transaction::Native(TypedNativeTransaction::Mip155(
                     ref mut unsigned,
                 )) if tx_data_len > 0 => {
                     unsigned.data = vec![0; tx_data_len];
                 }
-                Transaction::Native(TypedNativeTransaction::Cip1559(
+                Transaction::Native(TypedNativeTransaction::Mip1559(
                     ref mut unsigned,
                 )) if tx_data_len > 0 => {
                     unsigned.data = vec![0; tx_data_len];
                 }
-                Transaction::Native(TypedNativeTransaction::Cip2930(
+                Transaction::Native(TypedNativeTransaction::Mip2930(
                     ref mut unsigned,
                 )) if tx_data_len > 0 => {
                     unsigned.data = vec![0; tx_data_len];
@@ -1552,23 +1426,12 @@ impl RpcImpl {
                 .get_state_db_by_epoch_number(epoch, "epoch")?,
         )?;
         let total_issued = state.total_issued_tokens();
-        let total_staking = state.total_staking_tokens();
         let total_collateral = state.total_storage_tokens();
-        let two_year_unlock_address = genesis_contract_address_two_year();
-        let four_year_unlock_address = genesis_contract_address_four_year();
-        let two_year_locked = state
-            .balance(&two_year_unlock_address)
-            .unwrap_or(U256::zero());
-        let four_year_locked = state
-            .balance(&four_year_unlock_address)
-            .unwrap_or(U256::zero());
-        let total_circulating =
-            total_issued - two_year_locked - four_year_locked;
+        let total_circulating = total_issued;
         let total_espace_tokens = state.total_espace_tokens();
         Ok(TokenSupplyInfo {
             total_circulating,
             total_issued,
-            total_staking,
             total_collateral,
             total_espace_tokens,
         })
@@ -1591,29 +1454,6 @@ impl RpcImpl {
             total_storage_tokens,
             converted_storage_points,
             used_storage_points,
-        })
-    }
-
-    pub fn get_vote_params(
-        &self, epoch: Option<EpochNumber>,
-    ) -> RpcResult<VoteParamsInfo> {
-        let epoch = epoch.unwrap_or(EpochNumber::LatestState).into();
-        let state_db = self
-            .consensus
-            .get_state_db_by_epoch_number(epoch, "epoch_num")?;
-        let interest_rate = state_db.get_global_param::<InterestRate>()?
-            / U256::from(BLOCKS_PER_YEAR);
-        let pow_base_reward = state_db.get_global_param::<PowBaseReward>()?;
-
-        let storage_point_prop =
-            state_db.get_system_storage(&storage_point_prop())?;
-
-        let base_fee_share_prop = state_db.get_global_param::<BaseFeeProp>()?;
-        Ok(VoteParamsInfo {
-            pow_base_reward,
-            interest_rate,
-            storage_point_prop,
-            base_fee_share_prop,
         })
     }
 
@@ -1857,7 +1697,7 @@ impl RpcImpl {
                 bail!(invalid_params_msg("Cannot stat genesis"))
             }
             EpochNumber::LatestMined => bail!(invalid_params_msg(
-                "Epoch number is earilier than 'latest_state'"
+                "Epoch number is earlier than 'latest_state'"
             )),
             EpochNumber::Num(num) => {
                 let main_hash = consensus.get_hash_from_epoch_number(
@@ -1874,7 +1714,6 @@ impl RpcImpl {
                 num.as_u64()
             }
             EpochNumber::LatestCheckpoint
-            | EpochNumber::LatestFinalized
             | EpochNumber::LatestConfirmed
             | EpochNumber::LatestState => {
                 let main_hash =
@@ -2281,7 +2120,6 @@ impl Mazze for MazzeHandler {
             fn get_client_version(&self) -> JsonRpcResult<String>;
             fn account_pending_info(&self, addr: RpcAddress) -> BoxFuture<Option<AccountPendingInfo>>;
             fn account_pending_transactions(&self, address: RpcAddress, maybe_start_nonce: Option<U256>, maybe_limit: Option<U64>) -> BoxFuture<AccountPendingTransactions>;
-            fn get_pos_reward_by_epoch(&self, epoch: EpochNumber) -> JsonRpcResult<Option<PoSEpochReward>>;
             fn fee_history(&self, block_count: HexU64, newest_block: EpochNumber, reward_percentiles: Vec<f64>) -> BoxFuture<MazzeFeeHistory>;
             fn max_priority_fee_per_gas(&self) -> BoxFuture<U256>;
         }
@@ -2289,18 +2127,11 @@ impl Mazze for MazzeHandler {
         to self.rpc_impl {
             fn code(&self, addr: RpcAddress, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> BoxFuture<Bytes>;
             fn account(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<RpcAccount>;
-            fn interest_rate(&self, num: Option<EpochNumber>) -> BoxFuture<U256>;
-            fn accumulate_interest_rate(&self, num: Option<EpochNumber>) -> BoxFuture<U256>;
-            fn pos_economics(&self, num: Option<EpochNumber>) -> BoxFuture<PoSEconomics>;
             fn admin(&self, address: RpcAddress, num: Option<EpochNumber>)
                 -> BoxFuture<Option<RpcAddress>>;
             fn sponsor_info(&self, address: RpcAddress, num: Option<EpochNumber>)
                 -> BoxFuture<SponsorInfo>;
             fn balance(&self, address: RpcAddress, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> BoxFuture<U256>;
-            fn staking_balance(&self, address: RpcAddress, num: Option<EpochNumber>)
-                -> BoxFuture<U256>;
-            fn deposit_list(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<Vec<DepositInfo>>;
-            fn vote_list(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<Vec<VoteStakeInfo>>;
             fn collateral_for_storage(&self, address: RpcAddress, num: Option<EpochNumber>)
                 -> BoxFuture<U256>;
             fn call(&self, request: CallRequest, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>)
@@ -2321,7 +2152,6 @@ impl Mazze for MazzeHandler {
             fn storage_root(&self, address: RpcAddress, epoch_num: Option<EpochNumber>) -> BoxFuture<Option<StorageRoot>>;
             fn get_supply_info(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<TokenSupplyInfo>;
             fn get_collateral_info(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<StorageCollateralInfo>;
-            fn get_vote_params(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<VoteParamsInfo>;
             fn get_fee_burnt(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<U256>;
         }
     }
@@ -2353,20 +2183,6 @@ impl TestRpc for TestRpcImpl {
             fn say_hello(&self) -> JsonRpcResult<String>;
             fn stop(&self) -> JsonRpcResult<()>;
             fn save_node_db(&self) -> JsonRpcResult<()>;
-            fn pos_register(&self, voting_power: U64, version: Option<u8>) -> JsonRpcResult<(Bytes, AccountAddress)>;
-            fn pos_update_voting_power(
-                &self, pos_account: AccountAddress, increased_voting_power: U64,
-            ) -> JsonRpcResult<()>;
-            fn pos_stop_election(&self) -> JsonRpcResult<Option<u64>>;
-            fn pos_start_voting(&self, initialize: bool) -> JsonRpcResult<()>;
-            fn pos_stop_voting(&self) -> JsonRpcResult<()>;
-            fn pos_voting_status(&self) -> JsonRpcResult<bool>;
-            fn pos_start(&self) -> JsonRpcResult<()>;
-            fn pos_force_vote_proposal(&self, block_id: H256) -> JsonRpcResult<()>;
-            fn pos_force_propose(&self, round: U64, parent_block_id: H256, payload: Vec<TransactionPayload>) -> JsonRpcResult<()>;
-            fn pos_trigger_timeout(&self, timeout_type: String) -> JsonRpcResult<()>;
-            fn pos_force_sign_main_decision(&self, block_hash: H256, height: U64) -> JsonRpcResult<()>;
-            fn pos_get_chosen_proposal(&self) -> JsonRpcResult<Option<PosBlock>>;
         }
 
         to self.rpc_impl {
@@ -2382,7 +2198,7 @@ impl TestRpc for TestRpcImpl {
             fn get_main_chain_and_weight(&self, height_range: Option<(u64, u64)>) -> JsonRpcResult<Vec<(H256, U256)>>;
             fn get_executed_info(&self, block_hash: H256) -> JsonRpcResult<(H256, H256)> ;
             fn generate_fixed_block(
-                &self, parent_hash: H256, referee: Vec<H256>, num_txs: usize, adaptive: bool, difficulty: Option<u64>, pos_reference: Option<H256>)
+                &self, parent_hash: H256, referee: Vec<H256>, num_txs: usize, adaptive: bool, difficulty: Option<u64>)
                 -> JsonRpcResult<H256>;
             fn generate_one_block_with_direct_txgen(
                 &self, num_txs: usize, block_size_limit: usize, num_txs_simple: usize, num_txs_erc20: usize)

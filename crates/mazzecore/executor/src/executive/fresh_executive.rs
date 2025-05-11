@@ -5,7 +5,7 @@ use super::{
     ExecutiveContext, PreCheckedExecutive,
 };
 use crate::{executive_observer::ExecutiveObserver, substate::Substate};
-use mazze_parameters::staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT;
+use mazze_parameters::collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT;
 
 use mazze_statedb::Result as DbResult;
 use mazze_types::{Address, AddressSpaceUtil, Space, U256, U512};
@@ -54,8 +54,6 @@ pub(super) struct CostInfo {
     pub gas_sponsored: bool,
     /// Transaction's collateral is sponsored
     pub storage_sponsored: bool,
-    /// Transaction's gas is in the sponsor whitelist
-    pub storage_sponsor_eligible: bool,
 }
 
 impl<'a, O: ExecutiveObserver> FreshExecutive<'a, O> {
@@ -203,7 +201,7 @@ impl<'a, O: ExecutiveObserver> FreshExecutive<'a, O> {
 
         let check_base_price = self.settings.check_base_price;
 
-        let gas_price = if !spec.cip1559 || !check_base_price {
+        let gas_price = if !check_base_price {
             *tx.gas_price()
         } else {
             // actual_base_gas >= tx gas_price >= burnt_base_price
@@ -249,7 +247,6 @@ impl<'a, O: ExecutiveObserver> FreshExecutive<'a, O> {
                 total_cost: sender_cost,
                 gas_sponsored: false,
                 storage_sponsored: false,
-                storage_sponsor_eligible: false,
             }));
         }
 
@@ -362,10 +359,6 @@ impl<'a, O: ExecutiveObserver> FreshExecutive<'a, O> {
             total_cost,
             gas_sponsored,
             storage_sponsored,
-            // Only for backward compatible for a early bug.
-            // The receipt reported `storage_sponsor_eligible` instead of
-            // `storage_sponsored`.
-            storage_sponsor_eligible,
         }));
     }
 }

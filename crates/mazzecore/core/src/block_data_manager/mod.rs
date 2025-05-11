@@ -11,7 +11,6 @@ use crate::{
 };
 use malloc_size_of::{new_malloc_size_ops, MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
-use mazze_executor::internal_contract::make_staking_events;
 use mazze_storage::{
     state_manager::StateIndex, utils::guarded_value::*, StorageManager,
     StorageManagerTrait,
@@ -34,11 +33,8 @@ pub mod block_data_types;
 pub mod db_gc_manager;
 pub mod db_manager;
 pub mod tx_data_manager;
-use crate::{
-    block_data_manager::{
-        db_manager::DBManager, tx_data_manager::TransactionDataManager,
-    },
-    consensus::pos_handler::PosVerifier,
+use crate::block_data_manager::{
+    db_manager::DBManager, tx_data_manager::TransactionDataManager,
 };
 pub use block_data_types::*;
 use db_gc_manager::GCProgress;
@@ -50,7 +46,6 @@ use mazze_internal_common::{
     EpochExecutionCommitment, StateAvailabilityBoundary, StateRootWithAuxInfo,
 };
 use metrics::{register_meter_with_group, Meter, MeterTimer};
-use primitives::pos::PosBlockId;
 use std::{hash::Hash, path::Path, time::Duration};
 
 lazy_static! {
@@ -188,10 +183,15 @@ impl BlockDataManager {
             worker_pool,
         );
         let db_manager = match config.db_type {
-            DbType::Rocksdb => DBManager::new_from_rocksdb(db, pow.clone()),
+            DbType::Rocksdb => DBManager::new_from_rocksdb(
+                db,
+                pow.clone(),
+                true_genesis.hash(),
+            ),
             DbType::Sqlite => DBManager::new_from_sqlite(
                 Path::new("./sqlite_db"),
                 pow.clone(),
+                true_genesis.hash(),
             ),
         };
         let previous_db_progress =
@@ -602,16 +602,6 @@ impl BlockDataManager {
     pub fn block_height_by_hash(&self, hash: &H256) -> Option<u64> {
         let result = self.block_header_by_hash(hash)?;
         Some(result.height())
-    }
-
-    /// Return `None` if the header does not exist.
-    /// Return `Some(None)` if the header exist but it does not have a PoS
-    /// reference field.
-    pub fn pos_reference_by_hash(
-        &self, hash: &H256,
-    ) -> Option<Option<PosBlockId>> {
-        self.block_header_by_hash(hash)
-            .map(|header| header.pos_reference().clone())
     }
 
     pub fn compact_block_by_hash(&self, hash: &H256) -> Option<CompactBlock> {
@@ -1187,18 +1177,6 @@ impl BlockDataManager {
         )
     }
 
-    pub fn insert_pos_reward(
-        &self, pos_epoch: u64, pos_reward: &PosRewardInfo,
-    ) {
-        self.db_manager.insert_pos_reward(pos_epoch, pos_reward)
-    }
-
-    pub fn pos_reward_by_pos_epoch(
-        &self, pos_epoch: u64,
-    ) -> Option<PosRewardInfo> {
-        self.db_manager.pos_reward_by_pos_epoch(pos_epoch)
-    }
-
     pub fn remove_epoch_execution_commitment(&self, block_hash: &H256) {
         self.epoch_execution_commitments.write().remove(block_hash);
     }
@@ -1226,8 +1204,7 @@ impl BlockDataManager {
     pub fn epoch_executed_and_recovered(
         &self, epoch_hash: &H256, epoch_block_hashes: &Vec<H256>,
         on_local_main: bool, update_trace: bool,
-        reward_execution_info: &Option<RewardExecutionInfo>,
-        pos_verifier: &PosVerifier, evm_chain_id: u32,
+        reward_execution_info: &Option<RewardExecutionInfo>, evm_chain_id: u32,
     ) -> bool {
         if !self.epoch_executed(epoch_hash) {
             return false;
@@ -1236,7 +1213,6 @@ impl BlockDataManager {
         if on_local_main {
             // Check if all blocks receipts and traces are from this epoch
             let mut epoch_receipts = Vec::new();
-            let mut epoch_staking_events = Vec::new();
             for h in epoch_block_hashes {
                 if let Some(r) = self.block_execution_result_by_hash_with_epoch(
                     h, epoch_hash, true, /* update_main_assumption */
@@ -1325,9 +1301,6 @@ impl BlockDataManager {
 
                                 evm_tx_index += 1;
                             }
-
-                            epoch_staking_events
-                                .extend(make_staking_events(logs));
                         }
                         _ => {}
                     }
@@ -1344,22 +1317,6 @@ impl BlockDataManager {
                     {
                         return false;
                     }
-                }
-            }
-            let me_height = self.block_height_by_hash(epoch_hash).unwrap();
-            if pos_verifier.pos_option().is_some() && me_height != 0 {
-                trace!(
-                    "staking events update: height={}, new={}",
-                    me_height,
-                    epoch_hash,
-                );
-                if let Err(e) = pos_verifier.consensus_db().put_staking_events(
-                    me_height,
-                    *epoch_hash,
-                    epoch_staking_events,
-                ) {
-                    error!("epoch_executed err={:?}", e);
-                    return false;
                 }
             }
         }

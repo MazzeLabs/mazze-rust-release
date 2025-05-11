@@ -3,14 +3,8 @@ use std::{
 };
 
 use parking_lot::Mutex;
-use rand_08::{prelude::StdRng, SeedableRng};
 use threadpool::ThreadPool;
 
-use diem_config::keys::ConfigKey;
-use diem_crypto::Uniform;
-use diem_types::validator_config::{
-    ConsensusPrivateKey, ConsensusVRFPrivateKey,
-};
 use mazze_internal_common::ChainIdParamsInner;
 use mazze_parameters::{
     block::{MAX_BLOCK_SIZE_IN_BYTES, REFEREE_DEFAULT_BOUND},
@@ -30,11 +24,10 @@ use crate::{
     cache_config::CacheConfig,
     consensus::{
         consensus_inner::consensus_executor::ConsensusExecutionConfiguration,
-        pos_handler::{PosConfiguration, PosVerifier},
         ConsensusConfig, ConsensusInnerConfig,
     },
     db::NUM_COLUMNS,
-    genesis_block::{genesis_block, GenesisPosState},
+    genesis_block::genesis_block,
     pow::{self, PowComputer, ProofOfWorkConfig},
     statistics::Statistics,
     sync::{SyncGraphConfig, SynchronizationGraph},
@@ -155,11 +148,6 @@ pub fn initialize_data_manager(
         machine.clone(),
         false, /* need_to_execute */
         None,
-        &Some(GenesisPosState {
-            initial_nodes: vec![],
-            initial_committee: vec![],
-            initial_seed: Default::default(),
-        }),
     ));
 
     let data_man = Arc::new(BlockDataManager::new(
@@ -184,24 +172,8 @@ pub fn initialize_synchronization_graph_with_data_manager(
     data_man: Arc<BlockDataManager>, beta: u64, h: u64, tcr: u64, tcb: u64,
     era_epoch_count: u64, pow: Arc<PowComputer>, vm: VmFactory,
 ) -> (Arc<SynchronizationGraph>, Arc<ConsensusGraph>) {
-    let mut params = CommonParams::default();
-    params.transition_heights.cip1559 = u64::MAX;
+    let params = CommonParams::default();
     let machine = Arc::new(new_machine_with_builtin(params, vm));
-    let mut rng = StdRng::from_seed([0u8; 32]);
-    let pos_verifier = Arc::new(PosVerifier::new(
-        None,
-        // These configurations will not be used.
-        PosConfiguration {
-            bls_key: ConfigKey::new(ConsensusPrivateKey::generate(&mut rng)),
-            vrf_key: ConfigKey::new(ConsensusVRFPrivateKey::generate(&mut rng)),
-            diem_conf_path: Default::default(),
-            protocol_conf: Default::default(),
-            pos_initial_nodes_path: "".to_string(),
-            vrf_proposal_threshold: Default::default(),
-            pos_state_config: Default::default(),
-        },
-        u64::MAX,
-    ));
 
     let verification_config = VerificationConfig::new(
         true, /* test_mode */
@@ -210,7 +182,6 @@ pub fn initialize_synchronization_graph_with_data_manager(
         TRANSACTION_DEFAULT_EPOCH_BOUND,
         TXPOOL_DEFAULT_NONCE_BITS,
         machine.clone(),
-        pos_verifier.clone(),
     );
 
     let txpool = Arc::new(TransactionPool::new(
@@ -229,7 +200,6 @@ pub fn initialize_synchronization_graph_with_data_manager(
         0,                /* stratum_port */
         None,             /* stratum_secret */
         1,                /* pow_problem_window_size */
-        0,                /* cip_height */
     );
     let sync_config = SyncGraphConfig {
         future_block_buffer_capacity: 1,
@@ -248,9 +218,6 @@ pub fn initialize_synchronization_graph_with_data_manager(
                 era_epoch_count,
                 enable_optimistic_execution: false,
                 enable_state_expose: false,
-                pos_main_decision_defer_epoch_count: 50,
-                cip113_main_decision_defer_epoch_count: 50,
-                cip113_transition_height: u64::MAX,
                 debug_dump_dir_invalid_state_root: None,
                 debug_invalid_state_root_epoch: None,
                 force_recompute_height_during_construct_main: None,
@@ -279,7 +246,6 @@ pub fn initialize_synchronization_graph_with_data_manager(
         },
         verification_config.clone(),
         NodeType::Archive,
-        pos_verifier.clone(),
     ));
 
     let sync = Arc::new(SynchronizationGraph::new(
@@ -290,7 +256,6 @@ pub fn initialize_synchronization_graph_with_data_manager(
         sync_config,
         notifications,
         machine,
-        pos_verifier.clone(),
     ));
 
     (sync, consensus)
@@ -299,7 +264,7 @@ pub fn initialize_synchronization_graph_with_data_manager(
 /// This method is only used in tests and benchmarks.
 pub fn initialize_synchronization_graph(
     db_dir: &str, beta: u64, h: u64, tcr: u64, tcb: u64, era_epoch_count: u64,
-    dbtype: DbType,
+    dbtype: DbType, seed_hash: H256,
 ) -> (
     Arc<SynchronizationGraph>,
     Arc<ConsensusGraph>,
@@ -307,7 +272,7 @@ pub fn initialize_synchronization_graph(
     Arc<Block>,
 ) {
     let vm = VmFactory::new(1024 * 32);
-    let pow = Arc::new(PowComputer::new());
+    let pow = Arc::new(PowComputer::new(seed_hash));
 
     let (data_man, genesis_block) =
         initialize_data_manager(db_dir, dbtype, pow.clone(), vm.clone());

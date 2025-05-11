@@ -2,7 +2,7 @@ use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_execute_helper::exec_tracer::BlockExecTraces;
 use mazze_internal_common::{DatabaseDecodable, DatabaseEncodable};
-use mazze_types::{Address, Bloom, H256, U256};
+use mazze_types::{Bloom, H256, U256};
 use primitives::BlockReceipts;
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use rlp_derive::{RlpDecodable, RlpEncodable};
@@ -339,40 +339,6 @@ impl MallocSizeOf for BlamedHeaderVerifiedRoots {
     }
 }
 
-#[derive(Clone, Debug, RlpEncodable, RlpDecodable)]
-pub struct PosRewardForAccount {
-    pub address: Address,
-    pub pos_identifier: H256,
-    pub reward: U256,
-}
-
-#[derive(Clone, Debug, RlpEncodable, RlpDecodable)]
-pub struct PosRewardInfo {
-    pub account_rewards: Vec<PosRewardForAccount>,
-    /// The PoW epoch hash where the reward is distributed in its execution.
-    pub execution_epoch_hash: H256,
-}
-
-impl PosRewardInfo {
-    pub fn new(
-        account_reward_list: Vec<(Address, H256, U256)>,
-        execution_epoch_hash: H256,
-    ) -> Self {
-        let account_rewards = account_reward_list
-            .into_iter()
-            .map(|(address, pos_identifier, reward)| PosRewardForAccount {
-                address,
-                pos_identifier,
-                reward,
-            })
-            .collect();
-        Self {
-            account_rewards,
-            execution_epoch_hash,
-        }
-    }
-}
-
 pub fn db_encode_list<T>(list: &[T]) -> Vec<u8>
 where
     T: DatabaseEncodable,
@@ -403,4 +369,3 @@ impl_db_encoding_as_rlp!(CheckpointHashes);
 impl_db_encoding_as_rlp!(EpochExecutionContext);
 impl_db_encoding_as_rlp!(BlockRewardResult);
 impl_db_encoding_as_rlp!(BlamedHeaderVerifiedRoots);
-impl_db_encoding_as_rlp!(PosRewardInfo);

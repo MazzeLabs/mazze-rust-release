@@ -589,362 +589,6 @@ fn test_not_enough_cash() {
 }
 
 #[test]
-fn test_deposit_withdraw_lock() {
-    let mut sender = Address::zero();
-    sender.set_user_account_type_bits();
-    let sender_with_space = sender.with_native_space();
-    let storage_manager = new_state_manager_for_unit_test();
-    let mut state = get_state_for_genesis_write(&storage_manager);
-    let env = Env::default();
-    let machine = make_byzantium_machine(0);
-    let spec = machine.spec_for_test(env.number);
-    let mut substate = Substate::new();
-    state
-        .add_balance(
-            &sender_with_space,
-            &U256::from(2_000_000_000_000_000_000u64),
-            CleanupMode::NoEmpty,
-        )
-        .unwrap();
-    state.add_total_issued(U256::from(2_000_000_000_000_000_000u64));
-    assert_eq!(
-        state.balance(&sender_with_space).unwrap(),
-        U256::from(2_000_000_000_000_000_000u64)
-    );
-    assert_eq!(state.staking_balance(&sender).unwrap(), U256::zero());
-    assert_eq!(state.total_staking_tokens(), U256::zero());
-    assert_eq!(
-        state.total_issued_tokens(),
-        U256::from(2_000_000_000_000_000_000u64)
-    );
-
-    let mut params = ActionParams::default();
-    params.code_address = STORAGE_INTEREST_STAKING_CONTRACT_ADDRESS.clone();
-    params.address = params.code_address;
-    params.sender = sender;
-    params.original_sender = sender;
-    params.storage_owner = params.code_address;
-    params.gas = U256::from(1000000);
-    params.data = Some("b6b55f250000000000000000000000000000000000000000000000000de0b6b3a7640000".from_hex().unwrap());
-    params.call_type = CallType::CallCode;
-
-    // wrong call type
-    let mut tracer = ();
-    let result = ExecutiveContext::new(&mut state, &env, &machine, &spec)
-        .call_for_test(params.clone(), &mut substate, &mut tracer)
-        .expect("no db error");
-    assert!(result.is_err());
-    assert_eq!(
-        result.unwrap_err(),
-        vm::Error::InternalContract("Incorrect call type.".into())
-    );
-    assert_eq!(
-        state.balance(&sender_with_space).unwrap(),
-        U256::from(2_000_000_000_000_000_000u64)
-    );
-    assert_eq!(state.staking_balance(&sender).unwrap(), U256::zero());
-    assert_eq!(
-        state.total_issued_tokens(),
-        U256::from(2_000_000_000_000_000_000u64)
-    );
-    assert_eq!(state.total_staking_tokens(), U256::zero());
-
-    // deposit 10^18 - 1, not enough
-    params.call_type = CallType::Call;
-    params.data = Some("b6b55f250000000000000000000000000000000000000000000000000de0b6b3a763ffff".from_hex().unwrap());
-
-    let result = ExecutiveContext::new(&mut state, &env, &machine, &spec)
-        .call_for_test(params.clone(), &mut substate, &mut tracer)
-        .expect("no db error");
-    assert!(result.is_err());
-    assert_eq!(
-        result.unwrap_err(),
-        vm::Error::InternalContract("invalid deposit amount".into())
-    );
-
-    // deposit 10^18, it should work fine
-    params.data = Some("b6b55f250000000000000000000000000000000000000000000000000de0b6b3a7640000".from_hex().unwrap());
-    let mut tracer = ();
-    let result = ExecutiveContext::new(&mut state, &env, &machine, &spec)
-        .call_for_test(params.clone(), &mut substate, &mut tracer);
-    assert!(result.is_ok());
-    assert_eq!(
-        state.balance(&sender_with_space).unwrap(),
-        U256::from(1_000_000_000_000_000_000u64)
-    );
-    assert_eq!(
-        state.staking_balance(&sender).unwrap(),
-        U256::from(1_000_000_000_000_000_000u64)
-    );
-    assert_eq!(
-        state.total_issued_tokens(),
-        U256::from(2_000_000_000_000_000_000u64)
-    );
-    assert_eq!(
-        state.total_staking_tokens(),
-        U256::from(1_000_000_000_000_000_000u64)
-    );
-
-    // empty data
-    params.data = None;
-    let mut tracer = ();
-    let result = ExecutiveContext::new(&mut state, &env, &machine, &spec)
-        .call_for_test(params.clone(), &mut substate, &mut tracer)
-        .expect("no db error");
-    assert!(result.is_err());
-    assert_eq!(
-        result.unwrap_err(),
-        vm::Error::InternalContract("ABI decode error: None call data".into())
-    );
-    assert_eq!(
-        state.balance(&sender_with_space).unwrap(),
-        U256::from(1_000_000_000_000_000_000u64)
-    );
-    assert_eq!(
-        state.staking_balance(&sender).unwrap(),
-        U256::from(1_000_000_000_000_000_000u64)
-    );
-    assert_eq!(
-        state.total_issued_tokens(),
-        U256::from(2_000_000_000_000_000_000u64)
-    );
-    assert_eq!(
-        state.total_staking_tokens(),
-        U256::from(1_000_000_000_000_000_000u64)
-    );
-
-    // less data
-    params.data = Some("b6b55f25000000000000000000000000000000000000000000000000000000174876e8".from_hex().unwrap());
-    let mut tracer = ();
-    let result = ExecutiveContext::new(&mut state, &env, &machine, &spec)
-        .call_for_test(params.clone(), &mut substate, &mut tracer)
-        .expect("no db error");
-    assert!(result.is_err());
-    assert_eq!(
-        result.unwrap_err(),
-        vm::Error::InternalContract(
-            "ABI decode error: Incomplete static input parameter".into()
-        )
-    );
-    assert_eq!(
-        state.balance(&sender_with_space).unwrap(),
-        U256::from(1_000_000_000_000_000_000u64)
-    );
-    assert_eq!(
-        state.staking_balance(&sender).unwrap(),
-        U256::from(1_000_000_000_000_000_000u64)
-    );
-    assert_eq!(
-        state.total_issued_tokens(),
-        U256::from(2_000_000_000_000_000_000u64)
-    );
-    assert_eq!(
-        state.total_staking_tokens(),
-        U256::from(1_000_000_000_000_000_000u64)
-    );
-
-    // withdraw
-    params.data = Some("2e1a7d4d0000000000000000000000000000000000000000000000000000000ba43b7400".from_hex().unwrap());
-    let mut tracer = ();
-    let result = ExecutiveContext::new(&mut state, &env, &machine, &spec)
-        .call_for_test(params.clone(), &mut substate, &mut tracer);
-    assert!(result.is_ok());
-    assert_eq!(
-        state.balance(&sender_with_space).unwrap(),
-        U256::from(1_000_000_050_000_000_000u64)
-    );
-    assert_eq!(
-        state.staking_balance(&sender).unwrap(),
-        U256::from(999_999_950_000_000_000u64)
-    );
-    assert_eq!(
-        state.total_issued_tokens(),
-        U256::from(2_000_000_000_000_000_000u64)
-    );
-    assert_eq!(
-        state.total_staking_tokens(),
-        U256::from(999_999_950_000_000_000u64)
-    );
-    // withdraw more than staking balance
-    params.data = Some("2e1a7d4d0000000000000000000000000000000000000000000000000de0b6a803288c01".from_hex().unwrap());
-
-    let result = ExecutiveContext::new(&mut state, &env, &machine, &spec)
-        .call_for_test(params.clone(), &mut substate, &mut tracer)
-        .expect("no db error");
-    assert!(result.is_err());
-    assert_eq!(
-        result.unwrap_err(),
-        vm::Error::InternalContract(
-            "not enough withdrawable staking balance to withdraw".into()
-        )
-    );
-    assert_eq!(
-        state.balance(&sender_with_space).unwrap(),
-        U256::from(1_000_000_050_000_000_000u64)
-    );
-    assert_eq!(
-        state.staking_balance(&sender).unwrap(),
-        U256::from(999_999_950_000_000_000u64)
-    );
-    assert_eq!(
-        state.total_issued_tokens(),
-        U256::from(2_000_000_000_000_000_000u64)
-    );
-    assert_eq!(
-        state.total_staking_tokens(),
-        U256::from(999_999_950_000_000_000u64)
-    );
-
-    // lock until block_number = 0
-    params.data = Some("44a51d6d00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000".from_hex().unwrap());
-    let mut tracer = ();
-    let result = ExecutiveContext::new(&mut state, &env, &machine, &spec)
-        .call_for_test(params.clone(), &mut substate, &mut tracer)
-        .expect("no db error");
-    assert!(result.is_err());
-    assert_eq!(
-        result.unwrap_err(),
-        vm::Error::InternalContract("invalid unlock_block_number".into())
-    );
-    assert_eq!(
-        state.balance(&sender_with_space).unwrap(),
-        U256::from(1_000_000_050_000_000_000u64)
-    );
-    assert_eq!(
-        state.staking_balance(&sender).unwrap(),
-        U256::from(999_999_950_000_000_000u64)
-    );
-    assert_eq!(
-        state.total_staking_tokens(),
-        U256::from(999_999_950_000_000_000u64)
-    );
-    assert_eq!(
-        state.total_issued_tokens(),
-        U256::from(2_000_000_000_000_000_000u64)
-    );
-    assert_eq!(
-        state
-            .withdrawable_staking_balance(&sender, env.number)
-            .unwrap(),
-        U256::from(999_999_950_000_000_000u64)
-    );
-    // lock 1 until 106751991167301 blocks, should succeed
-    params.data = Some("44a51d6d00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000611722833944".from_hex().unwrap());
-    let mut tracer = ();
-    let result = ExecutiveContext::new(&mut state, &env, &machine, &spec)
-        .call_for_test(params.clone(), &mut substate, &mut tracer);
-    assert!(result.is_ok());
-    assert_eq!(
-        state.balance(&sender_with_space).unwrap(),
-        U256::from(1_000_000_050_000_000_000u64)
-    );
-    assert_eq!(
-        state.staking_balance(&sender).unwrap(),
-        U256::from(999_999_950_000_000_000u64)
-    );
-    assert_eq!(
-        state.total_issued_tokens(),
-        U256::from(2_000_000_000_000_000_000u64)
-    );
-    assert_eq!(
-        state.total_staking_tokens(),
-        U256::from(999_999_950_000_000_000u64)
-    );
-    assert_eq!(
-        state
-            .withdrawable_staking_balance(&sender, env.number)
-            .unwrap(),
-        U256::from(999_999_949_999_999_999u64)
-    );
-    // lock 2 until block_number=2
-    params.data = Some("44a51d6d00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000002".from_hex().unwrap());
-    let mut tracer = ();
-    let result = ExecutiveContext::new(&mut state, &env, &machine, &spec)
-        .call_for_test(params.clone(), &mut substate, &mut tracer);
-    assert!(result.is_ok());
-    assert_eq!(
-        state.balance(&sender_with_space).unwrap(),
-        U256::from(1_000_000_050_000_000_000u64)
-    );
-    assert_eq!(
-        state.staking_balance(&sender).unwrap(),
-        U256::from(999_999_950_000_000_000u64)
-    );
-    assert_eq!(
-        state.total_issued_tokens(),
-        U256::from(2_000_000_000_000_000_000u64)
-    );
-    assert_eq!(
-        state.total_staking_tokens(),
-        U256::from(999_999_950_000_000_000u64)
-    );
-    assert_eq!(
-        state
-            .withdrawable_staking_balance(&sender, env.number)
-            .unwrap(),
-        U256::from(999_999_949_999_999_998u64)
-    );
-    // withdraw more than withdrawable staking balance
-    params.data = Some("2e1a7d4d0000000000000000000000000000000000000000000000000de0b6a803288bff".from_hex().unwrap());
-    let mut tracer = ();
-    let result = ExecutiveContext::new(&mut state, &env, &machine, &spec)
-        .call_for_test(params.clone(), &mut substate, &mut tracer)
-        .expect("no db error");
-    assert!(result.is_err());
-    assert_eq!(
-        result.unwrap_err(),
-        vm::Error::InternalContract(
-            "not enough withdrawable staking balance to withdraw".into()
-        )
-    );
-    assert_eq!(
-        state.balance(&sender_with_space).unwrap(),
-        U256::from(1_000_000_050_000_000_000u64)
-    );
-    assert_eq!(
-        state.staking_balance(&sender).unwrap(),
-        U256::from(999_999_950_000_000_000u64)
-    );
-    assert_eq!(
-        state.total_issued_tokens(),
-        U256::from(2_000_000_000_000_000_000u64)
-    );
-    assert_eq!(
-        state.total_staking_tokens(),
-        U256::from(999_999_950_000_000_000u64)
-    );
-    assert_eq!(
-        state
-            .withdrawable_staking_balance(&sender, env.number)
-            .unwrap(),
-        U256::from(999_999_949_999_999_998u64)
-    );
-
-    // withdraw exact withdrawable staking balance
-    params.data = Some("2e1a7d4d0000000000000000000000000000000000000000000000000de0b6a803288bfe".from_hex().unwrap());
-    let mut tracer = ();
-    let result = ExecutiveContext::new(&mut state, &env, &machine, &spec)
-        .call_for_test(params.clone(), &mut substate, &mut tracer);
-    assert!(result.is_ok());
-    assert_eq!(
-        state.balance(&sender_with_space).unwrap(),
-        U256::from(1_999_999_999_999_999_998u64)
-    );
-    assert_eq!(state.staking_balance(&sender).unwrap(), U256::from(2));
-    assert_eq!(
-        state.total_issued_tokens(),
-        U256::from(2_000_000_000_000_000_000u64)
-    );
-    assert_eq!(state.total_staking_tokens(), U256::from(2));
-    assert_eq!(
-        state
-            .withdrawable_staking_balance(&sender, env.number)
-            .unwrap(),
-        U256::from(0)
-    );
-}
-
-#[test]
 fn test_commission_privilege_all_whitelisted_across_epochs() {
     let code: Vec<u8> = "7c601080600c6000396000f3006000355415600957005b60203560003555600052601d60036017f0600055".from_hex().unwrap();
 
@@ -2119,10 +1763,6 @@ fn test_storage_commission_privilege() {
         U256::from(850_000)
     );
     assert_eq!(
-        state.staking_balance(&caller1.address()).unwrap(),
-        U256::zero()
-    );
-    assert_eq!(
         state.collateral_for_storage(&caller1.address()).unwrap(),
         *COLLATERAL_MAZZIES_PER_STORAGE_KEY,
     );
@@ -2141,10 +1781,6 @@ fn test_storage_commission_privilege() {
             .sponsor_balance_for_collateral(&address.address)
             .unwrap(),
         *COLLATERAL_MAZZIES_PER_STORAGE_KEY,
-    );
-    assert_eq!(
-        state.staking_balance(&address.address).unwrap(),
-        U256::zero()
     );
     assert_eq!(
         state.collateral_for_storage(&address.address).unwrap(),
@@ -2187,7 +1823,6 @@ fn test_push0() {
     // Test case 1 in EIP-3855
     {
         let mut spec = machine.spec_for_test(env.number);
-        spec.cip119 = true;
 
         // code:
         //
@@ -2214,7 +1849,6 @@ fn test_push0() {
     // Test case 2 in EIP-3855
     {
         let mut spec = machine.spec_for_test(env.number);
-        spec.cip119 = true;
 
         // code:
         //
@@ -2241,7 +1875,6 @@ fn test_push0() {
     // Test case 2 in EIP-3855
     {
         let mut spec = machine.spec_for_test(env.number);
-        spec.cip119 = true;
 
         // code:
         //
@@ -2256,25 +1889,5 @@ fn test_push0() {
             .expect_err("should fail");
 
         assert!(matches!(error, vm::Error::OutOfStack { .. }));
-    }
-
-    // Before activation of EIP-3855 (CIP119)
-    {
-        let mut spec = machine.spec_for_test(env.number);
-        spec.cip119 = false;
-
-        // code:
-        //
-        // 5f - push0
-        let mut params = params.clone();
-        params.code = Some(Arc::new([0x5f; 1025].to_vec()));
-
-        let mut ex = ExecutiveContext::new(&mut state, &env, &machine, &spec);
-        let error = ex
-            .call_for_test(params, &mut Substate::new(), &mut ())
-            .expect("no db error")
-            .expect_err("should fail");
-
-        assert!(matches!(error, vm::Error::BadInstruction { .. }));
     }
 }

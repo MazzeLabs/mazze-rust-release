@@ -17,7 +17,7 @@ use crate::{
 };
 use futures::{
     future::{self, Either},
-    stream, try_join, FutureExt, StreamExt, TryFutureExt, TryStreamExt,
+    stream, FutureExt, StreamExt, TryFutureExt, TryStreamExt,
 };
 use mazze_addr::Network;
 use mazze_executor::state::COMMISSION_PRIVILEGE_SPECIAL_KEY;
@@ -31,7 +31,6 @@ use mazze_parameters::{
         TRANSACTION_COUNT_PER_BLOCK_WATER_LINE_MEDIUM,
     },
 };
-use mazze_statedb::global_params::{self, GlobalParamKey};
 use mazze_types::{
     address_util::AddressUtil, AllChainID, BigEndianHash, Bloom, H160, H256,
     KECCAK_EMPTY_BLOOM, U256,
@@ -40,9 +39,8 @@ use network::{service::ProtocolVersion, NetworkContext, NetworkService};
 use primitives::{
     filter::{FilterError, LogFilter},
     log_entry::{LocalizedLogEntry, LogEntry},
-    Account, Block, BlockReceipts, CodeInfo, DepositList, EpochNumber, Receipt,
+    Account, Block, BlockReceipts, CodeInfo, EpochNumber, Receipt,
     SignedTransaction, StorageKey, StorageRoot, StorageValue, TransactionIndex,
-    VoteStakeList,
 };
 use rlp::Rlp;
 use std::{collections::BTreeSet, future::Future, sync::Arc, time::Duration};
@@ -388,18 +386,6 @@ impl QueryService {
             .to_key_bytes()
     }
 
-    fn deposit_list_key(address: &H160) -> Vec<u8> {
-        StorageKey::new_deposit_list_key(address)
-            .with_native_space()
-            .to_key_bytes()
-    }
-
-    fn vote_list_key(address: &H160) -> Vec<u8> {
-        StorageKey::new_vote_list_key(address)
-            .with_native_space()
-            .to_key_bytes()
-    }
-
     pub async fn get_account(
         &self, epoch: EpochNumber, address: H160,
     ) -> Result<Option<Account>, Error> {
@@ -414,22 +400,6 @@ impl QueryService {
                 Ok(Some(Account::new_from_rlp(address, &Rlp::new(&rlp))?))
             }
         }
-    }
-
-    pub async fn get_deposit_list(
-        &self, epoch: EpochNumber, address: H160,
-    ) -> Result<Option<DepositList>, Error> {
-        let epoch = self.get_height_from_epoch_number(epoch)?;
-        let key = Self::deposit_list_key(&address);
-        self.retrieve_state_entry::<DepositList>(epoch, key).await
-    }
-
-    pub async fn get_vote_list(
-        &self, epoch: EpochNumber, address: H160,
-    ) -> Result<Option<VoteStakeList>, Error> {
-        let epoch = self.get_height_from_epoch_number(epoch)?;
-        let key = Self::vote_list_key(&address);
-        self.retrieve_state_entry::<VoteStakeList>(epoch, key).await
     }
 
     pub async fn get_code(
@@ -549,60 +519,6 @@ impl QueryService {
 
         let epoch = self.get_height_from_epoch_number(epoch)?;
         self.retrieve_storage_root(epoch, address).await
-    }
-
-    pub async fn get_interest_rate(
-        &self, epoch: EpochNumber,
-    ) -> Result<U256, Error> {
-        debug!("get_interest_rate epoch={:?}", epoch);
-
-        let epoch = self.get_height_from_epoch_number(epoch)?;
-
-        let key = global_params::InterestRate::STORAGE_KEY.to_key_bytes();
-
-        self.retrieve_state_entry::<U256>(epoch, key)
-            .await
-            .map(|opt| opt.unwrap_or_default())
-    }
-
-    pub async fn get_accumulate_interest_rate(
-        &self, epoch: EpochNumber,
-    ) -> Result<U256, Error> {
-        debug!("get_accumulate_interest_rate epoch={:?}", epoch);
-
-        let epoch = self.get_height_from_epoch_number(epoch)?;
-
-        let key =
-            global_params::AccumulateInterestRate::STORAGE_KEY.to_key_bytes();
-
-        self.retrieve_state_entry::<U256>(epoch, key)
-            .await
-            .map(|opt| opt.unwrap_or_default())
-    }
-
-    pub async fn get_pos_economics(
-        &self, epoch: EpochNumber,
-    ) -> Result<[U256; 3], Error> {
-        debug!("get_PoSEconomics epoch={:?}", epoch);
-
-        let epoch = self.get_height_from_epoch_number(epoch)?;
-
-        let key1 = global_params::TotalPosStaking::STORAGE_KEY.to_key_bytes();
-        let key2 =
-            global_params::DistributablePoSInterest::STORAGE_KEY.to_key_bytes();
-        let key3 =
-            global_params::LastDistributeBlock::STORAGE_KEY.to_key_bytes();
-
-        let total_pos_staking = try_join!(
-            self.retrieve_state_entry::<U256>(epoch, key1),
-            self.retrieve_state_entry::<U256>(epoch, key2),
-            self.retrieve_state_entry::<U256>(epoch, key3)
-        )?;
-        Ok([
-            total_pos_staking.0.unwrap_or_default(),
-            total_pos_staking.1.unwrap_or_default(),
-            total_pos_staking.2.unwrap_or_default(),
-        ])
     }
 
     pub async fn get_tx_info(&self, hash: H256) -> Result<TxInfo, Error> {
@@ -837,9 +753,6 @@ impl QueryService {
             }
             EpochNumber::LatestMined => Ok(latest_verifiable),
             EpochNumber::LatestState => Ok(latest_verifiable),
-            EpochNumber::LatestFinalized => {
-                Ok(self.consensus.latest_finalized_epoch_number())
-            }
             EpochNumber::Number(n) if n <= latest_verifiable => Ok(n),
             EpochNumber::Number(n) => Err(FilterError::UnableToVerify {
                 epoch: n,

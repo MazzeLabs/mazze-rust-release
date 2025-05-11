@@ -5,7 +5,7 @@
 use super::{super::impls::sponsor::*, preludes::*};
 use mazze_parameters::{
     internal_contract_addresses::SPONSOR_WHITELIST_CONTROL_CONTRACT_ADDRESS,
-    staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
+    collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
 };
 use mazze_types::{Address, U256};
 
@@ -47,7 +47,7 @@ group_impl_is_active!(
     RemovePrivilegeByAdmin,
 );
 
-group_impl_is_active!(|spec: &Spec| spec.cip118, AvailableStoragePoints);
+group_impl_is_active!(|_spec: &Spec| true, AvailableStoragePoints);
 
 make_solidity_function! {
     struct SetSponsorForGas((Address, U256), "setSponsorForGas(address,uint256)");

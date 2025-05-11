@@ -34,9 +34,6 @@ mod factory;
 /// mechanism.
 mod sponsor;
 
-/// Implements functions of an `OverlayAccount` related to the staking.
-mod staking;
-
 /// Each `OverlayAccount` maintains a 256-bit addressable storage space, managed
 /// directly by `OverlayAccount` rather than the state object. This module
 /// implements functions of an `OverlayAccount` related to the storage entry
@@ -56,8 +53,7 @@ use mazze_types::{
 };
 use parking_lot::RwLock;
 use primitives::{
-    is_default::IsDefault, CodeInfo, DepositList, SponsorInfo, StorageLayout,
-    StorageValue, VoteStakeList,
+    is_default::IsDefault, CodeInfo, SponsorInfo, StorageLayout, StorageValue,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -84,14 +80,14 @@ pub struct OverlayAccount {
     nonce: U256,
     /// Code hash of the account.
     code_hash: H256,
-    /// Staking balance (in Mazzy) of the account
-    staking_balance: U256,
+    // /// Staking balance (in Mazzy) of the account
+    // staking_balance: U256,
     /// Collateral (in Mazzy) of the account
     collateral_for_storage: U256,
     /// Accumulated interest return (in Mazzy) of the account.
     ///
     /// Inactive after CIP-43.
-    accumulated_interest_return: U256,
+    // accumulated_interest_return: U256,
 
     /* ---------------------------------------------------
     -  Database-stored fields for contract accounts only -
@@ -104,18 +100,6 @@ pub struct OverlayAccount {
     /* ----------------------------------------------------------------
     -  Lazily loaded database-stored fields, also called `ext_fields` -
     ---------------------------------------------------------------- */
-    /// List of the deposit info of the account, sorted in increasing order of
-    /// `deposit_time`. (`None` indicates not loaded from db.)
-    ///
-    /// Cleared after CIP-97.
-    deposit_list: Option<DepositList>,
-    /// List of the vote info of the account. (`None` indicates not loaded from
-    /// db.)
-    ///
-    /// The `unlock_block_number` sorted in increasing order and the `amount`
-    /// is sorted in decreasing order. All the `unlock_block_number` and
-    /// `amount` is unique in the list.
-    vote_stake_list: Option<VoteStakeList>,
     /// The code of the account.  (`None` indicates not loaded from db if
     /// `code_hash` isn't `KECCAK_EMPTY`.)
     code: Option<CodeInfo>,
@@ -205,10 +189,6 @@ mod tests_another {
         let state = get_state_for_genesis_write(&storage_manager);
 
         assert!(account.as_account().is_default());
-
-        account.cache_ext_fields(true, true, &state.db).unwrap();
-        assert!(account.vote_stake_list().is_default());
-        assert!(account.deposit_list().is_default());
     }
 
     #[test]

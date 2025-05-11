@@ -8,7 +8,7 @@ use primitives::{Account, StorageLayout};
 impl State {
     pub fn new_contract_with_admin(
         &mut self, contract: &AddressWithSpace, admin: &Address, balance: U256,
-        storage_layout: Option<StorageLayout>, cip107: bool,
+        storage_layout: Option<StorageLayout>,
     ) -> DbResult<()> {
         assert!(contract.space == Space::Native || admin.is_zero());
         // Check if the new contract is deployed on a killed contract in the
@@ -22,7 +22,6 @@ impl State {
             admin,
             pending_db_clear,
             storage_layout,
-            cip107,
         );
         self.insert_to_cache(account);
         Ok(())

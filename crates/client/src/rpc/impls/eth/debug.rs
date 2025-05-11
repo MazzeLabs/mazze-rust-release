@@ -140,8 +140,7 @@ impl Debug for GethDebugHandler {
         let num = match block {
             BlockNumber::Num(block_number) => block_number,
             BlockNumber::Latest
-            | BlockNumber::Safe
-            | BlockNumber::Finalized => {
+            | BlockNumber::Safe => {
                 let epoch_num = block.try_into().expect("should success");
                 self.consensus_graph()
                     .get_height_from_epoch_number(epoch_num)

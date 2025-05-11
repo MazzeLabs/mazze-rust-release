@@ -25,7 +25,6 @@ use std::{convert::TryInto, sync::Arc};
 use crate::rpc::types::{
     transaction::PackedOrExecuted, Bytes, Receipt, Transaction,
 };
-use primitives::pos::PosBlockId;
 
 #[derive(PartialEq, Debug)]
 pub enum BlockTransactions {
@@ -137,8 +136,6 @@ pub struct Block {
     pub size: Option<U256>,
     /// Custom field
     pub custom: Vec<Bytes>,
-    /// PoS reference.
-    pub pos_reference: Option<PosBlockId>,
 }
 
 impl Block {
@@ -338,7 +335,6 @@ impl Block {
                 .map(Into::into)
                 .collect(),
             size: Some(b.size().into()),
-            pos_reference: b.block_header.pos_reference().clone(),
         })
     }
 
@@ -439,8 +435,6 @@ pub struct Header {
     pub adaptive: bool,
     /// Nonce of the block
     pub nonce: U256,
-    /// PoS reference.
-    pub pos_reference: Option<PosBlockId>,
 }
 
 impl Header {
@@ -482,7 +476,6 @@ impl Header {
                 pow::pow_hash_to_quality(&pow_hash, &h.nonce())
             }), /* TODO(thegaram):
                  * include custom */
-            pos_reference: *h.pos_reference(),
         })
     }
 }
@@ -560,19 +553,18 @@ mod tests {
             transactions: BlockTransactions::Hashes(vec![]),
             custom: vec![],
             size: Some(69.into()),
-            pos_reference: Default::default(),
         };
         let serialized_block = serde_json::to_string(&block).unwrap();
 
         assert_eq!(
             serialized_block,
-            r#"{"hash":"0x0000000000000000000000000000000000000000000000000000000000000000","parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","height":"0x0","miner":"MAZZE:TYPE.NULL:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA0SFBNJM2","deferredStateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","deferredReceiptsRoot":"0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347","deferredLogsBloomHash":"0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5","blame":"0x0","transactionsRoot":"0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347","epochNumber":null,"blockNumber":null,"gasLimit":"0x0","gasUsed":null,"timestamp":"0x0","difficulty":"0x0","powQuality":null,"refereeHashes":[],"adaptive":false,"nonce":"0x0","transactions":[],"size":"0x45","custom":[],"posReference":null}"#
+            r#"{"hash":"0x0000000000000000000000000000000000000000000000000000000000000000","parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","height":"0x0","miner":"MAZZE:TYPE.NULL:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA0SFBNJM2","deferredStateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","deferredReceiptsRoot":"0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347","deferredLogsBloomHash":"0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5","blame":"0x0","transactionsRoot":"0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347","epochNumber":null,"blockNumber":null,"gasLimit":"0x0","gasUsed":null,"timestamp":"0x0","difficulty":"0x0","powQuality":null,"refereeHashes":[],"adaptive":false,"nonce":"0x0","transactions":[],"size":"0x45","custom":[]}"#
         );
     }
 
     #[test]
     fn test_deserialize_block() {
-        let serialized = r#"{"space":"Native","hash":"0x0000000000000000000000000000000000000000000000000000000000000000","parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","height":"0x0","miner":"MAZZE:TYPE.NULL:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA0SFBNJM2","deferredStateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","deferredReceiptsRoot":"0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347","deferredLogsBloomHash":"0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5","blame":"0x0","transactionsRoot":"0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347","epochNumber":"0x0","blockNumber":"0x0","gasLimit":"0x0","timestamp":"0x0","difficulty":"0x0","refereeHashes":[],"stable":null,"adaptive":false,"nonce":"0x0","transactions":[],"size":"0x45","custom":[],"posReference":null}"#;
+        let serialized = r#"{"space":"Native","hash":"0x0000000000000000000000000000000000000000000000000000000000000000","parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","height":"0x0","miner":"MAZZE:TYPE.NULL:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA0SFBNJM2","deferredStateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","deferredReceiptsRoot":"0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347","deferredLogsBloomHash":"0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5","blame":"0x0","transactionsRoot":"0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347","epochNumber":"0x0","blockNumber":"0x0","gasLimit":"0x0","timestamp":"0x0","difficulty":"0x0","refereeHashes":[],"stable":null,"adaptive":false,"nonce":"0x0","transactions":[],"size":"0x45","custom":[]}"#;
         let result_block = Block {
             hash: H256::default(),
             parent_hash: H256::default(),
@@ -597,7 +589,6 @@ mod tests {
             transactions: BlockTransactions::Full(vec![]),
             custom: vec![],
             size: Some(69.into()),
-            pos_reference: Default::default(),
         };
         let deserialized_block: Block =
             serde_json::from_str(serialized).unwrap();
@@ -625,13 +616,12 @@ mod tests {
             referee_hashes: Vec::new(),
             adaptive: false,
             nonce: 0.into(),
-            pos_reference: None,
         };
         let serialized_header = serde_json::to_string(&header).unwrap();
 
         assert_eq!(
             serialized_header,
-            r#"{"hash":"0x0000000000000000000000000000000000000000000000000000000000000000","parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","height":"0x0","miner":"MAZZE:TYPE.NULL:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA0SFBNJM2","deferredStateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","deferredReceiptsRoot":"0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347","deferredLogsBloomHash":"0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5","blame":"0x0","transactionsRoot":"0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347","epochNumber":null,"blockNumber":null,"gasLimit":"0x0","timestamp":"0x0","difficulty":"0x0","powQuality":null,"refereeHashes":[],"adaptive":false,"nonce":"0x0","posReference":null}"#
+            r#"{"hash":"0x0000000000000000000000000000000000000000000000000000000000000000","parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","height":"0x0","miner":"MAZZE:TYPE.NULL:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA0SFBNJM2","deferredStateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","deferredReceiptsRoot":"0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347","deferredLogsBloomHash":"0xd397b3b043d87fcd6fad1291ff0bfd16401c274896d8c63a923727f077b8e0b5","blame":"0x0","transactionsRoot":"0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347","epochNumber":null,"blockNumber":null,"gasLimit":"0x0","timestamp":"0x0","difficulty":"0x0","powQuality":null,"refereeHashes":[],"adaptive":false,"nonce":"0x0"}"#
         );
     }
 }

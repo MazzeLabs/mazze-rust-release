@@ -10,29 +10,21 @@ use std::{
 };
 
 use rustc_hex::FromHex;
-use serde::{Deserialize, Serialize};
 use toml::Value;
 
-use diem_crypto::{
-    bls::BLSPrivateKey, ec_vrf::EcVrfPublicKey, PrivateKey, ValidCryptoMaterial,
-};
-use diem_types::validator_config::{ConsensusPublicKey, ConsensusVRFPublicKey};
 use keylib::KeyPair;
 use mazze_executor::internal_contract::initialize_internal_contract_accounts;
 use mazze_internal_common::debug::ComputeEpochDebugRecord;
 use mazze_parameters::{
     consensus::{GENESIS_GAS_LIMIT, ONE_MAZZE_IN_MAZZY},
-    consensus_internal::{
-        GENESIS_TOKEN_COUNT_IN_MAZZE, TWO_YEAR_UNLOCK_TOKEN_COUNT_IN_MAZZE,
-    },
+    consensus_internal::GENESIS_TOKEN_COUNT_IN_MAZZE,
     genesis::*,
-    staking::POS_VOTE_PRICE,
 };
 use mazze_statedb::StateDb;
 use mazze_storage::{StorageManager, StorageManagerTrait};
 use mazze_types::{
     address_util::AddressUtil, Address, AddressSpaceUtil, AddressWithSpace,
-    Space, H256, U256,
+    Space, U256,
 };
 use primitives::{
     Action, Block, BlockHeaderBuilder, BlockReceipts, SignedTransaction,
@@ -40,7 +32,6 @@ use primitives::{
 use secret_store::SecretStore;
 
 use crate::verification::{compute_receipts_root, compute_transaction_root};
-use diem_types::account_address::AccountAddress;
 use mazze_executor::{
     executive::{
         contract_address, ExecutionOutcome, ExecutiveContext, TransactOptions,
@@ -52,25 +43,37 @@ use mazze_vm_types::{CreateContractAddress, Env};
 use primitives::transaction::native_transaction::NativeTransaction;
 
 pub fn default(dev_or_test_mode: bool) -> HashMap<AddressWithSpace, U256> {
-    if !dev_or_test_mode {
-        return HashMap::new();
-    }
     let mut accounts: HashMap<AddressWithSpace, U256> = HashMap::new();
-    // FIXME: Decide the genesis initialization for mainnet.
-    let balance = U256::from_dec_str("5000000000000000000000000000000000")
-        .expect("Not overflow"); // 5*10^33
-    accounts
-        .insert(DEV_GENESIS_KEY_PAIR.address().with_native_space(), balance);
-    accounts.insert(
-        DEV_GENESIS_KEY_PAIR_2.address().with_native_space(),
-        balance,
-    );
-    accounts
-        .insert(DEV_GENESIS_KEY_PAIR.evm_address().with_evm_space(), balance);
-    accounts.insert(
-        DEV_GENESIS_KEY_PAIR_2.evm_address().with_evm_space(),
-        balance,
-    );
+    if dev_or_test_mode {
+        // FIXME: Decide the genesis initialization for mainnet.
+        let balance = U256::from_dec_str("5000000000000000000000000000000000")
+            .expect("Not overflow"); // 5*10^33
+        accounts.insert(
+            DEV_GENESIS_KEY_PAIR.address().with_native_space(),
+            balance,
+        );
+        accounts.insert(
+            DEV_GENESIS_KEY_PAIR_2.address().with_native_space(),
+            balance,
+        );
+        accounts.insert(
+            DEV_GENESIS_KEY_PAIR.evm_address().with_evm_space(),
+            balance,
+        );
+        accounts.insert(
+            DEV_GENESIS_KEY_PAIR_2.evm_address().with_evm_space(),
+            balance,
+        );
+    }
+
+    let genesis_address = "0x144c9f06748b745fe9c74d91d8d089af8ba32167"
+        .trim_start_matches("0x")
+        .parse::<Address>()
+        .unwrap();
+    let balance = U256::from_dec_str("2500000000000000000000000000")
+        .expect("Not overflow"); // 2.5B
+    accounts.insert(genesis_address.with_native_space(), balance);
+
     accounts
 }
 
@@ -105,7 +108,6 @@ pub fn genesis_block(
     genesis_accounts: HashMap<AddressWithSpace, U256>,
     test_net_version: Address, initial_difficulty: U256, machine: Arc<Machine>,
     need_to_execute: bool, genesis_chain_id: Option<u32>,
-    initial_nodes: &Option<GenesisPosState>,
 ) -> Block {
     let mut state =
         State::new(StateDb::new(storage_manager.get_state_for_genesis_write()))
@@ -134,11 +136,6 @@ pub fn genesis_block(
     let genesis_token_count = U256::from(GENESIS_TOKEN_COUNT_IN_MAZZE)
         * U256::from(ONE_MAZZE_IN_MAZZY);
     state.add_total_issued(genesis_token_count);
-    let two_year_unlock_token_count =
-        U256::from(TWO_YEAR_UNLOCK_TOKEN_COUNT_IN_MAZZE)
-            * U256::from(ONE_MAZZE_IN_MAZZY);
-    let four_year_unlock_token_count =
-        genesis_token_count - two_year_unlock_token_count;
 
     let genesis_account_init_balance =
         U256::from(ONE_MAZZE_IN_MAZZY) * 100 + genesis_token_count;
@@ -170,143 +167,17 @@ pub fn genesis_block(
     create_create2factory_transaction.gas_price = 1.into();
     create_create2factory_transaction.storage_limit = 512;
 
-    let mut create_genesis_token_manager_two_year_unlock_transaction =
-        NativeTransaction::default();
-    create_genesis_token_manager_two_year_unlock_transaction.nonce = 1.into();
-    create_genesis_token_manager_two_year_unlock_transaction.data =
-        GENESIS_TRANSACTION_CREATE_GENESIS_TOKEN_MANAGER_TWO_YEAR_UNLOCK
-            .from_hex()
-            .unwrap();
-    create_genesis_token_manager_two_year_unlock_transaction.value =
-        two_year_unlock_token_count;
-    create_genesis_token_manager_two_year_unlock_transaction.action =
-        Action::Create;
-    create_genesis_token_manager_two_year_unlock_transaction.chain_id =
-        genesis_chain_id;
-    create_genesis_token_manager_two_year_unlock_transaction.gas =
-        4000000.into();
-    create_genesis_token_manager_two_year_unlock_transaction.gas_price =
-        1.into();
-    create_genesis_token_manager_two_year_unlock_transaction.storage_limit =
-        16000;
-
-    let mut create_genesis_token_manager_four_year_unlock_transaction =
-        NativeTransaction::default();
-    create_genesis_token_manager_four_year_unlock_transaction.nonce = 2.into();
-    create_genesis_token_manager_four_year_unlock_transaction.data =
-        GENESIS_TRANSACTION_CREATE_GENESIS_TOKEN_MANAGER_FOUR_YEAR_UNLOCK
-            .from_hex()
-            .unwrap();
-    create_genesis_token_manager_four_year_unlock_transaction.value =
-        four_year_unlock_token_count;
-    create_genesis_token_manager_four_year_unlock_transaction.action =
-        Action::Create;
-    create_genesis_token_manager_four_year_unlock_transaction.chain_id =
-        genesis_chain_id;
-    create_genesis_token_manager_four_year_unlock_transaction.gas =
-        8000000.into();
-    create_genesis_token_manager_four_year_unlock_transaction.gas_price =
-        1.into();
-    create_genesis_token_manager_four_year_unlock_transaction.storage_limit =
-        32000;
-
-    let mut create_genesis_investor_fund_transaction =
-        NativeTransaction::default();
-    create_genesis_investor_fund_transaction.nonce = 3.into();
-    create_genesis_investor_fund_transaction.data =
-        GENESIS_TRANSACTION_CREATE_FUND_POOL.from_hex().unwrap();
-    create_genesis_investor_fund_transaction.action = Action::Create;
-    create_genesis_investor_fund_transaction.chain_id = genesis_chain_id;
-    create_genesis_investor_fund_transaction.gas = 4000000.into();
-    create_genesis_investor_fund_transaction.gas_price = 1.into();
-    create_genesis_investor_fund_transaction.storage_limit = 1000;
-
-    let mut create_genesis_team_fund_transaction = NativeTransaction::default();
-    create_genesis_team_fund_transaction.nonce = 4.into();
-    create_genesis_team_fund_transaction.data =
-        GENESIS_TRANSACTION_CREATE_FUND_POOL.from_hex().unwrap();
-    create_genesis_team_fund_transaction.action = Action::Create;
-    create_genesis_team_fund_transaction.chain_id = genesis_chain_id;
-    create_genesis_team_fund_transaction.gas = 4000000.into();
-    create_genesis_team_fund_transaction.gas_price = 1.into();
-    create_genesis_team_fund_transaction.storage_limit = 1000;
-
-    let mut create_genesis_eco_fund_transaction = NativeTransaction::default();
-    create_genesis_eco_fund_transaction.nonce = 5.into();
-    create_genesis_eco_fund_transaction.data =
-        GENESIS_TRANSACTION_CREATE_FUND_POOL.from_hex().unwrap();
-    create_genesis_eco_fund_transaction.action = Action::Create;
-    create_genesis_eco_fund_transaction.chain_id = genesis_chain_id;
-    create_genesis_eco_fund_transaction.gas = 4000000.into();
-    create_genesis_eco_fund_transaction.gas_price = 1.into();
-    create_genesis_eco_fund_transaction.storage_limit = 1000;
-
-    let mut create_genesis_community_fund_transaction =
-        NativeTransaction::default();
-    create_genesis_community_fund_transaction.nonce = 6.into();
-    create_genesis_community_fund_transaction.data =
-        GENESIS_TRANSACTION_CREATE_FUND_POOL.from_hex().unwrap();
-    create_genesis_community_fund_transaction.action = Action::Create;
-    create_genesis_community_fund_transaction.chain_id = genesis_chain_id;
-    create_genesis_community_fund_transaction.gas = 4000000.into();
-    create_genesis_community_fund_transaction.gas_price = 1.into();
-    create_genesis_community_fund_transaction.storage_limit = 1000;
-
-    let genesis_transactions = vec![
-        Arc::new(genesis_transaction.fake_sign(Default::default())),
-        Arc::new(
-            create_create2factory_transaction
-                .fake_sign(genesis_account_address),
-        ),
-        Arc::new(
-            create_genesis_token_manager_two_year_unlock_transaction
-                .fake_sign(genesis_account_address),
-        ),
-        Arc::new(
-            create_genesis_token_manager_four_year_unlock_transaction
-                .fake_sign(genesis_account_address),
-        ),
-        Arc::new(
-            create_genesis_investor_fund_transaction
-                .fake_sign(genesis_account_address),
-        ),
-        Arc::new(
-            create_genesis_team_fund_transaction
-                .fake_sign(genesis_account_address),
-        ),
-        Arc::new(
-            create_genesis_eco_fund_transaction
-                .fake_sign(genesis_account_address),
-        ),
-        Arc::new(
-            create_genesis_community_fund_transaction
-                .fake_sign(genesis_account_address),
-        ),
-    ];
+    let genesis_transactions = vec![Arc::new(
+        create_create2factory_transaction.fake_sign(genesis_account_address),
+    )];
 
     if need_to_execute {
         const CREATE2FACTORY_TX_INDEX: usize = 1;
-        /*
-        const TWO_YEAR_UNLOCK_TX_INDEX: usize = 2;
-        const FOUR_YEAR_UNLOCK_TX_INDEX: usize = 3;
-        const INVESTOR_FUND_TX_INDEX: usize = 4;
-        const TEAM_FUND_TX_INDEX: usize = 5;
-        const ECO_FUND_TX_INDEX: usize = 6;
-        const COMMUNITY_FUND_TX_INDEX: usize = 7;
-        */
-        let contract_name_list = vec![
-            "CREATE2FACTORY",
-            "TWO_YEAR_UNLOCK",
-            "FOUR_YEAR_UNLOCK",
-            "INVESTOR_FUND",
-            "TEAM_FUND",
-            "ECO_FUND",
-            "COMMUNITY_FUND",
-        ];
+        let contract_name_list = vec!["CREATE2FACTORY"];
 
         for i in CREATE2FACTORY_TX_INDEX..=contract_name_list.len() {
             execute_genesis_transaction(
-                genesis_transactions[i].as_ref(),
+                genesis_transactions[i - 1].as_ref(),
                 &mut state,
                 machine.clone(),
             );
@@ -316,7 +187,7 @@ pub fn genesis_block(
                 0,
                 &genesis_account_address,
                 &(i - 1).into(),
-                genesis_transactions[i].as_ref().data(),
+                genesis_transactions[i - 1].as_ref().data(),
             );
 
             state
@@ -326,33 +197,6 @@ pub fn genesis_block(
                 "Genesis {:?} addresses: {:?}",
                 contract_name_list[i - 1],
                 contract_address
-            );
-        }
-    }
-
-    if let Some(initial_nodes) = initial_nodes {
-        for node in &initial_nodes.initial_nodes {
-            let stake_balance = U256::from(node.voting_power) * *POS_VOTE_PRICE;
-            // TODO(lpl): Pass in signed tx so they can be retired.
-            state
-                .add_balance(
-                    &node.address.with_native_space(),
-                    &(stake_balance
-                        + U256::from(ONE_MAZZE_IN_MAZZY) * U256::from(20)),
-                    CleanupMode::NoEmpty,
-                )
-                .unwrap();
-            state
-                .deposit(&node.address, &stake_balance, 0, false)
-                .unwrap();
-            let signed_tx = node
-                .register_tx
-                .clone()
-                .fake_sign(node.address.with_native_space());
-            execute_genesis_transaction(
-                &signed_tx,
-                &mut state,
-                machine.clone(),
             );
         }
     }
@@ -394,6 +238,10 @@ pub fn genesis_block(
     );
 
     state
+        .set_initial_storage_point_prop()
+        .expect("Failed to initialize storage point prop");
+
+    state
         .commit(
             genesis.block_header.hash(),
             /* debug_record = */ debug_record.as_mut(),
@@ -404,68 +252,8 @@ pub fn genesis_block(
         "genesis debug_record {}",
         serde_json::to_string(&debug_record).unwrap()
     );
+
     genesis
-}
-
-pub fn register_transaction(
-    bls_priv_key: BLSPrivateKey, vrf_pub_key: EcVrfPublicKey, power: u64,
-    genesis_chain_id: u32, legacy: bool,
-) -> NativeTransaction {
-    /// TODO: test this function with new internal contracts.
-    use bls_signatures::{
-        sigma_protocol, PrivateKey as BlsPrivKey, PublicKey as BlsPubKey,
-        Serialize,
-    };
-    use mazze_parameters::internal_contract_addresses::POS_REGISTER_CONTRACT_ADDRESS;
-    use rand_08::rngs::OsRng;
-    use solidity_abi::ABIEncodable;
-    use tiny_keccak::{Hasher, Keccak};
-
-    let bls_pub_key = bls_priv_key.public_key();
-    let (commit, answer) =
-        sigma_protocol::prove(bls_priv_key.raw_key(), &mut OsRng, legacy);
-
-    let mut encoded_commit = Vec::<u8>::new();
-    BlsPubKey::from(commit)
-        .write_bytes(&mut encoded_commit)
-        .expect("write to Vec<u8> never fails");
-
-    let mut encoded_answer = Vec::<u8>::new();
-    BlsPrivKey::from(answer)
-        .write_bytes(&mut encoded_answer)
-        .expect("write to Vec<u8> never fails");
-
-    let encoded_bls_pub_key = bls_pub_key.to_bytes();
-
-    let encoded_vrf_pub_key = vrf_pub_key.to_bytes();
-
-    let mut hasher = Keccak::v256();
-    hasher.update(encoded_bls_pub_key.as_slice());
-    hasher.update(encoded_vrf_pub_key.as_slice());
-    let mut computed_identifier = H256::default();
-    hasher.finalize(computed_identifier.as_bytes_mut());
-
-    let params = (
-        computed_identifier,
-        power,
-        encoded_bls_pub_key,
-        encoded_vrf_pub_key,
-        [encoded_commit, encoded_answer],
-    );
-
-    let mut call_data: Vec<u8> = "e335b451".from_hex().unwrap();
-    call_data.extend_from_slice(&params.abi_encode());
-
-    let mut tx = NativeTransaction::default();
-    tx.nonce = 0.into();
-    tx.data = call_data;
-    tx.value = U256::zero();
-    tx.action = Action::Call(POS_REGISTER_CONTRACT_ADDRESS);
-    tx.chain_id = genesis_chain_id;
-    tx.gas = 200000.into();
-    tx.gas_price = 1.into();
-    tx.storage_limit = 16000;
-    tx
 }
 
 fn execute_genesis_transaction(
@@ -538,20 +326,4 @@ pub fn load_file(
     }
 
     Ok(accounts)
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct GenesisPosNodeInfo {
-    pub address: Address,
-    pub bls_key: ConsensusPublicKey,
-    pub vrf_key: ConsensusVRFPublicKey,
-    pub voting_power: u64,
-    pub register_tx: NativeTransaction,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct GenesisPosState {
-    pub initial_nodes: Vec<GenesisPosNodeInfo>,
-    pub initial_committee: Vec<(AccountAddress, u64)>,
-    pub initial_seed: H256,
 }

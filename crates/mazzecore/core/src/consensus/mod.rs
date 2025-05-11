@@ -7,7 +7,6 @@ pub mod consensus_trait;
 pub mod debug_recompute;
 mod outlier_cache;
 mod pastset_cache;
-pub mod pos_handler;
 
 use super::consensus::consensus_inner::{
     confirmation_meter::ConfirmationMeter,
@@ -22,11 +21,8 @@ use crate::{
     block_data_manager::{
         BlockDataManager, BlockExecutionResultWithEpoch, DataVersionTuple,
     },
-    consensus::{
-        consensus_inner::{
-            consensus_executor::ConsensusExecutionConfiguration, StateBlameInfo,
-        },
-        pos_handler::PosVerifier,
+    consensus::consensus_inner::{
+        consensus_executor::ConsensusExecutionConfiguration, StateBlameInfo,
     },
     pow::{PowComputer, ProofOfWorkConfig},
     rpc_errors::{invalid_params, invalid_params_check, Result as RpcResult},
@@ -74,7 +70,6 @@ use primitives::{
     epoch::BlockHashOrEpochNumber,
     filter::{FilterError, LogFilter},
     log_entry::LocalizedLogEntry,
-    pos::PosBlockId,
     receipt::Receipt,
     BlockHeader, EpochId, EpochNumber, SignedTransaction, TransactionIndex,
     TransactionStatus,
@@ -251,20 +246,23 @@ impl ConsensusGraph {
     /// other components. The execution will be skipped if bench_mode sets
     /// to true.
     pub fn with_era_genesis(
-        conf: ConsensusConfig, txpool: SharedTransactionPool,
-        statistics: SharedStatistics, data_man: Arc<BlockDataManager>,
-        pow_config: ProofOfWorkConfig, pow: Arc<PowComputer>,
-        era_genesis_block_hash: &H256, era_stable_block_hash: &H256,
+        conf: ConsensusConfig,
+        txpool: SharedTransactionPool,
+        statistics: SharedStatistics,
+        data_man: Arc<BlockDataManager>,
+        pow_config: ProofOfWorkConfig,
+        pow: Arc<PowComputer>,
+        era_genesis_block_hash: &H256,
+        era_stable_block_hash: &H256,
         notifications: Arc<Notifications>,
         execution_conf: ConsensusExecutionConfiguration,
-        verification_config: VerificationConfig, node_type: NodeType,
-        pos_verifier: Arc<PosVerifier>,
+        verification_config: VerificationConfig,
+        node_type: NodeType,
     ) -> Self {
         let inner =
             Arc::new(RwLock::new(ConsensusGraphInner::with_era_genesis(
                 pow_config,
                 pow.clone(),
-                pos_verifier.clone(),
                 data_man.clone(),
                 conf.inner_conf.clone(),
                 era_genesis_block_hash,
@@ -277,7 +275,6 @@ impl ConsensusGraph {
             execution_conf,
             verification_config,
             conf.bench_mode,
-            pos_verifier.clone(),
         );
         let confirmation_meter = ConfirmationMeter::new();
 
@@ -295,7 +292,6 @@ impl ConsensusGraph {
                 statistics,
                 notifications,
                 node_type,
-                pos_verifier,
             ),
             confirmation_meter,
             best_info: RwLock::new(Arc::new(Default::default())),
@@ -316,13 +312,16 @@ impl ConsensusGraph {
     /// in the data manager and various other components. The execution will
     /// be skipped if bench_mode sets to true.
     pub fn new(
-        conf: ConsensusConfig, txpool: SharedTransactionPool,
-        statistics: SharedStatistics, data_man: Arc<BlockDataManager>,
-        pow_config: ProofOfWorkConfig, pow: Arc<PowComputer>,
+        conf: ConsensusConfig,
+        txpool: SharedTransactionPool,
+        statistics: SharedStatistics,
+        data_man: Arc<BlockDataManager>,
+        pow_config: ProofOfWorkConfig,
+        pow: Arc<PowComputer>,
         notifications: Arc<Notifications>,
         execution_conf: ConsensusExecutionConfiguration,
-        verification_conf: VerificationConfig, node_type: NodeType,
-        pos_verifier: Arc<PosVerifier>,
+        verification_conf: VerificationConfig,
+        node_type: NodeType,
     ) -> Self {
         let genesis_hash = data_man.get_cur_consensus_era_genesis_hash();
         let stable_hash = data_man.get_cur_consensus_era_stable_hash();
@@ -339,7 +338,6 @@ impl ConsensusGraph {
             execution_conf,
             verification_conf,
             node_type,
-            pos_verifier,
         )
     }
 
@@ -379,7 +377,6 @@ impl ConsensusGraph {
     pub fn check_mining_adaptive_block(
         &self, inner: &mut ConsensusGraphInner, parent_hash: &H256,
         referees: &Vec<H256>, difficulty: &U256,
-        pos_reference: Option<PosBlockId>,
     ) -> bool {
         let parent_index =
             *inner.hash_to_arena_indices.get(parent_hash).expect(
@@ -399,39 +396,16 @@ impl ConsensusGraph {
             parent_index,
             referee_indices,
             *difficulty,
-            pos_reference,
         )
     }
 
-    /// After considering the latest `pos_reference`, `parent_hash` may become
-    /// an invalid choice, so this function tries to update the parent and
-    /// referee choices with `pos_reference` provided.
+    /// This function chooses the correct parent and referees for a new block.
+    /// TODO: investigate if still needed
     pub fn choose_correct_parent(
         &self, parent_hash: &mut H256, referees: &mut Vec<H256>,
-        blame_info: &mut StateBlameInfo, pos_reference: Option<PosBlockId>,
+        blame_info: &mut StateBlameInfo,
     ) {
         let correct_parent_hash = {
-            if let Some(pos_ref) = &pos_reference {
-                loop {
-                    let inner = self.inner.read();
-                    let main_decision = inner
-                        .pos_verifier
-                        .get_main_decision(pos_ref)
-                        .expect("pos ref committed");
-                    if inner.hash_to_arena_indices.contains_key(&main_decision)
-                        || inner.main_block_processed(&main_decision)
-                    {
-                        // If this pos ref is processed in catching-up, its
-                        // main decision may have not been processed
-                        break;
-                    } else {
-                        // Wait without holding consensus inner lock.
-                        drop(inner);
-                        warn!("Wait for PoW to catch up with PoS");
-                        sleep(Duration::from_secs(1));
-                    }
-                }
-            }
             // recompute `blame_info` needs locking `self.inner`, so we limit
             // the lock scope here.
             let mut inner = self.inner.write();
@@ -450,11 +424,8 @@ impl ConsensusGraph {
                         .expect("Checked by the caller")
                 })
                 .collect();
-            let correct_parent = inner.choose_correct_parent(
-                parent_index,
-                referee_indices,
-                pos_reference,
-            );
+            let correct_parent =
+                inner.choose_correct_parent(parent_index, referee_indices);
             inner.arena[correct_parent].hash
         };
 
@@ -496,9 +467,6 @@ impl ConsensusGraph {
                 self.latest_confirmed_epoch_number()
             }
             EpochNumber::LatestMined => self.best_epoch_number(),
-            EpochNumber::LatestFinalized => {
-                self.latest_finalized_epoch_number()
-            }
             EpochNumber::LatestState => self.best_executed_state_epoch_number(),
             EpochNumber::Number(num) => {
                 let epoch_num = num;
@@ -2174,13 +2142,6 @@ impl ConsensusGraphTrait for ConsensusGraph {
         self.confirmation_meter.get_confirmed_epoch_num()
     }
 
-    fn latest_finalized_epoch_number(&self) -> u64 {
-        self.inner
-            .read_recursive()
-            .latest_epoch_confirmed_by_pos()
-            .1
-    }
-
     fn best_chain_id(&self) -> AllChainID {
         self.best_info.read_recursive().best_chain_id()
     }
@@ -2488,7 +2449,7 @@ impl ConsensusGraphTrait for ConsensusGraph {
         let new_consensus_inner = ConsensusGraphInner::with_era_genesis(
             old_consensus_inner.pow_config.clone(),
             old_consensus_inner.pow.clone(),
-            old_consensus_inner.pos_verifier.clone(),
+            // old_consensus_inner.pos_verifier.clone(),
             self.data_man.clone(),
             old_consensus_inner.inner_conf.clone(),
             &cur_era_genesis_hash,

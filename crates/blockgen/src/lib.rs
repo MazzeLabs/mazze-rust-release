@@ -14,16 +14,14 @@ use mazze_parameters::{
 };
 use mazze_types::{Address, SpaceMap, H256, U256};
 use mazzecore::{
-    block_parameters::*,
-    consensus::{consensus_inner::StateBlameInfo, pos_handler::PosVerifier},
-    pow::*,
-    verification::compute_transaction_root,
-    ConsensusGraph, ConsensusGraphTrait, SharedSynchronizationGraph,
+    block_parameters::*, consensus::consensus_inner::StateBlameInfo, pow::*,
+    verification::compute_transaction_root, ConsensusGraph,
+    ConsensusGraphTrait, SharedSynchronizationGraph,
     SharedSynchronizationService, SharedTransactionPool, Stopable,
 };
 use metrics::{Gauge, GaugeUsize};
 use parking_lot::{Mutex, RwLock};
-use primitives::{pos::PosBlockId, *};
+use primitives::*;
 use std::{
     cmp::max,
     collections::HashSet,
@@ -65,7 +63,6 @@ pub struct BlockGenerator {
     state: RwLock<MiningState>,
     workers: Mutex<Vec<(Worker, mpsc::Sender<ProofOfWorkProblem>)>>,
     pub stratum: RwLock<Option<Stratum>>,
-    pos_verifier: Arc<PosVerifier>,
 }
 
 pub struct Worker {
@@ -77,7 +74,7 @@ impl Worker {
     pub fn new(
         bg: Arc<BlockGenerator>,
         solution_sender: mpsc::Sender<ProofOfWorkSolution>,
-        problem_receiver: mpsc::Receiver<ProofOfWorkProblem>,
+        problem_receiver: mpsc::Receiver<ProofOfWorkProblem>, seed_hash: H256,
     ) -> Self {
         let bg_handle = bg;
 
@@ -86,7 +83,7 @@ impl Worker {
             .spawn(move || {
                 let sleep_duration = time::Duration::from_millis(100);
                 let mut problem: Option<ProofOfWorkProblem> = None;
-                let bg_pow = Arc::new(PowComputer::new());
+                let bg_pow = Arc::new(PowComputer::new(seed_hash));
 
                 loop {
                     match *bg_handle.state.read() {
@@ -111,10 +108,11 @@ impl Worker {
                         trace!("problem is {:?}", problem);
                         let boundary = problem.as_ref().unwrap().boundary;
                         let block_hash = problem.as_ref().unwrap().block_hash;
+                        let seed_hash = problem.as_ref().unwrap().seed_hash;
                         let mut nonce: u64 = rand::random();
                         for _i in 0..MINING_ITERATION {
                             let nonce_u256 = U256::from(nonce);
-                            let hash = bg_pow.compute(&nonce_u256, &block_hash);
+                            let hash = bg_pow.compute(&nonce_u256, &block_hash, &seed_hash);
                             if ProofOfWorkProblem::validate_hash_against_boundary(&hash, &nonce_u256, &boundary) {
                                 // problem solved
                                 match solution_sender
@@ -148,7 +146,7 @@ impl BlockGenerator {
         sync: SharedSynchronizationService,
         maybe_txgen: Option<SharedTransactionGenerator>,
         pow_config: ProofOfWorkConfig, pow: Arc<PowComputer>,
-        mining_author: Address, pos_verifier: Arc<PosVerifier>,
+        mining_author: Address,
     ) -> Self {
         info!(
             "Initial mining difficulty set to: {:?}",
@@ -165,7 +163,6 @@ impl BlockGenerator {
             state: RwLock::new(MiningState::Start),
             workers: Mutex::new(Vec::new()),
             stratum: RwLock::new(None),
-            pos_verifier,
         }
     }
 
@@ -214,8 +211,7 @@ impl BlockGenerator {
         &self, mut parent_hash: H256, mut referees: Vec<H256>,
         mut blame_info: StateBlameInfo, block_gas_limit: U256,
         transactions: Vec<Arc<SignedTransaction>>, difficulty: u64,
-        adaptive_opt: Option<bool>, maybe_pos_reference: Option<PosBlockId>,
-        maybe_base_price: Option<SpaceMap<U256>>,
+        adaptive_opt: Option<bool>, maybe_base_price: Option<SpaceMap<U256>>,
     ) -> Block {
         trace!("{} txs packed", transactions.len());
         let consensus_graph = self.consensus_graph();
@@ -225,7 +221,6 @@ impl BlockGenerator {
                 &mut parent_hash,
                 &mut referees,
                 &mut blame_info,
-                maybe_pos_reference,
             );
         }
         let mut consensus_inner = consensus_graph.inner.write();
@@ -244,7 +239,6 @@ impl BlockGenerator {
                 &parent_hash,
                 &referees,
                 &expected_difficulty,
-                maybe_pos_reference,
             )
         };
 
@@ -292,7 +286,6 @@ impl BlockGenerator {
             .with_nonce(U256::zero())
             .with_gas_limit(block_gas_limit)
             .with_custom(custom)
-            .with_pos_reference(maybe_pos_reference)
             .with_base_price(maybe_base_price)
             .build();
 
@@ -304,7 +297,6 @@ impl BlockGenerator {
     pub fn assemble_new_fixed_block(
         &self, parent_hash: H256, referee: Vec<H256>, num_txs: usize,
         difficulty: u64, adaptive: bool, block_gas_target: u64,
-        pos_reference: Option<PosBlockId>,
     ) -> Result<Block, String> {
         let consensus_graph = self.consensus_graph();
         let state_blame_info = consensus_graph
@@ -325,33 +317,20 @@ impl BlockGenerator {
 
         let machine = self.txpool.machine();
         let params = machine.params();
-        let cip1559_height = params.transition_heights.cip1559;
+
         let pack_height = best_info.best_epoch_number + 1;
 
-        let block_gas_limit = if pack_height >= cip1559_height {
-            (block_gas_target * ELASTICITY_MULTIPLIER as u64).into()
+        let block_gas_limit =
+            (block_gas_target * ELASTICITY_MULTIPLIER as u64).into();
+
+        let parent_base_price = if 1 == pack_height {
+            params.init_base_price()
         } else {
-            block_gas_target.into()
+            parent_block.base_price().unwrap()
         };
 
-        let (transactions, maybe_base_price) = if pack_height < cip1559_height {
-            let txs = self.txpool.pack_transactions(
-                num_txs,
-                block_gas_limit,
-                U256::zero(),
-                block_size_limit,
-                best_info.best_epoch_number,
-                best_info.best_block_number,
-            );
-            (txs, None)
-        } else {
-            let parent_base_price = if cip1559_height == pack_height {
-                params.init_base_price()
-            } else {
-                parent_block.base_price().unwrap()
-            };
-
-            let (txs, base_price) = self.txpool.pack_transactions_1559(
+        let (transactions, maybe_base_price) =
+            self.txpool.pack_transactions_1559(
                 num_txs,
                 block_gas_limit,
                 parent_base_price,
@@ -359,8 +338,6 @@ impl BlockGenerator {
                 best_info.best_epoch_number,
                 best_info.best_block_number,
             );
-            (txs, Some(base_price))
-        };
 
         Ok(self.assemble_new_block_impl(
             parent_hash,
@@ -370,8 +347,7 @@ impl BlockGenerator {
             transactions,
             difficulty,
             Some(adaptive),
-            pos_reference.or_else(|| self.get_pos_reference(&parent_hash)),
-            maybe_base_price,
+            Some(maybe_base_price),
         ))
     }
 
@@ -407,20 +383,6 @@ impl BlockGenerator {
 
         let best_block_hash = best_info.best_block_hash.clone();
         let mut referee = best_info.bounded_terminal_block_hashes.clone();
-        // TODO: enable PoS reference - disabled for block processing debugging
-        // let maybe_pos_reference = if self
-        //     .pos_verifier
-        //     .is_enabled_at_height(best_info.best_epoch_number + 1)
-        // {
-        //     // parent is in consensus, so our PoS must have processed its
-        //     // pos_reference, meaning this latest pos reference must
-        //     // be valid.
-        //     Some(self.pos_verifier.get_latest_pos_reference())
-        // } else {
-        //     None
-        // };
-
-        let maybe_pos_reference = None;
 
         referee.retain(|r| *r != best_block_hash);
 
@@ -432,7 +394,6 @@ impl BlockGenerator {
             transactions,
             0,
             None,
-            maybe_pos_reference,
             maybe_base_price,
         )
     }
@@ -487,7 +448,6 @@ impl BlockGenerator {
             transactions,
             0,
             None,
-            self.get_pos_reference(&best_block_hash),
             maybe_base_price,
         )
     }
@@ -529,7 +489,7 @@ impl BlockGenerator {
     // This function is used in test only to simulate attacker behavior.
     pub fn generate_fixed_block(
         &self, parent_hash: H256, referee: Vec<H256>, num_txs: usize,
-        difficulty: u64, adaptive: bool, pos_reference: Option<H256>,
+        difficulty: u64, adaptive: bool,
     ) -> Result<H256, String> {
         let block = self.assemble_new_fixed_block(
             parent_hash,
@@ -538,7 +498,6 @@ impl BlockGenerator {
             difficulty,
             adaptive,
             GENESIS_GAS_LIMIT,
-            pos_reference,
         )?;
         Ok(self.generate_block_impl(block))
     }
@@ -620,7 +579,6 @@ impl BlockGenerator {
             transactions,
             0,
             adaptive,
-            self.get_pos_reference(&best_block_hash),
             maybe_base_price,
         );
 
@@ -661,7 +619,6 @@ impl BlockGenerator {
             transactions,
             0,
             Some(adaptive),
-            self.get_pos_reference(&parent_hash),
             maybe_base_price,
         );
         if let Some(custom) = maybe_custom {
@@ -705,7 +662,6 @@ impl BlockGenerator {
             transactions,
             0,
             Some(adaptive),
-            self.get_pos_reference(&parent_hash),
             maybe_base_price,
         );
         block.block_header.set_nonce(nonce);
@@ -731,6 +687,10 @@ impl BlockGenerator {
             block.block_header.height(),
             block.block_header.problem_hash(),
             *difficulty,
+            self.consensus_graph()
+                .get_data_manager()
+                .db_manager
+                .get_current_seed_hash(block.block_header.height()),
         );
         let mut nonce: u64 = rand::random();
         loop {
@@ -772,7 +732,7 @@ impl BlockGenerator {
 
     /// Start num_worker new workers
     pub fn start_new_worker(
-        num_worker: u32, bg: Arc<BlockGenerator>,
+        num_worker: u32, bg: Arc<BlockGenerator>, seed_hash: H256,
     ) -> mpsc::Receiver<ProofOfWorkSolution> {
         let (solution_sender, solution_receiver) = mpsc::channel();
         let mut workers = bg.workers.lock();
@@ -783,6 +743,7 @@ impl BlockGenerator {
                     bg.clone(),
                     solution_sender.clone(),
                     problem_receiver,
+                    seed_hash,
                 ),
                 problem_sender,
             ));
@@ -811,7 +772,9 @@ impl BlockGenerator {
         solution_receiver
     }
 
-    pub fn start_mining(bg: Arc<BlockGenerator>, _payload_len: u32) {
+    pub fn start_mining(
+        bg: Arc<BlockGenerator>, _payload_len: u32, seed_hash: H256,
+    ) {
         match bg.pow_config.mining_type {
             MiningType::Disable => {
                 debug!("Mining is disabled.");
@@ -819,7 +782,7 @@ impl BlockGenerator {
             }
             MiningType::CPU => {
                 debug!("Starting CPU mining.");
-                BlockGenerator::start_cpu_mining(bg, _payload_len);
+                BlockGenerator::start_cpu_mining(bg, _payload_len, seed_hash);
             }
             MiningType::Stratum => {
                 debug!("Starting Stratum mining server.");
@@ -828,8 +791,10 @@ impl BlockGenerator {
         }
     }
 
-    fn start_cpu_mining(bg: Arc<BlockGenerator>, _payload_len: u32) {
-        let pow_computer = Arc::new(PowComputer::new());
+    fn start_cpu_mining(
+        bg: Arc<BlockGenerator>, _payload_len: u32, seed_hash: H256,
+    ) {
+        let pow_computer = Arc::new(PowComputer::new(seed_hash));
         let mut current_mining_block: Option<Block> = None;
         let mut current_problem: Option<ProofOfWorkProblem> = None;
         let mut last_assemble = SystemTime::now();
@@ -853,6 +818,10 @@ impl BlockGenerator {
                     new_block.block_header.height(),
                     new_block.block_header.problem_hash(),
                     *new_block.block_header.difficulty(),
+                    bg.consensus_graph()
+                        .get_data_manager()
+                        .db_manager
+                        .get_current_seed_hash(new_block.block_header.height()),
                 );
 
                 current_mining_block = Some(new_block);
@@ -904,7 +873,11 @@ impl BlockGenerator {
         let mut hashes_checked = 0;
 
         while start_time.elapsed() < timeout {
-            let hash = pow_computer.compute(&nonce, &problem.block_hash);
+            let hash = pow_computer.compute(
+                &nonce,
+                &problem.block_hash,
+                &problem.seed_hash,
+            );
             hashes_checked += 1;
 
             if ProofOfWorkProblem::validate_hash_against_boundary(
@@ -974,18 +947,23 @@ impl BlockGenerator {
                     .block_header
                     .difficulty();
                 debug!("Current difficulty: {:?}", current_difficulty);
+                let height = current_mining_block
+                    .as_ref()
+                    .unwrap()
+                    .block_header
+                    .height();
                 let problem = ProofOfWorkProblem::new(
-                    current_mining_block
-                        .as_ref()
-                        .unwrap()
-                        .block_header
-                        .height(),
+                    height,
                     current_mining_block
                         .as_ref()
                         .unwrap()
                         .block_header
                         .problem_hash(),
                     *current_difficulty,
+                    bg.consensus_graph()
+                        .get_data_manager()
+                        .db_manager
+                        .get_current_seed_hash(height),
                 );
                 last_assemble = SystemTime::now();
                 trace!("send problem: {:?}", problem);
@@ -1080,19 +1058,6 @@ impl BlockGenerator {
                 );
             }
             thread::sleep(interval);
-        }
-    }
-
-    /// Get the latest pos reference according to parent height.
-    ///
-    /// Return `None` if parent block is missing in `BlockDataManager`, but this
-    /// should not happen in the current usage.
-    fn get_pos_reference(&self, parent_hash: &H256) -> Option<PosBlockId> {
-        let height = self.graph.data_man.block_height_by_hash(parent_hash)? + 1;
-        if self.pos_verifier.is_enabled_at_height(height) {
-            Some(self.pos_verifier.get_latest_pos_reference())
-        } else {
-            None
         }
     }
 }

@@ -17,7 +17,7 @@ use crate::{
     substate::Substate,
 };
 use mazze_bytes::Bytes;
-use mazze_parameters::staking::{
+use mazze_parameters::collateral::{
     code_collateral_units, MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
 };
 use mazze_types::{
@@ -116,7 +116,7 @@ impl<'a> Context<'a> {
     }
 
     fn blockhash_from_env(&self, number: &U256) -> H256 {
-        if self.space == Space::Ethereum && self.spec.cip98 {
+        if self.space == Space::Ethereum {
             return if U256::from(self.env().epoch_height) == number + 1 {
                 self.env().last_hash.clone()
             } else {
@@ -140,7 +140,6 @@ impl<'a> Context<'a> {
 
         let state_res = match self.space {
             Space::Native => {
-                return_if!(number < self.spec.cip133_b);
                 return_if!(number > self.env.number);
                 return_if!(number
                     .checked_add(65536)
@@ -148,7 +147,6 @@ impl<'a> Context<'a> {
                 self.state.get_system_storage(&block_hash_slot(number))?
             }
             Space::Ethereum => {
-                return_if!(number < self.spec.cip133_e);
                 return_if!(number > self.env.epoch_height);
                 return_if!(number
                     .checked_add(65536)
@@ -559,15 +557,7 @@ impl<'a> ContextTrait for Context<'a> {
     }
 
     fn blockhash_source(&self) -> vm::BlockHashSource {
-        let from_state = match self.space {
-            Space::Native => self.env.number >= self.spec.cip133_b,
-            Space::Ethereum => self.env.epoch_height >= self.spec.cip133_e,
-        };
-        if from_state {
-            BlockHashSource::State
-        } else {
-            BlockHashSource::Env
-        }
+        BlockHashSource::State
     }
 }
 
@@ -641,8 +631,6 @@ mod tests {
             accumulated_gas_used: 0.into(),
             gas_limit: 0.into(),
             epoch_height: 0,
-            pos_view: None,
-            finalized_epoch: None,
             transaction_epoch_bound: TRANSACTION_DEFAULT_EPOCH_BOUND,
             base_gas_price: Default::default(),
             burnt_gas_price: Default::default(),

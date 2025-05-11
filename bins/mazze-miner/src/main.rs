@@ -9,14 +9,13 @@ use tokio;
 use tokio::signal::ctrl_c;
 use tokio::time::{sleep, Duration};
 
+mod core;
 mod miner;
 mod miner_config;
 mod stratum_client;
+
 use miner::Miner;
 use stratum_client::StratumClient;
-mod core;
-mod core_numa;
-mod mining_metrics;
 
 async fn connect_with_retry(
     config: &MinerConfig, miner: Miner,
@@ -56,7 +55,6 @@ async fn connect_with_retry(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // env_logger::init();
     env_logger::builder()
         .format_timestamp_millis()
         .filter_module(
@@ -80,9 +78,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.worker_id, config.num_threads
     );
 
-    // let (miner, solution_receiver) =
-    //     Miner::new(config.num_threads, config.worker_id);
-
     // Create NUMA-aware miner instead of legacy miner
     let (miner, solution_receiver) =
         match Miner::new_numa(config.num_threads, config.worker_id) {
@@ -90,12 +85,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => {
                 error!("Failed to initialize NUMA-aware miner: {:?}", e);
                 return Err("Failed to initialize NUMA-aware miner".into());
-                // return Err(e.into());
             }
         };
-
-    info!("Sleeping for 30 seconds to allow VMs to initialize...");
-    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
 
     // Set up Ctrl+C handler
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);

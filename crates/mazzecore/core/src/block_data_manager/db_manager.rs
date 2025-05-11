@@ -3,12 +3,11 @@ use crate::{
         db_decode_list, db_encode_list, BlamedHeaderVerifiedRoots,
         BlockExecutionResultWithEpoch, BlockRewardResult, BlockTracesWithEpoch,
         CheckpointHashes, DataVersionTuple, EpochExecutionContext,
-        LocalBlockInfo, PosRewardInfo,
+        LocalBlockInfo,
     },
     db::{
         COL_BLAMED_HEADER_VERIFIED_ROOTS, COL_BLOCKS, COL_BLOCK_TRACES,
-        COL_EPOCH_NUMBER, COL_HASH_BY_BLOCK_NUMBER, COL_MISC,
-        COL_REWARD_BY_POS_EPOCH, COL_TX_INDEX,
+        COL_EPOCH_NUMBER, COL_HASH_BY_BLOCK_NUMBER, COL_MISC, COL_TX_INDEX,
     },
     pow::PowComputer,
     verification::VerificationConfig,
@@ -19,6 +18,7 @@ use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use mazze_internal_common::{
     DatabaseDecodable, DatabaseEncodable, EpochExecutionCommitment,
 };
+use mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
 use mazze_storage::{
     storage_db::KeyValueDbTrait, KvdbRocksdb, KvdbSqlite, KvdbSqliteStatements,
 };
@@ -49,9 +49,8 @@ enum DBTable {
     BlamedHeaderVerifiedRoots,
     BlockTraces,
     HashByBlockNumber,
-    RewardByPosEpoch,
 }
-
+// TODO: validate POS related columns have been successfully removed
 fn rocks_db_col(table: DBTable) -> u32 {
     match table {
         DBTable::Misc => COL_MISC,
@@ -61,7 +60,6 @@ fn rocks_db_col(table: DBTable) -> u32 {
         DBTable::BlamedHeaderVerifiedRoots => COL_BLAMED_HEADER_VERIFIED_ROOTS,
         DBTable::BlockTraces => COL_BLOCK_TRACES,
         DBTable::HashByBlockNumber => COL_HASH_BY_BLOCK_NUMBER,
-        DBTable::RewardByPosEpoch => COL_REWARD_BY_POS_EPOCH,
     }
 }
 
@@ -74,7 +72,6 @@ fn sqlite_db_table(table: DBTable) -> String {
         DBTable::BlamedHeaderVerifiedRoots => "blamed_header_verified_roots",
         DBTable::BlockTraces => "block_traces",
         DBTable::HashByBlockNumber => "hash_by_block_number",
-        DBTable::RewardByPosEpoch => "reward_by_pos_epoch",
     }
     .into()
 }
@@ -82,10 +79,13 @@ fn sqlite_db_table(table: DBTable) -> String {
 pub struct DBManager {
     table_db: HashMap<DBTable, Box<dyn KeyValueDbTrait<ValueType = Box<[u8]>>>>,
     pow: Arc<PowComputer>,
+    genesis_hash: H256,
 }
 
 impl DBManager {
-    pub fn new_from_rocksdb(db: Arc<SystemDB>, pow: Arc<PowComputer>) -> Self {
+    pub fn new_from_rocksdb(
+        db: Arc<SystemDB>, pow: Arc<PowComputer>, genesis_hash: H256,
+    ) -> Self {
         let mut table_db = HashMap::new();
 
         for table in DBTable::iter() {
@@ -98,12 +98,18 @@ impl DBManager {
                     as Box<dyn KeyValueDbTrait<ValueType = Box<[u8]>>>,
             );
         }
-        Self { table_db, pow }
+        Self {
+            table_db,
+            pow,
+            genesis_hash,
+        }
     }
 }
 
 impl DBManager {
-    pub fn new_from_sqlite(db_path: &Path, pow: Arc<PowComputer>) -> Self {
+    pub fn new_from_sqlite(
+        db_path: &Path, pow: Arc<PowComputer>, genesis_hash: H256,
+    ) -> Self {
         if let Err(e) = fs::create_dir_all(db_path) {
             panic!("Error creating database directory: {:?}", e);
         }
@@ -132,7 +138,11 @@ impl DBManager {
                     as Box<dyn KeyValueDbTrait<ValueType = Box<[u8]>>>,
             );
         }
-        Self { table_db, pow }
+        Self {
+            table_db,
+            pow,
+            genesis_hash,
+        }
     }
 }
 
@@ -172,12 +182,17 @@ impl DBManager {
     }
 
     pub fn block_header_from_db(&self, hash: &H256) -> Option<BlockHeader> {
-        let mut block_header =
+        let mut block_header: BlockHeader =
             self.load_decodable_val(DBTable::Blocks, hash.as_bytes())?;
+
+        let seed_hash = self.get_current_seed_hash(block_header.height());
+
         VerificationConfig::get_or_fill_header_pow_quality(
             &self.pow,
             &mut block_header,
+            &seed_hash,
         );
+
         Some(block_header)
     }
 
@@ -487,25 +502,6 @@ impl DBManager {
         self.load_decodable_val(DBTable::Misc, GC_PROGRESS_KEY)
     }
 
-    pub fn insert_pos_reward(
-        &self, pos_epoch: u64, pos_reward: &PosRewardInfo,
-    ) {
-        self.insert_encodable_val(
-            DBTable::RewardByPosEpoch,
-            &pos_epoch.to_be_bytes(),
-            pos_reward,
-        );
-    }
-
-    pub fn pos_reward_by_pos_epoch(
-        &self, pos_epoch: u64,
-    ) -> Option<PosRewardInfo> {
-        self.load_decodable_val(
-            DBTable::RewardByPosEpoch,
-            &pos_epoch.to_be_bytes(),
-        )
-    }
-
     /// The functions below are private utils used by the DBManager to access
     /// database
     fn insert_to_db(&self, table: DBTable, db_key: &[u8], value: Vec<u8>) {
@@ -573,6 +569,30 @@ impl DBManager {
     {
         let encoded = self.load_from_db(table, db_key)?;
         Some(db_decode_list(&encoded).expect("decode succeeds"))
+    }
+
+    pub fn get_current_seed_hash(&self, epoch_height: u64) -> H256 {
+        // Calculate the current epoch
+        let current_epoch = epoch_height / RANDOMX_EPOCH_LENGTH;
+
+        // For epoch 0, use genesis block
+        if current_epoch == 0 {
+            return self.genesis_hash;
+        }
+
+        // For all other epochs, use the block at the start of the previous epoch
+        // floor((height - 1) / epoch_length) * epoch_length - epoch_length
+        let seed_height = (current_epoch - 1) * RANDOMX_EPOCH_LENGTH;
+        let seed_hash = self
+            .executed_epoch_set_hashes_from_db(seed_height)
+            .and_then(|hashes| hashes.last().cloned())
+            .unwrap_or_default();
+        trace!(
+            "get_current_seed hash for epoch {}: {:?}",
+            current_epoch,
+            seed_hash
+        );
+        seed_hash
     }
 }
 

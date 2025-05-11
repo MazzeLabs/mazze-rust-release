@@ -8,6 +8,10 @@ use primitives::BlockNumber;
 // update the hardcoded test mode genesis state  without waiting for the
 // implementation of each contract.
 make_solidity_contract! {
+    pub(super) struct Reserved2(RESERVED2, "placeholder");
+}
+
+make_solidity_contract! {
     pub(super) struct Reserved3(RESERVED3, "placeholder");
 }
 

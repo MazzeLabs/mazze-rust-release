@@ -3,7 +3,6 @@
 // See http://www.gnu.org/licenses/
 
 use delegate::delegate;
-use diem_types::transaction::TransactionPayload;
 use futures::future::{self, FutureExt, TryFutureExt};
 use jsonrpc_core::{BoxFuture, Error as RpcError, Result as JsonRpcResult};
 use mazze_types::{
@@ -25,9 +24,7 @@ use network::{
     node_table::{Node, NodeId},
     throttling, SessionDetails, UpdateNodeOperation,
 };
-use primitives::{
-    Account, DepositInfo, StorageRoot, TransactionWithSignature, VoteStakeInfo,
-};
+use primitives::{Account, StorageRoot, TransactionWithSignature};
 use rlp::Encodable;
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 // To convert from RpcResult to BoxFuture by delegate! macro automatically.
@@ -38,24 +35,20 @@ use crate::{
         impls::common::{self, RpcImpl as CommonImpl},
         traits::{debug::LocalRpc, mazze::Mazze, test::TestRpc},
         types::{
-            errors::check_rpc_address_network,
-            pos::{Block as PosBlock, PoSEpochReward},
-            Account as RpcAccount, AccountPendingInfo,
-            AccountPendingTransactions, BlameInfo, Block as RpcBlock,
-            BlockHashOrEpochNumber, Bytes, CallRequest,
+            errors::check_rpc_address_network, Account as RpcAccount,
+            AccountPendingInfo, AccountPendingTransactions, BlameInfo,
+            Block as RpcBlock, BlockHashOrEpochNumber, Bytes, CallRequest,
             CheckBalanceAgainstTransactionResponse, ConsensusGraphStates,
             EpochNumber, EstimateGasAndCollateralResponse, FeeHistory,
-            Log as RpcLog, MazzeFeeHistory, MazzeRpcLogFilter, PoSEconomics,
+            Log as RpcLog, MazzeFeeHistory, MazzeRpcLogFilter,
             Receipt as RpcReceipt, RewardInfo as RpcRewardInfo, RpcAddress,
             SendTxRequest, SponsorInfo, StatOnGasLoad, Status as RpcStatus,
             StorageCollateralInfo, SyncGraphStates, TokenSupplyInfo,
-            Transaction as RpcTransaction, VoteParamsInfo, WrapTransaction,
-            U64 as HexU64,
+            Transaction as RpcTransaction, WrapTransaction, U64 as HexU64,
         },
         RpcBoxFuture, RpcResult,
     },
 };
-use diem_types::account_address::AccountAddress;
 use mazze_addr::Network;
 use mazze_parameters::rpc::GAS_PRICE_DEFAULT_VALUE;
 use mazzecore::{
@@ -288,65 +281,6 @@ impl RpcImpl {
         Box::new(fut.boxed().compat())
     }
 
-    fn staking_balance(
-        &self, address: RpcAddress, num: Option<EpochNumber>,
-    ) -> RpcBoxFuture<U256> {
-        let epoch = num.unwrap_or(EpochNumber::LatestState).into();
-
-        info!(
-            "RPC Request: mazze_getStakingBalance address={:?} epoch={:?}",
-            address, epoch
-        );
-
-        // clone `self.light` to avoid lifetime issues due to capturing `self`
-        let light = self.light.clone();
-
-        let fut = async move {
-            Self::check_address_network(address.network, &light)?;
-
-            let account = invalid_params_check(
-                "address",
-                light.get_account(epoch, address.into()).await,
-            )?;
-
-            Ok(account
-                .map(|account| account.staking_balance.into())
-                .unwrap_or_default())
-        };
-
-        Box::new(fut.boxed().compat())
-    }
-
-    fn deposit_list(
-        &self, address: RpcAddress, num: Option<EpochNumber>,
-    ) -> RpcBoxFuture<Vec<DepositInfo>> {
-        let epoch = num.unwrap_or(EpochNumber::LatestState).into();
-
-        info!(
-            "RPC Request: mazze_getDepositList address={:?} epoch_num={:?}",
-            address, epoch
-        );
-
-        // clone `self.light` to avoid lifetime issues due to capturing `self`
-        let light = self.light.clone();
-
-        let fut = async move {
-            Self::check_address_network(address.network, &light)?;
-
-            let maybe_list = invalid_params_check(
-                "address",
-                light.get_deposit_list(epoch, address.into()).await,
-            )?;
-
-            match maybe_list {
-                None => Ok(vec![]),
-                Some(deposit_list) => Ok(deposit_list.0),
-            }
-        };
-
-        Box::new(fut.boxed().compat())
-    }
-
     pub fn account_pending_info(
         &self, address: RpcAddress,
     ) -> RpcBoxFuture<Option<AccountPendingInfo>> {
@@ -356,36 +290,6 @@ impl RpcImpl {
             // TODO impl light node rpc
             Ok(None)
         };
-        Box::new(fut.boxed().compat())
-    }
-
-    fn vote_list(
-        &self, address: RpcAddress, num: Option<EpochNumber>,
-    ) -> RpcBoxFuture<Vec<VoteStakeInfo>> {
-        let epoch = num.unwrap_or(EpochNumber::LatestState).into();
-
-        info!(
-            "RPC Request: mazze_getVoteList address={:?} epoch_num={:?}",
-            address, epoch
-        );
-
-        // clone `self.light` to avoid lifetime issues due to capturing `self`
-        let light = self.light.clone();
-
-        let fut = async move {
-            Self::check_address_network(address.network, &light)?;
-
-            let maybe_list = invalid_params_check(
-                "address",
-                light.get_vote_list(epoch, address.into()).await,
-            )?;
-
-            match maybe_list {
-                None => Ok(vec![]),
-                Some(vote_list) => Ok(vote_list.0),
-            }
-        };
-
         Box::new(fut.boxed().compat())
     }
 
@@ -975,76 +879,6 @@ impl RpcImpl {
         Box::new(fut.boxed().compat())
     }
 
-    pub fn interest_rate(
-        &self, epoch: Option<EpochNumber>,
-    ) -> RpcBoxFuture<U256> {
-        let epoch = epoch.unwrap_or(EpochNumber::LatestState).into();
-        info!("RPC Request: mazze_getInterestRate epoch={:?}", epoch);
-
-        // clone to avoid lifetime issues due to capturing `self`
-        let light = self.light.clone();
-
-        let fut = async move {
-            Ok(light
-                .get_interest_rate(epoch)
-                .await
-                .map_err(|e| e.to_string())
-                .map_err(RpcError::invalid_params)?)
-        };
-
-        Box::new(fut.boxed().compat())
-    }
-
-    pub fn accumulate_interest_rate(
-        &self, epoch: Option<EpochNumber>,
-    ) -> RpcBoxFuture<U256> {
-        let epoch = epoch.unwrap_or(EpochNumber::LatestState).into();
-
-        info!(
-            "RPC Request: mazze_getAccumulateInterestRate epoch={:?}",
-            epoch
-        );
-
-        // clone to avoid lifetime issues due to capturing `self`
-        let light = self.light.clone();
-
-        let fut = async move {
-            Ok(light
-                .get_accumulate_interest_rate(epoch)
-                .await
-                .map_err(|e| e.to_string())
-                .map_err(RpcError::invalid_params)?)
-        };
-
-        Box::new(fut.boxed().compat())
-    }
-
-    pub fn pos_economics(
-        &self, epoch: Option<EpochNumber>,
-    ) -> RpcBoxFuture<PoSEconomics> {
-        let epoch = epoch.unwrap_or(EpochNumber::LatestState).into();
-
-        info!("RPC Request: mazze_getPoSEconomics epoch={:?}", epoch);
-
-        // clone to avoid lifetime issues due to capturing `self`
-        let light = self.light.clone();
-
-        let fut = async move {
-            Ok(light
-                .get_pos_economics(epoch)
-                .await
-                .map(|ans| PoSEconomics {
-                    total_pos_staking_tokens: ans[0],
-                    distributable_pos_interest: ans[1],
-                    last_distribute_block: ans[2].as_u64().into(),
-                })
-                .map_err(|e| e.to_string())
-                .map_err(RpcError::invalid_params)?)
-        };
-
-        Box::new(fut.boxed().compat())
-    }
-
     fn check_balance_against_transaction(
         &self, account_addr: RpcAddress, contract_addr: RpcAddress,
         gas_limit: U256, gas_price: U256, storage_limit: U256,
@@ -1226,7 +1060,6 @@ impl Mazze for MazzeHandler {
 
         to self.rpc_impl {
             fn account(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<RpcAccount>;
-            fn accumulate_interest_rate(&self, num: Option<EpochNumber>) -> BoxFuture<U256>;
             fn admin(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<Option<RpcAddress>>;
             fn balance(&self, address: RpcAddress, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> BoxFuture<U256>;
             fn block_by_epoch_number(&self, epoch_num: EpochNumber, include_txs: bool) -> BoxFuture<Option<RpcBlock>>;
@@ -1236,21 +1069,16 @@ impl Mazze for MazzeHandler {
             fn check_balance_against_transaction(&self, account_addr: RpcAddress, contract_addr: RpcAddress, gas_limit: U256, gas_price: U256, storage_limit: U256, epoch: Option<EpochNumber>) -> BoxFuture<CheckBalanceAgainstTransactionResponse>;
             fn code(&self, address: RpcAddress, block_hash_or_epoch_num: Option<BlockHashOrEpochNumber>) -> BoxFuture<Bytes>;
             fn collateral_for_storage(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<U256>;
-            fn deposit_list(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<Vec<DepositInfo>>;
             fn epoch_number(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<U256>;
             fn gas_price(&self) -> BoxFuture<U256>;
             fn get_logs(&self, filter: MazzeRpcLogFilter) -> BoxFuture<Vec<RpcLog>>;
-            fn interest_rate(&self, num: Option<EpochNumber>) -> BoxFuture<U256>;
             fn next_nonce(&self, address: RpcAddress, num: Option<BlockHashOrEpochNumber>) -> BoxFuture<U256>;
-            fn pos_economics(&self, num: Option<EpochNumber>) -> BoxFuture<PoSEconomics>;
             fn send_raw_transaction(&self, raw: Bytes) -> JsonRpcResult<H256>;
             fn sponsor_info(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<SponsorInfo>;
-            fn staking_balance(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<U256>;
             fn storage_at(&self, addr: RpcAddress, pos: U256, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> BoxFuture<Option<H256>>;
             fn storage_root(&self, address: RpcAddress, epoch_num: Option<EpochNumber>) -> BoxFuture<Option<StorageRoot>>;
             fn transaction_by_hash(&self, hash: H256) -> BoxFuture<Option<RpcTransaction>>;
             fn transaction_receipt(&self, tx_hash: H256) -> BoxFuture<Option<RpcReceipt>>;
-            fn vote_list(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<Vec<VoteStakeInfo>>;
             fn fee_history(&self, block_count: HexU64, newest_block: EpochNumber, reward_percentiles: Vec<f64>) -> BoxFuture<MazzeFeeHistory>;
         }
     }
@@ -1264,8 +1092,6 @@ impl Mazze for MazzeHandler {
         fn get_block_reward_info(&self, num: EpochNumber) -> JsonRpcResult<Vec<RpcRewardInfo>>;
         fn get_supply_info(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<TokenSupplyInfo>;
         fn get_collateral_info(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<StorageCollateralInfo>;
-        fn get_vote_params(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<VoteParamsInfo>;
-        fn get_pos_reward_by_epoch(&self, epoch: EpochNumber) -> JsonRpcResult<Option<PoSEpochReward>>;
         fn get_fee_burnt(&self, epoch: Option<EpochNumber>) -> JsonRpcResult<U256>;
         fn max_priority_fee_per_gas(&self) -> BoxFuture<U256>;
     }
@@ -1298,20 +1124,6 @@ impl TestRpc for TestRpcImpl {
             fn save_node_db(&self) -> JsonRpcResult<()>;
             fn say_hello(&self) -> JsonRpcResult<String>;
             fn stop(&self) -> JsonRpcResult<()>;
-            fn pos_register(&self, voting_power: U64, version: Option<u8>) -> JsonRpcResult<(Bytes, AccountAddress)>;
-            fn pos_update_voting_power(
-                &self, pos_account: AccountAddress, increased_voting_power: U64,
-            ) -> JsonRpcResult<()>;
-            fn pos_stop_election(&self) -> JsonRpcResult<Option<u64>>;
-            fn pos_start_voting(&self, initialize: bool) -> JsonRpcResult<()>;
-            fn pos_stop_voting(&self) -> JsonRpcResult<()>;
-            fn pos_voting_status(&self) -> JsonRpcResult<bool>;
-            fn pos_start(&self) -> JsonRpcResult<()>;
-            fn pos_force_vote_proposal(&self, block_id: H256) -> JsonRpcResult<()>;
-            fn pos_force_propose(&self, round: U64, parent_block_id: H256, payload: Vec<TransactionPayload>) -> JsonRpcResult<()>;
-            fn pos_trigger_timeout(&self, timeout_type: String) -> JsonRpcResult<()>;
-            fn pos_force_sign_main_decision(&self, block_hash: H256, height: U64) -> JsonRpcResult<()>;
-            fn pos_get_chosen_proposal(&self) -> JsonRpcResult<Option<PosBlock>>;
         }
     }
 
@@ -1322,7 +1134,7 @@ impl TestRpc for TestRpcImpl {
         fn generate_block_with_nonce_and_timestamp(&self, parent: H256, referees: Vec<H256>, raw: Bytes, nonce: U256, timestamp: u64, adaptive: bool) -> JsonRpcResult<H256>;
         fn generate_custom_block(&self, parent_hash: H256, referee: Vec<H256>, raw_txs: Bytes, adaptive: Option<bool>, custom: Option<Vec<Bytes>>) -> JsonRpcResult<H256>;
         fn generate_empty_blocks(&self, num_blocks: usize) -> JsonRpcResult<Vec<H256>>;
-        fn generate_fixed_block(&self, parent_hash: H256, referee: Vec<H256>, num_txs: usize, adaptive: bool, difficulty: Option<u64>, pos_reference: Option<H256>) -> JsonRpcResult<H256>;
+        fn generate_fixed_block(&self, parent_hash: H256, referee: Vec<H256>, num_txs: usize, adaptive: bool, difficulty: Option<u64>) -> JsonRpcResult<H256>;
         fn generate_one_block_with_direct_txgen(&self, num_txs: usize, block_size_limit: usize, num_txs_simple: usize, num_txs_erc20: usize) -> JsonRpcResult<H256>;
         fn generate_one_block(&self, num_txs: usize, block_size_limit: usize) -> JsonRpcResult<H256>;
         fn get_block_status(&self, block_hash: H256) -> JsonRpcResult<(u8, bool)>;

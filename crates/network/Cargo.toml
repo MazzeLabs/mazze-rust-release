@@ -37,8 +37,6 @@ metrics = { path = "../util/metrics" }
 throttling = { path = "../util/throttling" }
 natpmp = "0.2"
 malloc_size_of = { path = "../util/malloc_size_of" }
-diem-crypto = { path= "../mazzecore/core/src/pos/crypto/crypto" }
-diem-types = { path= "../mazzecore/core/src/pos/types" }
 
 [lints.rust]
 unexpected_cfgs = { level = "allow" }

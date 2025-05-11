@@ -76,30 +76,13 @@ random-crash = { path = "../util/random_crash" }
 mazze-parameters = { path = "../mazzecore/parameters" }
 strum = "0.20"
 strum_macros = "0.20"
-crash-handler = { path = "../mazzecore/core/src/pos/common/crash-handler" }
-cached-pos-ledger-db = { path = "../mazzecore/core/src/pos/storage/cached-pos-ledger-db" }
-pos-ledger-db = { path = "../mazzecore/core/src/pos/storage/pos-ledger-db" }
-diem-channel = {path = "../mazzecore/core/src/pos/common/channel", package = "channel"}
-diem-config = { path = "../mazzecore/core/src/pos/config" }
-diem-crypto = { path = "../mazzecore/core/src/pos/crypto/crypto" }
-diem-logger = { path = "../mazzecore/core/src/pos/common/logger" }
-diem-metrics = { path = "../mazzecore/core/src/pos/common/metrics" }
-diem-secure-storage = { path = "../mazzecore/core/src/pos/secure/storage" }
-diem-temppath = { path = "../mazzecore/core/src/pos/common/temppath" }
-diem-time-service = { path = "../mazzecore/core/src/pos/common/time-service" }
-diem-types = { path = "../mazzecore/core/src/pos/types" }
-pow-types = {path = "../mazzecore/core/src/pos/types/pow-types" }
-executor-types = { path = "../mazzecore/core/src/pos/types/executor-types" }
-executor = { path = "../mazzecore/core/src/pos/consensus/executor" }
 fail = "0.4.0"
-storage-interface = { path = "../mazzecore/core/src/pos/storage/storage-interface" }
-consensus-types = {path = "../mazzecore/core/src/pos/consensus/consensus-types" }
 anyhow = "1.0.38"
 rpassword = "5.0.1"
 static_assertions = "1.1.0"
 parity-version = {path = "../util/version" }
 solidity-abi = {path= "../util/solidity-abi" }
-bls-signatures = {git = "https://github.com/MazzeLabs/bls-signatures.git", rev = "0cf4158a4d17d1405d3bdc10dd4065e4e00e88dd", default-features = false, features = ["multicore"]}
+# bls-signatures = {git = "https://github.com/MazzeLabs/bls-signatures.git", rev = "0cf4158a4d17d1405d3bdc10dd4065e4e00e88dd", default-features = false, features = ["multicore"]}
 alloy-rpc-types-trace = { workspace = true }
 geth-tracer = { path = "../mazzecore/geth-tracer" }
 serde-utils = { path = "../serde_utils" }

@@ -5,23 +5,21 @@ use mazze_types::{H256, U256};
 use mazzecore::pow::{
     boundary_to_difficulty, ProofOfWorkProblem, ProofOfWorkSolution,
 };
-use randomx_rs::RandomXFlag;
 use serde_json::Value;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::{mpsc, Barrier};
+use std::sync::{mpsc, Barrier, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::broadcast;
 
+use crate::core::NumaError;
+use crate::core::ThreadAssignment;
 use crate::core::*;
-use crate::core_numa::NumaError;
-use crate::core_numa::ThreadAssignment;
-use crate::core_numa::{NewNumaVMManager, THREAD_VM};
-use crate::mining_metrics::MiningMetrics;
+use crate::core::{VMManager, THREAD_VM};
 
-const CHECK_INTERVAL: u64 = 64 * BATCH_SIZE as u64;
+const CHECK_INTERVAL: u64 = 64 * 128 as u64;
 
 /*
 Flow:
@@ -39,8 +37,7 @@ pub struct Miner {
     pub worker_name: String,
     num_threads: usize,
     solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
-    metrics: Arc<MiningMetrics>,
-    vm_manager: Arc<NewNumaVMManager>,
+    vm_manager: Arc<VMManager>,
 }
 
 impl Miner {
@@ -50,17 +47,15 @@ impl Miner {
         (Self, broadcast::Receiver<(ProofOfWorkSolution, u64)>),
         NumaError,
     > {
-        let (stratum_tx, rx) = broadcast::channel(32);
+        let (stratum_tx, stratum_rx) = broadcast::channel(32);
         let (solution_tx, solution_rx) = mpsc::channel();
-        let metrics = Arc::new(MiningMetrics::new());
-        let vm_manager = Arc::new(NewNumaVMManager::new()?);
+        let vm_manager = Arc::new(VMManager::new()?);
 
         let miner = Miner {
             worker_id,
             worker_name: format!("worker-{}", worker_id),
             num_threads,
             solution_sender: solution_tx,
-            metrics: Arc::clone(&metrics),
             vm_manager: Arc::clone(&vm_manager),
         };
 
@@ -73,15 +68,16 @@ impl Miner {
         // Spawn mining threads
         miner.spawn_numa_mining_threads(client_seed)?;
 
-        Ok((miner, rx))
+        Ok((miner, stratum_rx))
     }
 
     pub fn mine(&mut self, problem: &ProofOfWorkProblem) {
         debug!(
-            "[{}] mine() called with new height={}, hash={:.8}",
+            "[{}] mine() called with new height={}, hash={:.8}, seed_hash={}",
             self.worker_name,
             problem.block_height,
-            hex::encode(&problem.block_hash.as_bytes()[..4])
+            hex::encode(&problem.block_hash.as_bytes()[..4]),
+            hex::encode(problem.seed_hash.as_bytes())
         );
 
         // Update VMs before mining
@@ -96,14 +92,22 @@ impl Miner {
     pub fn parse_job(
         &mut self, params: &[Value],
     ) -> Result<ProofOfWorkProblem, String> {
-        if params.len() < 4 {
+        if params.len() != 5 {
             return Err("Invalid job data: not enough parameters".into());
         }
 
+        let block_height = params[1]
+            .as_str()
+            .ok_or("Invalid block height: not a string")?
+            .parse::<u64>()
+            .map_err(|e| format!("Invalid block height: {}", e))?;
         let pow_hash_str =
             params[2].as_str().ok_or("Invalid pow_hash: not a string")?;
         let boundary_str =
             params[3].as_str().ok_or("Invalid boundary: not a string")?;
+        let seed_hash_str = params[4]
+            .as_str()
+            .ok_or("Invalid seed_hash: not a string")?;
 
         let pow_hash = H256::from_slice(
             &hex::decode(pow_hash_str.trim_start_matches("0x"))
@@ -113,27 +117,28 @@ impl Miner {
         let boundary = U256::from_str(boundary_str.trim_start_matches("0x"))
             .map_err(|e| format!("Invalid boundary: {}", e))?;
 
-        let block_height = params[1]
-            .as_str()
-            .ok_or("Invalid block height: not a string")?
-            .parse::<u64>()
-            .map_err(|e| format!("Invalid block height: {}", e))?;
-
         let difficulty = boundary_to_difficulty(&boundary);
 
+        let seed_hash = H256::from_slice(
+            &hex::decode(seed_hash_str.trim_start_matches("0x"))
+                .map_err(|e| format!("Invalid seed_hash: {}", e))?,
+        );
+
         info!(
-            "Parsed job: block_height={}, pow_hash={:.4}…{:.4}, boundary=0x{:x}, calculated difficulty={}",
+            "Parsed job: block_height={}, pow_hash={:.4}…{:.4}, boundary=0x{:x}, calculated difficulty={}, seed_hash={}",
             block_height,
             pow_hash,
             hex::encode(&pow_hash.as_bytes()[28..32]),
             boundary,
-            difficulty
+            difficulty,
+            seed_hash,
         );
 
-        let problem = ProofOfWorkProblem::new_from_boundary(
+        let problem = ProofOfWorkProblem::new_from_boundary_with_seed_hash(
             block_height,
             pow_hash,
             boundary,
+            seed_hash,
         );
 
         self.mine(&problem);
@@ -207,8 +212,8 @@ impl Miner {
     fn run_mining_thread_numa(
         assignment: &ThreadAssignment, worker_name: String,
         solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
-        vm_manager: Arc<NewNumaVMManager>, num_threads: usize,
-        barrier: Arc<Barrier>, client_seed: H256,
+        vm_manager: Arc<VMManager>, num_threads: usize, barrier: Arc<Barrier>,
+        client_seed: H256,
     ) {
         info!(
             "[{}] Starting mining thread {} on NUMA node {} core {}",
@@ -231,11 +236,8 @@ impl Miner {
         }
 
         barrier.wait();
-        info!(
-            "[{}] Thread passed barrier, starting mining loop",
-            worker_name
-        );
 
+        // Mining loop
         loop {
             let result = vm_manager.with_vm(assignment, |vm| {
                 let start_nonce = Self::get_nonce_range_start(
@@ -283,8 +285,11 @@ impl Miner {
                                 "[{}] Block hash does not match, updating reference state",
                                 worker_name
                             );
-                            vm.update(vm_manager.get_reference_state())
-                                .unwrap();
+                            vm.update(
+                                vm_manager.get_reference_state(),
+                                vm_manager.get_context()
+                            )
+                            .unwrap();
 
                             debug!(
                                 "[{}] Reference state updated successfully to {}",
@@ -311,14 +316,8 @@ impl Miner {
                     input[..32].copy_from_slice(block_hash.as_bytes());
                     current_nonce.to_little_endian(&mut input[32..64]);
 
-                    let hash_bytes = match vm.vm.calculate_hash(&input) {
-                        Ok(hash) => hash,
-                        Err(e) => {
-                            error!("[{}] Failed to calculate hash: {}", worker_name, e);
-                            return false;
-                        }
-                    };
-                    let hash = H256::from_slice(&hash_bytes);
+                    let hash_bytes = vm.hasher.hash(&input);
+                    let hash = H256::from_slice(&hash_bytes.as_ref());
                     hashes_computed += 1;
 
                     if vm.check_hash(&hash) {
@@ -338,7 +337,11 @@ impl Miner {
                             thread::sleep(Duration::from_millis(50));
                             if !vm_manager.is_block_hash_matching(&vm.get_current_block_hash()) {
                                 debug!("[{}] New block detected after solution, resuming mining", worker_name);
-                                vm.update(vm_manager.get_reference_state()).unwrap();
+                                vm.update(
+                                    vm_manager.get_reference_state(),
+                                    vm_manager.get_context()
+                                )
+                                .unwrap();
                                 return false; // Exit closure to restart mining loop
                             } else {
                                 trace!("[{}] Waiting for new block", worker_name);
@@ -457,16 +460,11 @@ mod tests {
             "9111110000000000000000000000000000000000000000000000000000000000"
         );
 
-        let state = ProblemState::new(
-            0,
-            H256::zero(),
-            U256::from_big_endian(&boundary),
-        );
-
         let atomic_state = AtomicProblemState::new(
             0,
             H256::zero(),
             U256::from_big_endian(&boundary),
+            H256::zero(),
         );
 
         // This should print false because 0x91... > 0x12...
@@ -490,32 +488,5 @@ mod tests {
             !atomic_state.check_hash_simd(&H256::from_slice(&hash)),
             "SIMD comparison should return false for hash > boundary"
         );
-    }
-
-    #[test]
-    fn test_nonce_validation() {
-        // Setup test data
-        let block_hash_hex =
-            "7dc6e0aad8b74e5ee04e2f34e01b457d017bc4c38c7a5db001e5c7baecbab4e8";
-        let block_hash =
-            H256::from_slice(&Vec::from_hex(block_hash_hex).unwrap());
-
-        let boundary_hex =
-            "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-        let boundary = U256::from_str(boundary_hex).unwrap();
-
-        let nonce = U256::from_dec_str("14474011154664524427946373126085988481658748083205070504932198000989141204990").unwrap();
-
-        // Setup VM and hasher
-        let flags = RandomXFlag::get_recommended_flags();
-        let vm = ThreadLocalVM::new(flags, &block_hash);
-        let mut hasher = BatchHasher::new();
-
-        // Test single nonce validation
-        let hashes = hasher.compute_hash_batch(&vm.vm, nonce, &block_hash);
-        let hash = &hashes[0];
-        let hash_u256 = U256::from(hash.as_bytes());
-
-        assert!(hash_u256 <= boundary, "Known valid nonce failed validation");
     }
 }

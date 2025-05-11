@@ -132,9 +132,6 @@ pub mod codes {
     /// Call() execution error. This is clearly an application level error code,
     /// but we keep the error code to be ethereum rpc client compatible.
     pub const CALL_EXECUTION_ERROR: i64 = -32015;
-
-    /* PoS chain is not started */
-    pub const POS_NOT_ENABLED: i64 = -32078;
 }
 
 pub fn build_rpc_server_error(code: i64, message: String) -> Error {

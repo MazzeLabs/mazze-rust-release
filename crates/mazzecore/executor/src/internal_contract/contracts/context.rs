@@ -11,21 +11,16 @@ use crate::{internal_contract::epoch_hash_slot, return_if};
 use super::preludes::*;
 
 make_solidity_contract! {
-    pub struct Context(CONTEXT_CONTRACT_ADDRESS, generate_fn_table, initialize: |params: &CommonParams| params.transition_numbers.cip64, is_active: |spec: &Spec| spec.cip64);
+    pub struct Context(CONTEXT_CONTRACT_ADDRESS, generate_fn_table, initialize: |_params: &CommonParams| 0, is_active: |_spec: &Spec| true);
 }
 
 fn generate_fn_table() -> SolFnTable {
-    make_function_table!(EpochNumber, PoSHeight, FinalizedEpoch, EpochHash)
+    make_function_table!(EpochNumber, EpochHash)
 }
 
-group_impl_is_active!(
-    |spec: &Spec| spec.cip64,
-    EpochNumber,
-    PoSHeight,
-    FinalizedEpoch
-);
+group_impl_is_active!(|_spec: &Spec| true, EpochNumber,);
 
-group_impl_is_active!(|spec: &Spec| spec.cip133_core, EpochHash);
+group_impl_is_active!(|_spec: &Spec| true, EpochHash);
 
 make_solidity_function! {
     struct EpochNumber((), "epochNumber()", U256);
@@ -44,38 +39,6 @@ impl SimpleExecutionTrait for EpochNumber {
 }
 
 make_solidity_function! {
-    struct PoSHeight((), "posHeight()", U256);
-}
-
-// same gas cost as the `NUMBER` opcode
-impl_function_type!(PoSHeight, "query", gas: |spec: &Spec| spec.tier_step_gas[(GasPriceTier::Base).idx()]);
-
-impl SimpleExecutionTrait for PoSHeight {
-    fn execute_inner(
-        &self, _input: (), _params: &ActionParams,
-        context: &mut InternalRefContext,
-    ) -> vm::Result<U256> {
-        Ok(context.env.pos_view.unwrap_or(0).into())
-    }
-}
-
-make_solidity_function! {
-    struct FinalizedEpoch((), "finalizedEpochNumber()", U256);
-}
-
-// same gas cost as the `NUMBER` opcode
-impl_function_type!(FinalizedEpoch, "query", gas: |spec: &Spec| spec.tier_step_gas[(GasPriceTier::Base).idx()]);
-
-impl SimpleExecutionTrait for FinalizedEpoch {
-    fn execute_inner(
-        &self, _input: (), _params: &ActionParams,
-        context: &mut InternalRefContext,
-    ) -> vm::Result<U256> {
-        Ok(context.env.finalized_epoch.unwrap_or(0).into())
-    }
-}
-
-make_solidity_function! {
     struct EpochHash(U256, "epochHash(uint256)", H256);
 }
 
@@ -90,7 +53,6 @@ impl SimpleExecutionTrait for EpochHash {
 
         let number = number.as_u64();
 
-        return_if!(number < context.spec.cip133_e);
         return_if!(number > context.env.epoch_height);
         return_if!(number
             .checked_add(65536)

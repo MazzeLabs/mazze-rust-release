@@ -11,7 +11,7 @@ use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_packing_pool::{PackingBatch, PackingPoolConfig};
 use mazze_parameters::{
     consensus::TRANSACTION_DEFAULT_EPOCH_BOUND,
-    staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
+    collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
 };
 use mazze_types::{U128, U256, U512};
 use primitives::{SignedTransaction, Transaction};

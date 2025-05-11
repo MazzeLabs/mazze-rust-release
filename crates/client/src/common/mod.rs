@@ -4,8 +4,6 @@
 
 use std::{
     collections::HashMap,
-    fs::create_dir_all,
-    path::Path,
     str::FromStr,
     sync::{Arc, Weak},
     thread,
@@ -16,28 +14,17 @@ use jsonrpc_http_server::Server as HttpServer;
 use jsonrpc_tcp_server::Server as TcpServer;
 use jsonrpc_ws_server::Server as WSServer;
 use parking_lot::{Condvar, Mutex};
-use rand_08::{prelude::StdRng, rngs::OsRng, SeedableRng};
 use threadpool::ThreadPool;
 
 use blockgen::BlockGenerator;
-use diem_config::keys::ConfigKey;
-use diem_crypto::{
-    key_file::{load_pri_key, save_pri_key},
-    PrivateKey, Uniform,
-};
-use diem_types::validator_config::{
-    ConsensusPrivateKey, ConsensusVRFPrivateKey,
-};
 use keylib::KeyPair;
 use malloc_size_of::{new_malloc_size_ops, MallocSizeOf, MallocSizeOfOps};
 use mazze_executor::machine::{new_machine_with_builtin, Machine, VmFactory};
 use mazze_parameters::genesis::DEV_GENESIS_KEY_PAIR_2;
 use mazze_storage::StorageManager;
 use mazze_types::{address_util::AddressUtil, Address, Space, U256};
-pub use mazzecore::pos::pos::PosDropHandle;
 use mazzecore::{
     block_data_manager::BlockDataManager,
-    consensus::pos_handler::{PosConfiguration, PosVerifier},
     genesis_block::{self as genesis, genesis_block},
     pow::PowComputer,
     statistics::Statistics,
@@ -68,14 +55,12 @@ use crate::{
     },
     GENESIS_VERSION,
 };
-use mazzecore::consensus::pos_handler::read_initial_nodes_from_file;
 
 /// Hold all top-level components for a type of client.
 /// This struct implement ClientShutdownTrait.
 pub struct ClientComponents<BlockGenT, Rest> {
     pub data_manager_weak_ptr: Weak<BlockDataManager>,
     pub blockgen: Option<Arc<BlockGenT>>,
-    pub pos_handler: Option<Arc<PosVerifier>>,
     pub other_components: Rest,
 }
 
@@ -99,11 +84,7 @@ impl<BlockGenT: 'static + Stopable, Rest> ClientTrait
 {
     fn take_out_components_for_shutdown(
         &self,
-    ) -> (
-        Weak<BlockDataManager>,
-        Option<Arc<PosVerifier>>,
-        Option<Arc<dyn Stopable>>,
-    ) {
+    ) -> (Weak<BlockDataManager>, Option<Arc<dyn Stopable>>) {
         debug!("take_out_components_for_shutdown");
         let data_manager_weak_ptr = self.data_manager_weak_ptr.clone();
         let blockgen: Option<Arc<dyn Stopable>> = match self.blockgen.clone() {
@@ -111,18 +92,14 @@ impl<BlockGenT: 'static + Stopable, Rest> ClientTrait
             None => None,
         };
 
-        (data_manager_weak_ptr, self.pos_handler.clone(), blockgen)
+        (data_manager_weak_ptr, blockgen)
     }
 }
 
 pub trait ClientTrait {
     fn take_out_components_for_shutdown(
         &self,
-    ) -> (
-        Weak<BlockDataManager>,
-        Option<Arc<PosVerifier>>,
-        Option<Arc<dyn Stopable>>,
-    );
+    ) -> (Weak<BlockDataManager>, Option<Arc<dyn Stopable>>);
 }
 
 pub mod client_methods {
@@ -158,32 +135,20 @@ pub mod client_methods {
 
     /// Returns whether the shutdown is considered clean.
     pub fn shutdown(this: Box<dyn ClientTrait>) -> bool {
-        let (ledger_db, maybe_pos_handler, maybe_blockgen) =
+        let (ledger_db, maybe_blockgen) =
             this.take_out_components_for_shutdown();
         drop(this);
         if let Some(blockgen) = maybe_blockgen {
             blockgen.stop();
             drop(blockgen);
         }
-        let maybe_pos_db = if let Some(pos_handler) = maybe_pos_handler {
-            let maybe_pos_db = pos_handler.stop();
-            drop(pos_handler);
-            maybe_pos_db
-        } else {
-            None
-        };
 
         // Make sure ledger_db is properly dropped, so rocksdb can be closed
         // cleanly
         let mut graceful = true;
         graceful &= check_graceful_shutdown(ledger_db);
         debug!("ledger_db drop: graceful = {}", graceful);
-        if let Some((pos_ledger_db, consensus_db)) = maybe_pos_db {
-            graceful &= check_graceful_shutdown(pos_ledger_db);
-            debug!("pos_ledger_db drop: graceful = {}", graceful);
-            graceful &= check_graceful_shutdown(consensus_db);
-            debug!("consensus_db drop: graceful = {}", graceful);
-        }
+
         graceful
     }
 
@@ -221,7 +186,6 @@ pub fn initialize_common_modules(
         HashMap<Address, U256>,
         Arc<BlockDataManager>,
         Arc<PowComputer>,
-        Arc<PosVerifier>,
         Arc<TransactionPool>,
         Arc<ConsensusGraph>,
         Arc<SynchronizationGraph>,
@@ -236,56 +200,6 @@ pub fn initialize_common_modules(
     String,
 > {
     info!("Working directory: {:?}", std::env::current_dir());
-
-    // TODO(lpl): Keep it properly and allow not running pos.
-    let (self_pos_private_key, self_vrf_private_key) = {
-        let key_path = Path::new(&conf.raw_conf.pos_private_key_path);
-        // let default_passwd = if conf.is_test_or_dev_mode() {
-        //     Some(vec![])
-        // } else {
-        //     conf.raw_conf
-        //         .dev_pos_private_key_encryption_password
-        //         .clone()
-        //         // If the password is not set in the config file, read it from
-        //         // the environment variable.
-        //         .or(std::env::var("MAZZE_POS_KEY_ENCRYPTION_PASSWORD").ok())
-        //         .map(|s| s.into_bytes())
-        // };
-        let default_passwd = Some(vec![]);
-        if key_path.exists() {
-            let passwd = match default_passwd {
-                Some(p) => p,
-                None => rpassword::read_password_from_tty(Some("PoS key detected, please input your encryption password.\nPassword:")).map_err(|e| format!("{:?}", e))?.into_bytes()
-            };
-            let (sk, vrf_sk): (ConsensusPrivateKey, ConsensusVRFPrivateKey) =
-                load_pri_key(key_path, &passwd).unwrap();
-            (ConfigKey::new(sk), ConfigKey::new(vrf_sk))
-        } else {
-            create_dir_all(key_path.parent().unwrap()).unwrap();
-            let passwd = match default_passwd {
-                Some(p) => p,
-                None => {
-                    let p = rpassword::read_password_from_tty(Some("PoS key is not detected and will be generated instead, please input your encryption password. This password is needed when you restart the node\nPassword:")).map_err(|e| format!("{:?}", e))?.into_bytes();
-                    let p2 = rpassword::read_password_from_tty(Some(
-                        "Repeat Password:",
-                    ))
-                    .map_err(|e| format!("{:?}", e))?
-                    .into_bytes();
-                    if p != p2 {
-                        bail!("Passwords do not match!");
-                    }
-                    p
-                }
-            };
-            let mut rng = StdRng::from_rng(OsRng).unwrap();
-            let private_key = ConsensusPrivateKey::generate(&mut rng);
-            let vrf_private_key = ConsensusVRFPrivateKey::generate(&mut rng);
-            save_pri_key(key_path, &passwd, &(&private_key, &vrf_private_key))
-                .expect("error saving private key");
-            (ConfigKey::new(private_key), ConfigKey::new(vrf_private_key))
-        }
-    };
-
     metrics::initialize(conf.metrics_config());
 
     let worker_thread_pool = Arc::new(Mutex::new(ThreadPool::with_name(
@@ -331,30 +245,10 @@ pub fn initialize_common_modules(
             Some(ref file) => {
                 genesis::load_secrets_file(file, secret_store.as_ref())?
             }
-            None => genesis::default(conf.is_test_or_dev_mode()),
+            None => genesis::default(true),
         }
     } else {
-        match conf.raw_conf.genesis_accounts {
-            Some(ref file) => genesis::load_file(file, |addr_str| {
-                parse_config_address_string(
-                    addr_str,
-                    network_config.get_network_type(),
-                )
-            })?,
-            None => genesis::default(conf.is_test_or_dev_mode()),
-        }
-    };
-
-    // Only try to setup PoW genesis block if pos is enabled from genesis.
-    let initial_nodes = if conf.raw_conf.pos_reference_enable_height == 0 {
-        Some(
-            read_initial_nodes_from_file(
-                conf.raw_conf.pos_initial_nodes_path.as_str(),
-            )
-            .expect("Genesis must have been initialized with pos"),
-        )
-    } else {
-        None
+        genesis::default(false)
     };
 
     let consensus_conf = conf.consensus_config();
@@ -369,7 +263,6 @@ pub fn initialize_common_modules(
         machine.clone(),
         conf.raw_conf.execute_genesis, /* need_to_execute */
         conf.raw_conf.chain_id,
-        &initial_nodes,
     );
     storage_manager.notify_genesis_hash(genesis_block.hash());
     let mut genesis_accounts = genesis_accounts;
@@ -379,12 +272,9 @@ pub fn initialize_common_modules(
         .map(|(addr, x)| (addr.address, x))
         .collect();
     debug!("Initialize genesis_block={:?}", genesis_block);
-    if conf.raw_conf.pos_genesis_main_decision.is_none() {
-        conf.raw_conf.pos_genesis_main_decision = Some(genesis_block.hash());
-    }
 
     let pow_config = conf.pow_config();
-    let pow = Arc::new(PowComputer::new());
+    let pow = Arc::new(PowComputer::new(genesis_block.hash()));
 
     let data_man = Arc::new(BlockDataManager::new(
         cache_config,
@@ -397,37 +287,12 @@ pub fn initialize_common_modules(
     ));
 
     let network = {
-        let mut rng = StdRng::from_rng(OsRng).unwrap();
-        let private_key = ConsensusPrivateKey::generate(&mut rng);
-        let vrf_private_key = ConsensusVRFPrivateKey::generate(&mut rng);
         let mut network = NetworkService::new(network_config.clone());
-        network
-            .initialize((
-                private_key.public_key(),
-                vrf_private_key.public_key(),
-            ))
-            .unwrap();
+        network.initialize().unwrap();
         Arc::new(network)
     };
 
-    let pos_verifier = Arc::new(PosVerifier::new(
-        Some(network.clone()),
-        PosConfiguration {
-            bls_key: self_pos_private_key,
-            vrf_key: self_vrf_private_key,
-            diem_conf_path: conf.raw_conf.pos_config_path.clone(),
-            protocol_conf: conf.protocol_config(),
-            pos_initial_nodes_path: conf
-                .raw_conf
-                .pos_initial_nodes_path
-                .clone(),
-            vrf_proposal_threshold: conf.raw_conf.vrf_proposal_threshold,
-            pos_state_config: conf.pos_state_config(),
-        },
-        conf.raw_conf.pos_reference_enable_height,
-    ));
-    let verification_config =
-        conf.verification_config(machine.clone(), pos_verifier.clone());
+    let verification_config = conf.verification_config(machine.clone());
     let txpool = Arc::new(TransactionPool::new(
         conf.txpool_config(),
         verification_config.clone(),
@@ -449,20 +314,7 @@ pub fn initialize_common_modules(
         conf.execution_config(),
         verification_config.clone(),
         node_type,
-        pos_verifier.clone(),
     ));
-
-    // for terminal in data_man
-    //     .terminals_from_db()
-    //     .unwrap_or(vec![data_man.get_cur_consensus_era_genesis_hash()])
-    // {
-    //     if data_man.block_height_by_hash(&terminal).unwrap()
-    //         >= conf.raw_conf.pos_reference_enable_height
-    //     {
-    //         pos_verifier.initialize(consensus.clone())?;
-    //         break;
-    //     }
-    // }
 
     let sync_config = conf.sync_graph_config();
 
@@ -474,7 +326,6 @@ pub fn initialize_common_modules(
         sync_config,
         notifications.clone(),
         machine.clone(),
-        pos_verifier.clone(),
     ));
     let refresh_time =
         Duration::from_millis(conf.raw_conf.account_provider_refresh_time_ms);
@@ -494,7 +345,6 @@ pub fn initialize_common_modules(
         network.clone(),
         txpool.clone(),
         accounts.clone(),
-        pos_verifier.clone(),
     ));
 
     let runtime = Runtime::with_default_thread_count();
@@ -517,7 +367,6 @@ pub fn initialize_common_modules(
         genesis_accounts,
         data_man,
         pow,
-        pos_verifier,
         txpool,
         consensus,
         sync_graph,
@@ -548,7 +397,6 @@ pub fn initialize_not_light_node_modules(
         Option<TcpServer>,
         Option<WSServer>,
         Option<WSServer>,
-        Arc<PosVerifier>,
         Runtime,
         Option<HttpServer>,
         Option<WSServer>,
@@ -561,7 +409,6 @@ pub fn initialize_not_light_node_modules(
         genesis_accounts,
         data_man,
         pow,
-        pos_verifier,
         txpool,
         consensus,
         sync_graph,
@@ -661,7 +508,6 @@ pub fn initialize_not_light_node_modules(
         conf.pow_config(),
         pow.clone(),
         maybe_author.clone().unwrap_or_default(),
-        pos_verifier.clone(),
     ));
     if conf.is_dev_mode() {
         // If `dev_block_interval_ms` is None, blocks are generated after
@@ -683,10 +529,11 @@ pub fn initialize_not_light_node_modules(
         }
         if blockgen.pow_config.enable_mining() {
             let bg = blockgen.clone();
+            let seed_hash = pow.get_seed_hash();
             thread::Builder::new()
                 .name("mining".into())
                 .spawn(move || {
-                    BlockGenerator::start_mining(bg, 0);
+                    BlockGenerator::start_mining(bg, 0, seed_hash);
                 })
                 .expect("Mining thread spawn error");
         }
@@ -811,7 +658,6 @@ pub fn initialize_not_light_node_modules(
         rpc_tcp_server,
         debug_rpc_ws_server,
         rpc_ws_server,
-        pos_verifier,
         runtime,
         eth_rpc_http_server,
         eth_rpc_ws_server,

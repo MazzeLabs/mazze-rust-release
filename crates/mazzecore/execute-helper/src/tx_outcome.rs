@@ -1,9 +1,6 @@
-use mazze_executor::{
-    executive::ExecutionOutcome, internal_contract::make_staking_events,
-};
+use mazze_executor::executive::ExecutionOutcome;
 use mazze_types::{H256, U256};
 use mazze_vm_types::Spec;
-use pow_types::StakingEvent;
 use primitives::Receipt;
 
 use alloy_rpc_types_trace::geth::GethTrace;
@@ -18,7 +15,6 @@ pub struct ProcessTxOutcome {
     pub receipt: Receipt,
     pub phantom_txs: Vec<PhantomTransaction>,
     pub tx_traces: Vec<ExecTrace>,
-    pub tx_staking_events: Vec<StakingEvent>,
     pub tx_exec_error_msg: String,
     pub consider_repacked: bool,
     pub geth_trace: Option<GethTrace>,
@@ -47,15 +43,12 @@ pub fn make_process_tx_outcome(
     let consider_repacked = outcome.consider_repacked();
     let receipt = outcome.make_receipt(accumulated_gas_used, spec);
 
-    let tx_staking_events = make_staking_events(receipt.logs());
-
     let phantom_txs = recover_phantom(&receipt.logs(), tx_hash);
 
     ProcessTxOutcome {
         receipt,
         phantom_txs,
         tx_traces,
-        tx_staking_events,
         tx_exec_error_msg,
         consider_repacked,
         geth_trace,

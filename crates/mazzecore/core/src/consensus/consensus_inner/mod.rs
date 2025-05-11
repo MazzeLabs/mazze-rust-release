@@ -15,10 +15,8 @@ use crate::{
     consensus::{
         consensus_inner::consensus_executor::ConsensusExecutor,
         debug_recompute::log_invalid_state_root, outlier_cache::OutlierCache,
-        pastset_cache::PastSetCache, pos_handler::PosVerifier,
-        MaybeExecutedTxExtraInfo, TransactionInfo,
+        pastset_cache::PastSetCache, MaybeExecutedTxExtraInfo, TransactionInfo,
     },
-    pos::pow_handler::POS_TERM_EPOCHS,
     pow::{target_difficulty, PowComputer, ProofOfWorkConfig},
     state_exposer::{ConsensusGraphBlockExecutionState, STATE_EXPOSER},
     verification::VerificationConfig,
@@ -35,9 +33,7 @@ use mazze_internal_common::{
 use mazze_parameters::{consensus::*, consensus_internal::*};
 use mazze_types::{H256, U256, U512};
 use metrics::{Counter, CounterUsize};
-use primitives::{
-    pos::PosBlockId, Block, BlockHeader, BlockHeaderBuilder, EpochId,
-};
+use primitives::{Block, BlockHeader, BlockHeaderBuilder, EpochId};
 use slab::Slab;
 use std::{
     cmp::{max, min},
@@ -75,11 +71,6 @@ pub struct ConsensusInnerConfig {
     pub enable_optimistic_execution: bool,
     /// Control whether we enable the state exposer for the testing purpose.
     pub enable_state_expose: bool,
-    /// The deferred epoch count before a confirmed epoch.
-    pub pos_main_decision_defer_epoch_count: u64,
-
-    pub cip113_main_decision_defer_epoch_count: u64,
-    pub cip113_transition_height: u64,
 
     /// If we hit invalid state root, we will dump the information into a
     /// directory specified here. This is useful for testing.
@@ -88,18 +79,6 @@ pub struct ConsensusInnerConfig {
     pub force_recompute_height_during_construct_main: Option<u64>,
     pub recovery_latest_mpt_snapshot: bool,
     pub use_isolated_db_for_mpt_table: bool,
-}
-
-impl ConsensusInnerConfig {
-    pub fn pos_main_decision_defer_epoch_count(
-        &self, confirmed_height: u64,
-    ) -> u64 {
-        if confirmed_height >= self.cip113_transition_height {
-            self.cip113_main_decision_defer_epoch_count
-        } else {
-            self.pos_main_decision_defer_epoch_count
-        }
-    }
 }
 
 #[derive(Copy, Clone, DeriveMallocSizeOf)]
@@ -447,7 +426,6 @@ impl Default for ConsensusGraphMainData {
 pub struct ConsensusGraphInner {
     /// data_man is the handle to access raw block data
     pub data_man: Arc<BlockDataManager>,
-    pub pos_verifier: Arc<PosVerifier>,
     pub inner_conf: ConsensusInnerConfig,
     pub pow_config: ProofOfWorkConfig,
     pub pow: Arc<PowComputer>,
@@ -496,6 +474,7 @@ pub struct ConsensusGraphInner {
     // TODO(lpl): It's always used after being updated, so this should be okay.
     /// The main decision of the best (the round is the largest) pos
     /// reference.
+    /// TODO: check if still used, rename to best_main_decision
     best_pos_main_decision: (H256, u64),
 
     /// weight_tree maintains the subtree weight of each node in the
@@ -605,9 +584,8 @@ impl ConsensusGraphNode {
 impl ConsensusGraphInner {
     pub fn with_era_genesis(
         pow_config: ProofOfWorkConfig, pow: Arc<PowComputer>,
-        pos_verifier: Arc<PosVerifier>, data_man: Arc<BlockDataManager>,
-        inner_conf: ConsensusInnerConfig, cur_era_genesis_block_hash: &H256,
-        cur_era_stable_block_hash: &H256,
+        data_man: Arc<BlockDataManager>, inner_conf: ConsensusInnerConfig,
+        cur_era_genesis_block_hash: &H256, cur_era_stable_block_hash: &H256,
     ) -> Self {
         let genesis_block_header = data_man
             .block_header_by_hash(cur_era_genesis_block_hash)
@@ -647,7 +625,6 @@ impl ConsensusGraphInner {
             pow,
             current_difficulty: initial_difficulty.into(),
             data_man: data_man.clone(),
-            pos_verifier,
             inner_conf,
             outlier_cache: OutlierCache::new(),
             pastset_cache: Default::default(),
@@ -1204,7 +1181,7 @@ impl ConsensusGraphInner {
 
     pub fn check_mining_adaptive_block(
         &mut self, parent_arena_index: usize, referee_indices: Vec<usize>,
-        difficulty: U256, pos_reference: Option<PosBlockId>,
+        difficulty: U256,
     ) -> bool {
         // We first compute outlier barrier for newly mined block
         let parent_outlier_opt = self.outlier_cache.get(parent_arena_index);
@@ -1274,7 +1251,6 @@ impl ConsensusGraphInner {
             None,
             &timer_chain_tuple,
             i128::try_from(difficulty.low_u128()).unwrap(),
-            pos_reference,
         )
     }
 
@@ -1387,11 +1363,10 @@ impl ConsensusGraphInner {
         &mut self, parent_0: usize, outlier_barrier: &BitSet,
         weight_tuple: Option<&Vec<i128>>,
         timer_chain_tuple: &(u64, HashMap<usize, u64>, Vec<usize>, Vec<usize>),
-        difficulty: i128, pos_reference: Option<PosBlockId>,
+        difficulty: i128,
     ) -> bool {
         let mut parent = parent_0;
-        let force_confirm =
-            self.compute_block_force_confirm(timer_chain_tuple, pos_reference);
+        let force_confirm = self.compute_block_force_confirm(timer_chain_tuple);
         let force_confirm_height = self.arena[force_confirm].height;
         // This may happen if we are forced to generate at a position choosing
         // incorrect parent. We should return false here.
@@ -1498,9 +1473,6 @@ impl ConsensusGraphInner {
             weight_tuple,
             timer_chain_tuple,
             difficulty,
-            self.data_man
-                .pos_reference_by_hash(&self.arena[me].hash)
-                .expect("header exist"),
         )
     }
 
@@ -1681,7 +1653,6 @@ impl ConsensusGraphInner {
     fn compute_block_force_confirm(
         &self,
         timer_chain_tuple: &(u64, HashMap<usize, u64>, Vec<usize>, Vec<usize>),
-        pos_reference: Option<PosBlockId>,
     ) -> usize {
         let (fork_at, _, extra_lca, tmp_chain) = timer_chain_tuple;
         let fork_end_index =
@@ -1696,24 +1667,8 @@ impl ConsensusGraphInner {
         } else {
             self.cur_era_genesis_block_arena_index
         };
-        match pos_reference {
-            None => timer_chain_choice,
-            Some(pos_reference) => {
-                let pos_main_decision = self
-                    .pos_verifier
-                    .get_main_decision(&pos_reference)
-                    .expect("pos_reference checked");
-                self.compute_force_confirm(
-                    timer_chain_choice,
-                    &(
-                        pos_main_decision,
-                        self.data_man
-                            .block_height_by_hash(&pos_main_decision)
-                            .expect("pos main decision checked"),
-                    ),
-                )
-            }
-        }
+
+        timer_chain_choice
     }
 
     fn compute_force_confirm(
@@ -1747,6 +1702,9 @@ impl ConsensusGraphInner {
             U512::from(VerificationConfig::get_or_compute_header_pow_quality(
                 &self.pow,
                 block_header,
+                &self.data_man
+                    .db_manager
+                    .get_current_seed_hash(block_header.height()),
             ));
         let is_heavy = pow_quality
             >= U512::from(self.inner_conf.heavy_block_difficulty_ratio)
@@ -1987,21 +1945,13 @@ impl ConsensusGraphInner {
         let parent_arena_index =
             *self.hash_to_arena_indices.get(parent_hash).unwrap();
         let parent_epoch = self.arena[parent_arena_index].height;
-        if parent_epoch
-            < self
-                .pow_config
-                .difficulty_adjustment_epoch_period(parent_epoch)
-        {
+        if parent_epoch < self.pow_config.difficulty_adjustment_epoch_period() {
             // Use initial difficulty for early epochs
             self.pow_config.initial_difficulty.into()
         } else {
             let last_period_upper = (parent_epoch
-                / self
-                    .pow_config
-                    .difficulty_adjustment_epoch_period(parent_epoch))
-                * self
-                    .pow_config
-                    .difficulty_adjustment_epoch_period(parent_epoch);
+                / self.pow_config.difficulty_adjustment_epoch_period())
+                * self.pow_config.difficulty_adjustment_epoch_period();
             if last_period_upper != parent_epoch {
                 self.arena[parent_arena_index].difficulty
             } else {
@@ -2036,9 +1986,8 @@ impl ConsensusGraphInner {
             // state root and do not update the main chain.
             self.current_difficulty = self.pow_config.initial_difficulty.into();
         } else if epoch
-            == (epoch
-                / self.pow_config.difficulty_adjustment_epoch_period(epoch))
-                * self.pow_config.difficulty_adjustment_epoch_period(epoch)
+            == (epoch / self.pow_config.difficulty_adjustment_epoch_period())
+                * self.pow_config.difficulty_adjustment_epoch_period()
         {
             self.current_difficulty = target_difficulty(
                 &self.data_man,
@@ -3841,153 +3790,10 @@ impl ConsensusGraphInner {
         }
         Some(subtree)
     }
-
-    pub fn get_next_main_decision(
-        &self, parent_decision_hash: &H256, confirmed_height: u64,
-    ) -> Option<(u64, H256)> {
-        let r = match self.hash_to_arena_indices.get(parent_decision_hash) {
-            None => {
-                // parent_decision is before the current checkpoint, so we just
-                // choose the latest block as a new main
-                // decision.
-                let new_decision_height = (confirmed_height.saturating_sub(
-                    self.inner_conf
-                        .pos_main_decision_defer_epoch_count(confirmed_height),
-                )) / POS_TERM_EPOCHS
-                    * POS_TERM_EPOCHS;
-                if new_decision_height <= self.cur_era_genesis_height {
-                    None
-                } else {
-                    let new_decision_arena_index =
-                        self.get_main_block_arena_index(new_decision_height);
-                    Some((
-                        self.arena[new_decision_arena_index].height,
-                        self.arena[new_decision_arena_index].hash,
-                    ))
-                }
-            }
-            Some(parent_decision) => {
-                let parent_decision_height =
-                    self.arena[*parent_decision].height;
-                assert_eq!(parent_decision_height % POS_TERM_EPOCHS, 0);
-                // `parent` should be on the main chain.
-                if self.get_main_block_arena_index(parent_decision_height)
-                    == *parent_decision
-                {
-                    // TODO(lpl): Use confirmed epoch with a delay in
-                    // pos-finality spec.
-                    let new_decision_height =
-                        (confirmed_height.saturating_sub(
-                            self.inner_conf
-                                .pos_main_decision_defer_epoch_count(
-                                    confirmed_height,
-                                ),
-                        )) / POS_TERM_EPOCHS
-                            * POS_TERM_EPOCHS;
-                    if new_decision_height <= parent_decision_height {
-                        None
-                    } else {
-                        let new_decision_arena_index = self
-                            .get_main_block_arena_index(new_decision_height);
-                        Some((
-                            self.arena[new_decision_arena_index].height,
-                            self.arena[new_decision_arena_index].hash,
-                        ))
-                    }
-                } else {
-                    None
-                }
-            }
-        };
-        debug!(
-            "next_main_decision: parent={:?} return={:?}",
-            parent_decision_hash, r
-        );
-        r
-    }
-
-    pub fn validate_main_decision(
-        &self, ancestor_hash: &H256, me_hash: &H256,
-    ) -> bool {
-        if ancestor_hash == me_hash {
-            return true;
-        }
-        debug!(
-            "validate_main_decision: ancestor={:?}, me={:?}",
-            ancestor_hash, me_hash
-        );
-        match (
-            self.hash_to_arena_indices.get(ancestor_hash),
-            self.hash_to_arena_indices.get(me_hash),
-        ) {
-            (Some(ancestor), Some(me)) => {
-                if self.arena[*me].height % POS_TERM_EPOCHS != 0 {
-                    return false;
-                }
-                // Both in memory. Just use Link-Cut-Tree.
-                self.ancestor_at(*me, self.arena[*ancestor].height) == *ancestor
-            }
-            // TODO(lpl): Check if it's possible to go beyond checkpoint.
-            // TODO(lpl): If we want to check ancestor and me are both on main
-            // chain, we might need to always persist
-            // block_execution_result for full nodes. Or include
-            // height in the validation?
-            (_, Some(_me)) => {
-                // This should not happen after catching up for a normal node.
-                if !self.header_only {
-                    warn!(
-                        "ancestor not in consensus graph: processed={}",
-                        self.main_block_processed(ancestor_hash)
-                    );
-                }
-                // ancestor is before checkpoint and is on main chain, so me
-                // must be in the subtree.
-                true
-            }
-            (_, _) => {
-                // This should not happen after catching up for a normal node.
-                if !self.header_only {
-                    warn!("ancestor and me are both not in consensus graph, processed={} {}", self.main_block_processed(ancestor_hash), self.main_block_processed(me_hash));
-                }
-                true
-            }
-        }
-    }
-
-    /// Return error if the header does not exist or the header does not have
-    /// pos_reference or the pos_reference does not exist.
-    fn get_pos_reference_main_decision(
-        &self, block_hash: &H256,
-    ) -> Result<H256, String> {
-        let pos_reference = self
-            .data_man
-            .pos_reference_by_hash(block_hash)
-            .ok_or("header exist".to_string())?
-            .ok_or("pos reference checked in sync graph".to_string())?;
-        self.pos_verifier
-            .get_main_decision(&pos_reference)
-            .ok_or("pos validity checked in sync graph".to_string())
-    }
-
-    fn update_pos_main_decision(&mut self, me: usize) {
-        let h = self.arena[me].hash;
-        if let Ok(main_decision) = self.get_pos_reference_main_decision(&h) {
-            let main_decision_height = self
-                .data_man
-                .block_height_by_hash(&main_decision)
-                .expect("pos_reference checked");
-            if main_decision_height > self.best_pos_main_decision.1 {
-                self.best_pos_main_decision =
-                    (main_decision, main_decision_height);
-            }
-        }
-    }
-
     // TODO(lpl): Copied from `check_mining_adaptive_block`.
     /// Return possibly new parent.
     pub fn choose_correct_parent(
         &mut self, parent_arena_index: usize, referee_indices: Vec<usize>,
-        pos_reference: Option<PosBlockId>,
     ) -> usize {
         // We first compute outlier barrier for newly mined block
         let parent_outlier_opt = self.outlier_cache.get(parent_arena_index);
@@ -4055,17 +3861,14 @@ impl ConsensusGraphInner {
             parent_arena_index,
             &outlier_barrier,
             &timer_chain_tuple,
-            pos_reference,
         )
     }
 
     fn choose_correct_parent_impl(
         &mut self, parent: usize, outlier_barrier: &BitSet,
         timer_chain_tuple: &(u64, HashMap<usize, u64>, Vec<usize>, Vec<usize>),
-        pos_reference: Option<PosBlockId>,
     ) -> usize {
-        let force_confirm =
-            self.compute_block_force_confirm(timer_chain_tuple, pos_reference);
+        let force_confirm = self.compute_block_force_confirm(timer_chain_tuple);
         let force_confirm_height = self.arena[force_confirm].height;
 
         if self.ancestor_at(parent, force_confirm_height) == force_confirm {
@@ -4128,39 +3931,6 @@ impl ConsensusGraphInner {
             debug!("main_block_processed: {:?} is not processed", main_hash);
         }
         false
-    }
-
-    /// Return if a block has been confirmed by the main decision by the latest
-    /// committed PoS block.
-    ///
-    /// This function needs persisted `BlockExecutionResult` to respond
-    /// correctly for blocks before the checkpoint. If the data are not
-    /// persisted, it will return `false` for blocks before the checkpoint even
-    /// though they have been confirmed.
-    pub fn is_confirmed_by_pos(&self, block_hash: &H256) -> bool {
-        let epoch_number = match self.get_block_epoch_number(block_hash) {
-            Some(epoch_number) => epoch_number,
-            None => match self
-                .data_man
-                .block_execution_result_by_hash_from_db(block_hash)
-            {
-                Some(r) => {
-                    let epoch_hash = r.0;
-                    self.data_man
-                        .block_height_by_hash(&epoch_hash)
-                        .expect("executed header exists")
-                }
-                // We cannot find the BlockExecutionResult.
-                None => return false,
-            },
-        };
-        // All epochs before the confirmed epoch are regarded PoS-confirmed.
-        epoch_number <= self.best_pos_main_decision.1
-    }
-
-    /// Return the latest PoS main decision processed in ConsensusGraph.
-    pub fn latest_epoch_confirmed_by_pos(&self) -> &(H256, u64) {
-        &self.best_pos_main_decision
     }
 }
 

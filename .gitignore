@@ -19,5 +19,4 @@ build_clippy/
 tests/artifacts/**/*.dbg.json
 
 blockchain_data/
-pos_config/
 run/genesis_secrets.toml

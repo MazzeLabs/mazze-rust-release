@@ -15,12 +15,12 @@ use mazze_storage::{
     state_manager::StateIndex, utils::guarded_value::*, StorageManager,
     StorageManagerTrait,
 };
-use mazze_types::{Bloom, Space, H256};
+use mazze_types::{Bloom, H256};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockUpgradableReadGuard};
 use primitives::{
     block::CompactBlock,
-    receipt::{BlockReceipts, TransactionStatus},
-    Block, BlockHeader, EpochId, Receipt, SignedTransaction, TransactionIndex,
+    receipt::BlockReceipts,
+    Block, BlockHeader, EpochId, SignedTransaction, TransactionIndex,
     TransactionWithSignature, NULL_EPOCH,
 };
 use rlp::DecoderError;
@@ -40,7 +40,7 @@ pub use block_data_types::*;
 use db_gc_manager::GCProgress;
 use mazze_execute_helper::{
     exec_tracer::{BlockExecTraces, TransactionExecTraces},
-    phantom_tx::build_bloom_and_recover_phantom,
+    // phantom_tx::build_bloom_and_recover_phantom, // removed unused import
 };
 use mazze_internal_common::{
     EpochExecutionCommitment, StateAvailabilityBoundary, StateRootWithAuxInfo,
@@ -96,7 +96,6 @@ pub struct BlockDataManager {
     blocks: RwLock<HashMap<H256, Arc<Block>>>,
     compact_blocks: RwLock<HashMap<H256, CompactBlock>>,
     block_receipts: RwLock<HashMap<H256, BlockReceiptsInfo>>,
-    block_rewards: RwLock<HashMap<H256, BlockRewardsInfo>>,
     block_traces: RwLock<HashMap<H256, BlockTracesInfo>>,
     transaction_indices: RwLock<HashMap<H256, TransactionIndex>>,
     hash_by_block_number: RwLock<HashMap<u64, H256>>,
@@ -202,7 +201,6 @@ impl BlockDataManager {
             blocks: RwLock::new(HashMap::new()),
             compact_blocks: Default::default(),
             block_receipts: Default::default(),
-            block_rewards: Default::default(),
             block_traces: Default::default(),
             transaction_indices: Default::default(),
             hash_by_block_number: Default::default(),
@@ -700,51 +698,10 @@ impl BlockDataManager {
         trace! {"insert_block_traces end main={:?}", epoch};
     }
 
-    pub fn insert_block_reward_result(
-        &self, hash: H256, epoch: &H256, block_reward: BlockRewardResult,
-        persistent: bool,
-    ) {
-        self.insert_version(
-            hash,
-            epoch,
-            block_reward,
-            |key, result| {
-                self.db_manager
-                    .insert_block_reward_result_to_db(key, &result);
-            },
-            &self.block_rewards,
-            CacheId::BlockRewards(hash),
-            persistent,
-        );
-    }
-
-    pub fn block_reward_result_by_hash_with_epoch(
-        &self, hash: &H256, assumed_epoch_later: &H256,
-        update_main_assumption: bool, update_cache: bool,
-    ) -> Option<BlockRewardResult> {
-        self.get_version(
-            hash,
-            assumed_epoch_later,
-            &self.block_rewards,
-            update_main_assumption,
-            match update_cache {
-                true => Some(CacheId::BlockRewards(*hash)),
-                false => None,
-            },
-            |key| self.db_manager.block_reward_result_from_db(key),
-            |key, result| {
-                self.db_manager
-                    .insert_block_reward_result_to_db(key, result)
-            },
-        )
-    }
-
     pub fn remove_block_result(&self, hash: &H256, remove_db: bool) {
         self.block_receipts.write().remove(hash);
-        self.block_rewards.write().remove(hash);
         if remove_db {
             self.db_manager.remove_block_execution_result_from_db(hash);
-            self.db_manager.remove_block_reward_result_from_db(hash);
         }
     }
 
@@ -1203,123 +1160,38 @@ impl BlockDataManager {
     /// Check if all executed results of an epoch exist
     pub fn epoch_executed_and_recovered(
         &self, epoch_hash: &H256, epoch_block_hashes: &Vec<H256>,
-        on_local_main: bool, update_trace: bool,
-        reward_execution_info: &Option<RewardExecutionInfo>, evm_chain_id: u32,
+        _on_local_main: bool, update_trace: bool,
+        _reward_execution_info: &Option<RewardExecutionInfo>, _evm_chain_id: u32,
     ) -> bool {
-        if !self.epoch_executed(epoch_hash) {
+        let data_man = self;
+        let epoch_executed = data_man.epoch_executed(epoch_hash);
+        if !epoch_executed {
             return false;
         }
 
-        if on_local_main {
-            // Check if all blocks receipts and traces are from this epoch
-            let mut epoch_receipts = Vec::new();
-            for h in epoch_block_hashes {
-                if let Some(r) = self.block_execution_result_by_hash_with_epoch(
-                    h, epoch_hash, true, /* update_main_assumption */
-                    true, /* update_cache */
-                ) {
-                    epoch_receipts.push(r.block_receipts);
-                } else {
-                    return false;
-                }
                 if update_trace {
-                    // Update block traces in db if needed.
-                    if self
-                        .block_traces_by_hash_with_epoch(
-                            h, epoch_hash,
-                            true, /* update_main_assumption */
-                            true, /* update_cache */
-                        )
-                        .is_none()
-                    {
-                        return false;
+            // TODO: optimize for archive node.
+            for block_hash in epoch_block_hashes {
+                let block = match data_man.block_by_hash(block_hash, false) {
+                    Some(b) => b,
+                    None => {
+                        debug!("Block {:?} is missing", block_hash);
+                        continue;
                     }
-                }
-            }
-
-            let mut evm_tx_index = 0;
-
-            // Recover tx address if we will skip main chain execution
-            for (block_idx, block_hash) in epoch_block_hashes.iter().enumerate()
-            {
-                let mut mazze_tx_index = 0;
-
-                let block = self
-                    .block_by_hash(block_hash, true /* update_cache */)
-                    .expect("block exists");
-
-                for (tx_idx, tx) in block.transactions.iter().enumerate() {
-                    let Receipt {
-                        outcome_status,
-                        logs,
-                        ..
-                    } = epoch_receipts[block_idx].receipts.get(tx_idx).unwrap();
-
-                    let rpc_index = match tx.space() {
-                        Space::Native => {
-                            let rpc_index = mazze_tx_index;
-                            mazze_tx_index += 1;
-                            rpc_index
-                        }
-                        Space::Ethereum
-                            if *outcome_status
-                                != TransactionStatus::Skipped =>
-                        {
-                            let rpc_index = evm_tx_index;
-                            evm_tx_index += 1;
-                            rpc_index
-                        }
-                        _ => usize::MAX, // this will not be used
-                    };
-
-                    let (phantom_txs, _) =
-                        build_bloom_and_recover_phantom(logs, tx.hash());
-
-                    match outcome_status {
-                        TransactionStatus::Success
-                        | TransactionStatus::Failure => {
-                            self.insert_transaction_index(
-                                &tx.hash,
-                                &TransactionIndex {
-                                    block_hash: *block_hash,
-                                    real_index: tx_idx,
-                                    is_phantom: false,
-                                    rpc_index: Some(rpc_index),
-                                },
-                            );
-
-                            for ptx in phantom_txs {
-                                self.insert_transaction_index(
-                                    &ptx.into_eip155(evm_chain_id).hash(),
-                                    &TransactionIndex {
-                                        block_hash: *block_hash,
-                                        real_index: tx_idx,
-                                        is_phantom: true,
-                                        rpc_index: Some(evm_tx_index),
-                                    },
-                                );
-
-                                evm_tx_index += 1;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            if let Some(reward_execution_info) = reward_execution_info {
-                for block in &reward_execution_info.epoch_blocks {
-                    let h = block.as_ref().hash();
-                    if self
-                        .block_reward_result_by_hash_with_epoch(
-                            &h, epoch_hash, true, true,
-                        )
-                        .is_none()
-                    {
-                        return false;
+                };
+                let _block_header = &block.block_header;
+                let traces = data_man
+                    .transactions_traces_by_block_hash(block_hash)
+                    .map(|(_, traces)| traces);
+                if let Some(traces) = traces {
+                    if traces.len() != block.transactions.len() {
+                        debug!("Traces for block {:?} is not complete", block_hash);
+                        continue;
                     }
                 }
             }
         }
+
         true
     }
 
@@ -1370,7 +1242,6 @@ impl BlockDataManager {
         let blocks = self.blocks.read().size_of(malloc_ops);
         let compact_blocks = self.compact_blocks.read().size_of(malloc_ops);
         let block_receipts = self.block_receipts.read().size_of(malloc_ops);
-        let block_rewards = self.block_rewards.read().size_of(malloc_ops);
         let block_traces = self.block_traces.read().size_of(malloc_ops);
         let transaction_indices =
             self.transaction_indices.read().size_of(malloc_ops);
@@ -1383,7 +1254,6 @@ impl BlockDataManager {
             block_headers,
             blocks,
             block_receipts,
-            block_rewards,
             block_traces,
             transaction_indices,
             compact_blocks,
@@ -1398,7 +1268,6 @@ impl BlockDataManager {
         let mut blocks = self.blocks.write();
         let mut compact_blocks = self.compact_blocks.write();
         let mut executed_results = self.block_receipts.write();
-        let mut reward_results = self.block_rewards.write();
         let mut block_traces = self.block_traces.write();
         let mut tx_indices = self.transaction_indices.write();
         let mut local_block_info = self.local_block_info.write();
@@ -1408,13 +1277,12 @@ impl BlockDataManager {
         let mut cache_man = self.cache_man.lock();
 
         debug!(
-            "Before gc cache_size={} {} {} {} {} {} {} {} {} {} {}",
+            "Before gc cache_size={} {} {} {} {} {} {} {} {} {}",
             current_size,
             block_headers.len(),
             blocks.len(),
             compact_blocks.len(),
             executed_results.len(),
-            reward_results.len(),
             block_traces.len(),
             tx_indices.len(),
             local_block_info.len(),
@@ -1436,9 +1304,6 @@ impl BlockDataManager {
                     }
                     CacheId::BlockReceipts(h) => {
                         executed_results.remove(h);
-                    }
-                    CacheId::BlockRewards(h) => {
-                        reward_results.remove(h);
                     }
                     CacheId::BlockTraces(h) => {
                         block_traces.remove(h);
@@ -1462,7 +1327,6 @@ impl BlockDataManager {
             block_headers.size_of(malloc_ops)
                 + blocks.size_of(malloc_ops)
                 + executed_results.size_of(malloc_ops)
-                + reward_results.size_of(malloc_ops)
                 + block_traces.size_of(malloc_ops)
                 + tx_indices.size_of(malloc_ops)
                 + compact_blocks.size_of(malloc_ops)
@@ -1472,7 +1336,6 @@ impl BlockDataManager {
         block_headers.shrink_to_fit();
         blocks.shrink_to_fit();
         executed_results.shrink_to_fit();
-        reward_results.shrink_to_fit();
         block_traces.shrink_to_fit();
         tx_indices.shrink_to_fit();
         compact_blocks.shrink_to_fit();
@@ -1713,11 +1576,6 @@ impl BlockDataManager {
         );
         self.gc_epoch_with_defer(
             base_epoch,
-            self.config.additional_maintained_reward_epoch_count,
-            |h| self.db_manager.remove_block_reward_result_from_db(h),
-        );
-        self.gc_epoch_with_defer(
-            base_epoch,
             self.config.additional_maintained_trace_epoch_count,
             |h| self.db_manager.remove_block_trace_from_db(h),
         );
@@ -1760,7 +1618,6 @@ pub struct DataManagerConfiguration {
     pub db_type: DbType,
     pub additional_maintained_block_body_epoch_count: Option<usize>,
     pub additional_maintained_execution_result_epoch_count: Option<usize>,
-    pub additional_maintained_reward_epoch_count: Option<usize>,
     pub additional_maintained_trace_epoch_count: Option<usize>,
     pub additional_maintained_transaction_index_epoch_count: Option<usize>,
     pub checkpoint_gc_time_in_epoch_count: usize,
@@ -1785,7 +1642,6 @@ impl DataManagerConfiguration {
             db_type,
             additional_maintained_block_body_epoch_count: None,
             additional_maintained_execution_result_epoch_count: None,
-            additional_maintained_reward_epoch_count: None,
             additional_maintained_trace_epoch_count: None,
             additional_maintained_transaction_index_epoch_count: None,
             checkpoint_gc_time_in_epoch_count: 1,

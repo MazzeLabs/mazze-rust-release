@@ -21,7 +21,7 @@ use crate::sync::{
     synchronization_state::PeerFilter,
     SynchronizationProtocolHandler,
 };
-use mazze_parameters::consensus_internal::REWARD_EPOCH_COUNT;
+use mazze_parameters::consensus::DEFERRED_STATE_EPOCH_COUNT;
 use mazze_storage::Result as StorageResult;
 use mazze_types::H256;
 use network::{node_table::NodeId, NetworkContext};
@@ -306,7 +306,7 @@ impl SnapshotChunkSync {
         // FIXME: before snapshot, for the reward epoch count, maybe
         // FIXME: save it to a dedicated place for reward computation.
         for i in related_data.blame_vec_offset
-            ..(related_data.blame_vec_offset + REWARD_EPOCH_COUNT as usize)
+            ..(related_data.blame_vec_offset + DEFERRED_STATE_EPOCH_COUNT as usize)
         {
             info!(
                 "insert_epoch_execution_commitment for block hash {:?}",

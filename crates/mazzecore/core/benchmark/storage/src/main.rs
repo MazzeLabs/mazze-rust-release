@@ -29,7 +29,6 @@ pub enum EthTxType {
     BlockRewardAndTxFee,
     UncleReward,
     Transaction,
-    Dao,
     GenesisAccount,
 }
 
@@ -77,13 +76,6 @@ impl Decodable for RealizedEthTx {
             types: unsafe { mem::transmute(rlp.val_at::<u32>(4)?) },
         })
     }
-}
-
-#[derive(Clone, Default)]
-pub struct DaoHardforkInfo {
-    dao_hardfork_accounts: Vec<Address>,
-    dao_hardfork_beneficiary: Address,
-    dao_hardfork_transition: u64,
 }
 
 #[derive(Clone)]
@@ -979,9 +971,6 @@ pub struct EthTxExtractor<EthTxT: EthTxTypeTrait> {
         Vec<Arc<Mutex<FIFOConsumerThread<EthTxBasicVerifierRequest<EthTxT>>>>>,
     ethash_params: EthashParams,
     params: EthCommonParams,
-    dao_hardfork_info: Option<Arc<DaoHardforkInfo>>,
-
-    /// Not verifying balance at the moment.
     nonce_verifier: EthTxVerifier<EthTxT>,
     nonce_dir_path: String,
     counters: Arc<Mutex<EthTxExtractorCounters>>,
@@ -1044,19 +1033,22 @@ impl<EthTxT: EthTxTypeTrait> EthTxExtractor<EthTxT> {
             }
         }
 
-        let dao_hardfork_info = match ethash.params.dao_hardfork_transition {
-            Some(transition) => Some(Arc::new(DaoHardforkInfo {
-                dao_hardfork_transition: transition.0.as_u64(),
-                dao_hardfork_accounts: vec![],
-                dao_hardfork_beneficiary: ethash
-                    .params
-                    .dao_hardfork_beneficiary
-                    .as_ref()
-                    .unwrap()
-                    .0,
-            })),
-            None => None,
-        };
+        let nonce_verifier: EthTxVerifier<EthTxT>;
+        if start_block_number == 0 {
+            nonce_verifier = EthTxVerifier::new(
+                path_to_tx_file,
+                nonce_dir_path.clone(),
+                start_block_number,
+                tx_maker.clone(),
+            )?;
+        } else {
+            nonce_verifier = EthTxVerifier::new(
+                path_to_tx_file,
+                nonce_dir_path.clone(),
+                start_block_number,
+                tx_maker.clone(),
+            )?;
+        }
 
         let tx_basic_verifiers = FIFOConsumerThread::new_consumers(
             Self::N_TX_BASIC_VERIFIERS,
@@ -1121,15 +1113,9 @@ impl<EthTxT: EthTxTypeTrait> EthTxExtractor<EthTxT> {
             tx_basic_verifiers,
             ethash_params: ethash.params.into(),
             params: EthSpec::load(File::open(path)?)?.params.into(),
-            dao_hardfork_info,
-            counters: Default::default(),
-            nonce_verifier: EthTxVerifier::new(
-                path_to_tx_file,
-                nonce_dir_path.clone(),
-                start_block_number,
-                tx_maker.clone(),
-            )?,
+            nonce_verifier,
             nonce_dir_path: nonce_dir_path.clone(),
+            counters: Default::default(),
             shared_self: SyncUnsafeCell::new(None),
             tx_maker: tx_maker.clone(),
         }));
@@ -1284,24 +1270,6 @@ impl<EthTxT: EthTxTypeTrait> TxExtractor for EthTxExtractor<EthTxT> {
         let block_number = block.header.number();
         let base_transaction_number =
             self.counters.lock().base_transaction_number;
-        let dao_hardfork = self.dao_hardfork_info.is_some()
-            && block_number
-                == self
-                    .dao_hardfork_info
-                    .as_ref()
-                    .unwrap()
-                    .dao_hardfork_transition;
-
-        let mut ad_hoc_tx_numbers = 0;
-        if dao_hardfork {
-            ad_hoc_tx_numbers = self
-                .dao_hardfork_info
-                .as_ref()
-                .unwrap()
-                .dao_hardfork_accounts
-                .len() as u32;
-        }
-
         let use_tx_chain_id =
             block_number < self.params.validate_chain_id_transition;
         let chain_id =
@@ -1316,45 +1284,12 @@ impl<EthTxT: EthTxTypeTrait> TxExtractor for EthTxExtractor<EthTxT> {
         let new_base_transaction_number =
             self.get_out_streamer().lock().initialize_for_block(
                 block_number,
-                ad_hoc_tx_numbers,
+                0,
                 block.transactions.len() as u32,
                 1 + block.uncles.len() as u32,
                 base_transaction_number,
                 chain_id,
             );
-
-        // Dao
-        if dao_hardfork {
-            let mut ad_hoc_tx_index = 0;
-
-            let dao_hardfork_info =
-                self.dao_hardfork_info.as_ref().unwrap().clone();
-
-            let beneficiary = &dao_hardfork_info.dao_hardfork_beneficiary;
-            let accounts = &dao_hardfork_info.dao_hardfork_accounts;
-
-            for account in accounts {
-                // TODO: we don't support updating loading the balance because
-                // it's extremely slow. and it make parallelism
-                // hard.
-                let balance =
-                    self.get_balance(&account).map_or(0.into(), |x| *x);
-
-                self.add_tx_from_system(
-                    self.tx_maker.make_force_transfer(
-                        &account,
-                        &beneficiary,
-                        balance,
-                        EthTxType::Dao,
-                    ),
-                    block_number,
-                    base_transaction_number,
-                    ad_hoc_tx_index,
-                );
-
-                ad_hoc_tx_index += 1;
-            }
-        }
 
         // verify txs
         let check_low_s =
@@ -1362,7 +1297,7 @@ impl<EthTxT: EthTxTypeTrait> TxExtractor for EthTxExtractor<EthTxT> {
 
         // Apply block rewards.
         let block_reward_tx_offset =
-            ad_hoc_tx_numbers + block.transactions.len() as u32;
+            block.transactions.len() as u32;
         let mut block_reward_txs = 0;
         let block_reward_base = self.get_block_reward_base(block_number);
 

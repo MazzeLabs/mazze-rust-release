@@ -28,18 +28,17 @@ use std::{
 
 const COLLECTION_QUEUE_SIZE: usize = 8;
 
-#[derive(Debug, Hash, Eq, PartialEq, Clone, DeriveMallocSizeOf)]
+#[derive(Eq, PartialEq, Hash, Clone, Debug, DeriveMallocSizeOf)]
 pub enum CacheId {
     Block(H256),
     BlockHeader(H256),
-    CompactBlock(H256),
     BlockReceipts(H256),
-    BlockRewards(H256),
     BlockTraces(H256),
     TransactionAddress(H256),
+    CompactBlock(H256),
+    HashByBlockNumber(u64),
     LocalBlockInfo(H256),
     BlamedHeaderVerifiedRoots(u64),
-    HashByBlockNumber(u64),
 }
 
 pub struct CacheManager<T> {
@@ -139,8 +138,6 @@ pub struct CacheSize {
     pub compact_blocks: usize,
     /// Block Receipts cache size.
     pub block_receipts: usize,
-    /// Block Rewards cache size.
-    pub block_rewards: usize,
     /// Block Traces cache size.
     pub block_traces: usize,
     /// Transaction indices cache size.
@@ -158,7 +155,6 @@ impl CacheSize {
             + self.blocks
             + self.compact_blocks
             + self.block_receipts
-            + self.block_rewards
             + self.block_traces
             + self.transaction_indices
             + self.local_block_infos

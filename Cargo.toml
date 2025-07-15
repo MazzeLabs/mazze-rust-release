@@ -59,14 +59,14 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "2.0.2"
-authors = ["s94130586"]
+version = "2.1.2"
+authors = ["paladin0x"]
 description = "A rust implementation of the Mazze-Protocol"
-documentation = "https://doc.mazzenetwork.org"
+documentation = "https://docs.mazze.io/"
 #edition = "2018"
-homepage = "https://www.mazze.io/"
+homepage = "https://mazze.io/"
 keywords = ["Mazze"]
-repository = "https://github.com/s94130586/mazze-rust"
+repository = "https://github.com/MazzeLabs/mazze-rust-release"
 license-file = "LICENSE"
 
 [patch.crates-io]

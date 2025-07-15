@@ -375,11 +375,22 @@ impl BlockGenerator {
         }
         PACKED_ACCOUNT_SIZE.update(sender_accounts.len());
 
-        let state_blame_info = consensus_graph
+        let state_blame_info = match consensus_graph
             .get_blame_and_deferred_state_for_generation(
                 &best_info.best_block_hash,
-            )
-            .unwrap();
+            ) {
+            Ok(info) => info,
+            Err(e) => {
+                warn!("Cannot get blame and deferred state for generation: {}. Using default state blame info.", e);
+                // Return a default state blame info
+                StateBlameInfo {
+                    blame: 0,
+                    state_vec_root: H256::default(),
+                    receipts_vec_root: H256::default(),
+                    logs_bloom_vec_root: H256::default(),
+                }
+            }
+        };
 
         let best_block_hash = best_info.best_block_hash.clone();
         let mut referee = best_info.bounded_terminal_block_hashes.clone();
@@ -798,6 +809,7 @@ impl BlockGenerator {
         let mut current_mining_block: Option<Block> = None;
         let mut current_problem: Option<ProofOfWorkProblem> = None;
         let mut last_assemble = SystemTime::now();
+        let sleep_duration = Duration::from_millis(100);
 
         loop {
             match *bg.state.read() {
@@ -809,11 +821,22 @@ impl BlockGenerator {
                 current_mining_block.as_ref(),
                 &last_assemble,
             ) {
-                let new_block = bg.assemble_new_block(
-                    MAX_TRANSACTION_COUNT_PER_BLOCK,
-                    bg.graph.verification_config.max_block_size_in_bytes,
-                    vec![],
-                );
+                // Try to assemble new block with panic handling
+                let new_block = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    bg.assemble_new_block(
+                        MAX_TRANSACTION_COUNT_PER_BLOCK,
+                        bg.graph.verification_config.max_block_size_in_bytes,
+                        vec![],
+                    )
+                })) {
+                    Ok(block) => block,
+                    Err(_) => {
+                        warn!("Failed to assemble new block, execution results not ready. Retrying...");
+                        thread::sleep(sleep_duration);
+                        continue;
+                    }
+                };
+
                 let problem = ProofOfWorkProblem::new(
                     new_block.block_header.height(),
                     new_block.block_header.problem_hash(),

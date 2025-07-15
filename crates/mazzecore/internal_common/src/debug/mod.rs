@@ -22,33 +22,18 @@ pub struct ComputeEpochDebugRecord {
     pub block_hash: H256,
     pub parent_epoch_hash: H256,
     pub parent_state_root: StateRootWithAuxInfo,
-    pub reward_epoch_hash: Option<H256>,
-    pub outlier_penalty_cutoff_epoch_hash: Option<H256>,
 
     // Blocks.
     pub block_hashes: Vec<H256>,
     pub block_txs: Vec<usize>,
     pub transactions: Vec<Arc<SignedTransaction>>,
-
-    // Rewards. Rewards for outlier overlimit blocks may be skipped.
-    pub block_authors: Vec<Address>,
-    pub no_reward_blocks: Vec<H256>,
-    pub block_rewards: Vec<BlockHashAuthorValue<U256>>,
-    pub outlier_penalties: Vec<BlockHashAuthorValue<U256>>,
-    // pub outlier_set_size: Vec<BlockHashValue<usize>>,
-    pub tx_fees: Vec<BlockHashAuthorValue<U256>>,
-    pub secondary_rewards: Vec<BlockHashAuthorValue<U256>>,
-    pub block_final_rewards: Vec<BlockHashAuthorValue<U256>>,
-    pub merged_rewards_by_author: Vec<AuthorValue<U256>>,
-
-    // State root sequence.
-    // TODO: the fields below are not yet filled for debugging.
-    pub delta_roots_post_tx: Vec<H256>,
-    pub state_root_after_applying_rewards: StateRootWithAuxInfo,
-
+    
     // Storage operations.
     // op name, key, maybe_value
     pub state_ops: Vec<StateOp>,
+    
+    // For reward distribution
+    pub merged_rewards_by_author: Vec<AuthorValue<U256>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -74,24 +59,11 @@ impl Default for ComputeEpochDebugRecord {
             parent_state_root: StateRootWithAuxInfo::genesis(
                 &Default::default(),
             ),
-            reward_epoch_hash: None,
-            outlier_penalty_cutoff_epoch_hash: None,
             block_hashes: Default::default(),
             block_txs: Default::default(),
             transactions: Default::default(),
-            block_authors: Default::default(),
-            no_reward_blocks: Default::default(),
-            block_rewards: Default::default(),
-            outlier_penalties: Default::default(),
-            tx_fees: Default::default(),
-            secondary_rewards: Default::default(),
-            block_final_rewards: Default::default(),
-            merged_rewards_by_author: Default::default(),
-            delta_roots_post_tx: Default::default(),
-            state_root_after_applying_rewards: StateRootWithAuxInfo::genesis(
-                &Default::default(),
-            ),
             state_ops: Default::default(),
+            merged_rewards_by_author: Default::default(),
         }
     }
 }

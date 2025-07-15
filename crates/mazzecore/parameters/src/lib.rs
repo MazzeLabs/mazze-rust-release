@@ -5,8 +5,6 @@
 #[macro_use]
 extern crate lazy_static;
 
-use mazze_types::U256;
-
 pub mod genesis;
 pub mod internal_contract_addresses;
 
@@ -52,11 +50,6 @@ pub mod consensus {
 pub mod consensus_internal {
     use crate::consensus::{ONE_GMAZZY_IN_MAZZY, ONE_MAZZE_IN_MAZZY};
 
-    /// `REWARD_EPOCH_COUNT` needs to be larger than
-    /// `OUTLIER_PENALTY_UPPER_EPOCH_COUNT`. If we cannot cache receipts of
-    /// recent `REWARD_EPOCH_COUNT` epochs, the receipts will be loaded from
-    /// db, which may lead to performance downgrade
-    pub const REWARD_EPOCH_COUNT: u64 = 12;
     pub const OUTLIER_PENALTY_UPPER_EPOCH_COUNT: u64 = 10;
     pub const OUTLIER_PENALTY_RATIO: u64 = 100;
     /// The maximum number of blocks to be executed in each epoch
@@ -191,7 +184,7 @@ pub mod pow {
 
     // TODO: compute a more appropriate initial difficulty
     // previous initial difficulty: 20_000_000_000;
-    pub const INITIAL_DIFFICULTY: u64 = 500;
+    pub const INITIAL_DIFFICULTY: u64 = 10;
 
     // The amount of epochs to use for switching mining seed hash
     pub const RANDOMX_EPOCH_LENGTH: u64 = 2048;
@@ -379,7 +372,3 @@ pub mod light {
 }
 
 pub const WORKER_COMPUTATION_PARALLELISM: usize = 8;
-
-pub struct DaoControlParameters {
-    pub pow_base_reward: U256,
-}

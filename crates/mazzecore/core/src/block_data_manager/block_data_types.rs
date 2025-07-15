@@ -2,7 +2,7 @@ use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_execute_helper::exec_tracer::BlockExecTraces;
 use mazze_internal_common::{DatabaseDecodable, DatabaseEncodable};
-use mazze_types::{Bloom, H256, U256};
+use mazze_types::{Bloom, H256};
 use primitives::BlockReceipts;
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use rlp_derive::{RlpDecodable, RlpEncodable};
@@ -49,27 +49,6 @@ impl Decodable for BlockExecutionResult {
         })
     }
 }
-
-#[derive(
-    RlpEncodable, RlpDecodable, Clone, Copy, Debug, DeriveMallocSizeOf,
-)]
-pub struct BlockRewardResult {
-    pub total_reward: U256,
-    pub base_reward: U256,
-    pub tx_fee: U256,
-}
-
-impl Default for BlockRewardResult {
-    fn default() -> Self {
-        BlockRewardResult {
-            total_reward: U256::from(0),
-            base_reward: U256::from(0),
-            tx_fee: U256::from(0),
-        }
-    }
-}
-
-pub type BlockRewardsInfo = BlockDataWithMultiVersion<H256, BlockRewardResult>;
 
 #[derive(Clone, Debug, DeriveMallocSizeOf)]
 pub struct DataVersionTuple<Version, T>(pub Version, pub T);
@@ -367,5 +346,4 @@ impl_db_encoding_as_rlp!(BlockExecutionResult);
 impl_db_encoding_as_rlp!(LocalBlockInfo);
 impl_db_encoding_as_rlp!(CheckpointHashes);
 impl_db_encoding_as_rlp!(EpochExecutionContext);
-impl_db_encoding_as_rlp!(BlockRewardResult);
 impl_db_encoding_as_rlp!(BlamedHeaderVerifiedRoots);

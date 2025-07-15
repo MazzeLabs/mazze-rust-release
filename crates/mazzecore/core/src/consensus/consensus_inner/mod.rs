@@ -7,6 +7,8 @@ pub mod confirmation_meter;
 pub mod consensus_executor;
 pub mod consensus_new_block_handler;
 
+
+use parking_lot::RwLockReadGuard;
 use crate::{
     block_data_manager::{
         BlockDataManager, BlockExecutionResultWithEpoch, DataVersionTuple,
@@ -584,7 +586,7 @@ impl ConsensusGraphNode {
 impl ConsensusGraphInner {
     pub fn with_era_genesis(
         pow_config: ProofOfWorkConfig, pow: Arc<PowComputer>,
-        data_man: Arc<BlockDataManager>, inner_conf: ConsensusInnerConfig,
+        data_man: Arc<BlockDataManager>,
         cur_era_genesis_block_hash: &H256, cur_era_stable_block_hash: &H256,
     ) -> Self {
         let genesis_block_header = data_man
@@ -625,7 +627,20 @@ impl ConsensusGraphInner {
             pow,
             current_difficulty: initial_difficulty.into(),
             data_man: data_man.clone(),
-            inner_conf,
+            inner_conf: ConsensusInnerConfig {
+                adaptive_weight_beta: 1,
+                heavy_block_difficulty_ratio: 2,
+                timer_chain_block_difficulty_ratio: 2,
+                timer_chain_beta: 2,
+                era_epoch_count: 100,
+                enable_optimistic_execution: false,
+                enable_state_expose: false,
+                debug_dump_dir_invalid_state_root: None,
+                debug_invalid_state_root_epoch: None,
+                force_recompute_height_during_construct_main: None,
+                recovery_latest_mpt_snapshot: false,
+                use_isolated_db_for_mpt_table: false,
+            },
             outlier_cache: OutlierCache::new(),
             pastset_cache: Default::default(),
             sequence_number_of_block_entrance: 0,
@@ -837,7 +852,7 @@ impl ConsensusGraphInner {
     }
 
     #[inline]
-    fn get_epoch_start_block_number(&self, epoch_arena_index: usize) -> u64 {
+    pub fn get_epoch_start_block_number(&self, epoch_arena_index: usize) -> u64 {
         let parent = self.arena[epoch_arena_index].parent;
 
         return self.arena[parent].past_num_blocks + 1;
@@ -1562,7 +1577,7 @@ impl ConsensusGraphInner {
     ) -> (u64, usize) {
         let sn = self.get_next_sequence_number();
         let hash = block_header.hash();
-        // we make cur_era_genesis be it's parent if it doesn‘t has one.
+        // we make cur_era_genesis be it's parent if it doesn't has one.
         let parent = self
             .hash_to_arena_indices
             .get(block_header.parent_hash())
@@ -1865,45 +1880,19 @@ impl ConsensusGraphInner {
     pub fn get_main_reward_index(
         &self, epoch_arena_index: usize,
     ) -> Option<(usize, usize)> {
-        // We are going to exclude the original genesis block here!
-        if self.arena[epoch_arena_index].height <= REWARD_EPOCH_COUNT {
+        if self.arena[epoch_arena_index].height <= DEFERRED_STATE_EPOCH_COUNT {
             return None;
         }
-        let parent_index = self.arena[epoch_arena_index].parent;
-        // Recompute epoch.
-        let outlier_cut_height =
-            REWARD_EPOCH_COUNT - OUTLIER_PENALTY_UPPER_EPOCH_COUNT;
-        let mut outlier_penalty_cutoff_epoch_block = parent_index;
-        for _i in 1..outlier_cut_height {
-            if outlier_penalty_cutoff_epoch_block == NULL {
-                break;
-            }
-            outlier_penalty_cutoff_epoch_block =
-                self.arena[outlier_penalty_cutoff_epoch_block].parent;
-        }
-        let mut reward_epoch_block = outlier_penalty_cutoff_epoch_block;
-        for _i in 0..OUTLIER_PENALTY_UPPER_EPOCH_COUNT {
-            if reward_epoch_block == NULL {
-                break;
-            }
-            reward_epoch_block = self.arena[reward_epoch_block].parent;
-        }
-        if reward_epoch_block != NULL {
-            // The outlier_penalty_cutoff respect the era bound!
-            while !self.is_same_era(
-                reward_epoch_block,
-                outlier_penalty_cutoff_epoch_block,
-            ) {
-                outlier_penalty_cutoff_epoch_block =
-                    self.arena[outlier_penalty_cutoff_epoch_block].parent;
-            }
-        }
-        let reward_index = if reward_epoch_block == NULL {
-            None
-        } else {
-            Some((reward_epoch_block, outlier_penalty_cutoff_epoch_block))
-        };
-        reward_index
+        let reward_height =
+            self.arena[epoch_arena_index].height - DEFERRED_STATE_EPOCH_COUNT;
+        let penalty_cutoff_height = reward_height
+            .checked_sub(OUTLIER_PENALTY_UPPER_EPOCH_COUNT)
+            .unwrap_or(0);
+        let reward_main_chain_index =
+            self.get_main_block_arena_index(reward_height);
+        let penalty_main_chain_index =
+            self.get_main_block_arena_index(penalty_cutoff_height);
+        Some((reward_main_chain_index, penalty_main_chain_index))
     }
 
     fn get_executable_epoch_blocks(
@@ -2805,104 +2794,7 @@ impl ConsensusGraphInner {
         Ok(())
     }
 
-    fn compute_vote_valid_for_main_block(
-        &mut self, me: usize, main_arena_index: usize,
-    ) -> bool {
-        let lca = self.lca(me, main_arena_index);
-        let lca_height = self.arena[lca].height;
-        debug!(
-            "compute_vote_valid_for_main_block: lca={}, lca_height={}",
-            lca, lca_height
-        );
-        let mut stack = Vec::new();
-        stack.push((0, me, 0));
-        while !stack.is_empty() {
-            let (stage, index, a) = stack.pop().unwrap();
-            if stage == 0 {
-                if self.arena[index].data.vote_valid_lca_height != lca_height {
-                    let header = self
-                        .data_man
-                        .block_header_by_hash(&self.arena[index].hash)
-                        .unwrap();
-                    let blame = header.blame();
-                    if self.arena[index].height > lca_height + 1 + blame as u64
-                    {
-                        let ancestor = self.ancestor_at(
-                            index,
-                            self.arena[index].height - blame as u64 - 1,
-                        );
-                        stack.push((1, index, ancestor));
-                        stack.push((0, ancestor, 0));
-                    } else {
-                        // We need to make sure the ancestor at height
-                        // self.arena[index].height - blame - 1 is state valid,
-                        // and the remainings are not
-                        let start_height =
-                            self.arena[index].height - blame as u64 - 1;
-                        let mut cur_height = lca_height;
-                        let mut cur = lca;
-                        let mut vote_valid = true;
-                        while cur_height > start_height {
-                            if self.arena[cur].data.state_valid
-                                .expect("state_valid for me has been computed in \
-                                wait_and_compute_state_valid_locked by the caller, \
-                                so the precedents should have state_valid") {
-                                vote_valid = false;
-                                break;
-                            }
-                            cur_height -= 1;
-                            cur = self.arena[cur].parent;
-                        }
-                        if vote_valid
-                            && !self.arena[cur].data.state_valid.expect(
-                                "state_valid for me has been computed in \
-                            wait_and_compute_state_valid_locked by the caller, \
-                            so the precedents should have state_valid",
-                            )
-                        {
-                            vote_valid = false;
-                        }
-                        self.arena[index].data.vote_valid_lca_height =
-                            lca_height;
-                        self.arena[index].data.vote_valid = vote_valid;
-                    }
-                }
-            } else {
-                self.arena[index].data.vote_valid_lca_height = lca_height;
-                self.arena[index].data.vote_valid =
-                    self.arena[a].data.vote_valid;
-            }
-        }
-        self.arena[me].data.vote_valid
-    }
 
-    /// Compute the total weight in the epoch represented by the block of
-    /// my_hash.
-    fn total_weight_in_own_epoch(
-        &self, blockset_in_own_epoch: &Vec<usize>, genesis: usize,
-    ) -> i128 {
-        let gen_arena_index = if genesis != NULL {
-            genesis
-        } else {
-            self.cur_era_genesis_block_arena_index
-        };
-        let gen_height = self.arena[gen_arena_index].height;
-        let mut total_weight = 0 as i128;
-        for index in blockset_in_own_epoch.iter() {
-            if gen_arena_index != self.cur_era_genesis_block_arena_index {
-                let height = self.arena[*index].height;
-                if height < gen_height {
-                    continue;
-                }
-                let era_arena_index = self.ancestor_at(*index, gen_height);
-                if gen_arena_index != era_arena_index {
-                    continue;
-                }
-            }
-            total_weight += self.block_weight(*index);
-        }
-        total_weight
-    }
 
     /// Recompute metadata associated information on main chain changes
     fn recompute_metadata(
@@ -2926,17 +2818,12 @@ impl ConsensusGraphInner {
                     let blockset = self
                         .exchange_or_compute_blockset_in_own_view_of_epoch(
                             me, None,
-                        );
-                    let blockset_weight = self.total_weight_in_own_epoch(
-                        &blockset,
-                        self.cur_era_genesis_block_arena_index,
                     );
                     self.exchange_or_compute_blockset_in_own_view_of_epoch(
                         me,
                         Some(blockset),
                     );
                     self.main_chain_metadata[i_main_index - 1].past_weight
-                        + blockset_weight
                         + self.block_weight(me)
                 } else {
                     self.block_weight(me)
@@ -3931,6 +3818,15 @@ impl ConsensusGraphInner {
             debug!("main_block_processed: {:?} is not processed", main_hash);
         }
         false
+    }
+
+    pub fn get_block_from_arena_index(inner: &RwLockReadGuard<ConsensusGraphInner>, index: usize) -> Arc<Block> {
+        // This block should always exist
+        // It's safe to unwrap since we only call this for existing blocks.
+        inner
+            .data_man
+            .block_by_hash(&inner.arena[index].hash, false)
+            .expect("Block should always exist")
     }
 }
 

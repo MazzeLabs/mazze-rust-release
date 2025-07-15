@@ -23,7 +23,6 @@ use jsonrpc_pubsub::{
 };
 use mazze_parameters::{
     consensus::DEFERRED_STATE_EPOCH_COUNT,
-    consensus_internal::REWARD_EPOCH_COUNT,
 };
 use mazze_types::{Space, H256};
 use mazzecore::{
@@ -41,6 +40,7 @@ use std::{
     time::Duration,
 };
 use tokio_timer::sleep;
+
 
 type Client = Sink<pubsub::Result>;
 
@@ -407,7 +407,6 @@ impl ChainNotificationHandler {
                 if latest
                     > epoch_number
                         + DEFERRED_STATE_EPOCH_COUNT
-                        + REWARD_EPOCH_COUNT
                 {
                     // Even if the epoch was executed, the phantom block on the
                     // fork should be unable to constructed.
@@ -460,7 +459,7 @@ impl ChainNotificationHandler {
                 return None;
             } else {
                 if latest
-                    > epoch + DEFERRED_STATE_EPOCH_COUNT + REWARD_EPOCH_COUNT
+                    > epoch + DEFERRED_STATE_EPOCH_COUNT
                 {
                     // Even if the epoch was executed, the receipts on the fork
                     // should have been deleted and cannot

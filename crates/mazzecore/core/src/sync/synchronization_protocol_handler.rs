@@ -26,6 +26,7 @@ use crate::{
     },
     ConsensusGraph, NodeType,
 };
+use crate::verification::VerificationConfig;
 use io::TimerToken;
 use malloc_size_of::{new_malloc_size_ops, MallocSizeOf};
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
@@ -1177,12 +1178,21 @@ impl SynchronizationProtocolHandler {
         let hash = block.block_header.hash();
         info!("Mined block {:?} header={:?}", hash, block.block_header);
         let parent_hash = *block.block_header.parent_hash();
-
+    
         assert!(self.graph.contains_block_header(&parent_hash));
         if self.graph.contains_block_header(&hash) {
             warn!("Mined an duplicate block, the mining power is wasted!");
             return;
         }
+        
+        // Compute and set pow_hash before inserting
+        let seed_hash = self.graph.data_man.db_manager.get_current_seed_hash(block.block_header.height());
+        VerificationConfig::get_or_fill_header_pow_quality(
+            &self.graph.pow,
+            &mut block.block_header,
+            &seed_hash,
+        );
+        
         self.graph.insert_block_header(
             &mut block.block_header,
             false,

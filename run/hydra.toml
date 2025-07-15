@@ -102,7 +102,7 @@ log_level="info"
 # If not set, the process will try to find out the public IP with best effort, and use `tcp_port` as public port.
 # However, it's HIGHLY RECOMMENDED to set the value manually, especially for machines with IP translated by NAT.
 #
-public_address="37.27.134.37"
+public_address="YOUR_IP"
 
 # `tcp_port` is the TCP port that the process listens for P2P messages. The default is 55555.
 #
@@ -405,7 +405,6 @@ session_ip_limits="1,32,16,4"
 #
 # additional_maintained_block_body_epoch_count = 0
 # additional_maintained_execution_result_epoch_count = 0
-# additional_maintained_reward_epoch_count = 0
 # additional_maintained_trace_epoch_count = 0
 # additional_maintained_transaction_index_epoch_count = 0
 
@@ -559,7 +558,6 @@ chain_id = 1990
 evm_chain_id = 1991
 hydra_transition_number = 1
 hydra_transition_height = 1
-pos_reference_enable_height = 1
 
 
 # genesis_secrets="genesis_secrets.toml"

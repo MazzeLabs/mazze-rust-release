@@ -138,6 +138,11 @@ impl StateAvailabilityBoundary {
             self.upper_bound,
             self,
         );
+        if self.synced_state_height != 0
+            && new_lower_bound > self.synced_state_height + REWARD_EPOCH_COUNT
+        {
+            self.synced_state_height = 0;
+        }
         self.main_chain = self
             .main_chain
             .split_off((new_lower_bound - self.lower_bound) as usize);
@@ -147,5 +152,6 @@ impl StateAvailabilityBoundary {
 
 use derivative::Derivative;
 use malloc_size_of_derive::MallocSizeOf;
+use mazze_parameters::consensus_internal::REWARD_EPOCH_COUNT;
 use mazze_types::{Space, H256};
 use primitives::BlockHeader;

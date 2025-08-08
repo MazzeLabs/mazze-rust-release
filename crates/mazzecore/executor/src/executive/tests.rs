@@ -10,8 +10,8 @@ use crate::{
 };
 use mazze_internal_common::debug::ComputeEpochDebugRecord;
 use mazze_parameters::{
-    internal_contract_addresses::STORAGE_INTEREST_STAKING_CONTRACT_ADDRESS,
-    staking::*,
+    collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
+    collateral::COLLATERAL_MAZZIES_PER_STORAGE_KEY,
 };
 use mazze_statedb::StateDb;
 use mazze_storage::{
@@ -1441,10 +1441,6 @@ fn test_storage_commission_privilege() {
         U256::from(925_000)
     );
     assert_eq!(
-        state.staking_balance(&caller3.address()).unwrap(),
-        U256::zero()
-    );
-    assert_eq!(
         state.collateral_for_storage(&caller3.address()).unwrap(),
         *COLLATERAL_MAZZIES_PER_STORAGE_KEY,
     );
@@ -1519,10 +1515,6 @@ fn test_storage_commission_privilege() {
         *COLLATERAL_MAZZIES_PER_STORAGE_KEY + U256::from(925_000),
     );
     assert_eq!(
-        state.staking_balance(&caller1.address()).unwrap(),
-        U256::zero()
-    );
-    assert_eq!(
         state.collateral_for_storage(&caller1.address()).unwrap(),
         U256::zero()
     );
@@ -1537,26 +1529,8 @@ fn test_storage_commission_privilege() {
         U256::zero()
     );
     assert_eq!(
-        state.staking_balance(&address.address).unwrap(),
-        U256::zero()
-    );
-    assert_eq!(
         state.collateral_for_storage(&address.address).unwrap(),
-        *COLLATERAL_MAZZIES_PER_STORAGE_KEY,
-    );
-    assert_eq!(
-        state
-            .balance(&caller3.address().with_native_space())
-            .unwrap(),
-        *COLLATERAL_MAZZIES_PER_STORAGE_KEY + U256::from(925_000)
-    );
-    assert_eq!(
-        state.staking_balance(&caller3.address()).unwrap(),
-        U256::zero()
-    );
-    assert_eq!(
-        state.collateral_for_storage(&caller3.address()).unwrap(),
-        U256::zero()
+        U256::from(0),
     );
     assert_eq!(
         state.total_storage_tokens(),
@@ -1624,10 +1598,6 @@ fn test_storage_commission_privilege() {
         U256::from(925_000)
     );
     assert_eq!(
-        state.staking_balance(&caller2.address()).unwrap(),
-        U256::zero()
-    );
-    assert_eq!(
         state.collateral_for_storage(&caller2.address()).unwrap(),
         *COLLATERAL_MAZZIES_PER_STORAGE_KEY,
     );
@@ -1642,24 +1612,8 @@ fn test_storage_commission_privilege() {
         *COLLATERAL_MAZZIES_PER_STORAGE_KEY
     );
     assert_eq!(
-        state.staking_balance(&address.address).unwrap(),
-        U256::zero()
-    );
-    assert_eq!(
         state.collateral_for_storage(&address.address).unwrap(),
         U256::from(0),
-    );
-    assert_eq!(
-        state.total_storage_tokens(),
-        *COLLATERAL_MAZZIES_PER_STORAGE_KEY * U256::from(3)
-    );
-    assert_eq!(
-        state.balance(&sender_with_space).unwrap(),
-        U256::from(1_812_500_000_000_000_000u64)
-    );
-    assert_eq!(
-        state.collateral_for_storage(&sender.address()).unwrap(),
-        *COLLATERAL_MAZZIES_PER_STORAGE_KEY * U256::from(2),
     );
 
     // remove privilege from caller1

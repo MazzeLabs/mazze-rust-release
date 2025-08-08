@@ -41,10 +41,10 @@ use crate::{
             CheckBalanceAgainstTransactionResponse, ConsensusGraphStates,
             EpochNumber, EstimateGasAndCollateralResponse, FeeHistory,
             Log as RpcLog, MazzeFeeHistory, MazzeRpcLogFilter,
-            Receipt as RpcReceipt, RpcAddress, SendTxRequest, SponsorInfo,
-            StatOnGasLoad, Status as RpcStatus, StorageCollateralInfo,
-            SyncGraphStates, TokenSupplyInfo, Transaction as RpcTransaction,
-            WrapTransaction, U64 as HexU64,
+            Receipt as RpcReceipt, RewardInfo as RpcRewardInfo, RpcAddress,
+            SendTxRequest, SponsorInfo, StatOnGasLoad, Status as RpcStatus,
+            StorageCollateralInfo, SyncGraphStates, TokenSupplyInfo,
+            Transaction as RpcTransaction, WrapTransaction, U64 as HexU64,
         },
         RpcBoxFuture, RpcResult,
     },
@@ -1056,6 +1056,9 @@ impl Mazze for MazzeHandler {
             fn get_status(&self) -> JsonRpcResult<RpcStatus>;
             fn skipped_blocks_by_epoch(&self, num: EpochNumber) -> JsonRpcResult<Vec<H256>>;
             fn account_pending_info(&self, addr: RpcAddress) -> BoxFuture<Option<AccountPendingInfo>>;
+            fn is_timer_block(&self, block_hash: H256) -> JsonRpcResult<bool>;
+            fn get_timer_chain(&self) -> JsonRpcResult<Vec<H256>>;
+            fn get_timer_chain_difficulty(&self) -> JsonRpcResult<U256>;
         }
 
         to self.rpc_impl {
@@ -1079,6 +1082,7 @@ impl Mazze for MazzeHandler {
             fn storage_root(&self, address: RpcAddress, epoch_num: Option<EpochNumber>) -> BoxFuture<Option<StorageRoot>>;
             fn transaction_by_hash(&self, hash: H256) -> BoxFuture<Option<RpcTransaction>>;
             fn transaction_receipt(&self, tx_hash: H256) -> BoxFuture<Option<RpcReceipt>>;
+            fn fee_history(&self, block_count: HexU64, newest_block: EpochNumber, reward_percentiles: Vec<f64>) -> BoxFuture<MazzeFeeHistory>;
         }
     }
 
@@ -1086,9 +1090,13 @@ impl Mazze for MazzeHandler {
     not_supported! {
         fn account_pending_transactions(&self, address: RpcAddress, maybe_start_nonce: Option<U256>, maybe_limit: Option<U64>) -> BoxFuture<AccountPendingTransactions>;
         fn block_by_block_number(&self, block_number: U64, include_txs: bool) -> BoxFuture<Option<RpcBlock>>;
+        fn call(&self, request: CallRequest, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> JsonRpcResult<Bytes>;
+        fn estimate_gas_and_collateral(&self, request: CallRequest, epoch_num: Option<EpochNumber>) -> JsonRpcResult<EstimateGasAndCollateralResponse>;
+        fn get_block_reward_info(&self, num: EpochNumber) -> JsonRpcResult<Vec<RpcRewardInfo>>;
         fn get_supply_info(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<TokenSupplyInfo>;
         fn get_collateral_info(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<StorageCollateralInfo>;
         fn get_fee_burnt(&self, epoch: Option<EpochNumber>) -> JsonRpcResult<U256>;
+        fn max_priority_fee_per_gas(&self) -> BoxFuture<U256>;
     }
 }
 
@@ -1128,15 +1136,15 @@ impl TestRpc for TestRpcImpl {
         fn generate_block_with_fake_txs(&self, raw_txs_without_data: Bytes, adaptive: Option<bool>, tx_data_len: Option<usize>) -> JsonRpcResult<H256>;
         fn generate_block_with_nonce_and_timestamp(&self, parent: H256, referees: Vec<H256>, raw: Bytes, nonce: U256, timestamp: u64, adaptive: bool) -> JsonRpcResult<H256>;
         fn generate_custom_block(&self, parent_hash: H256, referee: Vec<H256>, raw_txs: Bytes, adaptive: Option<bool>, custom: Option<Vec<Bytes>>) -> JsonRpcResult<H256>;
-        fn generate_empty_blocks(&self, num_blocks: usize) -> JsonRpcResult<Vec<H256>>; 
-        fn generate_fixed_block(&self, parent_hash: H256, referee: Vec<H256>, num_txs: usize, adaptive: bool, difficulty: Option<u64>) -> JsonRpcResult<H256>; 
-        fn generate_one_block_with_direct_txgen(&self, num_txs: usize, block_size_limit: usize, num_txs_simple: usize, num_txs_erc20: usize) -> JsonRpcResult<H256>; 
-        fn generate_one_block(&self, num_txs: usize, block_size_limit: usize) -> JsonRpcResult<H256>; 
-        fn get_block_status(&self, block_hash: H256) -> JsonRpcResult<(u8, bool)>; 
-        fn get_executed_info(&self, block_hash: H256) -> JsonRpcResult<(H256, H256)>; 
-        fn get_main_chain_and_weight(&self, height_range: Option<(u64, u64)>) -> JsonRpcResult<Vec<(H256, U256)>>; 
-        fn send_usable_genesis_accounts(&self, account_start_index: usize) -> JsonRpcResult<Bytes>; 
-        fn set_db_crash(&self, crash_probability: f64, crash_exit_code: i32) -> JsonRpcResult<()>; 
+        fn generate_empty_blocks(&self, num_blocks: usize) -> JsonRpcResult<Vec<H256>>;
+        fn generate_fixed_block(&self, parent_hash: H256, referee: Vec<H256>, num_txs: usize, adaptive: bool, difficulty: Option<u64>) -> JsonRpcResult<H256>;
+        fn generate_one_block_with_direct_txgen(&self, num_txs: usize, block_size_limit: usize, num_txs_simple: usize, num_txs_erc20: usize) -> JsonRpcResult<H256>;
+        fn generate_one_block(&self, num_txs: usize, block_size_limit: usize) -> JsonRpcResult<H256>;
+        fn get_block_status(&self, block_hash: H256) -> JsonRpcResult<(u8, bool)>;
+        fn get_executed_info(&self, block_hash: H256) -> JsonRpcResult<(H256, H256)> ;
+        fn get_main_chain_and_weight(&self, height_range: Option<(u64, u64)>) -> JsonRpcResult<Vec<(H256, U256)>>;
+        fn send_usable_genesis_accounts(&self, account_start_index: usize) -> JsonRpcResult<Bytes>;
+        fn set_db_crash(&self, crash_probability: f64, crash_exit_code: i32) -> JsonRpcResult<()>;
     }
 }
 

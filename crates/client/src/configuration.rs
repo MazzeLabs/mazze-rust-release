@@ -51,7 +51,6 @@ use crate::rpc::{
     TcpConfiguration, WsConfiguration,
 };
 
-
 lazy_static! {
     pub static ref CHAIN_ID: RwLock<Option<ChainIdParams>> = Default::default();
 }
@@ -264,6 +263,7 @@ build_config! {
         // `None` for `additional_maintained*` means the data is never garbage collected.
         (additional_maintained_block_body_epoch_count, (Option<usize>), None)
         (additional_maintained_execution_result_epoch_count, (Option<usize>), None)
+        (additional_maintained_reward_epoch_count, (Option<usize>), None)
         (additional_maintained_trace_epoch_count, (Option<usize>), None)
         (additional_maintained_transaction_index_epoch_count, (Option<usize>), None)
         (block_cache_gc_period_ms, (u64), 5_000)
@@ -314,8 +314,21 @@ build_config! {
         // DAG-Embedded Tree Structure (DETS) Section.
         (is_consortium, (bool), false)
         (vrf_proposal_threshold, (U256), U256::from_str("1111111111111100000000000000000000000000000000000000000000000000").unwrap())
+        // Deferred epoch count before a confirmed epoch.
+
         (nonce_limit_transition_view, (u64), u64::MAX)
+
+        // Light node section
+        (ln_epoch_request_batch_size, (Option<usize>), None)
+        (ln_epoch_request_timeout_sec, (Option<u64>), None)
+        (ln_header_request_batch_size, (Option<usize>), None)
+        (ln_header_request_timeout_sec, (Option<u64>), None)
+        (ln_max_headers_in_flight, (Option<usize>), None)
+        (ln_max_parallel_epochs_to_request, (Option<usize>), None)
+        (ln_num_epochs_to_request, (Option<usize>), None)
+        (ln_num_waiting_headers_threshold, (Option<usize>), None)
         (keep_snapshot_before_stable_checkpoint, (bool), true)
+        (force_recompute_height_during_construct_main, (Option<u64>), None)
 
         // The snapshot database consists of two tables: snapshot_key_value and snapshot_mpt. However, the size of snapshot_mpt is significantly larger than that of snapshot_key_value.
         // When the configuration parameter use_isolated_db_for_mpt_table is set to true, the snapshot_mpt table will be located in a separate database.
@@ -551,8 +564,50 @@ impl Configuration {
     }
 
     pub fn consensus_config(&self) -> ConsensusConfig {
-        ConsensusConfig {
+        let enable_optimistic_execution = if DEFERRED_STATE_EPOCH_COUNT <= 1 {
+            false
+        } else {
+            self.raw_conf.enable_optimistic_execution
+        };
+        let mut conf = ConsensusConfig {
             chain_id: self.chain_id_params(),
+            inner_conf: ConsensusInnerConfig {
+                adaptive_weight_beta: self.raw_conf.adaptive_weight_beta,
+                heavy_block_difficulty_ratio: self
+                    .raw_conf
+                    .heavy_block_difficulty_ratio,
+                timer_chain_block_difficulty_ratio: self
+                    .raw_conf
+                    .timer_chain_block_difficulty_ratio,
+                timer_chain_beta: self.raw_conf.timer_chain_beta,
+                era_epoch_count: self.raw_conf.era_epoch_count,
+                enable_optimistic_execution,
+                enable_state_expose: self.raw_conf.enable_state_expose,
+                debug_dump_dir_invalid_state_root: if self
+                    .raw_conf
+                    .debug_invalid_state_root
+                {
+                    Some(
+                        self.raw_conf.debug_dump_dir_invalid_state_root.clone(),
+                    )
+                } else {
+                    None
+                },
+
+                debug_invalid_state_root_epoch: match &self
+                    .raw_conf
+                    .debug_invalid_state_root_epoch
+                {
+                    Some(epoch_hex) => {
+                        Some(H256::from_str(&epoch_hex).expect("debug_invalid_state_root_epoch byte length is incorrect."))
+                    }
+                    None => None,
+                },
+                force_recompute_height_during_construct_main: self.raw_conf.force_recompute_height_during_construct_main,
+                recovery_latest_mpt_snapshot: self.raw_conf.recovery_latest_mpt_snapshot,
+                use_isolated_db_for_mpt_table: self.raw_conf.use_isolated_db_for_mpt_table,
+            },
+            bench_mode: false,
             transaction_epoch_bound: self.raw_conf.transaction_epoch_bound,
             referee_bound: self.raw_conf.referee_bound,
             get_logs_epoch_batch_size: self.raw_conf.get_logs_epoch_batch_size,
@@ -561,7 +616,21 @@ impl Configuration {
             get_logs_filter_max_limit: self.raw_conf.get_logs_filter_max_limit,
             sync_state_starting_epoch: self.raw_conf.sync_state_starting_epoch,
             sync_state_epoch_gap: self.raw_conf.sync_state_epoch_gap,
+        };
+        match self.raw_conf.node_type {
+            Some(NodeType::Archive) => {
+                if conf.sync_state_starting_epoch.is_none() {
+                    conf.sync_state_starting_epoch = Some(0);
+                }
+            }
+            _ => {
+                if conf.sync_state_epoch_gap.is_none() {
+                    conf.sync_state_epoch_gap =
+                        Some(CATCH_UP_EPOCH_LAG_THRESHOLD);
+                }
+            }
         }
+        conf
     }
 
     pub fn pow_config(&self) -> ProofOfWorkConfig {
@@ -602,12 +671,12 @@ impl Configuration {
         &self, machine: Arc<Machine>,
     ) -> VerificationConfig {
         VerificationConfig::new(
-            self.raw_conf.transaction_epoch_bound > 0, // Convert u64 to bool
+            self.is_test_mode(),
             self.raw_conf.referee_bound,
             self.raw_conf.max_block_size_in_bytes,
             self.raw_conf.transaction_epoch_bound,
-            self.raw_conf.pow_problem_window_size,
-            machine.clone(),
+            self.raw_conf.tx_pool_nonce_bits,
+            machine,
         )
     }
 
@@ -833,6 +902,9 @@ impl Configuration {
             additional_maintained_execution_result_epoch_count: self
                 .raw_conf
                 .additional_maintained_execution_result_epoch_count,
+            additional_maintained_reward_epoch_count: self
+                .raw_conf
+                .additional_maintained_reward_epoch_count,
             additional_maintained_trace_epoch_count: self
                 .raw_conf
                 .additional_maintained_trace_epoch_count,
@@ -866,6 +938,9 @@ impl Configuration {
             {
                 conf.additional_maintained_transaction_index_epoch_count =
                     Some(0);
+            }
+            if conf.additional_maintained_reward_epoch_count.is_none() {
+                conf.additional_maintained_reward_epoch_count = Some(0);
             }
             if conf.additional_maintained_trace_epoch_count.is_none() {
                 conf.additional_maintained_trace_epoch_count = Some(0);
@@ -1074,14 +1149,26 @@ impl Configuration {
 
     pub fn light_node_config(&self) -> LightNodeConfiguration {
         LightNodeConfiguration {
-            epoch_request_batch_size: Some(1),
-            epoch_request_timeout: Some(Duration::from_secs(1)), // Assuming a default of 1 second
-            header_request_batch_size: Some(1),
-            header_request_timeout: Some(Duration::from_millis(self.raw_conf.headers_request_timeout_ms)),
-            max_headers_in_flight: Some(1),
-            max_parallel_epochs_to_request: Some(1),
-            num_epochs_to_request: Some(1),
-            num_waiting_headers_threshold: Some(1),
+            epoch_request_batch_size: self.raw_conf.ln_epoch_request_batch_size,
+            epoch_request_timeout: self
+                .raw_conf
+                .ln_epoch_request_timeout_sec
+                .map(Duration::from_secs),
+            header_request_batch_size: self
+                .raw_conf
+                .ln_header_request_batch_size,
+            header_request_timeout: self
+                .raw_conf
+                .ln_header_request_timeout_sec
+                .map(Duration::from_secs),
+            max_headers_in_flight: self.raw_conf.ln_max_headers_in_flight,
+            max_parallel_epochs_to_request: self
+                .raw_conf
+                .ln_max_parallel_epochs_to_request,
+            num_epochs_to_request: self.raw_conf.ln_num_epochs_to_request,
+            num_waiting_headers_threshold: self
+                .raw_conf
+                .ln_num_waiting_headers_threshold,
         }
     }
 

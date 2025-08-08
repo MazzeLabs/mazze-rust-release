@@ -33,7 +33,6 @@ mod sponsor;
 /// Implements access functions for the account storage entries of `State`.
 mod storage_entry;
 
-/// Implements functions for the base fee proportion in the state.
 mod reward;
 
 #[cfg(test)]

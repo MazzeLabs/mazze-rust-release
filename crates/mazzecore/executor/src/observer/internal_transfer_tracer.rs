@@ -71,7 +71,6 @@ pub trait InternalTransferTracer {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AddressPocket {
     Balance(AddressWithSpace),
-    StakingBalance(Address),
     StorageCollateral(Address),
     SponsorBalanceForGas(Address),
     SponsorBalanceForStorage(Address),
@@ -84,7 +83,6 @@ impl AddressPocket {
         use AddressPocket::*;
         match self {
             Balance(AddressWithSpace { address: addr, .. })
-            | StakingBalance(addr)
             | StorageCollateral(addr)
             | SponsorBalanceForGas(addr)
             | SponsorBalanceForStorage(addr) => Some(addr),
@@ -100,7 +98,6 @@ impl AddressPocket {
         use AddressPocket::*;
         match self {
             Balance(_) => "balance",
-            StakingBalance(_) => "staking_balance",
             StorageCollateral(_) => "storage_collateral",
             SponsorBalanceForGas(_) => "sponsor_balance_for_gas",
             SponsorBalanceForStorage(_) => "sponsor_balance_for_collateral",
@@ -125,7 +122,7 @@ impl AddressPocket {
                 space: Space::Native,
                 ..
             }) => 0,
-            StakingBalance(_) => 1,
+            // Reserved: 1
             StorageCollateral(_) => 2,
             SponsorBalanceForGas(_) => 3,
             SponsorBalanceForStorage(_) => 4,
@@ -163,7 +160,8 @@ impl Decodable for AddressPocket {
             0 => rlp
                 .val_at(1)
                 .map(|addr: Address| Balance(addr.with_native_space())),
-            1 => rlp.val_at(1).map(StakingBalance),
+            // Type 1 was previously StakingBalance, now reserved
+            1 => Err(DecoderError::Custom("Type 1 is reserved and no longer supported")),
             2 => rlp.val_at(1).map(StorageCollateral),
             3 => rlp.val_at(1).map(SponsorBalanceForGas),
             4 => rlp.val_at(1).map(SponsorBalanceForStorage),

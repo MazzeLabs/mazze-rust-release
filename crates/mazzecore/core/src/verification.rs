@@ -41,6 +41,7 @@ pub struct VerificationConfig {
     pub transaction_epoch_bound: u64,
     pub max_nonce: Option<U256>,
     machine: Arc<Machine>,
+    catch_up_mode: bool,
 }
 
 /// Create an MPT from the ordered list of block transactions.
@@ -179,30 +180,33 @@ pub fn is_valid_receipt_inclusion_proof(
     tx_index_in_block: usize, num_txs_in_block: usize, receipt: &Receipt,
     block_receipt_proof: &TrieProof,
 ) -> bool {
+
+    if block_index_in_epoch >= num_blocks_in_epoch
+        || tx_index_in_block >= num_txs_in_block
+    {
+        return false;
+    }
+
     // get block receipts root from block index trie (proof)
     // traversing along `key` also means we're validating the proof
     let key = &into_simple_mpt_key(block_index_in_epoch, num_blocks_in_epoch);
 
-    let block_receipts_root_bytes =
-        match block_index_proof.get_value(key, &verified_epoch_receipts_root) {
-            (false, _) => return false,
-            (true, None) => return false,
-            (true, Some(val)) => val,
-        };
+    let (is_valid_index_proof, maybe_val) =
+        block_index_proof.get_value(key, &verified_epoch_receipts_root);
+    if !is_valid_index_proof {
+        return false;
+    }
+    let block_receipts_root_bytes = match maybe_val {
+        Some(val) => val,
+        None => return false,
+    };
 
     // parse block receipts root as H256
     let block_receipts_root: H256 = match TryInto::<[u8; 32]>::try_into(
         block_receipts_root_bytes,
     ) {
         Ok(hash) => hash.into(),
-        Err(e) => {
-            // this should not happen
-            error!(
-                "Invalid content found in valid MPT: key = {:?}, value = {:?}; error = {:?}",
-                key, block_receipts_root_bytes, e,
-            );
-            return false;
-        }
+        Err(_) => return false,
     };
 
     // validate receipt in the block receipts trie
@@ -234,6 +238,7 @@ impl VerificationConfig {
                 transaction_epoch_bound,
                 machine,
                 max_nonce,
+                catch_up_mode: false,
             }
         } else {
             VerificationConfig {
@@ -243,6 +248,7 @@ impl VerificationConfig {
                 transaction_epoch_bound,
                 machine,
                 max_nonce,
+                catch_up_mode: false,
             }
         }
     }
@@ -294,6 +300,23 @@ impl VerificationConfig {
     pub fn verify_pow(
         &self, pow: &PowComputer, header: &mut BlockHeader, seed_hash: &H256,
     ) -> Result<(), Error> {
+
+        //If catch-up mode is enabled, skip PoW verification
+        if self.catch_up_mode() {
+
+            // //If difficulty is zero, return error
+            // if header.difficulty().is_zero() {
+            //     return Err(From::from(BlockError::InvalidDifficulty(OutOfBounds {
+            //         min: Some(1.into()),
+            //         max: None,
+            //         found: 0.into(),
+            //     })));
+            // }
+
+            return Ok(());
+        }
+
+
         let difficulty: U256 = header.difficulty().into();
         if difficulty.is_zero() {
             return Err(BlockError::InvalidDifficulty(OutOfBounds {
@@ -740,6 +763,14 @@ impl VerificationConfig {
         } else {
             Ok(())
         }
+    }
+
+    pub fn catch_up_mode(&self) -> bool {
+        self.catch_up_mode
+    }
+
+    pub fn set_catch_up_mode(&mut self, mode: bool) {
+        self.catch_up_mode = mode;
     }
 }
 

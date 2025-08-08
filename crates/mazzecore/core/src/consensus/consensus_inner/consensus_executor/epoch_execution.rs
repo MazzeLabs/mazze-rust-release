@@ -442,7 +442,6 @@ impl<'a, 'b> BlockProcessContext<'a, 'b> {
 #[derive(Default)]
 struct EpochProcessRecorder {
     receipts: Vec<Arc<BlockReceipts>>,
-    // staking_events: Vec<StakingEvent>,
     repack_tx: Vec<Arc<SignedTransaction>>,
     geth_traces: Vec<GethTraceWithHash>,
 
@@ -461,7 +460,6 @@ struct BlockProcessRecorder {
     traces: Vec<TransactionExecTraces>,
     geth_traces: Vec<GethTraceWithHash>,
     repack_tx: Vec<Arc<SignedTransaction>>,
-    // staking_events: Vec<StakingEvent>,
     tx_idx: SpaceMap<usize>,
 }
 
@@ -475,7 +473,6 @@ impl BlockProcessRecorder {
             traces: vec![],
             geth_traces: vec![],
             repack_tx: vec![],
-            // staking_events: vec![],
             tx_idx,
         }
     }
@@ -551,7 +548,6 @@ impl BlockProcessRecorder {
         });
 
         epoch_recorder.receipts.push(block_receipts.clone());
-        // epoch_recorder.staking_events.extend(self.staking_events);
         epoch_recorder.repack_tx.extend(self.repack_tx);
         epoch_recorder.geth_traces.extend(self.geth_traces);
 

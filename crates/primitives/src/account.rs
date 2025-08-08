@@ -151,13 +151,9 @@ pub struct Account {
     pub balance: U256,
     pub nonce: U256,
     pub code_hash: H256,
-    // /// This is the number of tokens used in staking.
-    // pub staking_balance: U256,
     /// This is the number of tokens used as collateral for storage, which will
     /// be returned to balance if the storage is released.
     pub collateral_for_storage: U256,
-    /// This is the accumulated interest return.
-    // pub accumulated_interest_return: U256,
     /// This is the address of the administrator of the contract.
     pub admin: Address,
     /// This is the sponsor information of the contract.
@@ -170,13 +166,9 @@ pub struct BasicAccount {
     dummy_diferentiator: u8,
     pub balance: U256,
     pub nonce: U256,
-    // /// This is the number of tokens used in staking.
-    // pub staking_balance: U256,
     /// This is the number of tokens used as collateral for storage, which will
     /// be returned to balance if the storage is released.
     pub collateral_for_storage: U256,
-    // /// This is the accumulated interest return.
-    // pub accumulated_interest_return: U256,
 }
 
 /// Defined for Rlp serialization/deserialization.
@@ -185,13 +177,9 @@ pub struct ContractAccount {
     pub balance: U256,
     pub nonce: U256,
     pub code_hash: H256,
-    // /// This is the number of tokens used in staking.
-    // pub staking_balance: U256,
     /// This is the number of tokens used as collateral for storage, which will
     /// be returned to balance if the storage is released.
     pub collateral_for_storage: U256,
-    // /// This is the accumulated interest return.
-    // pub accumulated_interest_return: U256,
     /// This is the address of the administrator of the contract.
     pub admin: Address,
     /// This is the sponsor information of the contract.
@@ -226,9 +214,7 @@ impl Account {
             balance: *balance,
             nonce: *nonce,
             code_hash: KECCAK_EMPTY,
-            // staking_balance: 0.into(),
             collateral_for_storage: 0.into(),
-            // accumulated_interest_return: 0.into(),
             admin: Address::zero(),
             sponsor_info: Default::default(),
         }
@@ -240,9 +226,7 @@ impl Account {
             balance: a.balance,
             nonce: a.nonce,
             code_hash: KECCAK_EMPTY,
-            // staking_balance: a.staking_balance,
             collateral_for_storage: a.collateral_for_storage,
-            // accumulated_interest_return: a.accumulated_interest_return,
             admin: Address::zero(),
             sponsor_info: Default::default(),
         }
@@ -254,9 +238,7 @@ impl Account {
             balance: a.balance,
             nonce: a.nonce,
             code_hash: a.code_hash,
-            // staking_balance: a.staking_balance,
             collateral_for_storage: a.collateral_for_storage,
-            // accumulated_interest_return: a.accumulated_interest_return,
             admin: a.admin,
             sponsor_info: a.sponsor_info,
         }
@@ -279,9 +261,7 @@ impl Account {
             dummy_diferentiator: 1,
             balance: self.balance,
             nonce: self.nonce,
-            // staking_balance: self.staking_balance,
             collateral_for_storage: self.collateral_for_storage,
-            // accumulated_interest_return: self.accumulated_interest_return,
         }
     }
 
@@ -291,9 +271,7 @@ impl Account {
             balance: self.balance,
             nonce: self.nonce,
             code_hash: self.code_hash,
-            // staking_balance: self.staking_balance,
             collateral_for_storage: self.collateral_for_storage,
-            // accumulated_interest_return: self.accumulated_interest_return,
             admin: self.admin,
             sponsor_info: self.sponsor_info.clone(),
         }
@@ -301,9 +279,7 @@ impl Account {
 
     pub fn to_evm_account(&self) -> EthereumAccount {
         assert_eq!(self.address_local_info.space, Space::Ethereum);
-        // assert!(self.staking_balance.is_zero());
         assert!(self.collateral_for_storage.is_zero());
-        // assert!(self.accumulated_interest_return.is_zero());
         assert!(self.admin.is_zero());
         assert_eq!(self.sponsor_info, Default::default());
         EthereumAccount {
@@ -426,9 +402,7 @@ fn test_random_account(
                 balance: 1000.into(),
                 nonce: 123.into(),
                 code_hash,
-                // staking_balance: 10000000.into(),
                 collateral_for_storage: 23.into(),
-                // accumulated_interest_return: 456.into(),
                 admin,
                 sponsor_info,
             },
@@ -440,9 +414,7 @@ fn test_random_account(
                 dummy_diferentiator: 1,
                 balance: 1000.into(),
                 nonce: 123.into(),
-                // staking_balance: 10000000.into(),
                 collateral_for_storage: 23.into(),
-                // accumulated_interest_return: 456.into(),
             },
         )
     };

@@ -375,22 +375,11 @@ impl BlockGenerator {
         }
         PACKED_ACCOUNT_SIZE.update(sender_accounts.len());
 
-        let state_blame_info = match consensus_graph
+        let state_blame_info = consensus_graph
             .get_blame_and_deferred_state_for_generation(
                 &best_info.best_block_hash,
-            ) {
-            Ok(info) => info,
-            Err(e) => {
-                warn!("Cannot get blame and deferred state for generation: {}. Using default state blame info.", e);
-                // Return a default state blame info
-                StateBlameInfo {
-                    blame: 0,
-                    state_vec_root: H256::default(),
-                    receipts_vec_root: H256::default(),
-                    logs_bloom_vec_root: H256::default(),
-                }
-            }
-        };
+            )
+            .unwrap();
 
         let best_block_hash = best_info.best_block_hash.clone();
         let mut referee = best_info.bounded_terminal_block_hashes.clone();
@@ -809,7 +798,7 @@ impl BlockGenerator {
         let mut current_mining_block: Option<Block> = None;
         let mut current_problem: Option<ProofOfWorkProblem> = None;
         let mut last_assemble = SystemTime::now();
-        let sleep_duration = Duration::from_millis(100);
+        let sleep_duration = time::Duration::from_millis(BLOCKGEN_LOOP_SLEEP_IN_MILISECS);
 
         loop {
             match *bg.state.read() {
@@ -821,7 +810,6 @@ impl BlockGenerator {
                 current_mining_block.as_ref(),
                 &last_assemble,
             ) {
-                // Try to assemble new block with panic handling
                 let new_block = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     bg.assemble_new_block(
                         MAX_TRANSACTION_COUNT_PER_BLOCK,
@@ -836,7 +824,6 @@ impl BlockGenerator {
                         continue;
                     }
                 };
-
                 let problem = ProofOfWorkProblem::new(
                     new_block.block_header.height(),
                     new_block.block_header.problem_hash(),

@@ -36,7 +36,7 @@ impl State {
             .unwrap_or_default())
     }
 
-    /// Caller should make sure that staking_balance for this account is
+    /// Caller should make sure that balance for this account is
     /// sufficient enough.
     pub fn add_collateral_for_storage(
         &mut self, address: &Address, by: &U256,

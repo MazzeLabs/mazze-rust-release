@@ -1,8 +1,8 @@
 use crate::{
     block_data_manager::{
         db_decode_list, db_encode_list, BlamedHeaderVerifiedRoots,
-        BlockExecutionResultWithEpoch, BlockTracesWithEpoch,
-        CheckpointHashes, EpochExecutionContext,
+        BlockExecutionResultWithEpoch, BlockRewardResult, BlockTracesWithEpoch,
+        CheckpointHashes, DataVersionTuple, EpochExecutionContext,
         LocalBlockInfo,
     },
     db::{
@@ -36,6 +36,7 @@ const EPOCH_EXECUTION_CONTEXT_SUFFIX_BYTE: u8 = 4;
 const EPOCH_CONSENSUS_EXECUTION_INFO_SUFFIX_BYTE: u8 = 5;
 const EPOCH_EXECUTED_BLOCK_SET_SUFFIX_BYTE: u8 = 6;
 const EPOCH_SKIPPED_BLOCK_SET_SUFFIX_BYTE: u8 = 7;
+const BLOCK_REWARD_RESULT_SUFFIX_BYTE: u8 = 8;
 const BLOCK_TERMINAL_KEY: &[u8] = b"block_terminals";
 const GC_PROGRESS_KEY: &[u8] = b"gc_progress";
 
@@ -49,7 +50,6 @@ enum DBTable {
     BlockTraces,
     HashByBlockNumber,
 }
-// TODO: validate POS related columns have been successfully removed
 fn rocks_db_col(table: DBTable) -> u32 {
     match table {
         DBTable::Misc => COL_MISC,
@@ -322,6 +322,16 @@ impl DBManager {
         )
     }
 
+    pub fn insert_block_reward_result_to_db(
+        &self, hash: &H256, value: &DataVersionTuple<H256, BlockRewardResult>,
+    ) {
+        self.insert_encodable_val(
+            DBTable::Blocks,
+            &block_reward_result_key(hash),
+            value,
+        )
+    }
+
     pub fn block_execution_result_from_db(
         &self, hash: &H256,
     ) -> Option<BlockExecutionResultWithEpoch> {
@@ -331,8 +341,21 @@ impl DBManager {
         )
     }
 
+    pub fn block_reward_result_from_db(
+        &self, hash: &H256,
+    ) -> Option<DataVersionTuple<H256, BlockRewardResult>> {
+        self.load_might_decodable_val(
+            DBTable::Blocks,
+            &block_reward_result_key(hash),
+        )
+    }
+
     pub fn remove_block_execution_result_from_db(&self, hash: &H256) {
         self.remove_from_db(DBTable::Blocks, &block_execution_result_key(hash))
+    }
+
+    pub fn remove_block_reward_result_from_db(&self, hash: &H256) {
+        self.remove_from_db(DBTable::Blocks, &block_reward_result_key(hash))
     }
 
     pub fn remove_block_trace_from_db(&self, hash: &H256) {
@@ -527,6 +550,16 @@ impl DBManager {
         Some(V::db_decode(&encoded).expect("decode succeeds"))
     }
 
+    fn load_might_decodable_val<V>(
+        &self, table: DBTable, db_key: &[u8],
+    ) -> Option<V>
+    where
+        V: DatabaseDecodable,
+    {
+        let encoded = self.load_from_db(table, db_key)?;
+        V::db_decode(&encoded).ok()
+    }
+
     fn load_decodable_list<V>(
         &self, table: DBTable, db_key: &[u8],
     ) -> Option<Vec<V>>
@@ -599,6 +632,10 @@ fn skipped_epoch_set_key(epoch_number: u64) -> [u8; 9] {
 
 fn block_execution_result_key(hash: &H256) -> Vec<u8> {
     append_suffix(hash, BLOCK_EXECUTION_RESULT_SUFFIX_BYTE)
+}
+
+fn block_reward_result_key(hash: &H256) -> Vec<u8> {
+    append_suffix(hash, BLOCK_REWARD_RESULT_SUFFIX_BYTE)
 }
 
 fn epoch_execution_context_key(hash: &H256) -> Vec<u8> {

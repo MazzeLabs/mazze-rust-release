@@ -19,7 +19,10 @@ use crate::{
     },
 };
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
-use mazze_parameters::consensus::DEFERRED_STATE_EPOCH_COUNT;
+use mazze_parameters::{
+    consensus::DEFERRED_STATE_EPOCH_COUNT,
+    consensus_internal::REWARD_EPOCH_COUNT,
+};
 use mazze_types::H256;
 use network::service::ProtocolVersion;
 use primitives::{EpochNumber, StateRoot};
@@ -125,7 +128,7 @@ impl SnapshotManifestRequest {
         let mut epoch_receipts = Vec::new();
         let mut epoch_hash =
             self.snapshot_to_sync.get_snapshot_epoch_id().clone();
-        for i in 0..DEFERRED_STATE_EPOCH_COUNT {
+        for i in 0..REWARD_EPOCH_COUNT {
             if let Some(block) =
                 ctx.manager.graph.data_man.block_header_by_hash(&epoch_hash)
             {
@@ -235,7 +238,7 @@ impl SnapshotManifestRequest {
             trusted_block.height()
                 - DEFERRED_STATE_EPOCH_COUNT
                 - snapshot_epoch_block.height()
-                + DEFERRED_STATE_EPOCH_COUNT
+                + REWARD_EPOCH_COUNT
         };
         let mut state_root_vec = Vec::with_capacity(min_vec_len as usize);
         let mut receipt_blame_vec = Vec::with_capacity(min_vec_len as usize);

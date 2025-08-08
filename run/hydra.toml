@@ -70,20 +70,20 @@ stratum_listen_address = "0.0.0.0"
 
 # Window size for PoW manager
 #
- pow_problem_window_size = 1
+pow_problem_window_size = 120
 
 # Secret key for stratum.
 # The value is 64-digit hex string.
 # If not set, the RPC subscription will not check the authorization.
 #
- stratum_secret = "9c22ff5f21f0b81b113e63f7db6da94fedef11b2119b4088b89664fb9a3cb658"
+stratum_secret = "9c22ff5f21f0b81b113e63f7db6da94fedef11b2119b4088b89664fb9a3cb658"
 
 # -------------- Log-related Configuration -------------
 
-# `log_conf` the path of the log4rs configuration file. The configuration in the file will overwrite the value set by `log_level`.
+# `	log_conf` the path of the log4rs configuration file. The configuration in the file will overwrite the value set by `log_level`.
 # By default, the value is not set.
 #
-# log_conf="log.yaml"
+log_conf="log.yaml"
 
 # `log_file` is the path of the log file"
 # If not set, the log will only be printed to stdout, and not persisted to files.
@@ -102,7 +102,7 @@ log_level="info"
 # If not set, the process will try to find out the public IP with best effort, and use `tcp_port` as public port.
 # However, it's HIGHLY RECOMMENDED to set the value manually, especially for machines with IP translated by NAT.
 #
-public_address="YOUR_IP"
+public_address="37.27.134.37"
 
 # `tcp_port` is the TCP port that the process listens for P2P messages. The default is 55555.
 #
@@ -120,18 +120,18 @@ public_address="YOUR_IP"
 
 # `jsonrpc_http_threads` is used to control how many threads to process HTTP rpc requests.
 #
-# jsonrpc_http_threads=1
+jsonrpc_http_threads=8
 
 # `jsonrpc_http_keep_alive` is used to control whether to set KeepAlive for rpc HTTP connections.
 #
-# jsonrpc_http_keep_alive=false
+jsonrpc_http_keep_alive=true
 
 # `jsonrpc_cors` is used to control the rpc domain validation policies.
 # The value should be "none", "all", or a list string split by commas without space.
 # If not set, domain validation is disabled.
 # By default, the values are not set.
 #
-# jsonrpc_cors="all"
+jsonrpc_cors="all"
 
 # The following parameters are the ports for the node to provide rpc service. If not set,
 # the node will not start rpc services. By default, the `jsonrpc_local_http_port` is set,
@@ -181,17 +181,17 @@ jsonrpc_ws_eth_port=58546
 # Maximum network queue size. When reached, the queue will refuse any new data.
 # The unit is MB.
 #
-# egress_queue_capacity = 256
+egress_queue_capacity = 1024
 
 # Minimum queue size for throttling in manner of ratio.
 # The unit is MB.
 #
-# egress_min_throttle = 10
+egress_min_throttle = 50
 
 # Maximum queue size for throttling in manner of ratio.
 # The unit is MB.
 #
-# egress_max_throttle = 10
+egress_max_throttle = 256
 
 # Time interval to garbage-collect not block-graph-ready blocks periodically.
 #
@@ -240,7 +240,7 @@ jsonrpc_ws_eth_port=58546
 # Maximum number of inflight requests for each peer.
 # If the max is reached, requests will be buffered until inflight requests are responded or timeout.
 #
-# max_inflight_request_count = 64
+max_inflight_request_count = 2000
 
 # Maximum number of peers to broadcast transaction digests.
 #
@@ -376,7 +376,7 @@ session_ip_limits="1,32,16,4"
 # Whether to persist transaction indices.
 # This only needs to be enabled if you want to reliably answer transaction-related RPCs.
 #
- persist_tx_index = false
+ persist_tx_index = true
 
 # Time to keep transactions in in-memory transaction cache.
 #
@@ -405,6 +405,7 @@ session_ip_limits="1,32,16,4"
 #
 # additional_maintained_block_body_epoch_count = 0
 # additional_maintained_execution_result_epoch_count = 0
+# additional_maintained_reward_epoch_count = 0
 # additional_maintained_trace_epoch_count = 0
 # additional_maintained_transaction_index_epoch_count = 0
 
@@ -431,12 +432,12 @@ session_ip_limits="1,32,16,4"
 # Maximum size of cached ledger data (block, receipts, e.t.c.)
 # The unit is MB.
 #
-# ledger_cache_size = 1024
+ledger_cache_size = 4096
 
 # Rocksdb cache size.
 # Only applies if `block_db_type = "rocksdb"`.
 #
-# rocksdb_cache_size = 128
+rocksdb_cache_size = 1024
 
 # Rocksdb compaction file path.
 # Only applies if `block_db_type = "rocksdb"`.
@@ -447,11 +448,11 @@ session_ip_limits="1,32,16,4"
 # State storage parameters.
 # Refer to the documentation for details.
 #
-# storage_delta_mpts_cache_recent_lfu_factor=4.0
-# storage_delta_mpts_cache_size=20000000
-# storage_delta_mpts_cache_start_size=1000000
-# storage_delta_mpts_node_map_vec_size=80000000
-# storage_delta_mpts_slab_idle_size=200000
+storage_delta_mpts_cache_recent_lfu_factor=4.0
+storage_delta_mpts_cache_size=40000000
+storage_delta_mpts_cache_start_size=2000000
+storage_delta_mpts_node_map_vec_size=160000000
+storage_delta_mpts_slab_idle_size=400000
 
 # Configure the maximal open MPT count. Open MPTs are maintained as an LRU cache, and we will close the database handle
 # for the evicted MPT once its usage finishes. Every MPT contains the data written in 2000 epochs.
@@ -465,7 +466,7 @@ session_ip_limits="1,32,16,4"
 # However, increasing the value may increase the system memory usage by opening more database instances at the same
 # time, and the memory usage of an MPT is affected by `rocksdb_cache_size`.
 #
-# storage_max_open_mpt_count = 4
+storage_max_open_mpt_count = 8
 
 # Configure if we strictly check the tx index before garbage collection.
 # Setting it to `false` will improve the performance. But if the value is `false`, it's possible that although the
@@ -523,24 +524,24 @@ session_ip_limits="1,32,16,4"
 # Maximum number of log entries returned from mazze_getLogs and eth_getLogs.
 # If not set, mazze_getLogs and eth_getLogs will not limit the number of logs returned.
 #
-get_logs_filter_max_limit = 5000
+get_logs_filter_max_limit = 10000
 
 # Epoch batch size used in log filtering.
 # Larger batch sizes may improve performance but might also prevent consensus from making progress under high RPC load.
 #
-# get_logs_epoch_batch_size = 32
+get_logs_epoch_batch_size = 128
 
 # The maximal allowed number of epochs between `from_epoch` and `to_epoch` in the filter to call `mazze_getLogs`.
 # If not set, there is no limit on the gap.
 # By default it is not set.
 #
-# get_logs_filter_max_epoch_range = 10000
+get_logs_filter_max_epoch_range = 100000
 
 # The maximal allowed number of blocks between `from_block` and `to_block` in the filter to call `mazze_getLogs`.
 # If not set, there is no limit on the gap.
 # By default it is not set.
 #
-# get_logs_filter_max_block_number_range = 10000
+get_logs_filter_max_block_number_range = 100000
 
 # Maximum number of transactions allowed for peers to send to a catch-up node.
 #
@@ -558,6 +559,7 @@ chain_id = 1990
 evm_chain_id = 1991
 hydra_transition_number = 1
 hydra_transition_height = 1
+pos_reference_enable_height = 1
 
 
 # genesis_secrets="genesis_secrets.toml"

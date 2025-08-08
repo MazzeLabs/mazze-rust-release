@@ -257,7 +257,7 @@ fn main() {
         sync.insert_block_header(
             &mut new_block.block_header,
             false, // need_to_verify
-            false,  // bench_mode
+            true,  // bench_mode
             false, // insert_to_consensus
             true,  // persistent
         );

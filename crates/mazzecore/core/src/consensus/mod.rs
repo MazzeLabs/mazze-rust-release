@@ -50,6 +50,7 @@ use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_internal_common::ChainIdParams;
 use mazze_parameters::{
     consensus::*,
+    consensus_internal::REWARD_EPOCH_COUNT,
     rpc::{
         GAS_PRICE_BLOCK_SAMPLE_SIZE, GAS_PRICE_DEFAULT_VALUE,
         GAS_PRICE_TRANSACTION_SAMPLE_SIZE,
@@ -118,6 +119,13 @@ pub struct PhantomBlock {
 pub struct ConsensusConfig {
     /// Chain id configs.
     pub chain_id: ChainIdParams,
+    /// When bench_mode is true, the PoW solution verification will be skipped.
+    /// The transaction execution will also be skipped and only return the
+    /// pair of (KECCAK_NULL_RLP, KECCAK_EMPTY_LIST_RLP) This is for testing
+    /// only
+    pub bench_mode: bool,
+    /// The configuration used by inner data
+    pub inner_conf: ConsensusInnerConfig,
     /// The epoch bound for processing a transaction. For a transaction being
     /// process, the epoch height of its enclosing block must be with in
     /// [tx.epoch_height - transaction_epoch_bound, tx.epoch_height +
@@ -256,6 +264,7 @@ impl ConsensusGraph {
                 pow_config,
                 pow.clone(),
                 data_man.clone(),
+                conf.inner_conf.clone(),
                 era_genesis_block_hash,
                 era_stable_block_hash,
             )));
@@ -265,6 +274,7 @@ impl ConsensusGraph {
             inner.clone(),
             execution_conf,
             verification_config,
+            conf.bench_mode,
         );
         let confirmation_meter = ConfirmationMeter::new();
 
@@ -2367,8 +2377,8 @@ impl ConsensusGraphTrait for ConsensusGraph {
             .data_man
             .block_height_by_hash(&stable_genesis)
             .expect("stable exist");
-        let reward_start_epoch = if stable_height >= DEFERRED_STATE_EPOCH_COUNT {
-            stable_height - DEFERRED_STATE_EPOCH_COUNT + 1
+        let reward_start_epoch = if stable_height >= REWARD_EPOCH_COUNT {
+            stable_height - REWARD_EPOCH_COUNT + 1
         } else {
             1
         };
@@ -2440,6 +2450,7 @@ impl ConsensusGraphTrait for ConsensusGraph {
             old_consensus_inner.pow_config.clone(),
             old_consensus_inner.pow.clone(),
             self.data_man.clone(),
+            old_consensus_inner.inner_conf.clone(),
             &cur_era_genesis_hash,
             &cur_era_stable_hash,
         );

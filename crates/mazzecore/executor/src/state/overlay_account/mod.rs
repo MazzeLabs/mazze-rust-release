@@ -80,8 +80,6 @@ pub struct OverlayAccount {
     nonce: U256,
     /// Code hash of the account.
     code_hash: H256,
-    // /// Staking balance (in Mazzy) of the account
-    // staking_balance: U256,
     /// Collateral (in Mazzy) of the account
     collateral_for_storage: U256,
     /// Accumulated interest return (in Mazzy) of the account.

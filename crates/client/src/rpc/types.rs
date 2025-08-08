@@ -2,9 +2,6 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-use primitives::{BlockNumber};
-
-
 mod account;
 mod blame_info;
 mod block;
@@ -21,6 +18,7 @@ pub mod mazze;
 mod provenance;
 pub mod pubsub;
 mod receipt;
+mod reward_info;
 mod sponsor_info;
 mod stat_on_gas_load;
 mod status;
@@ -57,6 +55,7 @@ pub use self::{
     },
     provenance::Origin,
     receipt::Receipt,
+    reward_info::RewardInfo,
     sponsor_info::SponsorInfo,
     stat_on_gas_load::StatOnGasLoad,
     status::Status,

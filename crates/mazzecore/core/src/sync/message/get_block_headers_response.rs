@@ -200,7 +200,7 @@ impl GetBlockHeadersResponse {
                 ctx.manager.graph.insert_block_header(
                     &mut header.clone(),
                     true,  /* need_to_verify */
-                    true, /* bench_mode */
+                    false, /* bench_mode */
                     ctx.manager.insert_header_to_consensus(),
                     true, /* persistent */
                 )

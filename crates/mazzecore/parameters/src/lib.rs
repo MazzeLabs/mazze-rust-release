@@ -5,6 +5,8 @@
 #[macro_use]
 extern crate lazy_static;
 
+use mazze_types::U256;
+
 pub mod genesis;
 pub mod internal_contract_addresses;
 
@@ -21,9 +23,17 @@ pub mod consensus {
     // relative to the era start blocks.
     pub const ERA_DEFAULT_EPOCH_COUNT: u64 = 20000;
 
-    // At Mazze MainNet Launch there are approximately 2 blocks per epoch,
-    // with 1k TPS, and 2 blocks per second, a DeltaMPT contains data for
-    // around 2 million transaction.
+    // Realistic TPS depends on gas/tx (examples):
+    // Block gas limit (steady state): 60M (GENESIS_GAS_LIMIT 30M × ELASTICITY 2)
+    // Packing target ≈ 70% of block gas (9/10 Native + 5/10 EVM, then /2 ELASTICITY) ⇒ ~0.7 × block_gas
+    // Block rate: 4 blocks/s
+    // Gas/s ≈ 0.7 × 60M × 4 = ~168M gas/s
+    // TPS est.:
+    //   ~42k TPS @ 4k gas/tx  (simple native transfers)
+    //   ~8k TPS  @ 21k gas/tx (simple EVM token transfers)
+    //   ~3.36k TPS @ 50k gas/tx (typical DeFi swaps)
+    //   ~1.68k TPS @ 100k gas/tx (complex contract calls)
+
     pub const SNAPSHOT_EPOCHS_CAPACITY: u32 = 2000;
 
     pub const NULL: usize = !0;
@@ -50,6 +60,11 @@ pub mod consensus {
 pub mod consensus_internal {
     use crate::consensus::{ONE_GMAZZY_IN_MAZZY, ONE_MAZZE_IN_MAZZY};
 
+    /// `REWARD_EPOCH_COUNT` needs to be larger than
+    /// `OUTLIER_PENALTY_UPPER_EPOCH_COUNT`. If we cannot cache receipts of
+    /// recent `REWARD_EPOCH_COUNT` epochs, the receipts will be loaded from
+    /// db, which may lead to performance downgrade
+    pub const REWARD_EPOCH_COUNT: u64 = 12;
     pub const OUTLIER_PENALTY_UPPER_EPOCH_COUNT: u64 = 10;
     pub const OUTLIER_PENALTY_RATIO: u64 = 100;
     /// The maximum number of blocks to be executed in each epoch
@@ -122,10 +137,12 @@ pub mod sync {
     /// A node is in catch-up mode if its local best epoch number is
     /// CATCH_UP_EPOCH_LAG_THRESHOLD behind the median of the epoch
     /// numbers of peers.
-    pub const CATCH_UP_EPOCH_LAG_THRESHOLD: u64 = 20;
+    //200 instead of 20
+    pub const CATCH_UP_EPOCH_LAG_THRESHOLD: u64 = 200;
     /// This threshold controlling whether a node should request missing
     /// terminals from peers when the node is in catch-up mode.
-    pub const REQUEST_TERMINAL_EPOCH_LAG_THRESHOLD: u64 = 40;
+    //400 instead of 40
+    pub const REQUEST_TERMINAL_EPOCH_LAG_THRESHOLD: u64 = 400;
 
     /// The max number of headers that are to be sent for header
     /// block request.
@@ -184,7 +201,7 @@ pub mod pow {
 
     // TODO: compute a more appropriate initial difficulty
     // previous initial difficulty: 20_000_000_000;
-    pub const INITIAL_DIFFICULTY: u64 = 10;
+    pub const INITIAL_DIFFICULTY: u64 = 20;
 
     // The amount of epochs to use for switching mining seed hash
     pub const RANDOMX_EPOCH_LENGTH: u64 = 2048;
@@ -302,8 +319,10 @@ pub mod light {
     pub const CATCH_UP_EPOCH_LAG_THRESHOLD: u64 = 3;
 
     /// (Maximum) number of items requested in a single request.
-    pub const EPOCH_REQUEST_BATCH_SIZE: usize = 100;
-    pub const HEADER_REQUEST_BATCH_SIZE: usize = 30;
+    //500 instead of 100
+    pub const EPOCH_REQUEST_BATCH_SIZE: usize = 500;
+    //100 instead of 30
+    pub const HEADER_REQUEST_BATCH_SIZE: usize = 100;
     pub const BLOOM_REQUEST_BATCH_SIZE: usize = 30;
     pub const WITNESS_REQUEST_BATCH_SIZE: usize = 50;
     pub const RECEIPT_REQUEST_BATCH_SIZE: usize = 30;
@@ -316,7 +335,9 @@ pub mod light {
 
     /// Maximum number of in-flight items at any given time.
     /// If we reach this limit, we will not request any more.
-    pub const MAX_HEADERS_IN_FLIGHT: usize = 1000;
+
+    //2000 instead of 1000
+    pub const MAX_HEADERS_IN_FLIGHT: usize = 2000;
     pub const MAX_WITNESSES_IN_FLIGHT: usize = 500;
     pub const MAX_BLOOMS_IN_FLIGHT: usize = 500;
     pub const MAX_RECEIPTS_IN_FLIGHT: usize = 100;
@@ -372,3 +393,7 @@ pub mod light {
 }
 
 pub const WORKER_COMPUTATION_PARALLELISM: usize = 8;
+
+pub struct DaoControlParameters {
+    pub pow_base_reward: U256,
+}

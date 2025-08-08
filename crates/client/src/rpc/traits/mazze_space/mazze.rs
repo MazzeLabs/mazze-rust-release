@@ -5,9 +5,11 @@
 use crate::rpc::types::{
     Account as RpcAccount, AccountPendingInfo, AccountPendingTransactions,
     Block, BlockHashOrEpochNumber, Bytes, CallRequest,
-    CheckBalanceAgainstTransactionResponse, EpochNumber, Log as RpcLog, MazzeFilterChanges,
-    MazzeRpcLogFilter, Receipt as RpcReceipt, RpcAddress, SponsorInfo,
-    Status as RpcStatus, StorageCollateralInfo, TokenSupplyInfo, Transaction,
+    CheckBalanceAgainstTransactionResponse, EpochNumber,
+    EstimateGasAndCollateralResponse, Log as RpcLog, MazzeFeeHistory,
+    MazzeFilterChanges, MazzeRpcLogFilter, Receipt as RpcReceipt,
+    RewardInfo as RpcRewardInfo, RpcAddress, SponsorInfo, Status as RpcStatus,
+    StorageCollateralInfo, TokenSupplyInfo, Transaction, U64 as HexU64,
 };
 use jsonrpc_core::{BoxFuture, Result as JsonRpcResult};
 use jsonrpc_derive::rpc;
@@ -36,6 +38,10 @@ pub trait Mazze {
     /// Returns current gas price.
     #[rpc(name = "mazze_gasPrice")]
     fn gas_price(&self) -> BoxFuture<U256>;
+
+    /// Returns current max_priority_fee
+    #[rpc(name = "mazze_maxPriorityFeePerGas")]
+    fn max_priority_fee_per_gas(&self) -> BoxFuture<U256>;
 
     /// Returns highest epoch number.
     #[rpc(name = "mazze_epochNumber")]
@@ -140,6 +146,12 @@ pub trait Mazze {
     //        #[rpc(name = "mazze_submitTransaction")]
     //        fn submit_transaction(&self, Bytes) -> JsonRpcResult<H256>;
 
+    /// Call contract, returning the output data.
+    #[rpc(name = "mazze_call")]
+    fn call(
+        &self, tx: CallRequest,
+        block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>,
+    ) -> JsonRpcResult<Bytes>;
 
     /// Returns logs matching the filter provided.
     #[rpc(name = "mazze_getLogs")]
@@ -163,6 +175,18 @@ pub trait Mazze {
         &self, address: RpcAddress, maybe_start_nonce: Option<U256>,
         maybe_limit: Option<U64>,
     ) -> BoxFuture<AccountPendingTransactions>;
+
+    /// Return estimated gas and collateral usage.
+    #[rpc(name = "mazze_estimateGasAndCollateral")]
+    fn estimate_gas_and_collateral(
+        &self, request: CallRequest, epoch_number: Option<EpochNumber>,
+    ) -> JsonRpcResult<EstimateGasAndCollateralResponse>;
+
+    #[rpc(name = "mazze_feeHistory")]
+    fn fee_history(
+        &self, block_count: HexU64, newest_block: EpochNumber,
+        reward_percentiles: Vec<f64>,
+    ) -> BoxFuture<MazzeFeeHistory>;
 
     /// Check if user balance is enough for the transaction.
     #[rpc(name = "mazze_checkBalanceAgainstTransaction")]
@@ -200,6 +224,12 @@ pub trait Mazze {
 
     #[rpc(name = "mazze_getStatus")]
     fn get_status(&self) -> JsonRpcResult<RpcStatus>;
+
+    /// Returns block reward information in an epoch
+    #[rpc(name = "mazze_getBlockRewardInfo")]
+    fn get_block_reward_info(
+        &self, num: EpochNumber,
+    ) -> JsonRpcResult<Vec<RpcRewardInfo>>;
 
     /// Return the client version as a string
     #[rpc(name = "mazze_clientVersion")]
@@ -240,6 +270,18 @@ pub trait Mazze {
     //        #[rpc(name = "mazze_getUnclesByBlockNumberAndIndex")]
     //        fn uncles_by_block_number_and_index(&self, BlockNumber, Index) ->
     // BoxFuture<Option<Block>>;
+
+    /// Check if a block is a timer block
+    #[rpc(name = "mazze_isTimerBlock")]
+    fn is_timer_block(&self, block_hash: H256) -> JsonRpcResult<bool>;
+
+    /// Get the timer chain hash list
+    #[rpc(name = "mazze_getTimerChain")]
+    fn get_timer_chain(&self) -> JsonRpcResult<Vec<H256>>;
+
+    /// Get the timer chain difficulty
+    #[rpc(name = "mazze_getTimerChainDifficulty")]
+    fn get_timer_chain_difficulty(&self) -> JsonRpcResult<U256>;
 }
 
 /// Eth filters rpc api (polling).

@@ -70,7 +70,7 @@ use crate::{
             CheckBalanceAgainstTransactionResponse, ConsensusGraphStates,
             EpochNumber, EstimateGasAndCollateralResponse, Log as RpcLog,
             MazzeRpcLogFilter, PackedOrExecuted, Receipt as RpcReceipt,
-            SendTxRequest, Status as RpcStatus,
+            RewardInfo as RpcRewardInfo, SendTxRequest, Status as RpcStatus,
             SyncGraphStates, Transaction as RpcTransaction,
         },
         RpcResult,
@@ -81,6 +81,7 @@ use mazze_execute_helper::estimation::EstimateRequest;
 use mazze_executor::state::State;
 use mazze_parameters::{
     collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
+    consensus_internal::REWARD_EPOCH_COUNT,
 };
 use mazze_storage::state::StateDbGetOriginalMethods;
 use mazzecore::{
@@ -1075,6 +1076,189 @@ impl RpcImpl {
         Ok(logs)
     }
 
+    fn get_block_reward_info(
+        &self, epoch: EpochNumber,
+    ) -> RpcResult<Vec<RpcRewardInfo>> {
+        info!(
+            "RPC Request: mazze_getBlockRewardInfo epoch_number={:?}",
+            epoch
+        );
+        let epoch_height: U64 = self
+            .consensus_graph()
+            .get_height_from_epoch_number(epoch.clone().into_primitive())?
+            .into();
+        let (epoch_later_number, overflow) =
+            epoch_height.overflowing_add(REWARD_EPOCH_COUNT.into());
+        if overflow {
+            bail!(invalid_params("epoch", "Epoch number overflows!"));
+        }
+        let epoch_later = match self.consensus.get_hash_from_epoch_number(
+            EpochNumber::Num(epoch_later_number).into_primitive(),
+        ) {
+            Ok(hash) => hash,
+            Err(e) => {
+                debug!("get_block_reward_info: get_hash_from_epoch_number returns error: {}", e);
+                bail!(invalid_params("epoch", "Reward not calculated yet!"))
+            }
+        };
+
+        let blocks = self.consensus.get_block_hashes_by_epoch(epoch.into())?;
+
+        let mut ret = Vec::new();
+        for b in blocks {
+            if let Some(reward_result) = self
+                .consensus
+                .get_data_manager()
+                .block_reward_result_by_hash_with_epoch(
+                    &b,
+                    &epoch_later,
+                    false, // update_main_assumption
+                    true,  // update_cache
+                )
+            {
+                if let Some(block_header) =
+                    self.consensus.get_data_manager().block_header_by_hash(&b)
+                {
+                    let author = RpcAddress::try_from_h160(
+                        *block_header.author(),
+                        *self.sync.network.get_network_type(),
+                    )?;
+
+                    ret.push(RpcRewardInfo::new(b, author, reward_result));
+                }
+            }
+        }
+        Ok(ret)
+    }
+
+    fn call(
+        &self, request: CallRequest,
+        block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>,
+    ) -> RpcResult<Bytes> {
+        let epoch = Some(
+            self.get_epoch_number_with_main_check(block_hash_or_epoch_number)?,
+        );
+        let (execution_outcome, _estimation) =
+            self.exec_transaction(request, epoch)?;
+        match execution_outcome {
+            ExecutionOutcome::NotExecutedDrop(TxDropError::OldNonce(
+                expected,
+                got,
+            )) => bail!(call_execution_error(
+                "Transaction can not be executed".into(),
+                format! {"nonce is too old expected {:?} got {:?}", expected, got}
+            )),
+            ExecutionOutcome::NotExecutedDrop(
+                TxDropError::InvalidRecipientAddress(recipient),
+            ) => bail!(call_execution_error(
+                "Transaction can not be executed".into(),
+                format! {"invalid recipient address {:?}", recipient}
+            )),
+            ExecutionOutcome::NotExecutedDrop(
+                TxDropError::NotEnoughGasLimit { expected, got },
+            ) => bail!(call_execution_error(
+                "Transaction can not be executed".into(),
+                format! {"not enough gas limit with respected to tx size: expected {:?} got {:?}", expected, got}
+            )),
+            ExecutionOutcome::NotExecutedToReconsiderPacking(e) => {
+                bail!(call_execution_error(
+                    "Transaction can not be executed".into(),
+                    format! {"{:?}", e}
+                ))
+            }
+            ExecutionOutcome::ExecutionErrorBumpNonce(
+                ExecutionError::VmError(VmError::Reverted),
+                executed,
+            ) => bail!(call_execution_error(
+                "Transaction reverted".into(),
+                format!("0x{}", executed.output.to_hex::<String>())
+            )),
+            ExecutionOutcome::ExecutionErrorBumpNonce(e, _) => {
+                bail!(call_execution_error(
+                    "Transaction execution failed".into(),
+                    format! {"{:?}", e}
+                ))
+            }
+            ExecutionOutcome::Finished(executed) => Ok(executed.output.into()),
+        }
+    }
+
+    fn estimate_gas_and_collateral(
+        &self, request: CallRequest, epoch: Option<EpochNumber>,
+    ) -> RpcResult<EstimateGasAndCollateralResponse> {
+        info!(
+            "RPC Request: mazze_estimateGasAndCollateral request={:?}, epoch={:?}",request,epoch
+        );
+        let (execution_outcome, estimation) =
+            self.exec_transaction(request, epoch)?;
+        match execution_outcome {
+            ExecutionOutcome::NotExecutedDrop(TxDropError::OldNonce(
+                expected,
+                got,
+            )) => bail!(call_execution_error(
+                "Can not estimate: transaction can not be executed".into(),
+                format! {"nonce is too old expected {:?} got {:?}", expected, got}
+            )),
+            ExecutionOutcome::NotExecutedDrop(
+                TxDropError::InvalidRecipientAddress(recipient),
+            ) => bail!(call_execution_error(
+                "Can not estimate: transaction can not be executed".into(),
+                format! {"invalid recipient address {:?}", recipient}
+            )),
+            ExecutionOutcome::NotExecutedToReconsiderPacking(e) => {
+                bail!(call_execution_error(
+                    "Can not estimate: transaction can not be executed".into(),
+                    format! {"{:?}", e}
+                ))
+            }
+            ExecutionOutcome::NotExecutedDrop(
+                TxDropError::NotEnoughGasLimit { expected, got },
+            ) => bail!(call_execution_error(
+                "Can not estimate: transaction can not be executed".into(),
+                format! {"not enough gas limit with respected to tx size: expected {:?} got {:?}", expected, got}
+            )),
+            ExecutionOutcome::ExecutionErrorBumpNonce(
+                ExecutionError::VmError(VmError::Reverted),
+                executed,
+            ) => {
+                let network_type = *self.sync.network.get_network_type();
+                let (revert_error, innermost_error, errors) =
+                    decode_error(&executed, |addr| {
+                        RpcAddress::try_from_h160(addr.clone(), network_type)
+                            .unwrap()
+                            .base32_address
+                    });
+
+                bail!(call_execution_error(
+                    format!("Estimation isn't accurate: transaction is reverted{}{}",
+                        revert_error, innermost_error),
+                    errors.join("\n"),
+                ))
+            }
+            ExecutionOutcome::ExecutionErrorBumpNonce(e, _) => {
+                bail!(call_execution_error(
+                    format! {"Can not estimate: transaction execution failed, \
+                    all gas will be charged (execution error: {:?})", e}
+                    .into(),
+                    format! {"{:?}", e}
+                ))
+            }
+            ExecutionOutcome::Finished(executed) => executed,
+        };
+        let storage_collateralized =
+            U64::from(estimation.estimated_storage_limit);
+        let estimated_gas_used = estimation.estimated_gas_limit;
+        let response = EstimateGasAndCollateralResponse {
+            gas_limit: estimated_gas_used, /* gas_limit used to be 4/3 of
+                                            * gas_used due to inaccuracy,
+                                            * currently it's the same as gas
+                                            * used as it's more accurate */
+            gas_used: estimated_gas_used,
+            storage_collateralized,
+        };
+        Ok(response)
+    }
+
     fn check_balance_against_transaction(
         &self, account_addr: RpcAddress, contract_addr: RpcAddress,
         gas_limit: U256, gas_price: U256, storage_limit: U256,
@@ -1928,6 +2112,9 @@ impl Mazze for MazzeHandler {
             fn confirmation_risk_by_hash(&self, block_hash: H256) -> JsonRpcResult<Option<U256>>;
             fn blocks_by_epoch(&self, num: EpochNumber) -> JsonRpcResult<Vec<H256>>;
             fn skipped_blocks_by_epoch(&self, num: EpochNumber) -> JsonRpcResult<Vec<H256>>;
+            fn is_timer_block(&self, block_hash: H256) -> JsonRpcResult<bool>;
+            fn get_timer_chain(&self) -> JsonRpcResult<Vec<H256>>;
+            fn get_timer_chain_difficulty(&self) -> JsonRpcResult<U256>;
             fn epoch_number(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<U256>;
             fn gas_price(&self) -> BoxFuture<U256>;
             fn next_nonce(&self, address: RpcAddress, num: Option<BlockHashOrEpochNumber>)
@@ -1936,6 +2123,8 @@ impl Mazze for MazzeHandler {
             fn get_client_version(&self) -> JsonRpcResult<String>;
             fn account_pending_info(&self, addr: RpcAddress) -> BoxFuture<Option<AccountPendingInfo>>;
             fn account_pending_transactions(&self, address: RpcAddress, maybe_start_nonce: Option<U256>, maybe_limit: Option<U64>) -> BoxFuture<AccountPendingTransactions>;
+            fn fee_history(&self, block_count: HexU64, newest_block: EpochNumber, reward_percentiles: Vec<f64>) -> BoxFuture<MazzeFeeHistory>;
+            fn max_priority_fee_per_gas(&self) -> BoxFuture<U256>;
         }
 
         to self.rpc_impl {
@@ -1948,11 +2137,16 @@ impl Mazze for MazzeHandler {
             fn balance(&self, address: RpcAddress, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> BoxFuture<U256>;
             fn collateral_for_storage(&self, address: RpcAddress, num: Option<EpochNumber>)
                 -> BoxFuture<U256>;
-            
+            fn call(&self, request: CallRequest, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>)
+                -> JsonRpcResult<Bytes>;
+            fn estimate_gas_and_collateral(
+                &self, request: CallRequest, epoch_number: Option<EpochNumber>)
+                -> JsonRpcResult<EstimateGasAndCollateralResponse>;
             fn check_balance_against_transaction(
                 &self, account_addr: RpcAddress, contract_addr: RpcAddress, gas_limit: U256, gas_price: U256, storage_limit: U256, epoch: Option<EpochNumber>,
             ) -> BoxFuture<CheckBalanceAgainstTransactionResponse>;
             fn get_logs(&self, filter: MazzeRpcLogFilter) -> BoxFuture<Vec<RpcLog>>;
+            fn get_block_reward_info(&self, num: EpochNumber) -> JsonRpcResult<Vec<RpcRewardInfo>>;
             fn send_raw_transaction(&self, raw: Bytes) -> JsonRpcResult<H256>;
             fn storage_at(&self, addr: RpcAddress, pos: U256, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>)
                 -> BoxFuture<Option<H256>>;

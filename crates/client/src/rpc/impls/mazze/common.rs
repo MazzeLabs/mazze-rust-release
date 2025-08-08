@@ -466,6 +466,119 @@ impl RpcImpl {
             "num",
         )
     }
+
+    // TODO: cache the history to improve performance
+    pub fn fee_history(
+        &self, block_count: HexU64, newest_block: EpochNumber,
+        reward_percentiles: Vec<f64>,
+    ) -> RpcResult<MazzeFeeHistory> {
+        if newest_block == EpochNumber::LatestMined {
+            return Err(RpcError::invalid_params(
+                "newestBlock cannot be 'LatestMined'",
+            )
+            .into());
+        }
+
+        info!(
+            "RPC Request: mazze_feeHistory: block_count={}, newest_block={:?}, reward_percentiles={:?}",
+            block_count, newest_block, reward_percentiles
+        );
+
+        if block_count.as_u64() == 0 {
+            return Ok(FeeHistory::new().to_mazze_fee_history());
+        }
+        // keep read lock to ensure consistent view
+        let inner = self.consensus_graph().inner.read();
+
+        let fetch_block = |height| {
+            let main_hash = inner
+                .get_main_hash_from_epoch_number(height)
+                .map_err(RpcError::invalid_params)?;
+
+            let maybe_block = self
+                .data_man
+                .block_by_hash(&main_hash, false /* update_cache */);
+            if let Some(block) = maybe_block {
+                // Internal error happens only if the fetch header has
+                // inconsistent block height
+                Ok(block)
+            } else {
+                Err(RpcError::invalid_params(
+                    "Specified block header does not exist",
+                ))
+            }
+        };
+
+        let start_height: u64 = self
+            .consensus_graph()
+            .get_height_from_epoch_number(newest_block.into())
+            .map_err(RpcError::invalid_params)?;
+
+        let mut current_height = start_height;
+
+        let mut fee_history = FeeHistory::new();
+        while current_height
+            >= start_height.saturating_sub(block_count.as_u64() - 1)
+        {
+            let block = fetch_block(current_height)?;
+
+            let transactions = block
+                .transactions
+                .iter()
+                .filter(|tx| tx.space() == Space::Native)
+                .map(|x| &**x);
+
+            // Internal error happens only if the fetch header has inconsistent
+            // block height
+            fee_history
+                .push_front_block(
+                    Space::Native,
+                    &reward_percentiles,
+                    &block.block_header,
+                    transactions,
+                )
+                .map_err(|_| RpcError::internal_error())?;
+
+            if current_height == 0 {
+                break;
+            } else {
+                current_height -= 1;
+            }
+        }
+
+        // Fetch the block after the last block in the history
+        let block = fetch_block(start_height + 1)?;
+        let oldest_block = if current_height == 0 {
+            0
+        } else {
+            current_height + 1
+        };
+        fee_history.finish(
+            oldest_block,
+            block.block_header.base_price().as_ref(),
+            Space::Native,
+        );
+
+        Ok(fee_history.to_mazze_fee_history())
+    }
+
+    pub fn max_priority_fee_per_gas(&self) -> RpcResult<U256> {
+        info!("RPC Request: max_priority_fee_per_gas",);
+
+        let fee_history = self.fee_history(
+            HexU64::from(300),
+            EpochNumber::LatestState,
+            vec![50f64],
+        )?;
+
+        let total_reward: U256 = fee_history
+            .reward()
+            .iter()
+            .map(|x| x.first().unwrap())
+            .fold(U256::zero(), |x, y| x + *y);
+
+        Ok(total_reward / 300)
+    }
 }
 
 // Test RPC implementation
@@ -1102,6 +1215,37 @@ impl RpcImpl {
             first_tx_status: tx_status,
             pending_count: pending_count.into(),
         })
+    }
+
+    pub fn is_timer_block(&self, block_hash: H256) -> JsonRpcResult<bool> {
+        info!("RPC Request: mazze_isTimerBlock block_hash={:?}", block_hash);
+
+        match self.consensus.get_data_manager().block_header_by_hash(&block_hash) {
+            Some(_header) => {
+                let inner = self.consensus_graph().inner.read();
+                match inner.is_timer_block(&block_hash) {
+                    Some(is_timer) => Ok(is_timer),
+                    None => Err(RpcError::invalid_params("Block not found in consensus graph")),
+                }
+            }
+            None => Err(RpcError::invalid_params("Invalid block hash")),
+        }
+    }
+
+    pub fn get_timer_chain(&self) -> JsonRpcResult<Vec<H256>> {
+        info!("RPC Request: mazze_getTimerChain");
+
+        let inner = self.consensus_graph().inner.read();
+        let timer_chain_hashes = inner.get_timer_chain_hashes();
+        Ok(timer_chain_hashes)
+    }
+
+    pub fn get_timer_chain_difficulty(&self) -> JsonRpcResult<U256> {
+        info!("RPC Request: mazze_getTimerChainDifficulty");
+
+        let inner = self.consensus_graph().inner.read();
+        let difficulty = inner.get_timer_chain_difficulty();
+        Ok(difficulty)
     }
 }
 

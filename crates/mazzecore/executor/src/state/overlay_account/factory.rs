@@ -16,9 +16,7 @@ impl Default for OverlayAccount {
             storage_write_cache: Default::default(),
             transient_storage: Default::default(),
             storage_layout_change: None,
-            // staking_balance: 0.into(),
             collateral_for_storage: 0.into(),
-            // accumulated_interest_return: 0.into(),
             code_hash: KECCAK_EMPTY,
             code: None,
             is_newly_created_contract: false,
@@ -36,9 +34,7 @@ impl OverlayAccount {
             nonce: account.nonce,
             admin: account.admin,
             sponsor_info: account.sponsor_info,
-            // staking_balance: account.staking_balance,
             collateral_for_storage: account.collateral_for_storage,
-            // accumulated_interest_return: account.accumulated_interest_return,
             code_hash: account.code_hash,
             ..Default::default()
         };
@@ -129,9 +125,7 @@ impl OverlayAccount {
             nonce: self.nonce,
             admin: self.admin,
             sponsor_info: self.sponsor_info.clone(),
-            // staking_balance: self.staking_balance,
             collateral_for_storage: self.collateral_for_storage,
-            // accumulated_interest_return: self.accumulated_interest_return,
             code_hash: self.code_hash,
             code: self.code.clone(),
             is_newly_created_contract: self.is_newly_created_contract,
@@ -151,9 +145,7 @@ impl OverlayAccount {
         account.balance = self.balance;
         account.nonce = self.nonce;
         account.code_hash = self.code_hash;
-        // account.staking_balance = self.staking_balance;
         account.collateral_for_storage = self.collateral_for_storage;
-        // account.accumulated_interest_return = self.accumulated_interest_return;
         account.admin = self.admin;
         account.sponsor_info = self.sponsor_info.clone();
         account.set_address(self.address);

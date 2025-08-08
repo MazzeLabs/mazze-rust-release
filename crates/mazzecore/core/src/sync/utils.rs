@@ -24,7 +24,7 @@ use crate::{
     cache_config::CacheConfig,
     consensus::{
         consensus_inner::consensus_executor::ConsensusExecutionConfiguration,
-        ConsensusConfig,
+        ConsensusConfig, ConsensusInnerConfig,
     },
     db::NUM_COLUMNS,
     genesis_block::genesis_block,
@@ -169,8 +169,8 @@ pub fn initialize_data_manager(
 }
 
 pub fn initialize_synchronization_graph_with_data_manager(
-    data_man: Arc<BlockDataManager>, _beta: u64, _h: u64, _tcr: u64, _tcb: u64,
-    _era_epoch_count: u64, pow: Arc<PowComputer>, vm: VmFactory,
+    data_man: Arc<BlockDataManager>, beta: u64, h: u64, tcr: u64, tcb: u64,
+    era_epoch_count: u64, pow: Arc<PowComputer>, vm: VmFactory,
 ) -> (Arc<SynchronizationGraph>, Arc<ConsensusGraph>) {
     let params = CommonParams::default();
     let machine = Arc::new(new_machine_with_builtin(params, vm));
@@ -210,6 +210,22 @@ pub fn initialize_synchronization_graph_with_data_manager(
     let consensus = Arc::new(ConsensusGraph::new(
         ConsensusConfig {
             chain_id: ChainIdParamsInner::new_simple(AllChainID::new(1, 1)),
+            inner_conf: ConsensusInnerConfig {
+                adaptive_weight_beta: beta,
+                heavy_block_difficulty_ratio: h,
+                timer_chain_block_difficulty_ratio: tcr,
+                timer_chain_beta: tcb,
+                era_epoch_count,
+                enable_optimistic_execution: false,
+                enable_state_expose: false,
+                debug_dump_dir_invalid_state_root: None,
+                debug_invalid_state_root_epoch: None,
+                force_recompute_height_during_construct_main: None,
+                recovery_latest_mpt_snapshot: false,
+                use_isolated_db_for_mpt_table: false,
+            },
+            bench_mode: true, /* Set bench_mode to true so that we skip
+                               * execution */
             transaction_epoch_bound: TRANSACTION_DEFAULT_EPOCH_BOUND,
             referee_bound: REFEREE_DEFAULT_BOUND,
             get_logs_epoch_batch_size: 32,

@@ -20,15 +20,13 @@ use crate::{
 };
 use hibitset::{BitSet, BitSetLike, DrainableBitSet};
 use mazze_parameters::{consensus::*, consensus_internal::*};
-use mazze_storage::{
-    StateIndex,
-};
+use mazze_storage::{storage_db::SnapshotDbManagerTrait, StateIndex};
 use mazze_types::H256;
 use parking_lot::Mutex;
-use primitives::{MERKLE_NULL_NODE};
+use primitives::{MERKLE_NULL_NODE, NULL_EPOCH};
 use std::{
     cmp::{max, min},
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BinaryHeap, HashMap, HashSet, VecDeque},
     slice::Iter,
     sync::Arc,
 };
@@ -261,6 +259,10 @@ impl ConsensusNewBlockHandler {
             let main = inner.main_chain[i];
             inner.main_chain_metadata[i].past_weight =
                 inner.main_chain_metadata[i - 1].past_weight
+                    + inner.total_weight_in_own_epoch(
+                        &inner.arena[main].data.blockset_in_own_view_of_epoch,
+                        new_era_block_arena_index,
+                    )
                     + inner.block_weight(main)
         }
         for d in inner.main_chain_metadata.iter_mut() {
@@ -627,7 +629,7 @@ impl ConsensusNewBlockHandler {
     }
 
     fn check_block_full_validity(
-        &self, new: usize, inner: &mut ConsensusGraphInner, _adaptive: bool,
+        &self, new: usize, inner: &mut ConsensusGraphInner, adaptive: bool,
         outlier_barrier: &BitSet, weight_tuple: Option<&Vec<i128>>,
     ) -> bool {
         let parent = inner.arena[new].parent;
@@ -666,7 +668,16 @@ impl ConsensusNewBlockHandler {
         // Check adaptivity match. Note that in bench mode we do not check
         // the adaptive field correctness. We simply override its value
         // with the right one.
-        
+        if !self.conf.bench_mode {
+            if inner.arena[new].adaptive != adaptive {
+                warn!(
+                    "Partially invalid due to invalid adaptive field. {:?}",
+                    inner.arena[new].hash
+                );
+                return false;
+            }
+        }
+
         return true;
     }
 
@@ -763,16 +774,18 @@ impl ConsensusNewBlockHandler {
         let mut new_genesis_height =
             inner.cur_era_genesis_height + inner.inner_conf.era_epoch_count;
 
-        // FIXME: Here is a chicken and egg problem. In our full node sync
-        // FIXME: logic, we first run consensus on headers to determine
-        // FIXME: the checkpoint location. And then run the full blocks.
-        // FIXME: However, when we do not have the body, we cannot faithfully
-        // FIXME: check this condition. The consequence is that if
-        // FIXME: attacker managed to generate a lot blame blocks. New full
-        // FIXME: nodes will not correctly determine the safe checkpoint
-        // FIXME: location to start the sync. Causing potential panic
-        // FIXME: when computing `state_valid` and `blame_info`.
-        if !inner.header_only {
+        // NOTE: In header-only sync we determine checkpoints using the timer chain’s
+        // force-confirm rule; we do not rely on state_valid/blame_info without bodies.
+        // Therefore, the check below only runs when !inner.header_only && !self.conf.bench_mode
+        // (i.e., after block bodies are available).
+        // The timer chain (consecutive timer_chain_beta timer blocks) anchors safe checkpoints,
+        // and we skip era-candidate heights whose outlier contains timer blocks
+        // (see has_timer_block_in_outlier_cache). This mitigates the original
+        // chicken-and-egg concern and prevents attacker-crafted blame-only patterns from
+        // misleading checkpoint selection. Ensure timer_chain_beta and
+        // timer_chain_block_difficulty_ratio are chosen sufficiently high; partial-invalid blocks
+        // are excluded from the timer chain.
+        if !inner.header_only && !self.conf.bench_mode {
             // Stable block must have a blame vector that does not stretch
             // beyond the new genesis
             if !inner.arena[stable_main_block].data.state_valid.unwrap() {
@@ -1016,7 +1029,7 @@ impl ConsensusNewBlockHandler {
                 weight_tuple.as_ref(),
             );
 
-            if fully_valid {
+            if self.conf.bench_mode && fully_valid {
                 inner.arena[me].adaptive = adaptive;
             }
         } else {
@@ -1118,7 +1131,20 @@ impl ConsensusNewBlockHandler {
             inner.update_timer_chain(me);
             // Now we go over every element in the ``invalid_block_queue``
             // because their timer may change.
-            
+            if !self.conf.bench_mode {
+                let mut new_block_queue = BinaryHeap::new();
+                for (_, x) in &inner.invalid_block_queue {
+                    let timer =
+                        self.compute_invalid_block_start_timer(inner, *x);
+                    new_block_queue.push((-(timer as i128), *x));
+                    debug!(
+                        "Partial invalid Block {} (hash = {}) start timer is now {}",
+                        *x, inner.arena[*x].hash, timer
+                    );
+                }
+                inner.invalid_block_queue = new_block_queue;
+            }
+        } else {
             let mut timer_chain_height =
                 inner.arena[parent].data.ledger_view_timer_chain_height;
             if inner.get_timer_chain_index(parent) != NULL {
@@ -1296,6 +1322,10 @@ impl ConsensusNewBlockHandler {
                 .exchange_or_compute_blockset_in_own_view_of_epoch(me, None);
             inner.main_chain_metadata[main_index].past_weight =
                 inner.main_chain_metadata[main_index - 1].past_weight
+                    + inner.total_weight_in_own_epoch(
+                        &blockset,
+                        inner.cur_era_genesis_block_arena_index,
+                    )
                     + inner.block_weight(me);
             inner.exchange_or_compute_blockset_in_own_view_of_epoch(
                 me,
@@ -1304,11 +1334,13 @@ impl ConsensusNewBlockHandler {
         }
 
         // Only process blocks in the subtree of stable
-        if inner.arena[me].height <= inner.cur_era_stable_height
+        if (inner.arena[me].height <= inner.cur_era_stable_height
             || (inner.arena[me].height > inner.cur_era_stable_height
-                && inner.arena[me]
-                    .hash
-                    != inner.cur_era_stable_block_hash)
+                && inner.arena
+                    [inner.ancestor_at(me, inner.cur_era_stable_height)]
+                .hash
+                    != inner.cur_era_stable_block_hash))
+            && !self.conf.bench_mode
         {
             self.persist_terminals(inner);
             if main_changed {
@@ -1386,20 +1418,11 @@ impl ConsensusNewBlockHandler {
 
                 // Ensure all blocks on the main chain before
                 // the new stable block to have state_valid computed
-                if !inner.header_only {
-                    // FIXME: this asserion doesn't hold any more
-                    // assert!(
-                    //     new_stable_height
-                    //         >= inner
-                    //             .data_man
-                    //             .state_availability_boundary
-                    //             .read()
-                    //             .lower_bound
-                    // );
-                    // If new_era_genesis should have available state,
-                    // make sure state execution is finished before setting
-                    // lower_bound
-                    // to the new_checkpoint_era_genesis.
+                if !inner.header_only && !self.conf.bench_mode {
+                   // NOTE: Do not assert new_stable_height >= state_availability_boundary.lower_bound.
+                    // During snapshot/full sync (and header-only), the boundary may not align with the
+                    // newly chosen stable height. Instead we wait for execution to finish and compute
+                    // state_valid before proceeding.
                     self.executor
                         .wait_for_result(inner.arena[stable_arena_index].hash)
                         .expect(
@@ -1517,7 +1540,7 @@ impl ConsensusNewBlockHandler {
                 .maintain_state_confirmed(
                     inner,
                     inner.cur_era_stable_height,
-                    inner.inner_conf.era_epoch_count,
+                    self.conf.inner_conf.era_epoch_count,
                     confirmed_height,
                     &self.data_man.state_availability_boundary,
                 )
@@ -1708,6 +1731,11 @@ impl ConsensusNewBlockHandler {
                         self.compute_invalid_block_start_timer(inner, me);
                     // We are not going to delay partial invalid blocks in the
                     // bench mode
+                    if self.conf.bench_mode {
+                        inner.invalid_block_queue.push((0, me));
+                    } else {
+                        inner.invalid_block_queue.push((-(timer as i128), me));
+                    }
                     inner.arena[me].data.inactive_dependency_cnt = NULL;
                     debug!(
                         "Block {} (hash = {}) is partially invalid, all of its future will be non-active till timer height {}",
@@ -1897,8 +1925,16 @@ impl ConsensusNewBlockHandler {
             .storage_manager
             .get_storage_manager()
             .get_snapshot_epoch_count();
-        let need_set_intermediate_trie_root_merkle = false;
-            
+        let mut need_set_intermediate_trie_root_merkle = false;
+        let max_snapshot_epoch_index_has_mpt = self
+            .recover_latest_mpt_snapshot_if_needed(
+                inner,
+                &mut start_compute_epoch_main_index,
+                start_main_index,
+                end_index,
+                &mut need_set_intermediate_trie_root_merkle,
+                snapshot_epoch_count as u64,
+            );
         self.set_intermediate_trie_root_merkle(
             inner,
             start_compute_epoch_main_index,
@@ -1940,7 +1976,14 @@ impl ConsensusNewBlockHandler {
                     .executor
                     .get_reward_execution_info(inner, main_arena_index);
 
-                
+                let recover_mpt_during_construct_main_state =
+                    max_snapshot_epoch_index_has_mpt.map_or(true, |idx| {
+                        main_index > idx + snapshot_epoch_count as usize
+                    });
+                info!(
+                    "compute epoch recovery flag {}",
+                    recover_mpt_during_construct_main_state
+                );
                 self.executor.compute_epoch(
                     EpochExecutionTask::new(
                         main_arena_index,
@@ -1950,7 +1993,7 @@ impl ConsensusNewBlockHandler {
                         true, /* force_recompute */
                     ),
                     None,
-                    false, // Default value for recover_mpt_during_construct_main_state
+                    recover_mpt_during_construct_main_state,
                 );
 
                 // Remove old-main state during start up to save disk,
@@ -1970,7 +2013,7 @@ impl ConsensusNewBlockHandler {
                         .maintain_state_confirmed(
                             inner,
                             inner.cur_era_stable_height,
-                            inner.inner_conf.era_epoch_count,
+                            self.conf.inner_conf.era_epoch_count,
                             confirmed_height,
                             &self.data_man.state_availability_boundary,
                         )
@@ -2059,7 +2102,11 @@ impl ConsensusNewBlockHandler {
             }
         }
 
-        if let Some(height) = None {
+        if let Some(height) = self
+            .conf
+            .inner_conf
+            .force_recompute_height_during_construct_main
+        {
             if height > inner.cur_era_stable_height {
                 let main_idx = inner.height_to_main_index(height);
                 debug!(
@@ -2073,7 +2120,245 @@ impl ConsensusNewBlockHandler {
         force_compute_index
     }
 
-  
+    fn recover_latest_mpt_snapshot_if_needed(
+        &self, inner: &mut ConsensusGraphInner,
+        start_compute_epoch_main_index: &mut usize, start_main_index: usize,
+        end_index: usize, need_set_intermediate_trie_root_merkle: &mut bool,
+        snapshot_epoch_count: u64,
+    ) -> Option<usize> {
+        if !self.conf.inner_conf.use_isolated_db_for_mpt_table {
+            return Some(end_index);
+        }
+
+        let (
+            temp_snapshot_db_existing,
+            removed_snapshots,
+            latest_snapshot_epoch_height,
+            max_snapshot_epoch_height_has_mpt,
+        ) = if let Some((
+            temp_snapshot_db_existing,
+            removed_snapshots,
+            latest_snapshot_epoch_height,
+            max_snapshot_epoch_height_has_mpt,
+        )) = inner
+            .data_man
+            .storage_manager
+            .get_storage_manager()
+            .persist_state_from_initialization
+            .write()
+            .take()
+        {
+            (
+                temp_snapshot_db_existing,
+                removed_snapshots,
+                max(latest_snapshot_epoch_height, inner.cur_era_stable_height),
+                max_snapshot_epoch_height_has_mpt,
+            )
+        } else {
+            (None, HashSet::new(), inner.cur_era_stable_height, None)
+        };
+
+        debug!("latest snapshot epoch height: {}, temp snapshot status: {:?}, max snapshot epoch height has mpt: {:?}, removed snapshots {:?}",
+            latest_snapshot_epoch_height, temp_snapshot_db_existing, max_snapshot_epoch_height_has_mpt, removed_snapshots);
+
+        if removed_snapshots.len() == 1
+            && removed_snapshots.contains(&NULL_EPOCH)
+        {
+            debug!("special case for synced snapshot");
+            return Some(end_index);
+        }
+
+        if max_snapshot_epoch_height_has_mpt
+            .is_some_and(|h| h == latest_snapshot_epoch_height)
+        {
+            inner
+                .data_man
+                .storage_manager
+                .get_storage_manager()
+                .get_snapshot_manager()
+                .get_snapshot_db_manager()
+                .recreate_latest_mpt_snapshot()
+                .unwrap();
+
+            info!(
+                "snapshot for epoch height {} is still not use mpt database",
+                start_compute_epoch_main_index
+            );
+            return Some(end_index);
+        }
+
+        // maximum epoch need to compute
+        let maximum_height_to_create_next_snapshot =
+            latest_snapshot_epoch_height + snapshot_epoch_count * 2;
+        let index =
+            inner.height_to_main_index(maximum_height_to_create_next_snapshot);
+        if *start_compute_epoch_main_index > index {
+            warn!("start_compute_epoch_main_index is greater than maximum epoch need to compute {}", index);
+            *start_compute_epoch_main_index = index;
+        }
+
+        // Find the closest ear prior to the start_compute_epoch_height
+        let start_compute_epoch_height = inner.arena
+            [inner.main_chain[*start_compute_epoch_main_index]]
+            .height;
+        info!(
+            "current start compute epoch height {}",
+            start_compute_epoch_height
+        );
+
+        let recovery_latest_mpt_snapshot =
+            if self.conf.inner_conf.recovery_latest_mpt_snapshot
+                || start_compute_epoch_height <= latest_snapshot_epoch_height
+                || (temp_snapshot_db_existing.is_some()
+                    && latest_snapshot_epoch_height
+                        < start_compute_epoch_height
+                    && start_compute_epoch_height
+                        <= latest_snapshot_epoch_height + snapshot_epoch_count)
+            {
+                true
+            } else {
+                let mut max_epoch_height = 0;
+                for main_index in (start_main_index..end_index)
+                    .step_by(snapshot_epoch_count as usize)
+                {
+                    let main_arena_index = inner.main_chain[main_index];
+                    let main_hash = inner.arena[main_arena_index].hash;
+
+                    debug!(
+                        "snapshot main_index {} height {} ",
+                        main_index, inner.arena[main_arena_index].height
+                    );
+
+                    if removed_snapshots.contains(&main_hash) {
+                        max_epoch_height = max(
+                            max_epoch_height,
+                            inner.arena[main_arena_index].height,
+                        );
+                    }
+                }
+
+                // snapshots after latest_snapshot_epoch_height is removed
+                latest_snapshot_epoch_height < max_epoch_height
+            };
+
+        // if the latest_snapshot_epoch_height is greater than
+        // start_compute_epoch_height, the latest MPT snapshot is dirty
+        if recovery_latest_mpt_snapshot {
+            let era_main_epoch_height = if start_compute_epoch_height
+                <= inner.cur_era_stable_height + snapshot_epoch_count
+            {
+                debug!("snapshot for cur_era_stable_height must be exist");
+                inner.cur_era_stable_height
+            } else {
+                (start_compute_epoch_height - snapshot_epoch_count - 1)
+                    / self.conf.inner_conf.era_epoch_count
+                    * self.conf.inner_conf.era_epoch_count
+            };
+
+            if era_main_epoch_height > latest_snapshot_epoch_height {
+                panic!("era_main_epoch_height is greater than latest_snapshot_epoch_height, this should not happen");
+            }
+
+            debug!(
+                "need recovery latest mpt snapshot, start compute epoch height {}, era main epoch height {}",
+                start_compute_epoch_height, era_main_epoch_height
+            );
+
+            if start_compute_epoch_height <= era_main_epoch_height {
+                unreachable!("start_compute_epoch_height {} is smaller than era_main_epoch_height {}", start_compute_epoch_height, era_main_epoch_height);
+            } else if start_compute_epoch_height
+                <= era_main_epoch_height + snapshot_epoch_count
+            {
+                if start_compute_epoch_height % snapshot_epoch_count == 1 {
+                    *need_set_intermediate_trie_root_merkle = true;
+                }
+            } else if start_compute_epoch_height
+                <= era_main_epoch_height + snapshot_epoch_count * 2
+            {
+                // nothing need to do
+            } else {
+                let new_height =
+                    era_main_epoch_height + snapshot_epoch_count * 2;
+                let new_index = inner.height_to_main_index(new_height);
+
+                info!("reset start_compute_epoch_main_index to {}", new_index);
+                *start_compute_epoch_main_index = new_index;
+            }
+
+            let era_main_hash = if era_main_epoch_height == 0 {
+                NULL_EPOCH
+            } else {
+                inner
+                    .get_main_hash_from_epoch_number(era_main_epoch_height)
+                    .expect("main hash should be exist")
+            };
+
+            let snapshot_db_manager = inner
+                .data_man
+                .storage_manager
+                .get_storage_manager()
+                .get_snapshot_manager()
+                .get_snapshot_db_manager();
+
+            snapshot_db_manager.update_latest_snapshot_id(
+                era_main_hash.clone(),
+                era_main_epoch_height,
+            );
+
+            if max_snapshot_epoch_height_has_mpt
+                .is_some_and(|height| height >= era_main_epoch_height)
+            {
+                // mpt snapshot will be created from empty
+                snapshot_db_manager.recreate_latest_mpt_snapshot().unwrap();
+            } else {
+                let main_hash_before_era = if era_main_epoch_height == 0 {
+                    None
+                } else {
+                    Some(
+                        inner
+                            .get_main_hash_from_epoch_number(
+                                era_main_epoch_height - snapshot_epoch_count,
+                            )
+                            .expect("main hash should be exist"),
+                    )
+                };
+
+                // use ear snapshot replace latest
+                snapshot_db_manager
+                    .recovery_latest_mpt_snapshot_from_checkpoint(
+                        &era_main_hash,
+                        main_hash_before_era,
+                    )
+                    .unwrap();
+            }
+
+            max_snapshot_epoch_height_has_mpt.and_then(|v| {
+                if v >= inner.cur_era_stable_height {
+                    Some(inner.height_to_main_index(v))
+                } else {
+                    None
+                }
+            })
+        } else {
+            if temp_snapshot_db_existing.is_some()
+                && latest_snapshot_epoch_height + snapshot_epoch_count
+                    < start_compute_epoch_height
+                && start_compute_epoch_height
+                    <= latest_snapshot_epoch_height + 2 * snapshot_epoch_count
+            {
+                inner
+                    .data_man
+                    .storage_manager
+                    .get_storage_manager()
+                    .get_snapshot_manager()
+                    .get_snapshot_db_manager()
+                    .set_reconstruct_snapshot_id(temp_snapshot_db_existing);
+            }
+
+            debug!("the latest MPT snapshot is valid");
+            Some(end_index)
+        }
+    }
 
     fn set_intermediate_trie_root_merkle(
         &self, inner: &mut ConsensusGraphInner,
@@ -2191,15 +2476,5 @@ impl ConsensusNewBlockHandler {
                 }
             }
         }
-    }
-
-    fn check_mining_adaptive_block(
-        &self, _new: usize, _inner: &mut ConsensusGraphInner, _adaptive: bool,
-    ) -> bool {
-        // Implementation for check_mining_adaptive_block method
-        // This method should return true if the block is valid for mining
-        // and false otherwise.
-        // You can add any additional checks you want to perform here.
-        true
     }
 }

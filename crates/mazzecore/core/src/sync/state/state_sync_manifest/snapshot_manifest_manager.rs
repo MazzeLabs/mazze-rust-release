@@ -17,6 +17,7 @@ use crate::{
 use mazze_internal_common::{StateRootAuxInfo, StateRootWithAuxInfo};
 use mazze_parameters::{
     consensus::DEFERRED_STATE_EPOCH_COUNT,
+    consensus_internal::REWARD_EPOCH_COUNT,
 };
 use mazze_storage::{
     storage_db::{SnapshotInfo, SnapshotKeptToProvideSyncStatus},
@@ -327,7 +328,7 @@ impl SnapshotManifestManager {
             trusted_blame_block.height()
                 - DEFERRED_STATE_EPOCH_COUNT
                 - snapshot_block_header.height()
-                + DEFERRED_STATE_EPOCH_COUNT
+                + REWARD_EPOCH_COUNT
         };
         let mut trusted_blocks = Vec::new();
         let mut trusted_block_height = trusted_blame_block.height();
@@ -534,7 +535,7 @@ impl SnapshotManifestManager {
         let epoch_receipts_count = if checkpoint.height() == 0 {
             1
         } else {
-            DEFERRED_STATE_EPOCH_COUNT
+            REWARD_EPOCH_COUNT
         } as usize;
         let mut receipts_vec_offset = 0;
         let mut result = Vec::new();

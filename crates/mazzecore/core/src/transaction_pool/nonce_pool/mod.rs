@@ -397,7 +397,7 @@ impl NoncePool {
 mod nonce_pool_test {
     use super::{InsertResult, NoncePool, TxWithReadyInfo};
     use keylib::{Generator, KeyPair, Random};
-    use mazze_parameters::staking::MAZZIES_PER_STORAGE_COLLATERAL_UNIT;
+    use mazze_parameters::collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT;
     use mazze_types::{Address, U128, U256};
     use primitives::{
         transaction::native_transaction::NativeTransaction, Action,

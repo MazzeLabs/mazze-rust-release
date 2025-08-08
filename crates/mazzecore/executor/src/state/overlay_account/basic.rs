@@ -64,7 +64,6 @@ impl OverlayAccount {
 
     pub fn is_null(&self) -> bool {
         self.balance.is_zero()
-            // && self.staking_balance.is_zero()
             && self.collateral_for_storage.is_zero()
             && self.nonce.is_zero()
             && self.code_hash == KECCAK_EMPTY

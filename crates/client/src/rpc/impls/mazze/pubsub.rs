@@ -25,7 +25,7 @@ use jsonrpc_pubsub::{
 use mazze_addr::Network;
 use mazze_parameters::{
     consensus::DEFERRED_STATE_EPOCH_COUNT,
-    
+    consensus_internal::REWARD_EPOCH_COUNT,
 };
 use mazze_types::{Space, H256};
 use mazzecore::{
@@ -393,7 +393,7 @@ impl ChainNotificationHandler {
                 return None;
             } else {
                 if latest
-                    > epoch + DEFERRED_STATE_EPOCH_COUNT
+                    > epoch + DEFERRED_STATE_EPOCH_COUNT + REWARD_EPOCH_COUNT
                 {
                     // Even if the epoch was executed, the receipts on the fork
                     // should have been deleted and cannot

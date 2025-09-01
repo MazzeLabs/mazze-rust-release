@@ -2292,6 +2292,20 @@ impl ConsensusGraphInner {
             .and_then(|index| Some(self.arena[*index].data.pending))
     }
 
+    /// Return the WLSR weight of a block by its hash.
+    /// If the block is not tracked by the current consensus graph view,
+    /// returns None.
+    pub fn get_block_weight(&self, block_hash: &H256) -> Option<U256> {
+        self.hash_to_arena_indices.get(block_hash).map(|index| {
+            let w: i128 = self.block_weight(*index);
+            if w <= 0 {
+                U256::zero()
+            } else {
+                U256::from(w as u128)
+            }
+        })
+    }
+
     pub fn get_transaction_info(
         &self, tx_hash: &H256,
     ) -> Option<TransactionInfo> {

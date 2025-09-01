@@ -31,6 +31,7 @@ use rlp::Encodable;
 use rlp_derive::{RlpDecodable, RlpEncodable};
 use serde_derive::{Deserialize, Serialize};
 use std::{collections::HashSet, convert::TryInto, sync::Arc};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use unexpected::{Mismatch, OutOfBounds};
 
 #[derive(Clone)]
@@ -41,7 +42,7 @@ pub struct VerificationConfig {
     pub transaction_epoch_bound: u64,
     pub max_nonce: Option<U256>,
     machine: Arc<Machine>,
-    catch_up_mode: bool,
+    catch_up_mode: Arc<AtomicBool>,
 }
 
 /// Create an MPT from the ordered list of block transactions.
@@ -238,7 +239,7 @@ impl VerificationConfig {
                 transaction_epoch_bound,
                 machine,
                 max_nonce,
-                catch_up_mode: false,
+                catch_up_mode: Arc::new(AtomicBool::new(false)),
             }
         } else {
             VerificationConfig {
@@ -248,7 +249,7 @@ impl VerificationConfig {
                 transaction_epoch_bound,
                 machine,
                 max_nonce,
-                catch_up_mode: false,
+                catch_up_mode: Arc::new(AtomicBool::new(false)),
             }
         }
     }
@@ -313,6 +314,12 @@ impl VerificationConfig {
             //     })));
             // }
 
+            return Ok(());
+        }
+
+        // If seed hash is unknown (e.g., epoch seed not yet available from DB),
+        // skip PoW verification to avoid false negatives during era/epoch transitions
+        if seed_hash.is_zero() {
             return Ok(());
         }
 
@@ -766,11 +773,11 @@ impl VerificationConfig {
     }
 
     pub fn catch_up_mode(&self) -> bool {
-        self.catch_up_mode
+        self.catch_up_mode.load(AtomicOrdering::SeqCst)
     }
 
-    pub fn set_catch_up_mode(&mut self, mode: bool) {
-        self.catch_up_mode = mode;
+    pub fn set_catch_up_mode(&self, mode: bool) {
+        self.catch_up_mode.store(mode, AtomicOrdering::SeqCst)
     }
 }
 

@@ -5,7 +5,7 @@
 
 bootnodes="mazzenode://a340a417a575dcbd5797252f88348550533989da203142ea5d02e84d4cefecadaafcc6a91ff6e598577ed79982b4dca310df5b046774e6ab96e19286efbbbb23@37.27.99.214:55555,mazzenode://be7846274d5dbf53b8c1f7078b45089a0d5693aca09557203cfa0f740443175148472cf7ffffd4fbc9fc0f5daa1bff7ae0328739ead4b1f111538499ddf0b591@138.201.206.108:55555,mazzenode://f66864acbeb39e0892d664f0f3919332c61d2de994f40b958a624ee8fc73fd2bbb8ce4f1d16fcce033b0e00bf73f888f8c3fe6edaba067233431e7aa210dfac8@37.27.134.37:55555,mazzzenode://f0578f55e11dfba882d27ec583879b7d7d82d8edccba0be7631d24f75b428739d76951c11ebe4c4ec8d69677d8d73dc0775fb8f61d3ded30915015a5603b12cb@37.27.134.36:55555"
 
-node_type = "full"
+node_type = "archive"
 
 # Some preset develepment configurations.
 # It should not be set in production environment.
@@ -50,7 +50,7 @@ node_type = "full"
 # The value is a 40-digit hex string or a valid CIP-37 base32 address.
 # By default, the value is not set.
 #
-mining_author="0x1e4eaf458e93ad4331e046c72fafc78c1bbba7b5"
+mining_author="mazze:aanrhgy4390z9u3zgjhhvmvu9f2p643haec7wazvc0"
 
 # `mining_type` controls whether the mining process goes through the
 # stratum protocol, uses CPU-mining, or disable mining.
@@ -70,7 +70,7 @@ stratum_listen_address = "0.0.0.0"
 
 # Window size for PoW manager
 #
-pow_problem_window_size = 120
+pow_problem_window_size = 30
 
 # Secret key for stratum.
 # The value is 64-digit hex string.
@@ -102,7 +102,7 @@ log_level="info"
 # If not set, the process will try to find out the public IP with best effort, and use `tcp_port` as public port.
 # However, it's HIGHLY RECOMMENDED to set the value manually, especially for machines with IP translated by NAT.
 #
-public_address="37.27.134.37"
+public_address="$PUBLIC_ADDRESS"
 
 # `tcp_port` is the TCP port that the process listens for P2P messages. The default is 55555.
 #
@@ -229,7 +229,7 @@ egress_max_throttle = 256
 
 # Maximum number of outgoing connections.
 #
-# max_outgoing_peers = 16
+max_outgoing_peers = 32
 
 # Maximum number of outgoing connections to archive nodes. 0 represents
 # not required to connect to archive nodes. E.g. light node or full node
@@ -437,7 +437,7 @@ ledger_cache_size = 4096
 # Rocksdb cache size.
 # Only applies if `block_db_type = "rocksdb"`.
 #
-rocksdb_cache_size = 1024
+rocksdb_cache_size = 512
 
 # Rocksdb compaction file path.
 # Only applies if `block_db_type = "rocksdb"`.
@@ -484,7 +484,7 @@ storage_max_open_mpt_count = 8
 # The number of epochs needed between our best_epoch and our neighbours' best_epoch that we want to
 # start downloading states during catching up.
 #
-# sync_state_epoch_gap = 20
+sync_state_epoch_gap = 5
 
 # ------------------ Light Node Parameters ----------------------
 

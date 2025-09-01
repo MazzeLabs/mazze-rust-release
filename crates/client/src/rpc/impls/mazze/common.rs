@@ -753,12 +753,7 @@ impl RpcImpl {
 
             let best_info = self.consensus.best_info();
 
-            let block_number = self
-                .consensus
-                .get_block_number(&best_info.best_block_hash)?
-                .ok_or("block_number is missing for best_hash")?
-                // The returned block_number of `best_hash` does not include `best_hash` itself.
-                + 1;
+            let block_number = self.consensus.block_count();
 
             (best_info, block_number)
         };
@@ -1246,6 +1241,150 @@ impl RpcImpl {
         let inner = self.consensus_graph().inner.read();
         let difficulty = inner.get_timer_chain_difficulty();
         Ok(difficulty)
+    }
+
+    pub fn get_block_blame_info(&self, block_hash: H256) -> JsonRpcResult<jsonrpc_core::Value> {
+        info!("RPC Request: mazze_getBlockBlameInfo block_hash={:?}", block_hash);
+
+        let _consensus_graph = self.consensus_graph();
+        let header = self
+            .data_man
+            .block_header_by_hash(&block_hash)
+            .ok_or_else(|| RpcError::invalid_params("Block not found"))?;
+
+        // Basic fields from header
+        let blame = header.blame();
+        let hdr_state_root = *header.deferred_state_root();
+        let hdr_receipts_root = *header.deferred_receipts_root();
+        let hdr_bloom_root = *header.deferred_logs_bloom_hash();
+
+        // Note: We intentionally rely on header commitments, which are the
+        // canonical values once finalized.
+
+        let obj = serde_json::json!({
+            "blame": blame,
+            "stateVecRoot": H256::from(hdr_state_root),
+            "receiptsVecRoot": H256::from(hdr_receipts_root),
+            "logsBloomVecRoot": H256::from(hdr_bloom_root),
+        });
+        Ok(obj)
+    }
+
+    pub fn get_dag_tips(&self) -> JsonRpcResult<Vec<H256>> {
+        info!("RPC Request: mazze_getDagTips");
+        let best_info = self.consensus.best_info();
+        Ok(best_info.bounded_terminal_block_hashes.clone())
+    }
+
+    pub fn get_skipped_block_hashes_by_epoch(
+        &self, epoch: EpochNumber,
+    ) -> JsonRpcResult<Vec<H256>> {
+        info!("RPC Request: mazze_getSkippedBlockHashesByEpoch epoch_number={:?}", epoch);
+        // alias to existing skipped_blocks_by_epoch
+        self.skipped_blocks_by_epoch(epoch)
+    }
+
+    pub fn get_randomx_epoch_info(
+        &self, epoch_number: Option<EpochNumber>,
+    ) -> JsonRpcResult<jsonrpc_core::Value> {
+        use mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
+        info!("RPC Request: mazze_getRandomXEpochInfo epoch_number={:?}", epoch_number);
+
+        let consensus_graph = self.consensus_graph();
+        let epoch_num: u64 = match epoch_number.unwrap_or(EpochNumber::LatestMined) {
+            EpochNumber::LatestMined => consensus_graph.best_epoch_number(),
+            EpochNumber::LatestState => consensus_graph.best_executed_state_epoch_number(),
+            EpochNumber::LatestConfirmed => consensus_graph
+                .get_height_from_epoch_number(EpochNumber::LatestConfirmed.into())
+                .unwrap_or(consensus_graph.best_epoch_number()),
+            EpochNumber::LatestCheckpoint => consensus_graph
+                .get_height_from_epoch_number(EpochNumber::LatestCheckpoint.into())
+                .unwrap_or(0),
+            EpochNumber::Earliest => 0,
+            EpochNumber::Num(n) => n.as_u64(),
+        };
+
+        let current_epoch = epoch_num / RANDOMX_EPOCH_LENGTH;
+        let start_block_height = current_epoch * RANDOMX_EPOCH_LENGTH;
+        let end_block_height = start_block_height + RANDOMX_EPOCH_LENGTH - 1;
+        let next_transition_block_height = end_block_height + 1;
+
+        let seed_hash = self
+            .data_man
+            .db_manager
+            .get_current_seed_hash(epoch_num);
+
+        let obj = serde_json::json!({
+            "epochNumber": epoch_num,
+            "randomXSeedHash": H256::from(seed_hash),
+            "startBlockHeight": start_block_height,
+            "endBlockHeight": end_block_height,
+            "nextTransitionBlockHeight": next_transition_block_height,
+        });
+        Ok(obj)
+    }
+
+    pub fn get_era_details(
+        &self, selector: Option<String>,
+    ) -> JsonRpcResult<jsonrpc_core::Value> {
+        info!("RPC Request: mazze_getEraDetails selector={:?}", selector);
+        let consensus_graph = self.consensus_graph();
+        let inner = consensus_graph.inner.read();
+
+        // Compute era info using public getters and data manager
+        let era_epoch_count = inner.inner_conf.era_epoch_count;
+        let cur_era_genesis_height = inner.get_cur_era_genesis_height();
+        let era_number = cur_era_genesis_height / era_epoch_count;
+        let era_genesis_hash = inner
+            .data_man
+            .get_cur_consensus_era_genesis_hash();
+        let era_stable_hash = inner
+            .data_man
+            .get_cur_consensus_era_stable_hash();
+        let era_stable_height = inner
+            .data_man
+            .block_header_by_hash(&era_stable_hash)
+            .expect("Current era stable header should exist")
+            .height();
+        let best_height = inner.best_epoch_number();
+        let epoch_count_in_era = best_height.saturating_sub(cur_era_genesis_height) + 1;
+        let is_finalized = era_stable_height >= cur_era_genesis_height + era_epoch_count - 1;
+
+        let obj = serde_json::json!({
+            "eraNumber": era_number,
+            "eraGenesisBlockHash": H256::from(era_genesis_hash),
+            "eraStableHeight": era_stable_height,
+            "epochCountInEra": epoch_count_in_era,
+            "isFinalized": is_finalized,
+        });
+        Ok(obj)
+    }
+
+    pub fn get_block_weight(&self, block_hash: H256) -> JsonRpcResult<U256> {
+        info!("RPC Request: mazze_getBlockWeight block_hash={:?}", block_hash);
+        let inner = self.consensus_graph().inner.read();
+        match inner.get_block_weight(&block_hash) {
+            Some(w) => Ok(w),
+            None => Err(RpcError::invalid_params("Block not found in consensus graph")),
+        }
+    }
+
+    pub fn is_adaptive_block(&self, block_hash: H256) -> JsonRpcResult<bool> {
+        info!("RPC Request: mazze_isAdaptiveBlock block_hash={:?}", block_hash);
+        let inner = self.consensus_graph().inner.read();
+        match inner.is_adaptive(&block_hash) {
+            Some(b) => Ok(b),
+            None => Err(RpcError::invalid_params("Block not found in consensus graph")),
+        }
+    }
+
+    pub fn is_partial_invalid(&self, block_hash: H256) -> JsonRpcResult<bool> {
+        info!("RPC Request: mazze_isPartialInvalid block_hash={:?}", block_hash);
+        let inner = self.consensus_graph().inner.read();
+        match inner.is_partial_invalid(&block_hash) {
+            Some(b) => Ok(b),
+            None => Err(RpcError::invalid_params("Block not found in consensus graph")),
+        }
     }
 }
 

@@ -1,16 +1,16 @@
 #!/bin/bash
 
 # Configuration
-DOCKER_USERNAME="mazzelabs"
-REPO_NAME="mazze-chain"
+DOCKER_USERNAME="paladin0x"
+REPO_NAME="mazze-rust-release"
 DOCKER_REGISTRY="${DOCKER_USERNAME}/${REPO_NAME}"
 BASE_DIR=$(pwd)
 
 # CPU targets for optimization
 TARGETS=(
     "x86-64"  # Most compatible
-#    "x86-64-v2"  # Mid-tier
- #   "x86-64-v3"  # Modern CPUs
+    # "x86-64-v2"  # Mid-tier
+    # "x86-64-v3"  # Modern CPUs
 )
 
 # Initial setup and cleanup
@@ -90,7 +90,6 @@ build_binaries() {
     fi
 }
 
-echo "4. Binaries built"
 # Function to build and tag Docker images
 build_docker_images() {
     local target=$1
@@ -105,14 +104,14 @@ build_docker_images() {
     cp ./scripts/start-node.sh "$context_dir/"
     cp ./scripts/start-miner.sh "$context_dir/"
     
-    # Copy binaries from correct location
-    if [ ! -f "target/$target/mazze" ] || [ ! -f "target/$target/mazze-miner" ]; then
-        echo "Error: Binaries not found in target/$target/"
+    # Copy binaries from correct location (builds/$target/release/)
+    if [ ! -f "builds/$target/release/mazze" ] || [ ! -f "builds/$target/release/mazze-miner" ]; then
+        echo "Error: Binaries not found in builds/$target/release/"
         return 1
     fi
     
-    cp "target/$target/mazze" "$context_dir/"
-    cp "target/$target/mazze-miner" "$context_dir/"
+    cp "builds/$target/release/mazze" "$context_dir/"
+    cp "builds/$target/release/mazze-miner" "$context_dir/"
     
     # Build node image
     docker build \
@@ -166,15 +165,16 @@ trap cleanup EXIT
 # Process each target
 for target in "${TARGETS[@]}"; do
     echo "Processing target: $target"
-#    if build_binaries "$target"; then
+    if build_binaries "$target"; then
         build_docker_images "$target"
         push_images "$target"
-#    else
-#        echo "Skipping Docker build for $target due to binary build failure"
-#    fi
+    else
+        echo "Skipping Docker build for $target due to binary build failure"
+    fi
 done
 
-echo "Build process complete!"echo "Available images:"
+echo "Build process complete!"
+echo "Available images:"
 docker images | grep "${DOCKER_REGISTRY}"
 
 # Create or update version file

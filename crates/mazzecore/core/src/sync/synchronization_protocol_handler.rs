@@ -1655,6 +1655,8 @@ impl SynchronizationProtocolHandler {
         }
 
         let catch_up_mode = self.catch_up_mode();
+        // Propagate catch_up_mode to verification config so verify_pow can be relaxed in catch-up
+        self.graph.verification_config.set_catch_up_mode(catch_up_mode);
         let mut need_notify = Vec::new();
         for (peer, state) in self.syn.peers.read().iter() {
             let mut state = state.write();

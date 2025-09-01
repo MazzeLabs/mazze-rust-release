@@ -2115,6 +2115,14 @@ impl Mazze for MazzeHandler {
             fn is_timer_block(&self, block_hash: H256) -> JsonRpcResult<bool>;
             fn get_timer_chain(&self) -> JsonRpcResult<Vec<H256>>;
             fn get_timer_chain_difficulty(&self) -> JsonRpcResult<U256>;
+            fn get_block_weight(&self, block_hash: H256) -> JsonRpcResult<U256>;
+            fn is_adaptive_block(&self, block_hash: H256) -> JsonRpcResult<bool>;
+            fn is_partial_invalid(&self, block_hash: H256) -> JsonRpcResult<bool>;
+            fn get_block_blame_info(&self, block_hash: H256) -> JsonRpcResult<jsonrpc_core::Value>;
+            fn get_dag_tips(&self) -> JsonRpcResult<Vec<H256>>;
+            fn get_skipped_block_hashes_by_epoch(&self, epoch_number: EpochNumber) -> JsonRpcResult<Vec<H256>>;
+            fn get_randomx_epoch_info(&self, epoch_number: Option<EpochNumber>) -> JsonRpcResult<jsonrpc_core::Value>;
+            fn get_era_details(&self, selector: Option<String>) -> JsonRpcResult<jsonrpc_core::Value>;
             fn epoch_number(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<U256>;
             fn gas_price(&self) -> BoxFuture<U256>;
             fn next_nonce(&self, address: RpcAddress, num: Option<BlockHashOrEpochNumber>)

@@ -11,7 +11,7 @@ use crate::rpc::types::{
     RewardInfo as RpcRewardInfo, RpcAddress, SponsorInfo, Status as RpcStatus,
     StorageCollateralInfo, TokenSupplyInfo, Transaction, U64 as HexU64,
 };
-use jsonrpc_core::{BoxFuture, Result as JsonRpcResult};
+use jsonrpc_core::{BoxFuture, Result as JsonRpcResult, Value as JsonValue};
 use jsonrpc_derive::rpc;
 use mazze_types::{H128, H256, U256, U64};
 use primitives::StorageRoot;
@@ -282,6 +282,42 @@ pub trait Mazze {
     /// Get the timer chain difficulty
     #[rpc(name = "mazze_getTimerChainDifficulty")]
     fn get_timer_chain_difficulty(&self) -> JsonRpcResult<U256>;
+
+    /// Get block blame info by block hash
+    #[rpc(name = "mazze_getBlockBlameInfo")]
+    fn get_block_blame_info(&self, block_hash: H256) -> JsonRpcResult<JsonValue>;
+
+    /// Get current DAG tips (terminal block hashes)
+    #[rpc(name = "mazze_getDagTips")]
+    fn get_dag_tips(&self) -> JsonRpcResult<Vec<H256>>;
+
+    /// Alias for skipped blocks by epoch
+    #[rpc(name = "mazze_getSkippedBlockHashesByEpoch")]
+    fn get_skipped_block_hashes_by_epoch(
+        &self, epoch_number: EpochNumber,
+    ) -> JsonRpcResult<Vec<H256>>;
+
+    /// Get RandomX epoch info
+    #[rpc(name = "mazze_getRandomXEpochInfo")]
+    fn get_randomx_epoch_info(
+        &self, epoch_number: Option<EpochNumber>,
+    ) -> JsonRpcResult<JsonValue>;
+
+    /// Get era details (latest_era supported)
+    #[rpc(name = "mazze_getEraDetails")]
+    fn get_era_details(&self, selector: Option<String>) -> JsonRpcResult<JsonValue>;
+
+    /// Get block weight by hash (WLSR weight)
+    #[rpc(name = "mazze_getBlockWeight")]
+    fn get_block_weight(&self, block_hash: H256) -> JsonRpcResult<U256>;
+
+    /// Check if a block is adaptive
+    #[rpc(name = "mazze_isAdaptiveBlock")]
+    fn is_adaptive_block(&self, block_hash: H256) -> JsonRpcResult<bool>;
+
+    /// Check if a block is partial invalid
+    #[rpc(name = "mazze_isPartialInvalid")]
+    fn is_partial_invalid(&self, block_hash: H256) -> JsonRpcResult<bool>;
 }
 
 /// Eth filters rpc api (polling).

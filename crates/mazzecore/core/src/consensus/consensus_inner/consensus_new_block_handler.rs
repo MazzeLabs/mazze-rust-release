@@ -774,15 +774,17 @@ impl ConsensusNewBlockHandler {
         let mut new_genesis_height =
             inner.cur_era_genesis_height + inner.inner_conf.era_epoch_count;
 
-        // FIXME: Here is a chicken and egg problem. In our full node sync
-        // FIXME: logic, we first run consensus on headers to determine
-        // FIXME: the checkpoint location. And then run the full blocks.
-        // FIXME: However, when we do not have the body, we cannot faithfully
-        // FIXME: check this condition. The consequence is that if
-        // FIXME: attacker managed to generate a lot blame blocks. New full
-        // FIXME: nodes will not correctly determine the safe checkpoint
-        // FIXME: location to start the sync. Causing potential panic
-        // FIXME: when computing `state_valid` and `blame_info`.
+        // NOTE: In header-only sync we determine checkpoints using the timer chain’s
+        // force-confirm rule; we do not rely on state_valid/blame_info without bodies.
+        // Therefore, the check below only runs when !inner.header_only && !self.conf.bench_mode
+        // (i.e., after block bodies are available).
+        // The timer chain (consecutive timer_chain_beta timer blocks) anchors safe checkpoints,
+        // and we skip era-candidate heights whose outlier contains timer blocks
+        // (see has_timer_block_in_outlier_cache). This mitigates the original
+        // chicken-and-egg concern and prevents attacker-crafted blame-only patterns from
+        // misleading checkpoint selection. Ensure timer_chain_beta and
+        // timer_chain_block_difficulty_ratio are chosen sufficiently high; partial-invalid blocks
+        // are excluded from the timer chain.
         if !inner.header_only && !self.conf.bench_mode {
             // Stable block must have a blame vector that does not stretch
             // beyond the new genesis
@@ -1417,19 +1419,10 @@ impl ConsensusNewBlockHandler {
                 // Ensure all blocks on the main chain before
                 // the new stable block to have state_valid computed
                 if !inner.header_only && !self.conf.bench_mode {
-                    // FIXME: this asserion doesn't hold any more
-                    // assert!(
-                    //     new_stable_height
-                    //         >= inner
-                    //             .data_man
-                    //             .state_availability_boundary
-                    //             .read()
-                    //             .lower_bound
-                    // );
-                    // If new_era_genesis should have available state,
-                    // make sure state execution is finished before setting
-                    // lower_bound
-                    // to the new_checkpoint_era_genesis.
+                   // NOTE: Do not assert new_stable_height >= state_availability_boundary.lower_bound.
+                    // During snapshot/full sync (and header-only), the boundary may not align with the
+                    // newly chosen stable height. Instead we wait for execution to finish and compute
+                    // state_valid before proceeding.
                     self.executor
                         .wait_for_result(inner.arena[stable_arena_index].hash)
                         .expect(

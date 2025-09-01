@@ -23,9 +23,17 @@ pub mod consensus {
     // relative to the era start blocks.
     pub const ERA_DEFAULT_EPOCH_COUNT: u64 = 20000;
 
-    // At Mazze MainNet Launch there are approximately 2 blocks per epoch,
-    // with 1k TPS, and 2 blocks per second, a DeltaMPT contains data for
-    // around 2 million transaction.
+    // Realistic TPS depends on gas/tx (examples):
+    // Block gas limit (steady state): 60M (GENESIS_GAS_LIMIT 30M × ELASTICITY 2)
+    // Packing target ≈ 70% of block gas (9/10 Native + 5/10 EVM, then /2 ELASTICITY) ⇒ ~0.7 × block_gas
+    // Block rate: 4 blocks/s
+    // Gas/s ≈ 0.7 × 60M × 4 = ~168M gas/s
+    // TPS est.:
+    //   ~42k TPS @ 4k gas/tx  (simple native transfers)
+    //   ~8k TPS  @ 21k gas/tx (simple EVM token transfers)
+    //   ~3.36k TPS @ 50k gas/tx (typical DeFi swaps)
+    //   ~1.68k TPS @ 100k gas/tx (complex contract calls)
+
     pub const SNAPSHOT_EPOCHS_CAPACITY: u32 = 2000;
 
     pub const NULL: usize = !0;

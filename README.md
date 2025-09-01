@@ -29,7 +29,7 @@ For detailed setup instructions, see our [Node & Miner Setup Guide](docs/setup-g
 ```bash
 # Clone the repository
 git clone https://github.com/MazzeLabs/mazze-rust-release
-cd mazze-node
+cd mazze-rust-release
 
 # Build the project
 cargo build --release
@@ -38,7 +38,7 @@ cargo build --release
 ## Project Structure
 
 ```
-mazze-node/
+mazze-rust-release/
 ├── bins/                  # Binary targets
 │   ├── mazze/            # Main node implementation
 │   ├── mazze-miner/      # Mining client

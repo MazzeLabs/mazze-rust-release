@@ -6,156 +6,52 @@ For reading logs, see our [Viewing Mazze Logs](viewing-logs.md) guide.
 
 ## 1. Docker Setup
 
-### 1.1 Automated Setup (Recommended)
+### 1.1 Compose-based Setup (Recommended)
 
-Create the following three script files in your working directory:
+The repository includes a ready-to-use `docker-compose.yml`. To run Mazze:
 
-#### cleanup.sh
-Used for chain restarts during testnet (not applicable after mainnet launch):
+1. Edit `run/hydra.toml`:
+   - Set `public_address = "<your-public-ip>"` (or leave empty to auto-detect).
+   - Set `mining_author = "<your-base32-mazze-address>"` (or leave empty to disable mining on the node).
+   - Ensure `log_conf = "/app/config/log.yaml"` is present (already set in this repo).
+
+2. Optional: edit `run/log.yaml` for logging format/level. It is mounted into the container at `/app/config/log.yaml` and has `refresh_rate: 30 seconds`.
+
+3. Start the services:
 ```bash
-rm -rf /opt/mazze/blockchain_data/blockchain_db /opt/mazze/blockchain_data/storage_db
+sudo docker compose up -d
 ```
 
-#### constants.sh
-Configuration file for initial node and miner settings:
+4. View logs:
 ```bash
-#!/bin/bash
-PUBLIC_IP="" # Your VM's external IP address
-MINING_AUTHOR="" # Your base32 MAZZE address
-WORKER_ID="1" # Unique identifier for multiple mining rigs
-NUM_THREADS="4" # Recommended: (CPU_CORES / 2) - 2
+sudo docker compose logs node | tail -n 200
+sudo docker compose logs miner | tail -n 200
 ```
 
-#### setup_mazze.sh
-Main setup script that configures firewall rules and launches containers:
-
+5. Retrieve your node ID (after node starts):
 ```bash
-#!/bin/bash
-source constants.sh
-
-# Configure firewall
-setup_firewall() {
-    echo "Opening required ports..."
-    sudo ufw allow 55555/tcp
-    sudo ufw allow 32525/tcp
-    sudo ufw allow 52535/tcp
-    sudo ufw allow 52536/tcp
-    sudo ufw allow 52537/tcp
-    sudo ufw allow 58545/tcp
-    sudo ufw allow 58546/tcp
-    sudo ufw reload
-}
-
-# Main setup function
-setup_node() {
-    local public_ip=$1
-    
-    # Create required directories
-    mkdir -p ./logs
-    
-    # Start node container
-    docker run -d \
-        --name mazze-node \
-        --network host \
-        -v "$(pwd)/logs:/app/logs" \
-        -v /opt/mazze/blockchain_data:/app/blockchain_data \
-        -e PUBLIC_ADDRESS="$public_ip" \
-        -e MINING_AUTHOR="$MINING_AUTHOR" \
-        --log-opt max-size=10m \
-        --log-opt max-file=3 \
-        mazzelabs/mazze-chain:node-x86-64
-
-    # Start miner container
-    docker run -d \
-        --name mazze-miner \
-        -v "$(pwd)/logs:/app/logs" \
-        -e MINING_AUTHOR="$MINING_AUTHOR" \
-        -e WORKER_ID="$WORKER_ID" \
-        -e NUM_THREADS="$NUM_THREADS" \
-        -e STRATUM_HOST="$public_ip" \
-        --log-opt max-size=10m \
-        --log-opt max-file=3 \
-        mazzelabs/mazze-chain:miner-x86-64
-        
-    # Wait for node to start and extract node ID
-    echo "Waiting for node to initialize..."
-    local max_attempts=30
-    local attempt=1
-    local node_id=""
-    
-    while [ $attempt -le $max_attempts ]; do
-        echo "Attempting to fetch node ID (attempt $attempt/$max_attempts)..."
-        node_id=$(docker logs mazze-node 2>&1 | grep "Self node id:" | sed -E '"'"'s/.*Self node id: (0x[a-f0-9]+).*/\1/'"'"')
-        
-        if [ ! -z "$node_id" ]; then
-            echo "Successfully retrieved node ID:"
-            echo "$node_id"
-            # Save node ID to a file
-            echo "$node_id" > node_id.txt
-            break
-        fi
-        
-        sleep 10
-        ((attempt++))
-    done
-    
-    if [ -z "$node_id" ]; then
-        echo "Failed to retrieve node ID after $max_attempts attempts"
-        exit 1
-    fi
-}
-
-# Main execution
-setup_firewall
-
-# Execute main setup with parameters
-setup_node "$PUBLIC_IP"
+sudo docker compose logs node | grep "Self node id:" | tail -n 1
 ```
 
-
-### 1.2 Manual Setup
-
-For advanced users who need more control over the configuration:
-
-1. Configure firewall rules:
+6. Apply config changes:
 ```bash
-    sudo ufw allow 55555/tcp
-    sudo ufw allow 32525/tcp
-    sudo ufw allow 52535/tcp
-    sudo ufw allow 52536/tcp
-    sudo ufw allow 52537/tcp
-    sudo ufw allow 58545/tcp
-    sudo ufw allow 58546/tcp
-    sudo ufw reload
+sudo docker compose up -d --force-recreate
 ```
 
-2. Launch the node container:
+7. Stop services:
 ```bash
-    docker run -d \
-        --name mazze-node \
-        --network host \
-        -v "$(pwd)/logs:/app/logs" \
-        -v /opt/mazze/blockchain_data:/app/blockchain_data \
-        -e PUBLIC_ADDRESS="$public_ip" \
-        -e MINING_AUTHOR="$MINING_AUTHOR" \
-        --log-opt max-size=10m \
-        --log-opt max-file=3 \
-        mazzelabs/mazze-chain:node-x86-64
+sudo docker compose down
 ```
 
-3. Launch the miner container:
-```
-    docker run -d \
-        --name mazze-miner \
-        -v "$(pwd)/logs:/app/logs" \
-        -e MINING_AUTHOR="$MINING_AUTHOR" \
-        -e WORKER_ID="$WORKER_ID" \
-        -e NUM_THREADS="$NUM_THREADS" \
-        -e STRATUM_HOST="$public_ip" \
-        --log-opt max-size=10m \
-        --log-opt max-file=3 \
-        mazzelabs/mazze-chain:miner-x86-64
-```
+Notes:
+- Logs are written under `./logs/node` and `./logs/miner` on the host.
+- For persistent chain data on the host, you can add a volume to `docker-compose.yml`, for example:
+  - `- ./blockchain_data:/app/blockchain_data`
+
+
+### 1.2 Manual Docker Run (Optional)
+
+If you prefer `docker run`, ensure ports are open and set the same mounts as in the compose file. Compose is recommended for simplicity.
 
 
 
@@ -196,15 +92,15 @@ cargo build --release
 ```
 
 ## Important Notes
-If you are using Docker and want to change the log level, you can do so by editing the container's `hydra.toml` file, or, alternatively, by running 
+Changing log level / config:
 
+- Edit `run/hydra.toml` (`log_level = "info" | "debug" | "warn" | "error"`) or adjust `run/log.yaml`.
+- Then recreate containers:
 ```bash
-docker exec mazze-node sed -i 's/log_level="<current_level>"/log_level="<target_level>"/' /app/config/hydra.toml
+sudo docker compose up -d --force-recreate
 ```
 
-Possible log levels are: `error`, `warn`, `info`, `debug`.
-
-If you already have a node running, you should make sure the container is running with `--log-opt` options. For this, you have to recreate the container with the new options. If you don't want to, you can also set this up in your [docker settings](https://docs.docker.com/config/containers/logging/configure/).
+Container logging options are handled by Docker; compose already mounts `run/log.yaml` as `/app/config/log.yaml` with a refresh rate, so updates apply without rebuilding images.
 
 ## Additional Notes
 

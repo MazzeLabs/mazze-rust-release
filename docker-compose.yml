@@ -1,3 +1,4 @@
+name: mazze
 services:
   node:
     image: mazzelabs/mazze-chain:node-x86-64

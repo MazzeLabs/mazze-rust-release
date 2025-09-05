@@ -1,33 +1,36 @@
-version: '3.8'
-
 services:
   node:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.node
+    image: mazzelabs/mazze-chain:node-x86-64
+    platform: linux/amd64
     volumes:
-      - ./config:/app/config
+      - ./run/hydra.toml:/app/config/hydra.toml:ro
+      - ./run/log.yaml:/app/config/log.yaml:ro
       - ./logs/node:/app/logs
     environment:
-      - CONFIG_PATH=/app/config/hydra.toml
+      CONFIG_PATH: /app/config/hydra.toml
     ports:
-      - "52535:52535"
-      - "52536:52536"
-      - "52537:52537"
-      - "55550:55550"
-    command: ["/app/start.sh"]
+      - '55555:55555'
+      - '52535:52535'
+      - '52536:52536'
+      - '52537:52537'
+      - '58545:58545'
+      - '58546:58546'
+      - '32525:32525'
+    command: ['/app/start.sh']
 
   miner:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.miner
+    image: mazzelabs/mazze-chain:miner-x86-64
+    platform: linux/amd64
     volumes:
-      - ./config:/app/config
+      - ./run/hydra.toml:/app/config/hydra.toml:ro
+      - ./run/log.yaml:/app/config/log.yaml:ro
       - ./logs/miner:/app/logs
     environment:
-      - CONFIG_PATH=/app/config/hydra.toml
-      - WORKER_ID=1
-      - NUM_THREADS=16
-    ports:
-      - "32525:32525"
-    command: ["/app/start.sh"]
+      CONFIG_PATH: /app/config/hydra.toml
+      WORKER_ID: 1
+      NUM_THREADS: 16
+      STRATUM_HOST: node
+      STRATUM_PORT: 32525
+    command: ['/app/start.sh']
+    depends_on:
+      - node

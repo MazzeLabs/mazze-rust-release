@@ -2308,7 +2308,7 @@ dependencies = [
 
 [[package]]
 name = "geth-tracer"
-version = "2.0.2"
+version = "2.1.4"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-trace",
@@ -3637,7 +3637,7 @@ checksum = "60302e4db3a61da70c0cb7991976248362f30319e88850c487b9b95bbf059e00"
 
 [[package]]
 name = "mazze"
-version = "2.0.2"
+version = "2.1.4"
 dependencies = [
  "app_dirs 1.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "base64ct",
@@ -6393,7 +6393,7 @@ dependencies = [
 
 [[package]]
 name = "serde-utils"
-version = "2.0.2"
+version = "2.1.4"
 dependencies = [
  "alloy-primitives",
  "mazze-types",

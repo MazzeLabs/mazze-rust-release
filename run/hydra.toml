@@ -3,9 +3,9 @@
 # The command line parameter `--full`, `--archive`, or `--light` will overwrite this parameter.
 #
 
-bootnodes="mazzenode://a340a417a575dcbd5797252f88348550533989da203142ea5d02e84d4cefecadaafcc6a91ff6e598577ed79982b4dca310df5b046774e6ab96e19286efbbbb23@37.27.99.214:55555,mazzenode://be7846274d5dbf53b8c1f7078b45089a0d5693aca09557203cfa0f740443175148472cf7ffffd4fbc9fc0f5daa1bff7ae0328739ead4b1f111538499ddf0b591@138.201.206.108:55555,mazzenode://f66864acbeb39e0892d664f0f3919332c61d2de994f40b958a624ee8fc73fd2bbb8ce4f1d16fcce033b0e00bf73f888f8c3fe6edaba067233431e7aa210dfac8@37.27.134.37:55555,mazzzenode://f0578f55e11dfba882d27ec583879b7d7d82d8edccba0be7631d24f75b428739d76951c11ebe4c4ec8d69677d8d73dc0775fb8f61d3ded30915015a5603b12cb@37.27.134.36:55555"
+bootnodes = "mazzenode://f0578f55e11dfba882d27ec583879b7d7d82d8edccba0be7631d24f75b428739d76951c11ebe4c4ec8d69677d8d73dc0775fb8f61d3ded30915015a5603b12cb@37.27.134.36:55555"
 
-node_type = "archive"
+node_type = "full"
 
 # Some preset develepment configurations.
 # It should not be set in production environment.
@@ -50,7 +50,7 @@ node_type = "archive"
 # The value is a 40-digit hex string or a valid CIP-37 base32 address.
 # By default, the value is not set.
 #
-mining_author="mazze:aanrhgy4390z9u3zgjhhvmvu9f2p643haec7wazvc0"
+mining_author = ""
 
 # `mining_type` controls whether the mining process goes through the
 # stratum protocol, uses CPU-mining, or disable mining.
@@ -66,7 +66,7 @@ stratum_listen_address = "0.0.0.0"
 
 # Port for stratum.
 #
- stratum_port = 32525
+stratum_port = 32525
 
 # Window size for PoW manager
 #
@@ -83,7 +83,7 @@ stratum_secret = "9c22ff5f21f0b81b113e63f7db6da94fedef11b2119b4088b89664fb9a3cb6
 # `	log_conf` the path of the log4rs configuration file. The configuration in the file will overwrite the value set by `log_level`.
 # By default, the value is not set.
 #
-log_conf="log.yaml"
+log_conf = "/app/config/log.yaml"
 
 # `log_file` is the path of the log file"
 # If not set, the log will only be printed to stdout, and not persisted to files.
@@ -94,7 +94,7 @@ log_conf="log.yaml"
 # `log_level` is the printed log level.
 # The value should be one of "error", "warn", "info", "debug", "trace", "off"
 #
-log_level="info"
+log_level = "info"
 
 # -------------- Network Configuration -------------
 
@@ -102,11 +102,11 @@ log_level="info"
 # If not set, the process will try to find out the public IP with best effort, and use `tcp_port` as public port.
 # However, it's HIGHLY RECOMMENDED to set the value manually, especially for machines with IP translated by NAT.
 #
-public_address="$PUBLIC_ADDRESS"
+public_address = ""
 
 # `tcp_port` is the TCP port that the process listens for P2P messages. The default is 55555.
 #
- tcp_port=55555
+tcp_port = 55555
 
 # `public_tcp_port` is the public TCP port that other nodes should connect to. It might be different from
 # the tcp_port in case the machine is behind a NAT. The default is as same as `tcp_port`.
@@ -120,18 +120,18 @@ public_address="$PUBLIC_ADDRESS"
 
 # `jsonrpc_http_threads` is used to control how many threads to process HTTP rpc requests.
 #
-jsonrpc_http_threads=8
+jsonrpc_http_threads = 8
 
 # `jsonrpc_http_keep_alive` is used to control whether to set KeepAlive for rpc HTTP connections.
 #
-jsonrpc_http_keep_alive=true
+jsonrpc_http_keep_alive = true
 
 # `jsonrpc_cors` is used to control the rpc domain validation policies.
 # The value should be "none", "all", or a list string split by commas without space.
 # If not set, domain validation is disabled.
 # By default, the values are not set.
 #
-jsonrpc_cors="all"
+jsonrpc_cors = "all"
 
 # The following parameters are the ports for the node to provide rpc service. If not set,
 # the node will not start rpc services. By default, the `jsonrpc_local_http_port` is set,
@@ -140,25 +140,25 @@ jsonrpc_cors="all"
 # Note that to serve transaction-related RPCs, `persist_tx_index` should also be set to `true` or
 # the node will only be able to handle very recent transactions.
 #
- jsonrpc_ws_port=52535
- jsonrpc_tcp_port=52536
- jsonrpc_http_port=52537
+jsonrpc_ws_port = 52535
+jsonrpc_tcp_port = 52536
+jsonrpc_http_port = 52537
 #jsonrpc_local_tcp_port=12538
 #jsonrpc_local_http_port=12539
 #jsonrpc_local_ws_port=12540
-jsonrpc_http_eth_port=58545
-jsonrpc_ws_eth_port=58546
+jsonrpc_http_eth_port = 58545
+jsonrpc_ws_eth_port = 58546
 
 # Specify the APIs available through the public JSON-RPC interfaces (HTTP, TCP, WebSocket)
 # using a comma-delimited list of API names.
 
 # Possible Core space names are: all, safe, mazze, pos, debug, pubsub, test, trace, txpool.
 # `safe` only includes `mazze` and `pubsub`, `txpool`.
- public_rpc_apis = "all"
+public_rpc_apis = "all"
 
 # Possible eSpace names are: eth, ethpubsub, ethdebug.
 # `evm` only includes `eth` and `ethpubsub`
- public_evm_rpc_apis = "evm"
+public_evm_rpc_apis = "evm"
 
 # --------------- Performance-related Network Parameters ----------------------
 
@@ -317,7 +317,7 @@ request_block_with_public = false
 # `enable_discovery` is used to control whether the node will ask its neighbors for new peers
 # and whether it will respond to other nodes' discovery requests.
 #
-enable_discovery=true
+enable_discovery = true
 
 # `netconf_dir` is the directory to store network related persistent data, including `net_key`,
 # a list of trusted nodes and a list of untrusted nodes.
@@ -356,7 +356,7 @@ enable_discovery=true
 #
 # session_ip_limits="1,8,4,2"
 
-session_ip_limits="1,32,16,4"
+session_ip_limits = "1,32,16,4"
 
 # `subnet_quota` limits the number of nodes for a subnet B (e.g. 192.168.xxx.xxx/16) stored in database.
 # Nodes in database are used to establish outgoing TCP connections for P2P communications.
@@ -369,14 +369,14 @@ session_ip_limits="1,32,16,4"
 # Whether to persist block number indices.
 # This only needs to be enabled if you want to use RPCs that take block numbers as an input.
 #
- persist_block_number_index = true
+persist_block_number_index = true
 
 # ---------------- Transaction Cache Parameters -----------------
 
 # Whether to persist transaction indices.
 # This only needs to be enabled if you want to reliably answer transaction-related RPCs.
 #
- persist_tx_index = true
+persist_tx_index = true
 
 # Time to keep transactions in in-memory transaction cache.
 #
@@ -448,11 +448,11 @@ rocksdb_cache_size = 512
 # State storage parameters.
 # Refer to the documentation for details.
 #
-storage_delta_mpts_cache_recent_lfu_factor=4.0
-storage_delta_mpts_cache_size=40000000
-storage_delta_mpts_cache_start_size=2000000
-storage_delta_mpts_node_map_vec_size=160000000
-storage_delta_mpts_slab_idle_size=400000
+storage_delta_mpts_cache_recent_lfu_factor = 4.0
+storage_delta_mpts_cache_size = 40000000
+storage_delta_mpts_cache_start_size = 2000000
+storage_delta_mpts_node_map_vec_size = 160000000
+storage_delta_mpts_slab_idle_size = 400000
 
 # Configure the maximal open MPT count. Open MPTs are maintained as an LRU cache, and we will close the database handle
 # for the evicted MPT once its usage finishes. Every MPT contains the data written in 2000 epochs.

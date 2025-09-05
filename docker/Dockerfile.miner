@@ -1,19 +1,90 @@
-FROM debian:bookworm-slim
-
-# Install runtime dependencies
-RUN apt-get update && \
-    apt-get install -y \
-    libssl-dev \
-    libhwloc15 \
+# syntax=docker/dockerfile:1.7-labs
+FROM rust:1.84-slim-bookworm AS chef
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    libsqlite3-0 \
+    curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
-
-ARG BINARY_PATH
+RUN cargo install cargo-chef --locked
 WORKDIR /app
-COPY ${BINARY_PATH} /app/mazze-miner
-COPY config/ /app/config/
-COPY start-miner.sh /app/start.sh
+
+FROM chef AS planner
+WORKDIR /app
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+ENV DEBIAN_FRONTEND=noninteractive
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    pkg-config \
+    clang \
+    cmake \
+    llvm-dev \
+    libclang-dev \
+    libssl-dev \
+    liblz4-dev \
+    zlib1g-dev \
+    libzstd-dev \
+    libsnappy-dev \
+    libbz2-dev \
+    libudev-dev \
+    libsqlite3-dev \
+    libhwloc-dev \
+    hwloc \
+    mold \
+    sccache \
+    git \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+ENV PORTABLE=1
+ENV ROCKSDB_DISABLE_WARNING_AS_ERROR=1
+ENV CFLAGS="-Wno-error"
+ENV CXXFLAGS="-Wno-error -Wno-error=array-bounds"
+ENV RUSTC_WRAPPER=/usr/bin/sccache
+ENV SCCACHE_DIR=/sccache
+ENV SCCACHE_CACHE_SIZE=10G
+ENV RUSTFLAGS="-C linker=clang -Clink-arg=-fuse-ld=mold -C debuginfo=0"
+COPY --from=planner /app/recipe.json recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/sccache \
+    --mount=type=cache,target=/app/target \
+    cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/sccache \
+    --mount=type=cache,target=/app/target \
+    git init \
+    && git config user.email "builder@container" \
+    && git config user.name "Container Builder" \
+    && git commit --allow-empty -m "container build snapshot" \
+    && cargo build --locked --release -p mazze-miner \
+    && mkdir -p /app/bin \
+    && cp target/release/mazze-miner /app/bin/mazze-miner
+
+FROM debian:bookworm-slim AS runtime
+ENV DEBIAN_FRONTEND=noninteractive
+RUN --mount=type=cache,target=/var/lib/apt/lists \
+    --mount=type=cache,target=/var/cache/apt \
+    apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    libhwloc15 \
+    libudev1 \
+    libsqlite3-0 \
+    zlib1g \
+    libzstd1 \
+    libsnappy1v5 \
+    liblz4-1 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /app/bin/mazze-miner /app/mazze-miner
+COPY run/hydra.toml /app/config/hydra.toml
+COPY docker/scripts/start-miner.sh /app/start.sh
 RUN chmod +x /app/mazze-miner /app/start.sh
 
 # Expose necessary ports

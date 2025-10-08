@@ -1,0 +1,3 @@
+[submodule "vendor/rust-rocksdb"]
+	path = vendor/rust-rocksdb
+	url = https://github.com/MazzeLabs/rust-rocksdb

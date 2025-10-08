@@ -69,9 +69,6 @@ keywords = ["Mazze"]
 repository = "https://github.com/MazzeLabs/mazze-rust-release"
 license-file = "LICENSE"
 
-[patch."https://github.com/MazzeLabs/rust-rocksdb.git"]
-rocksdb = { path = "vendor/rust-rocksdb" }
-librocksdb_sys = { path = "vendor/rust-rocksdb/librocksdb_sys" }
 
 [profile.test]
 debug-assertions = true
@@ -94,3 +91,10 @@ serde_json = "1.0"
 
 alloy-primitives = "0.7.1"
 alloy-rpc-types-trace = { git = "https://github.com/alloy-rs/alloy", rev = "4e22b9e" }
+
+[patch."https://github.com/MazzeLabs/rust-rocksdb.git"]
+rocksdb = { path = "vendor/rust-rocksdb" }
+librocksdb_sys = { path = "vendor/rust-rocksdb/librocksdb_sys" }
+
+[patch.crates-io]
+sqlite3-sys = { git = "https://github.com/MazzeLabs/sqlite3-sys", rev = "7c7eb656f9ef0169e4c6532a6257e8255174e5a5" }

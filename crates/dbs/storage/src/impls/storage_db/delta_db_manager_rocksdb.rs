@@ -56,13 +56,11 @@ impl DeltaDbManagerTrait for DeltaDbManagerRocksdb {
         if path.exists() {
             Err(ErrorKind::DeltaMPTAlreadyExists.into())
         } else {
-            Ok(KvdbRocksdb {
-                kvdb: Arc::new(Database::open(
-                    &Self::ROCKSDB_CONFIG,
-                    path.to_str().unwrap(),
-                )?),
-                col: 0,
-            })
+            let kvdb: Arc<dyn KeyValueStore> = Arc::new(Database::open(
+                &Self::ROCKSDB_CONFIG,
+                path.to_str().unwrap(),
+            )?);
+            Ok(KvdbRocksdb { kvdb, col: 0 })
         }
     }
 
@@ -71,13 +69,11 @@ impl DeltaDbManagerTrait for DeltaDbManagerRocksdb {
     ) -> Result<Option<Self::DeltaDb>> {
         let path = self.get_delta_db_path(delta_db_name);
         if path.exists() {
-            Ok(Some(KvdbRocksdb {
-                kvdb: Arc::new(Database::open(
-                    &Self::ROCKSDB_CONFIG,
-                    path.to_str().unwrap(),
-                )?),
-                col: 0,
-            }))
+            let kvdb: Arc<dyn KeyValueStore> = Arc::new(Database::open(
+                &Self::ROCKSDB_CONFIG,
+                path.to_str().unwrap(),
+            )?);
+            Ok(Some(KvdbRocksdb { kvdb, col: 0 }))
         } else {
             Ok(None)
         }
@@ -94,6 +90,7 @@ use super::{
     },
     kvdb_rocksdb::KvdbRocksdb,
 };
+use db::KeyValueStore;
 use kvdb_rocksdb::{CompactionProfile, Database, DatabaseConfig};
 use parking_lot::Mutex;
 use primitives::EpochId;

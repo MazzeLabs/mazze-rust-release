@@ -10,8 +10,8 @@ use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_packing_pool::{PackingBatch, PackingPoolConfig};
 use mazze_parameters::{
-    consensus::TRANSACTION_DEFAULT_EPOCH_BOUND,
     collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
+    consensus::TRANSACTION_DEFAULT_EPOCH_BOUND,
 };
 use mazze_types::{U128, U256, U512};
 use primitives::{SignedTransaction, Transaction};

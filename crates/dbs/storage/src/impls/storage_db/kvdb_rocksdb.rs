@@ -2,10 +2,24 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-#[derive(MallocSizeOfDerive, Clone)]
 pub struct KvdbRocksdb {
-    pub kvdb: Arc<Database>,
+    pub kvdb: Arc<dyn KeyValueStore>,
     pub col: u32,
+}
+
+impl Clone for KvdbRocksdb {
+    fn clone(&self) -> Self {
+        Self {
+            kvdb: Arc::clone(&self.kvdb),
+            col: self.col,
+        }
+    }
+}
+
+impl MallocSizeOf for KvdbRocksdb {
+    fn size_of(&self, _ops: &mut MallocSizeOfOps) -> usize {
+        0
+    }
 }
 
 pub struct KvdbRocksDbTransaction {
@@ -137,8 +151,8 @@ use super::super::{
     super::storage_db::{delta_db_manager::DeltaDbTrait, key_value_db::*},
     errors::*,
 };
+use db::KeyValueStore;
 use kvdb::DBTransaction;
-use kvdb_rocksdb::Database;
-use malloc_size_of_derive::MallocSizeOf as MallocSizeOfDerive;
+use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use random_crash::random_crash_if_enabled;
 use std::{any::Any, sync::Arc};

@@ -16,10 +16,10 @@
 
 //! Accounts Directory
 
-use mazzekey::Password;
-use std::path::PathBuf;
 use crate::Error;
 use crate::SafeAccount;
+use mazzekey::Password;
+use std::path::PathBuf;
 
 mod disk;
 mod memory;

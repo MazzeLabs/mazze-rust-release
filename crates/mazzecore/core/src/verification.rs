@@ -30,8 +30,8 @@ use primitives::{
 use rlp::Encodable;
 use rlp_derive::{RlpDecodable, RlpEncodable};
 use serde_derive::{Deserialize, Serialize};
-use std::{collections::HashSet, convert::TryInto, sync::Arc};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::{collections::HashSet, convert::TryInto, sync::Arc};
 use unexpected::{Mismatch, OutOfBounds};
 
 #[derive(Clone)]
@@ -181,7 +181,6 @@ pub fn is_valid_receipt_inclusion_proof(
     tx_index_in_block: usize, num_txs_in_block: usize, receipt: &Receipt,
     block_receipt_proof: &TrieProof,
 ) -> bool {
-
     if block_index_in_epoch >= num_blocks_in_epoch
         || tx_index_in_block >= num_txs_in_block
     {
@@ -203,12 +202,11 @@ pub fn is_valid_receipt_inclusion_proof(
     };
 
     // parse block receipts root as H256
-    let block_receipts_root: H256 = match TryInto::<[u8; 32]>::try_into(
-        block_receipts_root_bytes,
-    ) {
-        Ok(hash) => hash.into(),
-        Err(_) => return false,
-    };
+    let block_receipts_root: H256 =
+        match TryInto::<[u8; 32]>::try_into(block_receipts_root_bytes) {
+            Ok(hash) => hash.into(),
+            Err(_) => return false,
+        };
 
     // validate receipt in the block receipts trie
     let key = &into_simple_mpt_key(tx_index_in_block, num_txs_in_block);
@@ -301,10 +299,8 @@ impl VerificationConfig {
     pub fn verify_pow(
         &self, pow: &PowComputer, header: &mut BlockHeader, seed_hash: &H256,
     ) -> Result<(), Error> {
-
         //If catch-up mode is enabled, skip PoW verification
         if self.catch_up_mode() {
-
             // //If difficulty is zero, return error
             // if header.difficulty().is_zero() {
             //     return Err(From::from(BlockError::InvalidDifficulty(OutOfBounds {
@@ -322,7 +318,6 @@ impl VerificationConfig {
         if seed_hash.is_zero() {
             return Ok(());
         }
-
 
         let difficulty: U256 = header.difficulty().into();
         if difficulty.is_zero() {

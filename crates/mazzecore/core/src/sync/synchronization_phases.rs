@@ -350,7 +350,6 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
         info!("start phase {:?}", self.name());
         sync_handler.graph.inner.write().locked_for_catchup = true;
         while sync_handler.graph.is_consensus_worker_busy() {
-
             //Thread sleep for 10ms to avoid busy-waiting
             thread::sleep(time::Duration::from_millis(1));
         }

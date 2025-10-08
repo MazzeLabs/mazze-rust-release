@@ -161,7 +161,9 @@ impl Decodable for AddressPocket {
                 .val_at(1)
                 .map(|addr: Address| Balance(addr.with_native_space())),
             // Type 1 was previously StakingBalance, now reserved
-            1 => Err(DecoderError::Custom("Type 1 is reserved and no longer supported")),
+            1 => Err(DecoderError::Custom(
+                "Type 1 is reserved and no longer supported",
+            )),
             2 => rlp.val_at(1).map(StorageCollateral),
             3 => rlp.val_at(1).map(SponsorBalanceForGas),
             4 => rlp.val_at(1).map(SponsorBalanceForStorage),

@@ -285,7 +285,9 @@ pub trait Mazze {
 
     /// Get block blame info by block hash
     #[rpc(name = "mazze_getBlockBlameInfo")]
-    fn get_block_blame_info(&self, block_hash: H256) -> JsonRpcResult<JsonValue>;
+    fn get_block_blame_info(
+        &self, block_hash: H256,
+    ) -> JsonRpcResult<JsonValue>;
 
     /// Get current DAG tips (terminal block hashes)
     #[rpc(name = "mazze_getDagTips")]
@@ -305,7 +307,9 @@ pub trait Mazze {
 
     /// Get era details (latest_era supported)
     #[rpc(name = "mazze_getEraDetails")]
-    fn get_era_details(&self, selector: Option<String>) -> JsonRpcResult<JsonValue>;
+    fn get_era_details(
+        &self, selector: Option<String>,
+    ) -> JsonRpcResult<JsonValue>;
 
     /// Get block weight by hash (WLSR weight)
     #[rpc(name = "mazze_getBlockWeight")]

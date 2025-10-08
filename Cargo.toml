@@ -69,8 +69,9 @@ keywords = ["Mazze"]
 repository = "https://github.com/MazzeLabs/mazze-rust-release"
 license-file = "LICENSE"
 
-[patch.crates-io]
-sqlite3-sys = { git = "https://github.com/MazzeLabs/sqlite3-sys", rev = "7c7eb656f9ef0169e4c6532a6257e8255174e5a5" }
+[patch."https://github.com/MazzeLabs/rust-rocksdb.git"]
+rocksdb = { path = "vendor/rust-rocksdb" }
+librocksdb_sys = { path = "vendor/rust-rocksdb/librocksdb_sys" }
 
 [profile.test]
 debug-assertions = true
@@ -88,7 +89,6 @@ overflow-checks = true
 debug-assertions = true
 
 [workspace.dependencies]
-serde_derive = "1.0"
 serde = { version = "1.0", features = ["derive", "alloc"] }
 serde_json = "1.0"
 

@@ -3,8 +3,8 @@ use super::Substate;
 #[cfg(test)]
 use super::StorageLayout;
 use mazze_parameters::{
-    internal_contract_addresses::SYSTEM_STORAGE_ADDRESS,
     collateral::COLLATERAL_UNITS_PER_STORAGE_KEY,
+    internal_contract_addresses::SYSTEM_STORAGE_ADDRESS,
 };
 use mazze_statedb::{Result as DbResult, StateDbExt, StateDbGeneric};
 use mazze_types::{Address, Space, U256};

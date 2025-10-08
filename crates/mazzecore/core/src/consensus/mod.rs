@@ -246,18 +246,13 @@ impl ConsensusGraph {
     /// other components. The execution will be skipped if bench_mode sets
     /// to true.
     pub fn with_era_genesis(
-        conf: ConsensusConfig,
-        txpool: SharedTransactionPool,
-        statistics: SharedStatistics,
-        data_man: Arc<BlockDataManager>,
-        pow_config: ProofOfWorkConfig,
-        pow: Arc<PowComputer>,
-        era_genesis_block_hash: &H256,
-        era_stable_block_hash: &H256,
+        conf: ConsensusConfig, txpool: SharedTransactionPool,
+        statistics: SharedStatistics, data_man: Arc<BlockDataManager>,
+        pow_config: ProofOfWorkConfig, pow: Arc<PowComputer>,
+        era_genesis_block_hash: &H256, era_stable_block_hash: &H256,
         notifications: Arc<Notifications>,
         execution_conf: ConsensusExecutionConfiguration,
-        verification_config: VerificationConfig,
-        node_type: NodeType,
+        verification_config: VerificationConfig, node_type: NodeType,
     ) -> Self {
         let inner =
             Arc::new(RwLock::new(ConsensusGraphInner::with_era_genesis(
@@ -312,16 +307,12 @@ impl ConsensusGraph {
     /// in the data manager and various other components. The execution will
     /// be skipped if bench_mode sets to true.
     pub fn new(
-        conf: ConsensusConfig,
-        txpool: SharedTransactionPool,
-        statistics: SharedStatistics,
-        data_man: Arc<BlockDataManager>,
-        pow_config: ProofOfWorkConfig,
-        pow: Arc<PowComputer>,
+        conf: ConsensusConfig, txpool: SharedTransactionPool,
+        statistics: SharedStatistics, data_man: Arc<BlockDataManager>,
+        pow_config: ProofOfWorkConfig, pow: Arc<PowComputer>,
         notifications: Arc<Notifications>,
         execution_conf: ConsensusExecutionConfiguration,
-        verification_conf: VerificationConfig,
-        node_type: NodeType,
+        verification_conf: VerificationConfig, node_type: NodeType,
     ) -> Self {
         let genesis_hash = data_man.get_cur_consensus_era_genesis_hash();
         let stable_hash = data_man.get_cur_consensus_era_stable_hash();

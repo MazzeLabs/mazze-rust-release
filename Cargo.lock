@@ -635,7 +635,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd4865004a46a0aafb2a0a5eb19d3c9fc46ee5f063a6cfc605c69ac9ecf5263d"
 dependencies = [
  "bitflags 1.3.2",
- "cexpr",
+ "cexpr 0.4.0",
  "clang-sys",
  "lazy_static",
  "lazycell",
@@ -645,6 +645,26 @@ dependencies = [
  "regex",
  "rustc-hash",
  "shlex 0.1.1",
+]
+
+[[package]]
+name = "bindgen"
+version = "0.66.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2b84e06fc203107bfbad243f4aba2af864eb7db3b1cf46ea0a023b0b433d2a7"
+dependencies = [
+ "bitflags 2.6.0",
+ "cexpr 0.6.0",
+ "clang-sys",
+ "lazy_static",
+ "lazycell",
+ "peeking_take_while",
+ "proc-macro2 1.0.87",
+ "quote 1.0.37",
+ "regex",
+ "rustc-hash",
+ "shlex 1.3.0",
+ "syn 2.0.79",
 ]
 
 [[package]]
@@ -721,6 +741,15 @@ dependencies = [
  "radium 0.7.0",
  "tap",
  "wyz 0.5.1",
+]
+
+[[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -958,7 +987,16 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f4aedb84272dbe89af497cf81375129abda4fc0a9e7c5d317498c15cc30c0d27"
 dependencies = [
- "nom",
+ "nom 5.1.3",
+]
+
+[[package]]
+name = "cexpr"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
+dependencies = [
+ "nom 7.1.3",
 ]
 
 [[package]]
@@ -1494,6 +1532,8 @@ dependencies = [
  "kvdb 0.4.0",
  "kvdb-rocksdb",
  "log",
+ "parity-db",
+ "parity-util-mem 0.5.2",
 ]
 
 [[package]]
@@ -2091,6 +2131,16 @@ dependencies = [
  "lazy_static",
  "libc",
  "libloading 0.5.2",
+ "winapi 0.3.9",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
  "winapi 0.3.9",
 ]
 
@@ -2964,6 +3014,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "impls"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a46645bbd70538861a90d0f26c31537cdf1e44aae99a794fb75a664b70951bc"
+
+[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3416,11 +3472,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ec2a862134d2a7d32d7983ddcdd1c4923530833c9f2ea1a44fc5fa473989058"
 
 [[package]]
+name = "libmdbx"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f0bee397dc9a7003e7bd34fffc1dc2d4c4fdc96530a0c439a5f98c9402bc7bf"
+dependencies = [
+ "anyhow",
+ "arrayref",
+ "arrayvec 0.7.6",
+ "bitflags 2.6.0",
+ "byteorder",
+ "derive_more 0.99.18",
+ "impls",
+ "indexmap 1.9.3",
+ "libc",
+ "mdbx-sys",
+ "parking_lot 0.12.3",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "librocksdb_sys"
 version = "0.1.0"
-source = "git+https://github.com/MazzeLabs/rust-rocksdb.git?rev=3b6affbc0c55bed8aaa82a6b6f34a1a878681f4e#3b6affbc0c55bed8aaa82a6b6f34a1a878681f4e"
 dependencies = [
- "bindgen",
+ "bindgen 0.57.0",
  "bzip2-sys",
  "cc",
  "cmake",
@@ -3435,7 +3511,6 @@ dependencies = [
 [[package]]
 name = "libtitan_sys"
 version = "0.0.1"
-source = "git+https://github.com/MazzeLabs/rust-rocksdb.git?rev=3b6affbc0c55bed8aaa82a6b6f34a1a878681f4e#3b6affbc0c55bed8aaa82a6b6f34a1a878681f4e"
 dependencies = [
  "bzip2-sys",
  "cc",
@@ -3560,6 +3635,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0609345ddee5badacf857d4f547e0e5a2e987db77085c24cd887f73573a04237"
+dependencies = [
+ "hashbrown 0.6.3",
+]
+
+[[package]]
 name = "lru-cache"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3575,9 +3659,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab44e08e5b5110188be64dc8f0865635206ad7386fe672903bef195df3cc8960"
 
 [[package]]
+name = "lz4"
+version = "1.28.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a20b523e860d03443e98350ceaac5e71c6ba89aea7d960769ec3ce37f4de5af4"
+dependencies = [
+ "lz4-sys",
+]
+
+[[package]]
 name = "lz4-sys"
-version = "1.8.3"
-source = "git+https://github.com/busyjay/lz4-rs.git?branch=adjust-build#5a8afe4010c67899fc7af876a58d67fd6269bf81"
+version = "1.11.1+lz4-1.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bd8c0d6c6ed0cd30b3652886bb8711dc4bb01d637a68105a3d5158039b418e6"
 dependencies = [
  "cc",
  "libc",
@@ -3922,6 +4016,7 @@ name = "mazze-storage"
 version = "1.0.0"
 dependencies = [
  "cfg-if 0.1.10",
+ "db",
  "delegate 0.5.2",
  "derivative",
  "error-chain",
@@ -3933,6 +4028,7 @@ dependencies = [
  "kvdb 0.4.0",
  "kvdb-rocksdb",
  "lazy_static",
+ "libmdbx",
  "log",
  "log4rs",
  "malloc_size_of",
@@ -4236,6 +4332,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mdbx-sys"
+version = "0.12.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21a329f8d655fb646cc9511c00886eefcddb6ef131869ef2d4b02c24c66825ac"
+dependencies = [
+ "bindgen 0.66.1",
+ "cc",
+ "libc",
+]
+
+[[package]]
 name = "memchr"
 version = "2.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4249,6 +4356,15 @@ checksum = "e2ffa2c986de11a9df78620c01eeaaf27d94d3ff02bf81bfcca953102dd0c6ff"
 dependencies = [
  "libc",
  "winapi 0.3.9",
+]
+
+[[package]]
+name = "memmap2"
+version = "0.5.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83faa42c0a078c393f6b29d5db232d8be22776a891f8f56e5284faee4a20b327"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -4302,6 +4418,12 @@ name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+
+[[package]]
+name = "minimal-lexical"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "miniz_oxide"
@@ -4489,6 +4611,16 @@ checksum = "08959a387a676302eebf4ddbcbc611da04285579f76f88ee0506c63b1a61dd4b"
 dependencies = [
  "memchr",
  "version_check",
+]
+
+[[package]]
+name = "nom"
+version = "7.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
+dependencies = [
+ "memchr",
+ "minimal-lexical",
 ]
 
 [[package]]
@@ -4815,6 +4947,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "parity-db"
+version = "0.5.0"
+source = "git+https://github.com/paritytech/parity-db?rev=ee51351b21621b2105786832d0b576f0d0d14eec#ee51351b21621b2105786832d0b576f0d0d14eec"
+dependencies = [
+ "blake2",
+ "crc32fast",
+ "fs2",
+ "hex 0.4.3",
+ "libc",
+ "log",
+ "lz4",
+ "memmap2",
+ "parking_lot 0.12.3",
+ "rand 0.8.5",
+ "siphasher",
+ "snap",
+ "winapi 0.3.9",
+]
+
+[[package]]
 name = "parity-path"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4931,8 +5083,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9344bc978467339b9ae688f9dcf279d1aaa0ccfc88e9a780c729b765a82d57d5"
 dependencies = [
  "cfg-if 0.1.10",
+ "ethereum-types 0.8.0",
+ "hashbrown 0.6.3",
  "impl-trait-for-tuples 0.1.3",
+ "lru",
  "parity-util-mem-derive",
+ "parking_lot 0.10.2",
+ "primitive-types 0.6.2",
+ "smallvec 1.13.2",
  "winapi 0.3.9",
 ]
 
@@ -6036,7 +6194,6 @@ dependencies = [
 [[package]]
 name = "rocksdb"
 version = "0.3.0"
-source = "git+https://github.com/MazzeLabs/rust-rocksdb.git?rev=3b6affbc0c55bed8aaa82a6b6f34a1a878681f4e#3b6affbc0c55bed8aaa82a6b6f34a1a878681f4e"
 dependencies = [
  "libc",
  "librocksdb_sys",
@@ -6629,6 +6786,12 @@ dependencies = [
  "quote 1.0.37",
  "syn 1.0.109",
 ]
+
+[[package]]
+name = "snap"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
 
 [[package]]
 name = "snappy-sys"
@@ -8230,8 +8393,3 @@ dependencies = [
  "cc",
  "libc",
 ]
-
-[[patch.unused]]
-name = "sqlite3-sys"
-version = "0.17.0"
-source = "git+https://github.com/MazzeLabs/sqlite3-sys?rev=7c7eb656f9ef0169e4c6532a6257e8255174e5a5#7c7eb656f9ef0169e4c6532a6257e8255174e5a5"

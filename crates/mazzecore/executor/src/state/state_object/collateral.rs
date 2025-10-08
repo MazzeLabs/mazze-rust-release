@@ -226,10 +226,7 @@ pub fn settle_collateral_for_all(
 }
 
 pub fn set_initial_storage_point_prop(state: &mut State) -> DbResult<()> {
-    debug!(
-        "set storage_point_prop to {}",
-        STORAGE_POINT_PROP_INIT
-    );
+    debug!("set storage_point_prop to {}", STORAGE_POINT_PROP_INIT);
     state.set_system_storage(
         storage_point_prop().to_vec(),
         STORAGE_POINT_PROP_INIT.into(),

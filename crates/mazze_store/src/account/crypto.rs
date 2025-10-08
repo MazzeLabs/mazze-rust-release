@@ -19,9 +19,9 @@ use crate::crypto::{self, Keccak256};
 use crate::json;
 use crate::mazzekey::{Password, Secret};
 use crate::random::Random;
+use crate::Error;
 use smallvec::SmallVec;
 use std::str;
-use crate::Error;
 
 /// Encrypted data
 #[derive(Debug, PartialEq, Clone)]

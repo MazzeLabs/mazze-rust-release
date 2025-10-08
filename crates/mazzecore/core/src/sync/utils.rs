@@ -20,7 +20,9 @@ use mazze_types::{
 use primitives::{Block, BlockHeaderBuilder};
 
 use crate::{
-    block_data_manager::{BlockDataManager, DataManagerConfiguration, DbType},
+    block_data_manager::{
+        BlockDataManager, BlockDbBackend, DataManagerConfiguration,
+    },
     cache_config::CacheConfig,
     consensus::{
         consensus_inner::consensus_executor::ConsensusExecutionConfiguration,
@@ -101,20 +103,18 @@ pub fn create_simple_block(
 }
 
 pub fn initialize_data_manager(
-    db_dir: &str, dbtype: DbType, pow: Arc<PowComputer>, vm: VmFactory,
+    db_dir: &str, dbtype: BlockDbBackend, pow: Arc<PowComputer>, vm: VmFactory,
 ) -> (Arc<BlockDataManager>, Arc<Block>) {
-    let ledger_db = db::open_database(
-        db_dir,
-        &db::db_config(
-            Path::new(db_dir),
-            Some(128),
-            db::DatabaseCompactionProfile::default(),
-            NUM_COLUMNS,
-            false,
-        ),
-    )
-    .map_err(|e| format!("Failed to open database {:?}", e))
-    .unwrap();
+    let settings = db::rocksdb_settings(
+        Path::new(db_dir).to_path_buf(),
+        Some(128),
+        db::DatabaseCompactionProfile::default(),
+        NUM_COLUMNS,
+        false,
+    );
+    let ledger_db = db::open_database(&settings)
+        .map_err(|e| format!("Failed to open database {:?}", e))
+        .unwrap();
 
     let worker_thread_pool = Arc::new(Mutex::new(ThreadPool::with_name(
         "Tx Recover".into(),
@@ -264,7 +264,7 @@ pub fn initialize_synchronization_graph_with_data_manager(
 /// This method is only used in tests and benchmarks.
 pub fn initialize_synchronization_graph(
     db_dir: &str, beta: u64, h: u64, tcr: u64, tcb: u64, era_epoch_count: u64,
-    dbtype: DbType, seed_hash: H256,
+    dbtype: BlockDbBackend, seed_hash: H256,
 ) -> (
     Arc<SynchronizationGraph>,
     Arc<ConsensusGraph>,

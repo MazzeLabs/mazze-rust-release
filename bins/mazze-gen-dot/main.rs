@@ -10,15 +10,15 @@ use std::{
 };
 
 fn open_db(db_path: &str) -> std::io::Result<Arc<db::SystemDB>> {
-    let db_config = db::db_config(
-        std::path::Path::new(db_path),
+    let settings = db::rocksdb_settings(
+        db_path.into(),
         None,
         db::DatabaseCompactionProfile::default(),
         mazzecore::db::NUM_COLUMNS,
         false,
     );
 
-    db::open_database(db_path, &db_config)
+    db::open_database(&settings)
 }
 
 fn retrieve_block(db: &Arc<db::SystemDB>, hash: &H256) -> Option<Block> {

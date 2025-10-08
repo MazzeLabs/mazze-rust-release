@@ -22,8 +22,8 @@ use crypto::{
 use mazzekey::Password;
 // use mazzekey::Secret;
 use crate::json;
-use std::{fs, num::NonZeroU32, path::Path};
 use crate::Error;
+use std::{fs, num::NonZeroU32, path::Path};
 
 /// Pre-sale wallet.
 pub struct PresaleWallet {

@@ -19,6 +19,8 @@ use super::{
     KeyDirectory, VaultKey, VaultKeyDirectory, VaultKeyDirectoryProvider,
 };
 use crate::json::{self, Uuid};
+use crate::Error;
+use crate::SafeAccount;
 use mazzekey::Password;
 use std::{
     collections::HashMap,
@@ -27,8 +29,6 @@ use std::{
     path::{Path, PathBuf},
 };
 use time;
-use crate::Error;
-use crate::SafeAccount;
 
 const IGNORED_FILES: &[&str] = &[
     "thumbs.db",

@@ -22,7 +22,9 @@ use std::{
 };
 
 use crate::account::SafeAccount;
-use crate::accounts_dir::{KeyDirectory, SetKeyError, VaultKey, VaultKeyDirectory};
+use crate::accounts_dir::{
+    KeyDirectory, SetKeyError, VaultKey, VaultKeyDirectory,
+};
 use crate::crypto::KEY_ITERATIONS;
 use crate::import;
 use crate::json::{self, OpaqueKeyFile, Uuid};
@@ -901,13 +903,15 @@ mod tests {
 
     use self::tempdir::TempDir;
     use super::{MazzeMultiStore, MazzeStore};
-    use crate::accounts_dir::{KeyDirectory, MemoryDirectory, RootDiskDirectory};
-    use mazze_types::H256;
-    use mazzekey::{Generator, KeyPair, Random};
+    use crate::accounts_dir::{
+        KeyDirectory, MemoryDirectory, RootDiskDirectory,
+    };
     use crate::secret_store::{
         Derivation, SecretStore, SecretVaultRef, SimpleSecretStore,
         StoreAccountRef,
     };
+    use mazze_types::H256;
+    use mazzekey::{Generator, KeyPair, Random};
 
     fn keypair() -> KeyPair {
         Random.generate().unwrap()

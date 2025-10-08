@@ -205,12 +205,9 @@ impl MallocSizeOf for SynchronizationGraphInner {
 
 impl SynchronizationGraphInner {
     pub fn with_genesis_block(
-        genesis_header: Arc<BlockHeader>,
-        pow_config: ProofOfWorkConfig,
-        pow: Arc<PowComputer>,
-        config: SyncGraphConfig,
-        data_man: Arc<BlockDataManager>,
-        machine: Arc<Machine>,
+        genesis_header: Arc<BlockHeader>, pow_config: ProofOfWorkConfig,
+        pow: Arc<PowComputer>, config: SyncGraphConfig,
+        data_man: Arc<BlockDataManager>, machine: Arc<Machine>,
     ) -> Self {
         let mut inner = SynchronizationGraphInner {
             arena: Slab::new(),
@@ -933,12 +930,9 @@ pub type SharedSynchronizationGraph = Arc<SynchronizationGraph>;
 impl SynchronizationGraph {
     pub fn new(
         consensus: SharedConsensusGraph,
-        verification_config: VerificationConfig,
-        pow_config: ProofOfWorkConfig,
-        pow: Arc<PowComputer>,
-        sync_config: SyncGraphConfig,
-        notifications: Arc<Notifications>,
-        machine: Arc<Machine>,
+        verification_config: VerificationConfig, pow_config: ProofOfWorkConfig,
+        pow: Arc<PowComputer>, sync_config: SyncGraphConfig,
+        notifications: Arc<Notifications>, machine: Arc<Machine>,
     ) -> Self {
         let data_man = consensus.get_data_manager().clone();
         let genesis_hash = data_man.get_cur_consensus_era_genesis_hash();
@@ -1985,7 +1979,7 @@ impl SynchronizationGraph {
                     true, /* need_to_verify */
                     b,
                     header_only, /* insert_to_consensus only when header_only */
-                    true,       /* persistent */
+                    true,        /* persistent */
                 );
             }
 

@@ -19,11 +19,12 @@ use mazze_parameters::{
 };
 use mazze_storage::{
     defaults::DEFAULT_DEBUG_SNAPSHOT_CHECKER_THREADS, storage_dir,
-    ConsensusParam, ProvideExtraSnapshotSyncConfig, StorageConfiguration,
+    ConsensusParam, MdbxConfig, MdbxSyncMode, ProvideExtraSnapshotSyncConfig,
+    StateDbBackend, StorageConfiguration,
 };
 use mazze_types::{Address, AllChainID, Space, SpaceMap, H256, U256};
 use mazzecore::{
-    block_data_manager::{DataManagerConfiguration, DbType},
+    block_data_manager::{BlockDbBackend, DataManagerConfiguration},
     block_parameters::*,
     cache_config::{
         DEFAULT_INVALID_BLOCK_HASH_CACHE_SIZE_IN_COUNT,
@@ -269,6 +270,10 @@ build_config! {
         (block_cache_gc_period_ms, (u64), 5_000)
         (block_db_dir, (Option<String>), None)
         (block_db_type, (String), "rocksdb".to_string())
+        (paritydb_columns, (Option<u32>), None)
+        (paritydb_max_open_files, (Option<u32>), None)
+        (paritydb_journal_compression, (Option<String>), None)
+        (paritydb_disable_wal, (bool), false)
         (checkpoint_gc_time_in_era_count, (f64), 0.5)
         // The Mazze data dir, if unspecified, is the workdir where Mazze is started.
         (mazze_data_dir, (String), "./blockchain_data".to_string())
@@ -277,6 +282,10 @@ build_config! {
         (invalid_block_hash_cache_size_in_count, (usize), DEFAULT_INVALID_BLOCK_HASH_CACHE_SIZE_IN_COUNT)
         (rocksdb_cache_size, (Option<usize>), Some(128))
         (rocksdb_compaction_profile, (Option<String>), None)
+        (state_db_type, (String), "rocksdb".to_string())
+        (mdbx_map_size_mb, (Option<u64>), None)
+        (mdbx_max_readers, (Option<u32>), None)
+        (mdbx_sync_mode, (Option<String>), None)
         (storage_delta_mpts_cache_recent_lfu_factor, (f64), mazze_storage::defaults::DEFAULT_DELTA_MPTS_CACHE_RECENT_LFU_FACTOR)
         (storage_delta_mpts_cache_size, (u32), mazze_storage::defaults::DEFAULT_DELTA_MPTS_CACHE_SIZE)
         (storage_delta_mpts_cache_start_size, (u32), mazze_storage::defaults::DEFAULT_DELTA_MPTS_CACHE_START_SIZE)
@@ -432,6 +441,48 @@ impl Configuration {
         }
     }
 
+    fn paritydb_settings(&self) -> Option<db::ParityDbOpenConfig> {
+        if self.raw_conf.block_db_type != "paritydb" {
+            return None;
+        }
+
+        let compression = self
+            .raw_conf
+            .paritydb_journal_compression
+            .as_ref()
+            .map(|c| db::ParityCompression::from_str(c).unwrap());
+
+        Some(db::ParityDbOpenConfig {
+            columns: self.raw_conf.paritydb_columns.unwrap_or(NUM_COLUMNS),
+            compression,
+            disable_wal: self.raw_conf.paritydb_disable_wal,
+            stats: false,
+        })
+    }
+
+    fn state_db_backend(&self) -> StateDbBackend {
+        match self.raw_conf.state_db_type.as_str() {
+            "rocksdb" => StateDbBackend::Rocksdb,
+            "mdbx" => {
+                let sync_mode = match self.raw_conf.mdbx_sync_mode.as_deref() {
+                    None | Some("safe") => MdbxSyncMode::Safe,
+                    Some("relaxed") => MdbxSyncMode::Relaxed,
+                    Some(other) => panic!(
+                        "Invalid mdbx_sync_mode parameter: {other}. Expected safe/relaxed",
+                    ),
+                };
+                StateDbBackend::Mdbx(MdbxConfig {
+                    map_size_mb: self.raw_conf.mdbx_map_size_mb,
+                    max_readers: self.raw_conf.mdbx_max_readers,
+                    sync_mode,
+                })
+            }
+            other => panic!(
+                "Invalid state_db_type parameter: {other}. Expected rocksdb/mdbx"
+            ),
+        }
+    }
+
     pub fn net_config(&self) -> Result<NetworkConfiguration, String> {
         let mut network_config = NetworkConfiguration::new_with_port(
             self.network_id(),
@@ -512,7 +563,7 @@ impl Configuration {
         cache_config
     }
 
-    pub fn db_config(&self) -> (PathBuf, DatabaseConfig) {
+    pub fn db_settings(&self) -> db::DatabaseSettings {
         let db_dir: PathBuf = match &self.raw_conf.block_db_dir {
             Some(dir) => dir.into(),
             None => {
@@ -523,19 +574,45 @@ impl Configuration {
             panic!("Error creating database directory: {:?}", e);
         }
 
-        let compact_profile =
-            match self.raw_conf.rocksdb_compaction_profile.as_ref() {
-                Some(p) => db::DatabaseCompactionProfile::from_str(p).unwrap(),
-                None => db::DatabaseCompactionProfile::default(),
-            };
-        let db_config = db::db_config(
-            &db_dir,
-            self.raw_conf.rocksdb_cache_size.clone(),
-            compact_profile,
-            NUM_COLUMNS.clone(),
-            self.raw_conf.rocksdb_disable_wal,
-        );
-        (db_dir, db_config)
+        match self.raw_conf.block_db_type.as_str() {
+            "rocksdb" => {
+                let compact_profile = self
+                    .raw_conf
+                    .rocksdb_compaction_profile
+                    .as_ref()
+                    .map(|p| db::DatabaseCompactionProfile::from_str(p).unwrap())
+                    .unwrap_or_default();
+                db::rocksdb_settings(
+                    db_dir,
+                    self.raw_conf.rocksdb_cache_size.clone(),
+                    compact_profile,
+                    NUM_COLUMNS,
+                    self.raw_conf.rocksdb_disable_wal,
+                )
+            }
+            "paritydb" => {
+                let columns = self
+                    .raw_conf
+                    .paritydb_columns
+                    .unwrap_or(NUM_COLUMNS);
+                let compression = self
+                    .raw_conf
+                    .paritydb_journal_compression
+                    .as_ref()
+                    .map(|c| db::ParityCompression::from_str(c).unwrap());
+                let parity_config = db::ParityDbOpenConfig {
+                    columns,
+                    compression,
+                    disable_wal: self.raw_conf.paritydb_disable_wal,
+                    stats: false,
+                };
+                db::paritydb_settings(db_dir, &parity_config)
+                    .expect("Failed to configure paritydb")
+            }
+            other => panic!(
+                "Invalid block_db_type parameter: {other}. Expected rocksdb/paritydb"
+            ),
+        }
     }
 
     pub fn chain_id_params(&self) -> ChainIdParams {
@@ -764,6 +841,7 @@ impl Configuration {
                 .raw_conf
                 .use_isolated_db_for_mpt_table_height,
             keep_era_genesis_snapshot: self.raw_conf.keep_era_genesis_snapshot,
+            state_db_backend: self.state_db_backend(),
         }
     }
 
@@ -891,11 +969,15 @@ impl Configuration {
             tx_cache_index_maintain_timeout: Duration::from_millis(
                 self.raw_conf.tx_cache_index_maintain_timeout_ms,
             ),
-            db_type: match self.raw_conf.block_db_type.as_str() {
-                "rocksdb" => DbType::Rocksdb,
-                "sqlite" => DbType::Sqlite,
-                _ => panic!("Invalid block_db_type parameter!"),
+            block_db_backend: match self.raw_conf.block_db_type.as_str() {
+                "rocksdb" => BlockDbBackend::Rocksdb,
+                "sqlite" => BlockDbBackend::Sqlite,
+                "paritydb" => BlockDbBackend::Paritydb,
+                other => panic!(
+                    "Invalid block_db_type parameter: {other}. Expected rocksdb/sqlite/paritydb"
+                ),
             },
+            paritydb_settings: self.paritydb_settings(),
             additional_maintained_block_body_epoch_count: self
                 .raw_conf
                 .additional_maintained_block_body_epoch_count,

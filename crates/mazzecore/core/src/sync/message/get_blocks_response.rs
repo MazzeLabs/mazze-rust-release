@@ -95,6 +95,11 @@ impl Handleable for GetBlocksWithPublicResponse {
                 .map(|b| b.block_header.hash())
                 .collect::<Vec<H256>>()
         );
+        // Guard against unbounded queuing when public blocks mode is enabled.
+        if ctx.manager.is_block_queue_full() {
+            warn!("recover_public_queue is full, discard GetBlocksWithPublicResponse");
+            return Ok(());
+        }
         let req = ctx.match_request(self.request_id)?;
         let delay = req.delay;
         let req_hashes: HashSet<H256> = if let Ok(req) = req

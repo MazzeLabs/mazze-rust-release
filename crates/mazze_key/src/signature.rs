@@ -284,10 +284,10 @@ pub fn recover(
 #[cfg(test)]
 mod tests {
     use super::{recover, sign, verify_address, verify_public, Signature};
-    use std::str::FromStr;
     use crate::Generator;
     use crate::Message;
     use crate::Random;
+    use std::str::FromStr;
 
     #[test]
     fn vrs_conversion() {

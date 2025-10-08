@@ -109,9 +109,9 @@ impl KeyPair {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
     use crate::KeyPair;
     use crate::Secret;
+    use std::str::FromStr;
 
     #[test]
     fn from_secret() {

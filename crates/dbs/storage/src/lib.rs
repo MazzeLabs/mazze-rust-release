@@ -103,6 +103,49 @@ impl ProvideExtraSnapshotSyncConfig {
 }
 
 #[derive(Debug, Clone)]
+pub enum MdbxSyncMode {
+    /// Flush metadata on commit for maximum durability.
+    Safe,
+    /// Skip metadata syncs to speed up writes at the cost of resilience.
+    Relaxed,
+}
+
+impl Default for MdbxSyncMode {
+    fn default() -> Self {
+        MdbxSyncMode::Safe
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MdbxConfig {
+    pub map_size_mb: Option<u64>,
+    pub max_readers: Option<u32>,
+    pub sync_mode: MdbxSyncMode,
+}
+
+impl Default for MdbxConfig {
+    fn default() -> Self {
+        Self {
+            map_size_mb: None,
+            max_readers: None,
+            sync_mode: MdbxSyncMode::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum StateDbBackend {
+    Rocksdb,
+    Mdbx(MdbxConfig),
+}
+
+impl Default for StateDbBackend {
+    fn default() -> Self {
+        StateDbBackend::Rocksdb
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct StorageConfiguration {
     pub additional_maintained_snapshot_count: u32,
     pub consensus_param: ConsensusParam,
@@ -128,6 +171,7 @@ pub struct StorageConfiguration {
     pub use_isolated_db_for_mpt_table: bool,
     pub use_isolated_db_for_mpt_table_height: Option<u64>,
     pub keep_era_genesis_snapshot: bool,
+    pub state_db_backend: StateDbBackend,
 }
 
 impl StorageConfiguration {
@@ -174,6 +218,7 @@ impl StorageConfiguration {
             use_isolated_db_for_mpt_table: false,
             use_isolated_db_for_mpt_table_height: None,
             keep_era_genesis_snapshot: false,
+            state_db_backend: StateDbBackend::default(),
         }
     }
 }

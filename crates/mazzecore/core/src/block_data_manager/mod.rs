@@ -182,14 +182,19 @@ impl BlockDataManager {
             config.tx_cache_index_maintain_timeout,
             worker_pool,
         );
-        let db_manager = match config.db_type {
-            DbType::Rocksdb => DBManager::new_from_rocksdb(
+        let db_manager = match config.block_db_backend {
+            BlockDbBackend::Rocksdb => DBManager::new_from_rocksdb(
                 db,
                 pow.clone(),
                 true_genesis.hash(),
             ),
-            DbType::Sqlite => DBManager::new_from_sqlite(
+            BlockDbBackend::Sqlite => DBManager::new_from_sqlite(
                 Path::new("./sqlite_db"),
+                pow.clone(),
+                true_genesis.hash(),
+            ),
+            BlockDbBackend::Paritydb => DBManager::new_from_paritydb(
+                db,
                 pow.clone(),
                 true_genesis.hash(),
             ),
@@ -1747,17 +1752,19 @@ impl BlockDataManager {
     }
 }
 
-#[derive(Copy, Clone)]
-pub enum DbType {
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum BlockDbBackend {
     Rocksdb,
     Sqlite,
+    Paritydb,
 }
 
 pub struct DataManagerConfiguration {
     pub persist_tx_index: bool,
     pub persist_block_number_index: bool,
     pub tx_cache_index_maintain_timeout: Duration,
-    pub db_type: DbType,
+    pub block_db_backend: BlockDbBackend,
+    pub paritydb_settings: Option<db::ParityDbOpenConfig>,
     pub additional_maintained_block_body_epoch_count: Option<usize>,
     pub additional_maintained_execution_result_epoch_count: Option<usize>,
     pub additional_maintained_reward_epoch_count: Option<usize>,
@@ -1776,13 +1783,15 @@ impl MallocSizeOf for DataManagerConfiguration {
 impl DataManagerConfiguration {
     pub fn new(
         persist_tx_index: bool, persist_block_number_index: bool,
-        tx_cache_index_maintain_timeout: Duration, db_type: DbType,
+        tx_cache_index_maintain_timeout: Duration,
+        block_db_backend: BlockDbBackend,
     ) -> Self {
         Self {
             persist_tx_index,
             persist_block_number_index,
             tx_cache_index_maintain_timeout,
-            db_type,
+            block_db_backend,
+            paritydb_settings: None,
             additional_maintained_block_body_epoch_count: None,
             additional_maintained_execution_result_epoch_count: None,
             additional_maintained_reward_epoch_count: None,

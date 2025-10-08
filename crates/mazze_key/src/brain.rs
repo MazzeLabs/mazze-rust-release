@@ -15,9 +15,9 @@
 // along with Parity Ethereum.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{Generator, KeyPair, Secret};
+use crate::WordlistError;
 use crate::{keccak::Keccak256, Void};
 use parity_wordlist;
-use crate::WordlistError;
 
 /// Simple brainwallet.
 pub struct Brain(String);

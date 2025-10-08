@@ -10,7 +10,7 @@ use log4rs::{
 };
 use mazze_types::H256;
 use mazzecore::{
-    block_data_manager::DbType,
+    block_data_manager::BlockDbBackend,
     consensus::{ConsensusGraph, ConsensusGraphTrait},
     pow::PowComputer,
     sync::utils::{
@@ -175,7 +175,7 @@ fn main() {
             timer_ratio,
             timer_beta,
             era_epoch_count,
-            DbType::Sqlite,
+            BlockDbBackend::Sqlite,
             H256::zero(),
         );
 

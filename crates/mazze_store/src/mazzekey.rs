@@ -19,8 +19,8 @@
 // along with Parity Ethereum.  If not, see <http://www.gnu.org/licenses/>.
 
 //! mazzekey reexport to make documentation look pretty.
-pub use _mazzekey::*;
 use crate::json;
+pub use _mazzekey::*;
 
 impl Into<json::H160> for Address {
     fn into(self) -> json::H160 {

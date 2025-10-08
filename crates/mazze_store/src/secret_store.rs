@@ -15,6 +15,8 @@
 // along with Parity Ethereum.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::json::{OpaqueKeyFile, Uuid};
+use crate::Error;
+use crate::OpaqueSecret;
 use mazze_types::H256;
 use mazzekey::{Address, Message, Password, Public, Secret, Signature};
 use std::{
@@ -22,8 +24,6 @@ use std::{
     hash::{Hash, Hasher},
     path::PathBuf,
 };
-use crate::Error;
-use crate::OpaqueSecret;
 
 /// Key directory reference
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

@@ -232,7 +232,7 @@ impl<'a> From<StorageKey<'a>> for OwnedStorageKey {
             } => OwnedStorageKey::CodeKey {
                 address_bytes: address_bytes.to_vec(),
                 code_hash_bytes: code_hash_bytes.to_vec(),
-            }
+            },
         }
     }
 }

@@ -10,8 +10,8 @@ use crate::{
 };
 use mazze_internal_common::debug::ComputeEpochDebugRecord;
 use mazze_parameters::{
-    collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
     collateral::COLLATERAL_MAZZIES_PER_STORAGE_KEY,
+    collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
 };
 use mazze_statedb::StateDb;
 use mazze_storage::{

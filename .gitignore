@@ -25,3 +25,6 @@ run/*.toml.backup
 *.swp
 .DS_Store
 Thumbs.db
+run/blockchain_data
+run/blockchain_data_runcpu
+run/blockchain_data_old

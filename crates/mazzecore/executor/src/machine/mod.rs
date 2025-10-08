@@ -180,7 +180,7 @@ fn new_builtin_map(space: Space) -> BTreeMap<Address, Builtin> {
         Builtin::new(
             Box::new(Blake2FPricer::new(1)),
             builtin_factory("blake2_f"),
-            0
+            0,
         ),
     );
     btree.insert(

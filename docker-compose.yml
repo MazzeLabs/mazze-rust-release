@@ -32,6 +32,7 @@ services:
       NUM_THREADS: 16
       STRATUM_HOST: node
       STRATUM_PORT: 32525
+      RANDOMX_FULL_MEM: "0"
     command: ['/app/start.sh']
     depends_on:
       - node

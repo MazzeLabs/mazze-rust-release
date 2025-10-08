@@ -68,16 +68,15 @@ impl LogDeviceManager {
     pub fn new(path_dir: PathBuf) -> Self {
         let mut db_dir_path = path_dir.clone();
         db_dir_path.push(META_DATA_DB_DIR);
-        let db_config = db::db_config(
-            &db_dir_path,
+        let settings = db::rocksdb_settings(
+            db_dir_path.clone(),
             None,
             db::DatabaseCompactionProfile::default(),
             NUM_COLUMNS.clone(),
             false, /* disable_wal */
         );
 
-        let db = db::open_database(db_dir_path.to_str().unwrap(), &db_config)
-            .unwrap();
+        let db = db::open_database(&settings).unwrap();
 
         let mut log_device_manager = LogDeviceManager {
             path_dir,
@@ -107,9 +106,8 @@ impl LogDeviceManager {
     }
 
     fn get_device_num_from_db(&self) -> usize {
-        let res = self
-            .db
-            .key_value()
+        let kv = self.db.key_value();
+        let res = kv
             .get(COL_DB, DB_KEY_LOG_DEVICE_NUM)
             .expect("Low level database error.");
         let device_num = match res {
@@ -125,7 +123,8 @@ impl LogDeviceManager {
         let mut value = [0; 8];
         LittleEndian::write_u64(&mut value[0..8], device_num as u64);
         tx.put(COL_DB, DB_KEY_LOG_DEVICE_NUM, &value);
-        self.db.key_value().write(tx).expect("DB write failed.");
+        let kv = self.db.key_value();
+        kv.write(tx).expect("DB write failed.");
     }
 
     pub fn get_device_num(&self) -> usize {
@@ -246,7 +245,8 @@ impl LogDevice {
         let value = rlp::encode(stripe_info);
         let mut tx = DBTransaction::new();
         tx.put(COL_DB, key, value.as_slice());
-        self.db.key_value().write(tx).expect("DB write failed.");
+        let kv = self.db.key_value();
+        kv.write(tx).expect("DB write failed.");
     }
 
     pub fn append_stripe(&self, stripe: &[u8]) -> Result<StripeInfo, Error> {

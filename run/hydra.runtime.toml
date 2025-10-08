@@ -87,7 +87,7 @@ stratum_secret = "9c22ff5f21f0b81b113e63f7db6da94fedef11b2119b4088b89664fb9a3cb6
 # By default, the value is not set.
 #
 # Use local log config when running outside Docker
-log_conf = "./log.yaml"
+log_conf = "/home/paladin0x/Desktop/mazze-node/run/log.yaml"
 
 # `log_file` is the path of the log file"
 # If not set, the log will only be printed to stdout, and not persisted to files.

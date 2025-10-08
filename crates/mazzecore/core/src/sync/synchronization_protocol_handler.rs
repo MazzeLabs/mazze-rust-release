@@ -147,11 +147,25 @@ impl<T: TaskSize> AsyncTaskQueue<T> {
 
     pub fn dispatch(&self, io: &dyn NetworkContext, task: T) {
         let mut inner = self.inner.write();
-        inner.size += task.size();
+        let incoming = task.size();
+
+        // Enforce hard cap to avoid unbounded growth / OOM.
+        if inner.size.saturating_add(incoming) > self.max_capacity {
+            debug!(
+                "AsyncTaskQueue full (size={} cap={}), dropping task (size={}, cnt={})",
+                inner.size,
+                self.max_capacity,
+                incoming,
+                task.count()
+            );
+            return;
+        }
+
+        inner.size += incoming;
         // Compute moving average.
         if task.count() != 0 {
             inner.moving_average = self.alpha
-                * (task.size() / task.count()) as f64
+                * (incoming / task.count()) as f64
                 + (1.0 - self.alpha) * inner.moving_average;
         }
         io.dispatch_work(self.work_type);
@@ -1656,7 +1670,9 @@ impl SynchronizationProtocolHandler {
 
         let catch_up_mode = self.catch_up_mode();
         // Propagate catch_up_mode to verification config so verify_pow can be relaxed in catch-up
-        self.graph.verification_config.set_catch_up_mode(catch_up_mode);
+        self.graph
+            .verification_config
+            .set_catch_up_mode(catch_up_mode);
         let mut need_notify = Vec::new();
         for (peer, state) in self.syn.peers.read().iter() {
             let mut state = state.write();

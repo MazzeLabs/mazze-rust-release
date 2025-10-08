@@ -7,3 +7,5 @@ edition = "2021"
 log = "0.4"
 kvdb-rocksdb = {path= "../kvdb-rocksdb" }
 kvdb = "0.4"
+parity-db = { git = "https://github.com/paritytech/parity-db", rev = "ee51351b21621b2105786832d0b576f0d0d14eec", features = ["instrumentation"] }
+parity-util-mem = "0.5"

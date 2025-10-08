@@ -82,7 +82,7 @@ pub struct DBManager {
 }
 
 impl DBManager {
-    pub fn new_from_rocksdb(
+    fn new_from_kvdb(
         db: Arc<SystemDB>, pow: Arc<PowComputer>, genesis_hash: H256,
     ) -> Self {
         let mut table_db = HashMap::new();
@@ -91,7 +91,7 @@ impl DBManager {
             table_db.insert(
                 table,
                 Box::new(KvdbRocksdb {
-                    kvdb: db.key_value().clone(),
+                    kvdb: db.key_value(),
                     col: rocks_db_col(table),
                 })
                     as Box<dyn KeyValueDbTrait<ValueType = Box<[u8]>>>,
@@ -102,6 +102,18 @@ impl DBManager {
             pow,
             genesis_hash,
         }
+    }
+
+    pub fn new_from_rocksdb(
+        db: Arc<SystemDB>, pow: Arc<PowComputer>, genesis_hash: H256,
+    ) -> Self {
+        Self::new_from_kvdb(db, pow, genesis_hash)
+    }
+
+    pub fn new_from_paritydb(
+        db: Arc<SystemDB>, pow: Arc<PowComputer>, genesis_hash: H256,
+    ) -> Self {
+        Self::new_from_kvdb(db, pow, genesis_hash)
     }
 }
 

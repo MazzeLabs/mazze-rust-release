@@ -126,7 +126,7 @@ pub mod client_methods {
         });
 
         let mut lock = exit_cond_var.0.lock();
-        if !*lock {
+        while !*lock {
             exit_cond_var.1.wait(&mut lock);
         }
 
@@ -210,8 +210,8 @@ pub fn initialize_common_modules(
     let network_config = conf.net_config()?;
     let cache_config = conf.cache_config();
 
-    let (db_path, db_config) = conf.db_config();
-    let ledger_db = db::open_database(db_path.to_str().unwrap(), &db_config)
+    let db_settings = conf.db_settings();
+    let ledger_db = db::open_database(&db_settings)
         .map_err(|e| format!("Failed to open database {:?}", e))?;
 
     let secret_store = Arc::new(SecretStore::new());

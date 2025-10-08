@@ -8,8 +8,7 @@ use rlp::Rlp;
 use mazze_internal_common::debug::ComputeEpochDebugRecord;
 use mazze_types::{AddressWithSpace, H256, U256};
 use primitives::{
-    is_default::IsDefault, Account, CodeInfo, StorageKey,
-    StorageKeyWithSpace,
+    is_default::IsDefault, Account, CodeInfo, StorageKey, StorageKeyWithSpace,
 };
 
 use crate::global_params::GlobalParamKey;

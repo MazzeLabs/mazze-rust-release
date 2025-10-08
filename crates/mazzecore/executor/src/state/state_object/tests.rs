@@ -11,8 +11,8 @@ use crate::{
 };
 use keccak_hash::{keccak, KECCAK_EMPTY};
 use mazze_parameters::{
-    consensus::ONE_MAZZE_IN_MAZZY, genesis::DEV_GENESIS_KEY_PAIR,
     collateral::COLLATERAL_MAZZIES_PER_STORAGE_KEY,
+    consensus::ONE_MAZZE_IN_MAZZY, genesis::DEV_GENESIS_KEY_PAIR,
 };
 use mazze_statedb::StateDb;
 use mazze_storage::{

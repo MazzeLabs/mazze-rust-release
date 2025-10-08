@@ -798,7 +798,8 @@ impl BlockGenerator {
         let mut current_mining_block: Option<Block> = None;
         let mut current_problem: Option<ProofOfWorkProblem> = None;
         let mut last_assemble = SystemTime::now();
-        let sleep_duration = time::Duration::from_millis(BLOCKGEN_LOOP_SLEEP_IN_MILISECS);
+        let sleep_duration =
+            time::Duration::from_millis(BLOCKGEN_LOOP_SLEEP_IN_MILISECS);
 
         loop {
             match *bg.state.read() {
@@ -810,13 +811,17 @@ impl BlockGenerator {
                 current_mining_block.as_ref(),
                 &last_assemble,
             ) {
-                let new_block = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    bg.assemble_new_block(
-                        MAX_TRANSACTION_COUNT_PER_BLOCK,
-                        bg.graph.verification_config.max_block_size_in_bytes,
-                        vec![],
-                    )
-                })) {
+                let new_block = match std::panic::catch_unwind(
+                    std::panic::AssertUnwindSafe(|| {
+                        bg.assemble_new_block(
+                            MAX_TRANSACTION_COUNT_PER_BLOCK,
+                            bg.graph
+                                .verification_config
+                                .max_block_size_in_bytes,
+                            vec![],
+                        )
+                    }),
+                ) {
                     Ok(block) => block,
                     Err(_) => {
                         warn!("Failed to assemble new block, execution results not ready. Retrying...");

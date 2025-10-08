@@ -74,6 +74,17 @@ pub struct VMManager {
 }
 
 impl VMManager {
+    fn randomx_use_full_memory() -> bool {
+        // Default to full memory (dataset) for best performance unless overridden.
+        match std::env::var("RANDOMX_FULL_MEM") {
+            Ok(v) => match v.as_str() {
+                "0" | "false" | "False" | "FALSE" => false,
+                _ => true,
+            },
+            Err(_) => true,
+        }
+    }
+
     pub fn new() -> Result<Self, NumaError> {
         // TODO: init with new seed hash
         info!("Initializing RandomX context");
@@ -83,8 +94,10 @@ impl VMManager {
             208, 98, 34, 241, 9, 35, 101, 195, 39, 166, 14, 116, 82, 106, 188,
             165, 14,
         ];
-        let context =
-            RwLock::new(Arc::new(RandomXContext::new(&temp_seed_hash, true)));
+        let context = RwLock::new(Arc::new(RandomXContext::new(
+            &temp_seed_hash,
+            Self::randomx_use_full_memory(),
+        )));
         info!("RandomX context initialized");
 
         Ok(Self {
@@ -133,8 +146,10 @@ impl VMManager {
         if problem_seed_hash != self.reference_state.get_seed_hash() {
             // Update context using the RwLock for interior mutability
             let mut context_write = self.context.write().unwrap();
-            *context_write =
-                Arc::new(RandomXContext::new(problem_seed_hash, true));
+            *context_write = Arc::new(RandomXContext::new(
+                problem_seed_hash,
+                Self::randomx_use_full_memory(),
+            ));
             debug!("RandomX context updated with new seed hash");
         }
 

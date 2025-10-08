@@ -3,7 +3,7 @@
 // See http://www.gnu.org/licenses/
 
 use crate::{
-    block_data_manager::DbType,
+    block_data_manager::BlockDbBackend,
     sync::{
         utils::{create_simple_block_impl, initialize_synchronization_graph},
         SynchronizationGraphNode,
@@ -28,7 +28,7 @@ fn test_remove_expire_blocks() {
             1,
             1,
             50000,
-            DbType::Rocksdb,
+            BlockDbBackend::Rocksdb,
         );
         // test initialization
         {

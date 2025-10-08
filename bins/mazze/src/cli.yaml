@@ -870,54 +870,32 @@ subcommands:
                                     - rpc-method:
                                         default_value: mazze_getStatus
                                         hidden: true
-                    - pos:
-                        about: PoS subcommands
+                    - snapshot:
+                        about: Snapshot management helpers
                         setting: SubcommandRequiredElseHelp
                         subcommands:
-                            - register:
-                                about: Return the transaction data needed to register the PoS keys used by this mazze node.
+                            - export:
+                                about: Export a snapshot bundle to a local directory
                                 args:
-                                    - rpc-method:
-                                          default_value: pos_register
-                                          hidden: true
-                                    - rpc-args:
-                                          multiple: true
-                                          use_delimiter: true
-                                          default_value: power:u64
-                                          hidden: true
-                                    - power:
-                                        help: The voting power to register (one voting power is 100 staked MAZZE)
-                                        long: power
-                                        required: true
+                                    - path:
+                                        help: Destination directory for the exported bundle
+                                        long: path
                                         takes_value: true
-                            - stop_election:
-                                  about: Stop sending PoS election transactions.
-                                  args:
-                                      - rpc-method:
-                                            default_value: pos_stop_election
-                                            hidden: true
-                            - start_voting:
-                                  about: Start PoS voting.
-                                  args:
-                                      - rpc-method:
-                                            default_value: pos_start_voting
-                                            hidden: true
-                                      - rpc-args:
-                                            default_value: initialize:bool
-                                            hidden: true
-                                      - initialize:
-                                            help: set this means the node uses its local safety data instead of a saved data file from another primary node
-                                            long: initialize
-                                            takes_value: false
-                            - stop_voting:
-                                  about: Stop PoS voting.
-                                  args:
-                                      - rpc-method:
-                                            default_value: pos_stop_voting
-                                            hidden: true
-                            - voting_status:
-                                  about: Show if the node is voting.
-                                  args:
-                                      - rpc-method:
-                                            default_value: pos_voting_status
-                                            hidden: true
+                                        required: true
+                                    - include-delta:
+                                        help: Include delta MPT data in the bundle
+                                        long: include-delta
+                                        takes_value: false
+                            - import:
+                                about: Import a snapshot bundle from a directory
+                                args:
+                                    - path:
+                                        help: Directory containing the snapshot bundle to import
+                                        long: path
+                                        takes_value: true
+                                        required: true
+                                    - force:
+                                        help: Overwrite existing snapshot data if present
+                                        long: force
+                                        takes_value: false
+                   

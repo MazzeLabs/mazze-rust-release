@@ -396,20 +396,20 @@ impl BlockHeader {
             referee_hashes: r.list_at(12)?,
             custom: vec![],
             nonce: r.val_at(13)?,
-            base_price: None,  // Will set this properly below
+            base_price: None, // Will set this properly below
         };
 
         // We need to decode pow_hash first, then base_price
         let pow_hash = r.val_at(14)?;
-        
+
         // Try to decode base_price if it exists (at index 15)
         if r.item_count()? > 15 {
             rlp_part.base_price = r.val_at(15).unwrap_or(None);
         }
-        
+
         // Calculate the starting index for custom fields
         let custom_start_idx = 15 + rlp_part.base_price.is_some() as usize;
-        
+
         for i in custom_start_idx..r.item_count()? {
             rlp_part.custom.push(r.at(i)?.as_raw().to_vec());
         }

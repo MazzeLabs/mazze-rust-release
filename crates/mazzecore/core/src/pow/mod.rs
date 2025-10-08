@@ -4,7 +4,6 @@
 
 mod cache;
 
-
 use crate::block_data_manager::BlockDataManager;
 use cache::RandomXCacheBuilder;
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};

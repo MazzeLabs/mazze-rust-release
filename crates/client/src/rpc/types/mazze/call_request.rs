@@ -21,7 +21,7 @@ use primitives::{
     transaction::{
         native_transaction::NativeTransaction as PrimitiveTransaction, Action,
         Mip1559Transaction, Mip2930Transaction, NativeTransaction,
-        TypedNativeTransaction::*, MIP1559_TYPE, MIP2930_TYPE, LEGACY_TX_TYPE,
+        TypedNativeTransaction::*, LEGACY_TX_TYPE, MIP1559_TYPE, MIP2930_TYPE,
     },
     SignedTransaction, Transaction, TransactionWithSignature,
 };

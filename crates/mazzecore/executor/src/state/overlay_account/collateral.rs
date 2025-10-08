@@ -99,7 +99,9 @@ impl OverlayAccount {
         self.sponsor_info.storage_points.is_some()
     }
 
-    pub fn initialize_account_storage_points(&mut self, prop: U256) -> (U256, U256) {
+    pub fn initialize_account_storage_points(
+        &mut self, prop: U256,
+    ) -> (U256, U256) {
         assert!(self.is_contract());
         let total_collateral = self.sponsor_info.sponsor_balance_for_collateral
             + self.collateral_for_storage;

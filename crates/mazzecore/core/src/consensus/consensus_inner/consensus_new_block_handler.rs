@@ -56,12 +56,9 @@ pub struct ConsensusNewBlockHandler {
 /// object accordingly.
 impl ConsensusNewBlockHandler {
     pub fn new(
-        conf: ConsensusConfig,
-        txpool: SharedTransactionPool,
-        data_man: Arc<BlockDataManager>,
-        executor: Arc<ConsensusExecutor>,
-        statistics: SharedStatistics,
-        notifications: Arc<Notifications>,
+        conf: ConsensusConfig, txpool: SharedTransactionPool,
+        data_man: Arc<BlockDataManager>, executor: Arc<ConsensusExecutor>,
+        statistics: SharedStatistics, notifications: Arc<Notifications>,
         node_type: NodeType,
     ) -> Self {
         let epochs_sender = notifications.epochs_ordered.clone();
@@ -1419,7 +1416,7 @@ impl ConsensusNewBlockHandler {
                 // Ensure all blocks on the main chain before
                 // the new stable block to have state_valid computed
                 if !inner.header_only && !self.conf.bench_mode {
-                   // NOTE: Do not assert new_stable_height >= state_availability_boundary.lower_bound.
+                    // NOTE: Do not assert new_stable_height >= state_availability_boundary.lower_bound.
                     // During snapshot/full sync (and header-only), the boundary may not align with the
                     // newly chosen stable height. Instead we wait for execution to finish and compute
                     // state_valid before proceeding.

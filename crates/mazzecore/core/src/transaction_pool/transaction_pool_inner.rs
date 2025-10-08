@@ -8,8 +8,8 @@ use crate::verification::{PackingCheckResult, VerificationConfig};
 use mazze_executor::machine::Machine;
 use mazze_packing_pool::{PackingPool, PackingPoolConfig};
 use mazze_parameters::{
-    consensus_internal::ELASTICITY_MULTIPLIER,
     collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT,
+    consensus_internal::ELASTICITY_MULTIPLIER,
 };
 
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;

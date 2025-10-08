@@ -8393,3 +8393,8 @@ dependencies = [
  "cc",
  "libc",
 ]
+
+[[patch.unused]]
+name = "sqlite3-sys"
+version = "0.17.0"
+source = "git+https://github.com/MazzeLabs/sqlite3-sys?rev=7c7eb656f9ef0169e4c6532a6257e8255174e5a5#7c7eb656f9ef0169e4c6532a6257e8255174e5a5"

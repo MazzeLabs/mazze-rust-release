@@ -126,7 +126,7 @@ pub struct MdbxConfig {
 impl Default for MdbxConfig {
     fn default() -> Self {
         Self {
-            map_size_mb: None,
+            map_size_mb: Some(crate::impls::defaults::DEFAULT_MDBX_MAP_SIZE_MB),
             max_readers: None,
             sync_mode: MdbxSyncMode::default(),
         }
@@ -135,13 +135,12 @@ impl Default for MdbxConfig {
 
 #[derive(Debug, Clone)]
 pub enum StateDbBackend {
-    Rocksdb,
     Mdbx(MdbxConfig),
 }
 
 impl Default for StateDbBackend {
     fn default() -> Self {
-        StateDbBackend::Rocksdb
+        StateDbBackend::Mdbx(MdbxConfig::default())
     }
 }
 
@@ -239,8 +238,9 @@ pub use self::{
         snapshot_sync::{FullSyncVerifier, MptSlicer},
         state_proof::StateProof,
         storage_db::{
-            kvdb_rocksdb::KvdbRocksdb,
+            kvdb_paritydb::KvdbParitydb,
             kvdb_sqlite::{KvdbSqlite, KvdbSqliteStatements},
+            snapshot_db_manager_paritydb::SnapshotDbManagerParitydb,
             snapshot_db_manager_sqlite::SnapshotDbManagerSqlite,
             sqlite::SqliteConnection,
         },

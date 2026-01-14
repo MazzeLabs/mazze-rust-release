@@ -33,3 +33,6 @@ pub const RESERVED9: Address =
     H160(hex!("0888000000000000000000000000000000000009"));
 pub const RESERVED11: Address =
     H160(hex!("088800000000000000000000000000000000000b"));
+
+// Reserved for the shielded pool precompile/contract.
+pub const SHIELDED_POOL_CONTRACT_ADDRESS: Address = RESERVED8;

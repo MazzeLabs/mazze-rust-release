@@ -4,7 +4,7 @@
 
 use crate::rpc::types::{
     eth::Transaction as ETHTransaction,
-    mazze::{from_primitive_access_list, MazzeAccessList},
+    mazze::{from_primitive_access_list, to_primitive_access_list, MazzeAccessList},
     receipt::Receipt,
     Bytes, RpcAddress,
 };
@@ -14,7 +14,11 @@ use mazzekey::Error;
 use primitives::{
     transaction::{
         eth_transaction::Eip155Transaction,
-        native_transaction::NativeTransaction, Action,
+        native_transaction::{
+            Mip1559Transaction, Mip2930Transaction, NativeTransaction,
+            ShieldedTransaction, TypedNativeTransaction,
+        },
+        Action, LEGACY_TX_TYPE, MIP1559_TYPE, MIP2930_TYPE, MIP_SHIELDED_TYPE,
     },
     SignedTransaction, Transaction as PrimitiveTransaction, TransactionIndex,
     TransactionWithSignature, TransactionWithSignatureSerializePart,
@@ -177,6 +181,11 @@ impl Transaction {
     }
 
     pub fn into_signed(self) -> Result<SignedTransaction, Error> {
+        let action = match self.to {
+            None => Action::Create,
+            Some(address) => Action::Call(address.into()),
+        };
+
         let tx_with_sig = TransactionWithSignature {
             transaction: TransactionWithSignatureSerializePart {
                 unsigned: if self.space == Some(Space::Ethereum) {
@@ -184,36 +193,126 @@ impl Transaction {
                         nonce: self.nonce.into(),
                         gas_price: self.gas_price.into(),
                         gas: self.gas.into(),
-                        action: match self.to {
-                            None => Action::Create,
-                            Some(address) => Action::Call(address.into()),
-                        },
+                        action,
                         value: self.value.into(),
                         chain_id: self.chain_id.map(|x| x.as_u32()),
                         data: self.data.into(),
                     }
                     .into()
                 } else {
-                    NativeTransaction {
-                        nonce: self.nonce.into(),
-                        gas_price: self.gas_price.into(),
-                        gas: self.gas.into(),
-                        action: match self.to {
-                            None => Action::Create,
-                            Some(address) => Action::Call(address.into()),
-                        },
-                        value: self.value.into(),
-                        storage_limit: self.storage_limit.as_u64(),
-                        epoch_height: self.epoch_height.as_u64(),
-                        chain_id: self
-                            .chain_id
-                            .ok_or(Error::Custom(
-                                "Native transaction must have chain_id".into(),
-                            ))?
-                            .as_u32(),
-                        data: self.data.into(),
+                    let default_type_id = if self.max_fee_per_gas.is_some()
+                        || self.max_priority_fee_per_gas.is_some()
+                    {
+                        MIP1559_TYPE
+                    } else if self.access_list.is_some() {
+                        MIP2930_TYPE
+                    } else {
+                        LEGACY_TX_TYPE
+                    };
+                    let transaction_type = self
+                        .transaction_type
+                        .unwrap_or(U64::from(default_type_id));
+
+                    let gas_price: U256 = self.gas_price.into();
+                    let max_fee_per_gas = self
+                        .max_fee_per_gas
+                        .or(self.max_priority_fee_per_gas)
+                        .unwrap_or(self.gas_price);
+                    let max_priority_fee_per_gas =
+                        self.max_priority_fee_per_gas.unwrap_or_default();
+                    let access_list =
+                        to_primitive_access_list(self.access_list.unwrap_or_default());
+                    let chain_id = self
+                        .chain_id
+                        .ok_or(Error::Custom(
+                            "Native transaction must have chain_id".into(),
+                        ))?
+                        .as_u32();
+
+                    match transaction_type.as_usize() as u8 {
+                        LEGACY_TX_TYPE => PrimitiveTransaction::Native(
+                            TypedNativeTransaction::Mip155(NativeTransaction {
+                                nonce: self.nonce.into(),
+                                gas_price,
+                                gas: self.gas.into(),
+                                action,
+                                value: self.value.into(),
+                                storage_limit: self.storage_limit.as_u64(),
+                                epoch_height: self.epoch_height.as_u64(),
+                                chain_id,
+                                data: self.data.into(),
+                            }),
+                        ),
+                        MIP2930_TYPE => PrimitiveTransaction::Native(
+                            TypedNativeTransaction::Mip2930(Mip2930Transaction {
+                                nonce: self.nonce.into(),
+                                gas_price,
+                                gas: self.gas.into(),
+                                action,
+                                value: self.value.into(),
+                                storage_limit: self.storage_limit.as_u64(),
+                                epoch_height: self.epoch_height.as_u64(),
+                                chain_id,
+                                data: self.data.into(),
+                                access_list,
+                            }),
+                        ),
+                        MIP1559_TYPE => PrimitiveTransaction::Native(
+                            TypedNativeTransaction::Mip1559(Mip1559Transaction {
+                                nonce: self.nonce.into(),
+                                max_priority_fee_per_gas:
+                                    max_priority_fee_per_gas.into(),
+                                max_fee_per_gas: max_fee_per_gas.into(),
+                                gas: self.gas.into(),
+                                action,
+                                value: self.value.into(),
+                                storage_limit: self.storage_limit.as_u64(),
+                                epoch_height: self.epoch_height.as_u64(),
+                                chain_id,
+                                data: self.data.into(),
+                                access_list,
+                            }),
+                        ),
+                        MIP_SHIELDED_TYPE => {
+                            if matches!(action, Action::Create) {
+                                return Err(Error::Custom(
+                                    "Shielded transaction requires a recipient"
+                                        .into(),
+                                ));
+                            }
+                            if self.data.0.is_empty() {
+                                return Err(Error::Custom(
+                                    "Shielded payload must not be empty".into(),
+                                ));
+                            }
+                            if !self.value.is_zero() {
+                                return Err(Error::Custom(
+                                    "Shielded transaction must not transfer value"
+                                        .into(),
+                                ));
+                            }
+                            PrimitiveTransaction::Native(
+                                TypedNativeTransaction::Shielded(
+                                ShieldedTransaction {
+                                    nonce: self.nonce.into(),
+                                    gas_price,
+                                    gas: self.gas.into(),
+                                    action,
+                                    value: self.value.into(),
+                                    storage_limit: self.storage_limit.as_u64(),
+                                    epoch_height: self.epoch_height.as_u64(),
+                                    chain_id,
+                                    data: self.data.into(),
+                                },
+                            ))
+                        }
+                        x => {
+                            return Err(Error::Custom(format!(
+                                "Unrecognized transaction type {}",
+                                x
+                            )))
+                        }
                     }
-                    .into()
                 },
                 v: self.v.as_usize() as u8,
                 r: self.r.into(),
@@ -222,6 +321,10 @@ impl Transaction {
             hash: self.hash.into(),
             rlp_size: None,
         };
+        if tx_with_sig.is_shielded() && tx_with_sig.is_unsigned() {
+            return Ok(SignedTransaction::new_shielded(tx_with_sig));
+        }
+
         let public = tx_with_sig.recover_public()?;
         Ok(SignedTransaction::new(public, tx_with_sig))
     }

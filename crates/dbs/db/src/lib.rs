@@ -28,8 +28,8 @@ mod kv_store;
 
 pub use self::{
     impls::{
-        open_database, paritydb_settings, rocksdb_settings, DatabaseBackend,
-        DatabaseCompactionProfile, DatabaseSettings, ParityCompression,
+        open_database, paritydb_settings, DatabaseBackend,
+        DatabaseSettings, ParityCompression,
         ParityDbOpenConfig, SystemDB,
     },
     kv_store::{DynKeyValueStore, KeyValueStore},

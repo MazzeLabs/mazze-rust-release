@@ -7,6 +7,7 @@ mod context;
 pub(super) mod cross_space;
 mod future;
 mod sponsor;
+mod shielded_pool;
 pub(super) mod system_storage;
 
 mod preludes {
@@ -52,24 +53,34 @@ pub fn all_internal_contracts() -> Vec<Box<dyn super::InternalContractTrait>> {
         Box::new(system_storage::SystemStorage::instance()),
         Box::new(future::Reserved2::instance()),
         Box::new(future::Reserved3::instance()),
-        Box::new(future::Reserved8::instance()),
+        Box::new(shielded_pool::ShieldedPool::instance()),
         Box::new(future::Reserved9::instance()),
         Box::new(future::Reserved11::instance()),
     ]
 }
 
 use crate::state::State;
+use mazze_parameters::{
+    genesis::GENESIS_ACCOUNT_ADDRESS,
+    internal_contract_addresses::SHIELDED_POOL_CONTRACT_ADDRESS,
+};
 use mazze_statedb::Result as DbResult;
-use mazze_types::{Address, AddressSpaceUtil, U256};
+use mazze_types::{address_util::AddressUtil, Address, AddressSpaceUtil, U256};
 use primitives::storage::STORAGE_LAYOUT_REGULAR_V0;
 
 pub fn initialize_internal_contract_accounts(
     state: &mut State, addresses: &[Address],
 ) -> DbResult<()> {
     for address in addresses {
+        let mut admin = Address::zero();
+        if *address == SHIELDED_POOL_CONTRACT_ADDRESS {
+            let mut genesis_admin = GENESIS_ACCOUNT_ADDRESS;
+            genesis_admin.set_user_account_type_bits();
+            admin = genesis_admin;
+        }
         state.new_contract_with_admin(
             &address.with_native_space(),
-            /* No admin; admin = */ &Address::zero(),
+            /* No admin; admin = */ &admin,
             /* balance = */ U256::zero(),
             Some(STORAGE_LAYOUT_REGULAR_V0),
         )?;

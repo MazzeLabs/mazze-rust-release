@@ -48,6 +48,12 @@ impl rlp::Encodable for LogEntry {
 impl rlp::Decodable for LogEntry {
     fn decode(rlp: &rlp::Rlp) -> Result<Self, rlp::DecoderError> {
         match rlp.item_count()? {
+            3 => Ok(LogEntry {
+                address: rlp.val_at(0)?,
+                topics: rlp.list_at(1)?,
+                data: rlp.val_at(2)?,
+                space: Space::Native,
+            }),
             4 => Ok(LogEntry {
                 address: rlp.val_at(0)?,
                 topics: rlp.list_at(1)?,

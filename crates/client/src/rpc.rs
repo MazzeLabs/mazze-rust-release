@@ -219,6 +219,10 @@ pub fn setup_debug_rpc_apis(
     common: Arc<CommonImpl>, rpc: Arc<RpcImpl>, pubsub: PubSubClient,
     eth_pubsub: EthPubSubClient, conf: &Configuration,
 ) -> MetaIoHandler<Metadata> {
+    let mut debug_apis = ApiSet::All.list_apis();
+    if !conf.is_test_or_dev_mode() {
+        debug_apis.remove(&Api::Test);
+    }
     setup_rpc_apis(
         common,
         rpc,
@@ -226,7 +230,7 @@ pub fn setup_debug_rpc_apis(
         eth_pubsub,
         &conf.raw_conf.throttling_conf,
         "rpc_local",
-        ApiSet::All.list_apis(),
+        debug_apis,
     )
 }
 
@@ -458,6 +462,9 @@ pub fn setup_debug_rpc_apis_light(
 ) -> MetaIoHandler<Metadata> {
     let mut light_debug_apis = ApiSet::All.list_apis();
     light_debug_apis.remove(&Api::Trace);
+    if !conf.is_test_or_dev_mode() {
+        light_debug_apis.remove(&Api::Test);
+    }
     setup_rpc_apis_light(
         common,
         rpc,

@@ -1981,7 +1981,7 @@ impl ConsensusNewBlockHandler {
                     "compute epoch recovery flag {}",
                     recover_mpt_during_construct_main_state
                 );
-                self.executor.compute_epoch(
+                let executed = self.executor.compute_epoch(
                     EpochExecutionTask::new(
                         main_arena_index,
                         inner,
@@ -1992,6 +1992,12 @@ impl ConsensusNewBlockHandler {
                     None,
                     recover_mpt_during_construct_main_state,
                 );
+                if !executed {
+                    warn!(
+                        "construct_main_state failed for epoch {:?}",
+                        inner.arena[main_arena_index].hash
+                    );
+                }
 
                 // Remove old-main state during start up to save disk,
                 // otherwise, all state will be keep till normal phase, this

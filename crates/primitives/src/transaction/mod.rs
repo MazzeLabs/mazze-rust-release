@@ -11,7 +11,7 @@ pub use eth_transaction::{
 };
 pub use native_transaction::{
     Mip1559Transaction, Mip2930Transaction, NativeTransaction,
-    TypedNativeTransaction,
+    ShieldedTransaction, TypedNativeTransaction,
 };
 
 use crate::{bytes::Bytes, hash::keccak};
@@ -42,6 +42,7 @@ pub const EIP2930_TYPE: u8 = 0x01;
 pub const EIP1559_TYPE: u8 = 0x02;
 pub const MIP2930_TYPE: u8 = 0x01;
 pub const MIP1559_TYPE: u8 = 0x02;
+pub const MIP_SHIELDED_TYPE: u8 = 0x03;
 
 /// Shorter id for transactions in compact blocks
 // TODO should be u48
@@ -126,6 +127,8 @@ pub enum TransactionError {
     FutureTransactionType,
     /// Receiver with invalid type bit.
     InvalidReceiver,
+    /// Shielded transaction violates required constraints.
+    InvalidShielded(String),
     /// Transaction nonce exceeds local limit.
     TooLargeNonce,
 }
@@ -191,6 +194,9 @@ impl fmt::Display for TransactionError {
             ZeroGasPrice => "Zero gas price is not allowed".into(),
             FutureTransactionType => "Ethereum like transaction should have u64::MAX storage limit".into(),
             InvalidReceiver => "Sending transaction to invalid address. The first four bits of address must be 0x0, 0x1, or 0x8.".into(),
+            InvalidShielded(ref err) => {
+                format!("Invalid shielded transaction: {}", err)
+            }
             TooLargeNonce => "Transaction nonce is too large.".into(),
         };
 
@@ -349,13 +355,23 @@ impl Transaction {
     pub fn type_id(&self) -> u8 {
         match self {
             Transaction::Native(TypedNativeTransaction::Mip155(_))
-            | Transaction::Ethereum(EthereumTransaction::Eip155(_)) => 0,
+            | Transaction::Ethereum(EthereumTransaction::Eip155(_)) => {
+                LEGACY_TX_TYPE
+            }
 
             Transaction::Native(TypedNativeTransaction::Mip2930(_))
-            | Transaction::Ethereum(EthereumTransaction::Eip2930(_)) => 1,
+            | Transaction::Ethereum(EthereumTransaction::Eip2930(_)) => {
+                MIP2930_TYPE
+            }
 
             Transaction::Native(TypedNativeTransaction::Mip1559(_))
-            | Transaction::Ethereum(EthereumTransaction::Eip1559(_)) => 2,
+            | Transaction::Ethereum(EthereumTransaction::Eip1559(_)) => {
+                MIP1559_TYPE
+            }
+
+            Transaction::Native(TypedNativeTransaction::Shielded(_)) => {
+                MIP_SHIELDED_TYPE
+            }
         }
     }
 
@@ -384,6 +400,10 @@ impl Transaction {
             Transaction::Native(tx) => tx.access_list(),
             Transaction::Ethereum(tx) => tx.access_list(),
         }
+    }
+
+    pub fn is_shielded(&self) -> bool {
+        matches!(self, Transaction::Native(TypedNativeTransaction::Shielded(_)))
     }
 }
 
@@ -418,6 +438,11 @@ impl Transaction {
                 s.append(tx);
                 type_prefix.extend_from_slice(TYPED_NATIVE_TX_PREFIX);
                 type_prefix.push(MIP2930_TYPE);
+            }
+            Transaction::Native(TypedNativeTransaction::Shielded(tx)) => {
+                s.append(tx);
+                type_prefix.extend_from_slice(TYPED_NATIVE_TX_PREFIX);
+                type_prefix.push(MIP_SHIELDED_TYPE);
             }
             Transaction::Ethereum(EthereumTransaction::Eip155(tx)) => {
                 s.append(tx);
@@ -575,6 +600,15 @@ impl Encodable for TransactionWithSignatureSerializePart {
                 s.append(&self.r);
                 s.append(&self.s);
             }
+            Transaction::Native(TypedNativeTransaction::Shielded(ref tx)) => {
+                s.append_raw(TYPED_NATIVE_TX_PREFIX, 0);
+                s.append_raw(&[MIP_SHIELDED_TYPE], 0);
+                s.begin_list(4);
+                s.append(tx);
+                s.append(&self.v);
+                s.append(&self.r);
+                s.append(&self.s);
+            }
         }
     }
 }
@@ -644,106 +678,59 @@ impl Decodable for TransactionWithSignatureSerializePart {
                 _ => Err(DecoderError::RlpInvalidLength),
             }
         } else {
-            match rlp.as_raw()[0] {
-                TYPED_NATIVE_TX_PREFIX_BYTE => {
-                    if rlp.as_raw().len() <= 4
-                        || rlp.as_raw()[0..3] != *TYPED_NATIVE_TX_PREFIX
-                    {
-                        return Err(DecoderError::RlpInvalidLength);
-                    }
-                    match rlp.as_raw()[3] {
-                        MIP2930_TYPE => {
-                            let rlp = Rlp::new(&rlp.as_raw()[4..]);
-                            if rlp.item_count()? != 4 {
-                                return Err(DecoderError::RlpIncorrectListLen);
-                            }
+            TransactionWithSignatureSerializePart::decode_typed_raw(rlp.as_raw())
+        }
+    }
+}
 
-                            let tx = rlp.val_at(0)?;
-                            let v = rlp.val_at(1)?;
-                            let r = rlp.val_at(2)?;
-                            let s = rlp.val_at(3)?;
-                            Ok(TransactionWithSignatureSerializePart {
-                                unsigned: Transaction::Native(
-                                    TypedNativeTransaction::Mip2930(tx),
-                                ),
-                                v,
-                                r,
-                                s,
-                            })
-                        }
-                        MIP1559_TYPE => {
-                            let rlp = Rlp::new(&rlp.as_raw()[4..]);
-                            if rlp.item_count()? != 4 {
-                                return Err(DecoderError::RlpIncorrectListLen);
-                            }
+impl TransactionWithSignatureSerializePart {
+    fn decode_typed_raw(raw: &[u8]) -> Result<Self, DecoderError> {
+        if raw.is_empty() {
+            return Err(DecoderError::RlpInvalidLength);
+        }
+        if raw.starts_with(TYPED_NATIVE_TX_PREFIX) {
+            let prefix_len = TYPED_NATIVE_TX_PREFIX.len();
+            if raw.len() <= prefix_len {
+                return Err(DecoderError::RlpInvalidLength);
+            }
+            let type_byte = raw[prefix_len];
+            let payload = &raw[prefix_len + 1..];
+            let rlp = Rlp::new(payload);
+            if rlp.item_count()? != 4 {
+                return Err(DecoderError::RlpIncorrectListLen);
+            }
 
-                            let tx = rlp.val_at(0)?;
-                            let v = rlp.val_at(1)?;
-                            let r = rlp.val_at(2)?;
-                            let s = rlp.val_at(3)?;
-                            Ok(TransactionWithSignatureSerializePart {
-                                unsigned: Transaction::Native(
-                                    TypedNativeTransaction::Mip1559(tx),
-                                ),
-                                v,
-                                r,
-                                s,
-                            })
-                        }
-                        _ => Err(DecoderError::RlpInvalidLength),
-                    }
-                }
-                EIP2930_TYPE => {
-                    let rlp = Rlp::new(&rlp.as_raw()[1..]);
-                    if rlp.item_count()? != 11 {
-                        return Err(DecoderError::RlpIncorrectListLen);
-                    }
-
-                    let tx = Eip2930Transaction {
-                        chain_id: rlp.val_at(0)?,
-                        nonce: rlp.val_at(1)?,
-                        gas_price: rlp.val_at(2)?,
-                        gas: rlp.val_at(3)?,
-                        action: rlp.val_at(4)?,
-                        value: rlp.val_at(5)?,
-                        data: rlp.val_at(6)?,
-                        access_list: rlp.list_at(7)?,
-                    };
-                    let v = rlp.val_at(8)?;
-                    let r = rlp.val_at(9)?;
-                    let s = rlp.val_at(10)?;
+            let v = rlp.val_at(1)?;
+            let r = rlp.val_at(2)?;
+            let s = rlp.val_at(3)?;
+            return match type_byte {
+                MIP2930_TYPE => {
+                    let tx: Mip2930Transaction = rlp.val_at(0)?;
                     Ok(TransactionWithSignatureSerializePart {
-                        unsigned: Transaction::Ethereum(
-                            EthereumTransaction::Eip2930(tx),
+                        unsigned: Transaction::Native(
+                            TypedNativeTransaction::Mip2930(tx),
                         ),
                         v,
                         r,
                         s,
                     })
                 }
-                EIP1559_TYPE => {
-                    let rlp = Rlp::new(&rlp.as_raw()[1..]);
-                    if rlp.item_count()? != 12 {
-                        return Err(DecoderError::RlpIncorrectListLen);
-                    }
-
-                    let tx = Eip1559Transaction {
-                        chain_id: rlp.val_at(0)?,
-                        nonce: rlp.val_at(1)?,
-                        max_priority_fee_per_gas: rlp.val_at(2)?,
-                        max_fee_per_gas: rlp.val_at(3)?,
-                        gas: rlp.val_at(4)?,
-                        action: rlp.val_at(5)?,
-                        value: rlp.val_at(6)?,
-                        data: rlp.val_at(7)?,
-                        access_list: rlp.list_at(8)?,
-                    };
-                    let v = rlp.val_at(9)?;
-                    let r = rlp.val_at(10)?;
-                    let s = rlp.val_at(11)?;
+                MIP1559_TYPE => {
+                    let tx: Mip1559Transaction = rlp.val_at(0)?;
                     Ok(TransactionWithSignatureSerializePart {
-                        unsigned: Transaction::Ethereum(
-                            EthereumTransaction::Eip1559(tx),
+                        unsigned: Transaction::Native(
+                            TypedNativeTransaction::Mip1559(tx),
+                        ),
+                        v,
+                        r,
+                        s,
+                    })
+                }
+                MIP_SHIELDED_TYPE => {
+                    let tx: ShieldedTransaction = rlp.val_at(0)?;
+                    Ok(TransactionWithSignatureSerializePart {
+                        unsigned: Transaction::Native(
+                            TypedNativeTransaction::Shielded(tx),
                         ),
                         v,
                         r,
@@ -751,7 +738,68 @@ impl Decodable for TransactionWithSignatureSerializePart {
                     })
                 }
                 _ => Err(DecoderError::RlpInvalidLength),
+            };
+        }
+
+        match raw[0] {
+            EIP2930_TYPE => {
+                let rlp = Rlp::new(&raw[1..]);
+                if rlp.item_count()? != 11 {
+                    return Err(DecoderError::RlpIncorrectListLen);
+                }
+
+                let tx = Eip2930Transaction {
+                    chain_id: rlp.val_at(0)?,
+                    nonce: rlp.val_at(1)?,
+                    gas_price: rlp.val_at(2)?,
+                    gas: rlp.val_at(3)?,
+                    action: rlp.val_at(4)?,
+                    value: rlp.val_at(5)?,
+                    data: rlp.val_at(6)?,
+                    access_list: rlp.list_at(7)?,
+                };
+                let v = rlp.val_at(8)?;
+                let r = rlp.val_at(9)?;
+                let s = rlp.val_at(10)?;
+                Ok(TransactionWithSignatureSerializePart {
+                    unsigned: Transaction::Ethereum(
+                        EthereumTransaction::Eip2930(tx),
+                    ),
+                    v,
+                    r,
+                    s,
+                })
             }
+            EIP1559_TYPE => {
+                let rlp = Rlp::new(&raw[1..]);
+                if rlp.item_count()? != 12 {
+                    return Err(DecoderError::RlpIncorrectListLen);
+                }
+
+                let tx = Eip1559Transaction {
+                    chain_id: rlp.val_at(0)?,
+                    nonce: rlp.val_at(1)?,
+                    max_priority_fee_per_gas: rlp.val_at(2)?,
+                    max_fee_per_gas: rlp.val_at(3)?,
+                    gas: rlp.val_at(4)?,
+                    action: rlp.val_at(5)?,
+                    value: rlp.val_at(6)?,
+                    data: rlp.val_at(7)?,
+                    access_list: rlp.list_at(8)?,
+                };
+                let v = rlp.val_at(9)?;
+                let r = rlp.val_at(10)?;
+                let s = rlp.val_at(11)?;
+                Ok(TransactionWithSignatureSerializePart {
+                    unsigned: Transaction::Ethereum(
+                        EthereumTransaction::Eip1559(tx),
+                    ),
+                    v,
+                    r,
+                    s,
+                })
+            }
+            _ => Err(DecoderError::RlpInvalidLength),
         }
     }
 }
@@ -812,7 +860,8 @@ impl Decodable for TransactionWithSignature {
             // Typed tx encoding is wrapped as an RLP string.
             let b: Vec<u8> = tx_rlp.as_val()?;
             hash = keccak(&b);
-            transaction = rlp::decode(&b)?;
+            transaction =
+                TransactionWithSignatureSerializePart::decode_typed_raw(&b)?;
         };
         Ok(TransactionWithSignature {
             transaction,
@@ -893,6 +942,10 @@ impl TransactionWithSignature {
         self.hash
     }
 
+    pub fn is_shielded(&self) -> bool {
+        self.unsigned.is_shielded()
+    }
+
     /// Recovers the public key of the sender.
     pub fn recover_public(&self) -> Result<Public, keylib::Error> {
         Ok(recover(&self.signature(), &self.unsigned.signature_hash())?)
@@ -903,11 +956,7 @@ impl TransactionWithSignature {
     }
 
     pub fn from_raw(raw: &[u8]) -> Result<Self, DecoderError> {
-        Ok(TransactionWithSignature {
-            transaction: Rlp::new(raw).as_val()?,
-            hash: keccak(raw),
-            rlp_size: Some(raw.len()),
-        })
+        rlp::decode(raw)
     }
 }
 
@@ -995,6 +1044,15 @@ impl SignedTransaction {
         }
     }
 
+    pub fn new_shielded(transaction: TransactionWithSignature) -> Self {
+        let sender = shielded_sender_from_hash(&transaction.hash());
+        SignedTransaction {
+            transaction,
+            sender,
+            public: None,
+        }
+    }
+
     pub fn set_public(&mut self, public: Public) {
         let type_nibble = self.unsigned.space() == Space::Native;
         self.sender = public_to_address(&public, type_nibble);
@@ -1004,6 +1062,10 @@ impl SignedTransaction {
     /// Returns transaction sender.
     pub fn sender(&self) -> AddressWithSpace {
         self.sender.with_space(self.space())
+    }
+
+    pub fn is_shielded(&self) -> bool {
+        self.transaction.is_shielded()
     }
 
     pub fn nonce(&self) -> &U256 {
@@ -1059,6 +1121,13 @@ impl SignedTransaction {
             Ok(true)
         }
     }
+}
+
+fn shielded_sender_from_hash(hash: &H256) -> Address {
+    let mut bytes = [0u8; 20];
+    bytes.copy_from_slice(&hash.as_ref()[12..]);
+    bytes[0] = (bytes[0] & 0x0f) | 0x80;
+    Address::from(bytes)
 }
 
 impl MallocSizeOf for SignedTransaction {

@@ -17,6 +17,10 @@ pub trait SnapshotMptLoadNode {
     ) -> Result<Option<SnapshotMptDbValue>>;
 }
 
+pub trait SnapshotMptIterableDb: SnapshotMptLoadNode {
+    type IterTag;
+}
+
 pub fn mpt_node_path_to_db_key(path: &dyn CompressedPathTrait) -> Vec<u8> {
     let path_slice = path.path_slice();
     let path_mask = path.path_mask();
@@ -127,15 +131,29 @@ impl<DbType: SnapshotMptLoadNode + ?Sized, BorrowType: BorrowMut<DbType>>
     }
 }
 
-impl<
-        DbType: SnapshotMptLoadNode
-            + KeyValueDbIterableTrait<
-                MptKeyValue,
-                [u8],
-                KvdbSqliteShardedIteratorTag,
-            > + ?Sized,
-        BorrowType: BorrowMut<DbType>,
-    > SnapshotMptTraitReadAndIterate for SnapshotMpt<DbType, BorrowType>
+impl<DbType, BorrowType> SnapshotMptTraitReadAndIterate
+    for SnapshotMpt<DbType, BorrowType>
+where
+    DbType: SnapshotMptIterableDb
+        + KeyValueDbIterableTrait<
+            MptKeyValue,
+            [u8],
+            <DbType as SnapshotMptIterableDb>::IterTag,
+        > + ?Sized,
+    BorrowType: BorrowMut<DbType>,
+    KvdbIterIterator<
+        MptKeyValue,
+        [u8],
+        <DbType as SnapshotMptIterableDb>::IterTag,
+    >: WrappedTrait<dyn FallibleIterator<Item = MptKeyValue, Error = Error>>,
+    for<'a> <KvdbIterIterator<
+        MptKeyValue,
+        [u8],
+        <DbType as SnapshotMptIterableDb>::IterTag,
+    > as WrappedLifetimeFamily<
+        'a,
+        dyn FallibleIterator<Item = MptKeyValue, Error = Error>,
+    >>::Out: FallibleIterator<Item = MptKeyValue, Error = Error>,
 {
     fn iterate_subtree_trie_nodes_without_root(
         &mut self, path: &dyn CompressedPathTrait,
@@ -161,16 +179,29 @@ impl<
     }
 }
 
-impl<
-        DbType: SnapshotMptLoadNode
-            + KeyValueDbTraitSingleWriter<ValueType = SnapshotMptDbValue>
-            + KeyValueDbIterableTrait<
-                MptKeyValue,
-                [u8],
-                KvdbSqliteShardedIteratorTag,
-            > + ?Sized,
-        BorrowType: BorrowMut<DbType>,
-    > SnapshotMptTraitRw for SnapshotMpt<DbType, BorrowType>
+impl<DbType, BorrowType> SnapshotMptTraitRw for SnapshotMpt<DbType, BorrowType>
+where
+    DbType: SnapshotMptIterableDb
+        + KeyValueDbTraitSingleWriter<ValueType = SnapshotMptDbValue>
+        + KeyValueDbIterableTrait<
+            MptKeyValue,
+            [u8],
+            <DbType as SnapshotMptIterableDb>::IterTag,
+        > + ?Sized,
+    BorrowType: BorrowMut<DbType>,
+    KvdbIterIterator<
+        MptKeyValue,
+        [u8],
+        <DbType as SnapshotMptIterableDb>::IterTag,
+    >: WrappedTrait<dyn FallibleIterator<Item = MptKeyValue, Error = Error>>,
+    for<'a> <KvdbIterIterator<
+        MptKeyValue,
+        [u8],
+        <DbType as SnapshotMptIterableDb>::IterTag,
+    > as WrappedLifetimeFamily<
+        'a,
+        dyn FallibleIterator<Item = MptKeyValue, Error = Error>,
+    >>::Out: FallibleIterator<Item = MptKeyValue, Error = Error>,
 {
     fn delete_node(&mut self, path: &dyn CompressedPathTrait) -> Result<()> {
         let key = mpt_node_path_to_db_key(path);
@@ -193,13 +224,14 @@ use crate::{
     impls::{
         errors::*,
         merkle_patricia_trie::{CompressedPathRaw, CompressedPathTrait},
-        storage_db::kvdb_sqlite_sharded::KvdbSqliteShardedIteratorTag,
     },
     storage_db::{
         key_value_db::{KeyValueDbIterableTrait, KeyValueDbTraitSingleWriter},
         snapshot_mpt::*,
         SnapshotMptTraitRead,
+        KvdbIterIterator,
     },
+    utils::wrap::{WrappedLifetimeFamily, WrappedTrait},
     MptKeyValue,
 };
 use fallible_iterator::FallibleIterator;

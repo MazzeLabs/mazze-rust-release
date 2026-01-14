@@ -19,13 +19,11 @@ use mazze_internal_common::{
     DatabaseDecodable, DatabaseEncodable, EpochExecutionCommitment,
 };
 use mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
-use mazze_storage::{
-    storage_db::KeyValueDbTrait, KvdbRocksdb, KvdbSqlite, KvdbSqliteStatements,
-};
+use mazze_storage::{storage_db::KeyValueDbTrait, KvdbParitydb};
 use mazze_types::H256;
 use primitives::{Block, BlockHeader, SignedTransaction, TransactionIndex};
 use rlp::Rlp;
-use std::{collections::HashMap, fs, path::Path, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
@@ -62,18 +60,6 @@ fn rocks_db_col(table: DBTable) -> u32 {
     }
 }
 
-fn sqlite_db_table(table: DBTable) -> String {
-    match table {
-        DBTable::Misc => "misc",
-        DBTable::Blocks => "blocks",
-        DBTable::Transactions => "transactions",
-        DBTable::EpochNumbers => "epoch_numbers",
-        DBTable::BlamedHeaderVerifiedRoots => "blamed_header_verified_roots",
-        DBTable::BlockTraces => "block_traces",
-        DBTable::HashByBlockNumber => "hash_by_block_number",
-    }
-    .into()
-}
 
 pub struct DBManager {
     table_db: HashMap<DBTable, Box<dyn KeyValueDbTrait<ValueType = Box<[u8]>>>>,
@@ -90,7 +76,7 @@ impl DBManager {
         for table in DBTable::iter() {
             table_db.insert(
                 table,
-                Box::new(KvdbRocksdb {
+                Box::new(KvdbParitydb {
                     kvdb: db.key_value(),
                     col: rocks_db_col(table),
                 })
@@ -104,56 +90,10 @@ impl DBManager {
         }
     }
 
-    pub fn new_from_rocksdb(
-        db: Arc<SystemDB>, pow: Arc<PowComputer>, genesis_hash: H256,
-    ) -> Self {
-        Self::new_from_kvdb(db, pow, genesis_hash)
-    }
-
     pub fn new_from_paritydb(
         db: Arc<SystemDB>, pow: Arc<PowComputer>, genesis_hash: H256,
     ) -> Self {
         Self::new_from_kvdb(db, pow, genesis_hash)
-    }
-}
-
-impl DBManager {
-    pub fn new_from_sqlite(
-        db_path: &Path, pow: Arc<PowComputer>, genesis_hash: H256,
-    ) -> Self {
-        if let Err(e) = fs::create_dir_all(db_path) {
-            panic!("Error creating database directory: {:?}", e);
-        }
-        let mut table_db = HashMap::new();
-        for table in DBTable::iter() {
-            let table_str = sqlite_db_table(table);
-            let (_, sqlite_db) = KvdbSqlite::open_or_create(
-                &db_path.join(table_str.as_str()), /* Use separate database
-                                                    * for
-                                                    * different table */
-                Arc::new(
-                    KvdbSqliteStatements::make_statements(
-                        &[&"value"],
-                        &[&"BLOB"],
-                        table_str.as_str(),
-                        false,
-                    )
-                    .unwrap(),
-                ),
-                false, /* unsafe_mode */
-            )
-            .expect("Open sqlite failure");
-            table_db.insert(
-                table,
-                Box::new(sqlite_db)
-                    as Box<dyn KeyValueDbTrait<ValueType = Box<[u8]>>>,
-            );
-        }
-        Self {
-            table_db,
-            pow,
-            genesis_hash,
-        }
     }
 }
 
@@ -248,8 +188,8 @@ impl DBManager {
     /// data locality if we get both a block and its info from db.
     /// The info is not a part of the block because the block is inserted
     /// before we know its info, and we do not want to insert a large chunk
-    /// again. TODO Maybe we can use in-place modification (operator `merge`
-    /// in rocksdb) to keep the info together with the block.
+    /// again. TODO Maybe we can use in-place modification to keep the info
+    /// together with the block.
     pub fn insert_local_block_info_to_db(
         &self, block_hash: &H256, value: &LocalBlockInfo,
     ) {
@@ -661,7 +601,7 @@ fn epoch_consensus_epoch_execution_commitment_key(hash: &H256) -> Vec<u8> {
 impl MallocSizeOf for DBManager {
     fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
         // Here we only handle the case that all columns are stored within the
-        // same rocksdb.
+        // same ParityDB backend.
         self.table_db
             .get(&DBTable::Blocks)
             .expect("DBManager initialized")

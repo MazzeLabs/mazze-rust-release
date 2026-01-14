@@ -125,7 +125,6 @@ build_config! {
         (metrics_influxdb_node, (Option<String>), None)
         (metrics_output_file, (Option<String>), None)
         (metrics_report_interval_ms, (u64), 3_000)
-        (rocksdb_disable_wal, (bool), false)
         (txgen_account_count, (usize), 10)
 
         // Genesis section.
@@ -269,7 +268,7 @@ build_config! {
         (additional_maintained_transaction_index_epoch_count, (Option<usize>), None)
         (block_cache_gc_period_ms, (u64), 5_000)
         (block_db_dir, (Option<String>), None)
-        (block_db_type, (String), "rocksdb".to_string())
+        (block_db_type, (String), "paritydb".to_string())
         (paritydb_columns, (Option<u32>), None)
         (paritydb_max_open_files, (Option<u32>), None)
         (paritydb_journal_compression, (Option<String>), None)
@@ -280,10 +279,8 @@ build_config! {
         (enable_single_mpt_storage, (bool), false)
         (ledger_cache_size, (usize), DEFAULT_LEDGER_CACHE_SIZE)
         (invalid_block_hash_cache_size_in_count, (usize), DEFAULT_INVALID_BLOCK_HASH_CACHE_SIZE_IN_COUNT)
-        (rocksdb_cache_size, (Option<usize>), Some(128))
-        (rocksdb_compaction_profile, (Option<String>), None)
-        (state_db_type, (String), "rocksdb".to_string())
-        (mdbx_map_size_mb, (Option<u64>), None)
+        (state_db_type, (String), "mdbx".to_string())
+        (mdbx_map_size_mb, (Option<u64>), Some(mazze_storage::defaults::DEFAULT_MDBX_MAP_SIZE_MB))
         (mdbx_max_readers, (Option<u32>), None)
         (mdbx_sync_mode, (Option<String>), None)
         (storage_delta_mpts_cache_recent_lfu_factor, (f64), mazze_storage::defaults::DEFAULT_DELTA_MPTS_CACHE_RECENT_LFU_FACTOR)
@@ -443,7 +440,10 @@ impl Configuration {
 
     fn paritydb_settings(&self) -> Option<db::ParityDbOpenConfig> {
         if self.raw_conf.block_db_type != "paritydb" {
-            return None;
+            panic!(
+                "Invalid block_db_type parameter: {}. Expected paritydb",
+                self.raw_conf.block_db_type
+            );
         }
 
         let compression = self
@@ -462,7 +462,6 @@ impl Configuration {
 
     fn state_db_backend(&self) -> StateDbBackend {
         match self.raw_conf.state_db_type.as_str() {
-            "rocksdb" => StateDbBackend::Rocksdb,
             "mdbx" => {
                 let sync_mode = match self.raw_conf.mdbx_sync_mode.as_deref() {
                     None | Some("safe") => MdbxSyncMode::Safe,
@@ -478,7 +477,7 @@ impl Configuration {
                 })
             }
             other => panic!(
-                "Invalid state_db_type parameter: {other}. Expected rocksdb/mdbx"
+                "Invalid state_db_type parameter: {other}. Expected mdbx"
             ),
         }
     }
@@ -575,21 +574,6 @@ impl Configuration {
         }
 
         match self.raw_conf.block_db_type.as_str() {
-            "rocksdb" => {
-                let compact_profile = self
-                    .raw_conf
-                    .rocksdb_compaction_profile
-                    .as_ref()
-                    .map(|p| db::DatabaseCompactionProfile::from_str(p).unwrap())
-                    .unwrap_or_default();
-                db::rocksdb_settings(
-                    db_dir,
-                    self.raw_conf.rocksdb_cache_size.clone(),
-                    compact_profile,
-                    NUM_COLUMNS,
-                    self.raw_conf.rocksdb_disable_wal,
-                )
-            }
             "paritydb" => {
                 let columns = self
                     .raw_conf
@@ -610,7 +594,7 @@ impl Configuration {
                     .expect("Failed to configure paritydb")
             }
             other => panic!(
-                "Invalid block_db_type parameter: {other}. Expected rocksdb/paritydb"
+                "Invalid block_db_type parameter: {other}. Expected paritydb"
             ),
         }
     }
@@ -970,11 +954,9 @@ impl Configuration {
                 self.raw_conf.tx_cache_index_maintain_timeout_ms,
             ),
             block_db_backend: match self.raw_conf.block_db_type.as_str() {
-                "rocksdb" => BlockDbBackend::Rocksdb,
-                "sqlite" => BlockDbBackend::Sqlite,
                 "paritydb" => BlockDbBackend::Paritydb,
                 other => panic!(
-                    "Invalid block_db_type parameter: {other}. Expected rocksdb/sqlite/paritydb"
+                    "Invalid block_db_type parameter: {other}. Expected paritydb"
                 ),
             },
             paritydb_settings: self.paritydb_settings(),

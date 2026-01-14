@@ -271,12 +271,11 @@ impl ConsensusExecutionHandler {
             GOOD_TPS_METER.mark(1);
         }
 
-        let tx_skipped = r.receipt.tx_skipped();
         let phantom_txs = r.phantom_txs.clone();
 
         recorder.receive_tx_outcome(r, transaction, block_context);
 
-        if !on_local_main || tx_skipped || dry_run {
+        if !on_local_main || dry_run {
             // Skip transaction index persist
             return Ok(());
         }

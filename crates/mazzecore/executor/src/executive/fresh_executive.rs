@@ -61,7 +61,15 @@ impl<'a, O: ExecutiveObserver> FreshExecutive<'a, O> {
         context: ExecutiveContext<'a>, tx: &'a SignedTransaction,
         options: TransactOptions<O>,
     ) -> Self {
-        let TransactOptions { observer, settings } = options;
+        let TransactOptions {
+            observer,
+            mut settings,
+        } = options;
+        if tx.is_shielded() {
+            settings.charge_gas = false;
+            settings.check_base_price = false;
+            settings.charge_collateral = ChargeCollateral::EstimateSender;
+        }
         let base_gas = gas_required_for(
             tx.action() == &Action::Create,
             &tx.data(),
@@ -82,7 +90,9 @@ impl<'a, O: ExecutiveObserver> FreshExecutive<'a, O> {
     ) -> DbResult<Result<PreCheckedExecutive<'a, O>, ExecutionOutcome>> {
         early_return_on_err!(self.check_base_price());
         // Validate transaction nonce
-        early_return_on_err!(self.check_nonce()?);
+        if !self.tx.is_shielded() {
+            early_return_on_err!(self.check_nonce()?);
+        }
 
         // Validate transaction epoch height.
         if self.settings.check_epoch_bound {
@@ -198,6 +208,21 @@ impl<'a, O: ExecutiveObserver> FreshExecutive<'a, O> {
         let state = &self.context.state;
         let env = self.context.env;
         let spec = self.context.spec;
+
+        if tx.is_shielded() {
+            return Ok(Ok(CostInfo {
+                sender_balance: U512::from(state.balance(&sender)?),
+                base_gas: self.base_gas,
+                total_cost: 0.into(),
+                gas_cost: 0.into(),
+                storage_cost: U256::zero(),
+                sender_intended_cost: 0.into(),
+                gas_price: U256::zero(),
+                burnt_gas_price: U256::zero(),
+                gas_sponsored: false,
+                storage_sponsored: false,
+            }));
+        }
 
         let check_base_price = self.settings.check_base_price;
 

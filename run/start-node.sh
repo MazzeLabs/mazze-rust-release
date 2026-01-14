@@ -23,6 +23,8 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
   exit 1
 fi
 
+export MAZZE_SHIELDED_VK_HEX="${MAZZE_SHIELDED_VK_HEX:-$SCRIPT_DIR/shielded_vk.hex}"
+
 echo "-------$(date '+%Y-%m-%d %H:%M:%S')-------" >> "$LOG_FILE"
 
 # Ensure log_conf in config is absolute so it works regardless of CWD
@@ -33,6 +35,13 @@ if grep -q '^\s*log_conf\s*=' "$TEMP_CONF"; then
   sed -i "s#^\s*log_conf\s*=.*#log_conf = \"$ABS_LOG_CONF\"#" "$TEMP_CONF"
 else
   printf '\nlog_conf = "%s"\n' "$ABS_LOG_CONF" >> "$TEMP_CONF"
+fi
+if compgen -G "$SCRIPT_DIR/blockchain_data/blockchain_db/*" > /dev/null; then
+  if grep -q '^\s*execute_genesis\s*=' "$TEMP_CONF"; then
+    sed -i "s#^\s*execute_genesis\s*=.*#execute_genesis = false#" "$TEMP_CONF"
+  else
+    printf '\nexecute_genesis = false\n' >> "$TEMP_CONF"
+  fi
 fi
 
 # Run from the config directory so relative paths (blockchain_data, logs, etc.)

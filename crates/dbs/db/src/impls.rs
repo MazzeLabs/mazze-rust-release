@@ -20,7 +20,6 @@
 
 use crate::KeyValueStore;
 use kvdb::{DBOp, DBTransaction, DBValue, IoStats, IoStatsKind, KeyValueDB};
-use kvdb_rocksdb::{CompactionProfile, Database as RocksDatabase, DatabaseConfig as RocksConfig};
 use parity_db::{CompressionType, Db as ParityDb, Options as ParityOptions};
 use parity_util_mem::{MallocSizeOf, MallocSizeOfOps};
 use std::{
@@ -28,7 +27,7 @@ use std::{
     fs,
     io,
     iter,
-    path::{Path, PathBuf},
+    path::PathBuf,
     str::FromStr,
     sync::Arc,
 };
@@ -47,42 +46,8 @@ impl SystemDB {
     }
 }
 
-/// db compaction profile
-#[derive(Debug, PartialEq, Clone)]
-pub enum DatabaseCompactionProfile {
-    /// Try to determine compaction profile automatically
-    Auto,
-    /// SSD compaction profile
-    SSD,
-    /// HDD or other slow storage io compaction profile
-    HDD,
-}
-
-impl Default for DatabaseCompactionProfile {
-    fn default() -> Self {
-        DatabaseCompactionProfile::Auto
-    }
-}
-
-impl FromStr for DatabaseCompactionProfile {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "auto" => Ok(DatabaseCompactionProfile::Auto),
-            "ssd" => Ok(DatabaseCompactionProfile::SSD),
-            "hdd" => Ok(DatabaseCompactionProfile::HDD),
-            _ => Err(
-                "Invalid compaction profile given. Expected auto/hdd/ssd."
-                    .into(),
-            ),
-        }
-    }
-}
-
 #[derive(Clone)]
 pub enum DatabaseBackend {
-    Rocksdb { config: RocksConfig },
     Paritydb { options: ParityOptions, columns: u8 },
 }
 
@@ -126,18 +91,6 @@ impl Default for ParityDbOpenConfig {
     }
 }
 
-pub fn rocksdb_settings(
-    path: PathBuf, db_cache_size: Option<usize>,
-    db_compaction: DatabaseCompactionProfile, columns: u32, disable_wal: bool,
-) -> DatabaseSettings {
-    let mut config = RocksConfig::with_columns(columns);
-    config.memory_budget = db_cache_size;
-    config.compaction = compaction_profile(&db_compaction, &path);
-    config.disable_wal = disable_wal;
-
-    DatabaseSettings { path, backend: DatabaseBackend::Rocksdb { config } }
-}
-
 pub fn paritydb_settings(
     path: PathBuf, config: &ParityDbOpenConfig,
 ) -> io::Result<DatabaseSettings> {
@@ -173,23 +126,6 @@ pub fn paritydb_settings(
 
 pub fn open_database(settings: &DatabaseSettings) -> io::Result<Arc<SystemDB>> {
     match &settings.backend {
-        DatabaseBackend::Rocksdb { config } => {
-            fs::create_dir_all(&settings.path)?;
-            let db = match RocksDatabase::open(config, settings.path.to_str().unwrap()) {
-                Ok(db) => {
-                    info!("Open RocksDB successfully ({:?})", settings.path);
-                    db
-                }
-                Err(e) => {
-                    warn!("Failed to open RocksDB ({:?})", settings.path);
-                    return Err(e);
-                }
-            };
-            let db = Arc::new(db);
-            let dyn_db: Arc<dyn KeyValueStore> = db.clone();
-            let sys_db = SystemDB::new(dyn_db);
-            Ok(Arc::new(sys_db))
-        }
         DatabaseBackend::Paritydb { options, columns } => {
             let mut options = options.clone();
             options.path = settings.path.clone();
@@ -200,14 +136,6 @@ pub fn open_database(settings: &DatabaseSettings) -> io::Result<Arc<SystemDB>> {
             let sys_db = SystemDB::new(kvdb);
             Ok(Arc::new(sys_db))
         }
-    }
-}
-
-fn compaction_profile(profile: &DatabaseCompactionProfile, db_path: &Path) -> CompactionProfile {
-    match profile {
-        DatabaseCompactionProfile::Auto => CompactionProfile::auto(db_path),
-        DatabaseCompactionProfile::SSD => CompactionProfile::ssd(),
-        DatabaseCompactionProfile::HDD => CompactionProfile::hdd(),
     }
 }
 

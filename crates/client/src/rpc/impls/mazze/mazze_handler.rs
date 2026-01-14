@@ -349,7 +349,7 @@ impl RpcImpl {
             TransactionWithSignature::from_raw(&raw.into_vec()),
         )?;
 
-        if tx.recover_public().is_err() {
+        if !(tx.is_shielded() && tx.is_unsigned()) && tx.recover_public().is_err() {
             bail!(invalid_params(
                 "tx",
                 "Can not recover pubkey for Ethereum like tx"
@@ -767,15 +767,6 @@ impl RpcImpl {
 
         let receipt =
             self.construct_rpc_receipt(tx_index, &exec_info, false, false)?;
-        if let Some(r) = &receipt {
-            // A skipped transaction is not available to clients if accessed by
-            // its hash.
-            if r.outcome_status
-                == TransactionStatus::Skipped.in_space(Space::Native).into()
-            {
-                return Ok(None);
-            }
-        }
         Ok(receipt)
     }
 
@@ -959,17 +950,20 @@ impl RpcImpl {
         let mut transactions = Vec::new();
 
         for tx in txs {
-            let public = match tx.recover_public() {
-                Ok(public) => public,
-                Err(e) => {
-                    bail!(invalid_params(
-                        &format!("raw_txs, tx {:?}", tx),
-                        format!("Recover public error: {:?}", e),
-                    ));
-                }
+            let mut signed_tx = if tx.is_shielded() && tx.is_unsigned() {
+                SignedTransaction::new_shielded(tx)
+            } else {
+                let public = match tx.recover_public() {
+                    Ok(public) => public,
+                    Err(e) => {
+                        bail!(invalid_params(
+                            &format!("raw_txs, tx {:?}", tx),
+                            format!("Recover public error: {:?}", e),
+                        ));
+                    }
+                };
+                SignedTransaction::new(public, tx)
             };
-
-            let mut signed_tx = SignedTransaction::new(public, tx);
 
             // set fake data for latency tests
             match signed_tx.transaction.transaction.unsigned {
@@ -984,6 +978,11 @@ impl RpcImpl {
                     unsigned.data = vec![0; tx_data_len];
                 }
                 Transaction::Native(TypedNativeTransaction::Mip2930(
+                    ref mut unsigned,
+                )) if tx_data_len > 0 => {
+                    unsigned.data = vec![0; tx_data_len];
+                }
+                Transaction::Native(TypedNativeTransaction::Shielded(
                     ref mut unsigned,
                 )) if tx_data_len > 0 => {
                     unsigned.data = vec![0; tx_data_len];

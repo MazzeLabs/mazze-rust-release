@@ -101,6 +101,14 @@ pub trait OpenSnapshotMptTrait<'db> {
     ) -> StorageResult<Self::SnapshotDbBorrowSharedType>;
 }
 
+pub trait SnapshotMptDbTrait: for<'db> OpenSnapshotMptTrait<'db> {
+    fn start_transaction(&mut self) -> StorageResult<()>;
+    fn commit_transaction(&mut self) -> StorageResult<()>;
+}
+
+pub type AlreadyOpenSnapshots<T> =
+    Arc<RwLock<HashMap<PathBuf, Option<Weak<T>>>>>;
+
 pub trait SnapshotDbTrait:
     KeyValueDbTraitOwnedRead
     + KeyValueDbTraitRead
@@ -117,6 +125,7 @@ pub trait SnapshotDbTrait:
             Self::SnapshotKvdbIterTraitTag,
         >,
     >;
+    type SnapshotMptDb: SnapshotMptDbTrait;
 
     fn get_null_snapshot() -> Self;
 
@@ -140,14 +149,14 @@ pub trait SnapshotDbTrait:
 
     fn direct_merge(
         &mut self, old_snapshot_db: Option<&Arc<Self>>,
-        mpt_snapshot: &mut Option<SnapshotMptDbSqlite>,
+        mpt_snapshot: &mut Option<Self::SnapshotMptDb>,
         recover_mpt_with_kv_snapshot_exist: bool,
         in_reconstruct_snapshot_state: bool,
     ) -> StorageResult<MerkleHash>;
 
     fn copy_and_merge(
         &mut self, old_snapshot_db: &Arc<Self>,
-        mpt_snapshot_db: &mut Option<SnapshotMptDbSqlite>,
+        mpt_snapshot_db: &mut Option<Self::SnapshotMptDb>,
         in_reconstruct_snapshot_state: bool,
     ) -> StorageResult<MerkleHash>;
 
@@ -174,10 +183,6 @@ pub trait SnapshotDbTrait:
 use crate::{
     impls::{
         errors::Result as StorageResult,
-        storage_db::{
-            snapshot_db_manager_sqlite::AlreadyOpenSnapshots,
-            snapshot_mpt_db_sqlite::SnapshotMptDbSqlite,
-        },
     },
     storage_db::{
         KeyValueDbIterableTrait, KeyValueDbTraitOwnedRead, KeyValueDbTraitRead,
@@ -191,5 +196,10 @@ use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use primitives::{EpochId, MerkleHash, MERKLE_NULL_NODE, NULL_EPOCH};
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use rlp_derive::{RlpDecodable, RlpEncodable};
-use std::{path::Path, sync::Arc};
+use parking_lot::RwLock;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Weak},
+};
 use tokio::sync::Semaphore;

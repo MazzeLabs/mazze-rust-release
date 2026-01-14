@@ -143,8 +143,8 @@ pub mod client_methods {
             drop(blockgen);
         }
 
-        // Make sure ledger_db is properly dropped, so rocksdb can be closed
-        // cleanly
+        // Make sure ledger_db is properly dropped, so the ParityDB handles are
+        // closed cleanly
         let mut graceful = true;
         graceful &= check_graceful_shutdown(ledger_db);
         debug!("ledger_db drop: graceful = {}", graceful);

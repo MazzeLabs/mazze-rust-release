@@ -18,6 +18,8 @@ version.txt
 
 # Node/miner runtime mounts
 run/*.toml.backup
+run/blockchain_data
+run/blockchain_data_dev
 
 # Editors/OS
 .vscode/

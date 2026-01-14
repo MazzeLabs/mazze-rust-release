@@ -218,8 +218,9 @@ use crate::{
     impls::{
         errors::*,
         merkle_patricia_trie::{mpt_cursor::*, MptMerger, *},
-        storage_db::snapshot_kv_db_sqlite::test_lib::{
-            check_key_value_load, open_snapshot_db_for_testing,
+        storage_db::{
+            snapshot_debug::check_key_value_load,
+            snapshot_kv_db_sqlite::test_lib::open_snapshot_db_for_testing,
         },
     },
     storage_db::{

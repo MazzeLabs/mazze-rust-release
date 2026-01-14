@@ -158,7 +158,14 @@ impl TransactionDataManager {
         let mut recovered_trans = Vec::new();
         if uncached_trans.len() < WORKER_COMPUTATION_PARALLELISM * 8 {
             for (idx, tx) in uncached_trans {
-                if let Ok(public) = tx.recover_public() {
+                if tx.is_shielded() && tx.is_unsigned() {
+                    recovered_trans.push((
+                        idx,
+                        Arc::new(SignedTransaction::new_shielded(
+                            tx.clone(),
+                        )),
+                    ));
+                } else if let Ok(public) = tx.recover_public() {
                     recovered_trans.push((
                         idx,
                         Arc::new(SignedTransaction::new(public, tx.clone())),
@@ -207,11 +214,21 @@ impl TransactionDataManager {
                 self.worker_pool.lock().execute(move || {
                     let mut signed_txns = Vec::new();
                     for (idx, tx) in unsigned_txns {
-                        if let Ok(public) = tx.recover_public() {
-                            signed_txns.push((idx, Arc::new(SignedTransaction::new(
-                                public,
-                                tx.clone(),
-                            ))));
+                        if tx.is_shielded() && tx.is_unsigned() {
+                            signed_txns.push((
+                                idx,
+                                Arc::new(SignedTransaction::new_shielded(
+                                    tx.clone(),
+                                )),
+                            ));
+                        } else if let Ok(public) = tx.recover_public() {
+                            signed_txns.push((
+                                idx,
+                                Arc::new(SignedTransaction::new(
+                                    public,
+                                    tx.clone(),
+                                )),
+                            ));
                         } else {
                             info!(
                                 "Unable to recover the public key of transaction {:?}",

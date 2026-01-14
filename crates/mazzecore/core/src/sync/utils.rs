@@ -105,13 +105,17 @@ pub fn create_simple_block(
 pub fn initialize_data_manager(
     db_dir: &str, dbtype: BlockDbBackend, pow: Arc<PowComputer>, vm: VmFactory,
 ) -> (Arc<BlockDataManager>, Arc<Block>) {
-    let settings = db::rocksdb_settings(
+    let parity_config = db::ParityDbOpenConfig {
+        columns: NUM_COLUMNS,
+        compression: None,
+        disable_wal: false,
+        stats: false,
+    };
+    let settings = db::paritydb_settings(
         Path::new(db_dir).to_path_buf(),
-        Some(128),
-        db::DatabaseCompactionProfile::default(),
-        NUM_COLUMNS,
-        false,
-    );
+        &parity_config,
+    )
+    .expect("Failed to configure ParityDB");
     let ledger_db = db::open_database(&settings)
         .map_err(|e| format!("Failed to open database {:?}", e))
         .unwrap();

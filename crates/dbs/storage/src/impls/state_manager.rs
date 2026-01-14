@@ -2,8 +2,8 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-pub type DeltaDbManager = DeltaDbManagerRocksdb;
-pub type SnapshotDbManager = SnapshotDbManagerSqlite;
+pub type DeltaDbManager = DeltaDbManagerParitydb;
+pub type SnapshotDbManager = SnapshotDbManagerParitydb;
 pub type SnapshotDb = <SnapshotDbManager as SnapshotDbManagerTrait>::SnapshotDb;
 
 pub struct StateTrees {
@@ -49,10 +49,6 @@ impl Drop for StateManager {
 impl StateManager {
     pub fn new(conf: StorageConfiguration) -> Result<Self> {
         debug!("Storage conf {:?}", conf);
-        // Make sure sqlite temp directory is using the data disk instead of the
-        // system disk.
-        std::env::set_var("SQLITE_TMPDIR", conf.path_snapshot_dir.clone());
-
         let single_mpt_storage_manager = if conf.enable_single_mpt_storage {
             Some(SingleMptStorageManager::new_arc(
                 conf.path_storage_dir.join("single_mpt"),
@@ -830,8 +826,8 @@ use crate::{
         errors::*,
         replicated_state::ReplicatedState,
         storage_db::{
-            delta_db_manager_rocksdb::DeltaDbManagerRocksdb,
-            snapshot_db_manager_sqlite::SnapshotDbManagerSqlite,
+            delta_db_manager_paritydb::DeltaDbManagerParitydb,
+            snapshot_db_manager_paritydb::SnapshotDbManagerParitydb,
         },
         storage_manager::{
             single_mpt_storage_manager::SingleMptStorageManager,

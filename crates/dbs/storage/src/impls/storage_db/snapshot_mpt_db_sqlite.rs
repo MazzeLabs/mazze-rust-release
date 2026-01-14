@@ -152,6 +152,7 @@ impl SnapshotDbTrait for SnapshotMptDbSqlite {
     type SnapshotKvdbIterTraitTag = KvdbSqliteShardedIteratorTag;
     type SnapshotKvdbIterType =
         KvdbSqliteSharded<<Self as KeyValueDbTypes>::ValueType>;
+    type SnapshotMptDb = SnapshotMptDbSqlite;
 
     fn get_null_snapshot() -> Self {
         unreachable!()
@@ -226,6 +227,16 @@ impl SnapshotDbTrait for SnapshotMptDbSqlite {
         >,
     > {
         unreachable!()
+    }
+}
+
+impl SnapshotMptDbTrait for SnapshotMptDbSqlite {
+    fn start_transaction(&mut self) -> Result<()> {
+        <SnapshotMptDbSqlite as SnapshotDbTrait>::start_transaction(self)
+    }
+
+    fn commit_transaction(&mut self) -> Result<()> {
+        <SnapshotMptDbSqlite as SnapshotDbTrait>::commit_transaction(self)
     }
 }
 
@@ -342,9 +353,10 @@ use crate::{
         },
     },
     storage_db::{
-        KeyValueDbIterableTrait, KeyValueDbTypes, OpenSnapshotMptTrait,
-        OwnedReadImplFamily, ReadImplFamily, SingleWriterImplFamily,
-        SnapshotDbTrait, SnapshotMptDbValue,
+        AlreadyOpenSnapshots, KeyValueDbIterableTrait, KeyValueDbTypes,
+        OpenSnapshotMptTrait, OwnedReadImplFamily, ReadImplFamily,
+        SingleWriterImplFamily, SnapshotDbTrait, SnapshotMptDbTrait,
+        SnapshotMptDbValue,
     },
     utils::wrap::Wrap,
     MptKeyValue, SnapshotDbManagerSqlite, SqliteConnection,
@@ -364,6 +376,5 @@ use super::{
         KvdbSqliteShardedDestructureTrait, KvdbSqliteShardedIteratorTag,
         KvdbSqliteShardedRefDestructureTrait,
     },
-    snapshot_db_manager_sqlite::AlreadyOpenSnapshots,
     sqlite::SQLITE_NO_PARAM,
 };

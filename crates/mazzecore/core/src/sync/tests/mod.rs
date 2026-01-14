@@ -28,7 +28,8 @@ fn test_remove_expire_blocks() {
             1,
             1,
             50000,
-            BlockDbBackend::Rocksdb,
+            BlockDbBackend::Paritydb,
+            H256::default(),
         );
         // test initialization
         {

@@ -807,6 +807,11 @@ impl BlockGenerator {
                 _ => {}
             }
 
+            if !bg.pow_config.test_mode && bg.sync.catch_up_mode() {
+                thread::sleep(sleep_duration);
+                continue;
+            }
+
             if bg.is_mining_block_outdated(
                 current_mining_block.as_ref(),
                 &last_assemble,

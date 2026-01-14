@@ -60,5 +60,8 @@ pub mod spec;
 /// meaningful database interfaces for the execution.
 pub mod state;
 
+/// Shielded primitives used by the pool, tooling, and circuits.
+pub mod shielded;
+
 pub use internal_contract::{InternalContractMap, InternalContractTrait};
 pub use observer as executive_observer;

@@ -6,13 +6,13 @@
 /// sync.
 pub struct PersistedSnapshotInfoMap {
     // Db to persist snapshot_info.
-    snapshot_info_db: KvdbSqlite<Box<[u8]>>,
+    snapshot_info_db: KvdbParitydb,
     // In memory snapshot_info_map_by_epoch.
     snapshot_info_map_by_epoch: HashMap<EpochId, SnapshotInfo>,
 }
 
 impl PersistedSnapshotInfoMap {
-    fn new(snapshot_info_db: KvdbSqlite<Box<[u8]>>) -> Result<Self> {
+    fn new(snapshot_info_db: KvdbParitydb) -> Result<Self> {
         let mut result = Self {
             // The map is loaded later
             snapshot_info_map_by_epoch: Default::default(),
@@ -54,34 +54,18 @@ impl PersistedSnapshotInfoMap {
     }
 
     fn load_persist_state(&mut self) -> Result<()> {
-        // Load snapshot info from db.
-        let (maybe_info_db_connection, statements) =
-            self.snapshot_info_db.destructure_mut();
-
-        let mut snapshot_info_iter = kvdb_sqlite_iter_range_impl(
-            maybe_info_db_connection,
-            statements,
-            &[],
-            None,
-            |row: &Statement<'_>| {
-                let key = row.read::<Vec<u8>>(0)?;
-                let value = row.read::<Vec<u8>>(1)?;
-
-                if key.len() != EpochId::len_bytes() {
-                    Err(DecoderError::RlpInvalidLength.into())
-                } else {
-                    Ok((
-                        EpochId::from_slice(&key),
-                        SnapshotInfo::decode(&Rlp::new(&value))?,
-                    ))
-                }
-            },
-        )?;
-        while let Some((snapshot_epoch, snapshot_info)) =
-            snapshot_info_iter.next()?
+        for (key, value) in self
+            .snapshot_info_db
+            .kvdb
+            .iter(self.snapshot_info_db.col)
         {
-            self.snapshot_info_map_by_epoch
-                .insert(snapshot_epoch, snapshot_info);
+            if key.len() != EpochId::len_bytes() {
+                return Err(DecoderError::RlpInvalidLength.into());
+            }
+            self.snapshot_info_map_by_epoch.insert(
+                EpochId::from_slice(&key),
+                SnapshotInfo::decode(&Rlp::new(&value))?,
+            );
         }
         Ok(())
     }
@@ -141,9 +125,7 @@ pub struct StorageManager {
 
 impl MallocSizeOf for StorageManager {
     fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
-        // TODO: Sqlite for snapshot may also use a significant amount of
-        // memory. We need to fork the crate `sqlite` ourselves to
-        // expose `sqlite3_status` to get the memory usage statistics.
+        // TODO: Snapshot DB memory usage is not accounted for here.
         let mut size = 0;
         size += self.delta_mpts_node_memory_manager.size_of(ops);
         size += self.snapshot_associated_mpts_by_epoch.size_of(ops);
@@ -214,13 +196,23 @@ impl StorageManager {
             fs::create_dir_all(storage_dir)?;
         }
 
-        let (_, snapshot_info_db) = KvdbSqlite::open_or_create(
-            &storage_conf.path_snapshot_info_db,
-            SNAPSHOT_KVDB_STATEMENTS.clone(),
-            false, /* unsafe_mode */
+        let snapshot_info_config = db::ParityDbOpenConfig {
+            columns: 1,
+            compression: None,
+            disable_wal: false,
+            stats: false,
+        };
+        let snapshot_info_settings = db::paritydb_settings(
+            storage_conf.path_snapshot_info_db.clone(),
+            &snapshot_info_config,
         )?;
+        let snapshot_info_db = db::open_database(&snapshot_info_settings)?;
+        let snapshot_info_kvdb = KvdbParitydb {
+            kvdb: snapshot_info_db.key_value(),
+            col: 0,
+        };
         let snapshot_info_map =
-            PersistedSnapshotInfoMap::new(snapshot_info_db)?;
+            PersistedSnapshotInfoMap::new(snapshot_info_kvdb)?;
 
         let (
             in_progress_snapshot_finish_signaler,
@@ -1564,18 +1556,6 @@ impl MaybeDeltaTrieDestroyErrors {
     }
 }
 
-lazy_static! {
-    static ref SNAPSHOT_KVDB_STATEMENTS: Arc<KvdbSqliteStatements> = Arc::new(
-        KvdbSqliteStatements::make_statements(
-            &["value"],
-            &["BLOB"],
-            &storage_dir::SNAPSHOT_INFO_DB_NAME,
-            false
-        )
-        .unwrap()
-    );
-}
-
 use crate::{
     impls::{
         delta_mpt::{
@@ -1587,11 +1567,7 @@ use crate::{
         errors::*,
         state_manager::{DeltaDbManager, SnapshotDb, SnapshotDbManager},
         storage_db::{
-            kvdb_sqlite::{
-                kvdb_sqlite_iter_range_impl, KvdbSqliteDestructureTrait,
-                KvdbSqliteStatements,
-            },
-            snapshot_kv_db_sqlite::test_lib::check_key_value_load,
+            snapshot_debug::check_key_value_load,
         },
         storage_manager::snapshot_manager::SnapshotManager,
     },
@@ -1600,13 +1576,11 @@ use crate::{
         DeltaDbManagerTrait, KeyValueDbIterableTrait, SnapshotDbManagerTrait,
         SnapshotInfo, SnapshotKeptToProvideSyncStatus,
     },
-    storage_dir,
     utils::guarded_value::GuardedValue,
-    DeltaMpt, DeltaMptIdGen, DeltaMptIterator, KeyValueDbTrait, KvdbSqlite,
+    DeltaMpt, DeltaMptIdGen, DeltaMptIterator, KeyValueDbTrait, KvdbParitydb,
     OpenDeltaDbLru, ProvideExtraSnapshotSyncConfig, StateIndex,
     StateRootWithAuxInfo, StorageConfiguration,
 };
-use fallible_iterator::FallibleIterator;
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use mazze_internal_common::{
     consensus_api::StateMaintenanceTrait, StateAvailabilityBoundary,
@@ -1614,7 +1588,6 @@ use mazze_internal_common::{
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use primitives::{EpochId, MerkleHash, MERKLE_NULL_NODE, NULL_EPOCH};
 use rlp::{Decodable, DecoderError, Encodable, Rlp};
-use sqlite::Statement;
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},

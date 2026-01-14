@@ -149,12 +149,22 @@ impl SnapshotMptLoadNode
     }
 }
 
+impl SnapshotMptIterableDb
+    for KvdbSqliteShardedBorrowMut<'static, SnapshotMptDbValue>
+{
+    type IterTag = KvdbSqliteShardedIteratorTag;
+}
+
 impl SnapshotMptLoadNode for KvdbSqliteSharded<SnapshotMptDbValue> {
     fn load_node_rlp(
         &mut self, key: &[u8],
     ) -> Result<Option<SnapshotMptDbValue>> {
         self.get_mut_impl(key)
     }
+}
+
+impl SnapshotMptIterableDb for KvdbSqliteSharded<SnapshotMptDbValue> {
+    type IterTag = KvdbSqliteShardedIteratorTag;
 }
 
 impl SnapshotMptLoadNode
@@ -165,6 +175,12 @@ impl SnapshotMptLoadNode
     ) -> Result<Option<SnapshotMptDbValue>> {
         self.get_impl(key)
     }
+}
+
+impl SnapshotMptIterableDb
+    for KvdbSqliteShardedBorrowShared<'static, SnapshotMptDbValue>
+{
+    type IterTag = KvdbSqliteShardedIteratorTag;
 }
 
 impl<'db> OpenSnapshotMptTrait<'db> for SnapshotKvDbSqlite {
@@ -251,6 +267,7 @@ impl SnapshotDbTrait for SnapshotKvDbSqlite {
     type SnapshotKvdbIterTraitTag = KvdbSqliteShardedIteratorTag;
     type SnapshotKvdbIterType =
         KvdbSqliteSharded<<Self as KeyValueDbTypes>::ValueType>;
+    type SnapshotMptDb = SnapshotMptDbSqlite;
 
     fn get_null_snapshot() -> Self {
         Self {
@@ -753,17 +770,19 @@ use crate::{
                 KvdbSqliteShardedIteratorTag,
                 KvdbSqliteShardedRefDestructureTrait,
             },
-            snapshot_db_manager_sqlite::AlreadyOpenSnapshots,
-            snapshot_mpt::{SnapshotMpt, SnapshotMptLoadNode},
+            snapshot_mpt::{
+                SnapshotMpt, SnapshotMptIterableDb, SnapshotMptLoadNode,
+            },
             sqlite::SQLITE_NO_PARAM,
         },
     },
     storage_db::{
-        KeyValueDbIterableTrait, KeyValueDbTraitSingleWriter, KeyValueDbTypes,
-        OpenSnapshotMptTrait, OwnedReadImplByFamily, OwnedReadImplFamily,
-        ReadImplByFamily, ReadImplFamily, SingleWriterImplByFamily,
-        SingleWriterImplFamily, SnapshotDbTrait, SnapshotMptDbValue,
-        SnapshotMptTraitReadAndIterate, SnapshotMptTraitRw,
+        AlreadyOpenSnapshots, KeyValueDbIterableTrait,
+        KeyValueDbTraitSingleWriter, KeyValueDbTypes, OpenSnapshotMptTrait,
+        OwnedReadImplByFamily, OwnedReadImplFamily, ReadImplByFamily,
+        ReadImplFamily, SingleWriterImplByFamily, SingleWriterImplFamily,
+        SnapshotDbTrait, SnapshotMptDbValue, SnapshotMptTraitReadAndIterate,
+        SnapshotMptTraitRw,
     },
     utils::wrap::Wrap,
     KVInserter, SnapshotDbManagerSqlite, SqliteConnection,

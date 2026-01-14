@@ -523,6 +523,9 @@ impl SynchronizationProtocolHandler {
     }
 
     pub fn catch_up_mode(&self) -> bool {
+        if self.protocol_config.dev_mode {
+            return false;
+        }
         self.phase_manager.get_current_phase().phase_type()
             != SyncPhaseType::Normal
     }
@@ -1227,7 +1230,10 @@ impl SynchronizationProtocolHandler {
 
         let throttle_ratio = THROTTLING_SERVICE.read().get_throttling_ratio();
         let num_total = peer_ids.len();
-        let num_allowed = (num_total as f64 * throttle_ratio) as usize;
+        let mut num_allowed = (num_total as f64 * throttle_ratio) as usize;
+        if num_total > 0 && throttle_ratio > 0.0 && num_allowed == 0 {
+            num_allowed = 1;
+        }
 
         if num_total > num_allowed {
             debug!("apply throttling for broadcast_message, total: {}, allowed: {}", num_total, num_allowed);

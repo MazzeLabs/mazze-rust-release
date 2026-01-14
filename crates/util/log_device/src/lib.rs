@@ -16,7 +16,7 @@ use std::{
     sync::Arc,
 };
 
-// database columns for rocksdb
+// database columns for ParityDB
 /// Column for miscellaneous items
 const COL_DB: u32 = 0;
 /// Number of columns in DB
@@ -68,13 +68,14 @@ impl LogDeviceManager {
     pub fn new(path_dir: PathBuf) -> Self {
         let mut db_dir_path = path_dir.clone();
         db_dir_path.push(META_DATA_DB_DIR);
-        let settings = db::rocksdb_settings(
-            db_dir_path.clone(),
-            None,
-            db::DatabaseCompactionProfile::default(),
-            NUM_COLUMNS.clone(),
-            false, /* disable_wal */
-        );
+        let parity_config = db::ParityDbOpenConfig {
+            columns: NUM_COLUMNS,
+            compression: None,
+            disable_wal: false,
+            stats: false,
+        };
+        let settings = db::paritydb_settings(db_dir_path.clone(), &parity_config)
+            .expect("Failed to configure ParityDB for log device");
 
         let db = db::open_database(&settings).unwrap();
 

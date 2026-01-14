@@ -46,7 +46,7 @@ use mazze_internal_common::{
     EpochExecutionCommitment, StateAvailabilityBoundary, StateRootWithAuxInfo,
 };
 use metrics::{register_meter_with_group, Meter, MeterTimer};
-use std::{hash::Hash, path::Path, time::Duration};
+use std::{hash::Hash, time::Duration};
 
 lazy_static! {
     static ref TX_POOL_RECOVER_TIMER: Arc<dyn Meter> =
@@ -182,23 +182,11 @@ impl BlockDataManager {
             config.tx_cache_index_maintain_timeout,
             worker_pool,
         );
-        let db_manager = match config.block_db_backend {
-            BlockDbBackend::Rocksdb => DBManager::new_from_rocksdb(
-                db,
-                pow.clone(),
-                true_genesis.hash(),
-            ),
-            BlockDbBackend::Sqlite => DBManager::new_from_sqlite(
-                Path::new("./sqlite_db"),
-                pow.clone(),
-                true_genesis.hash(),
-            ),
-            BlockDbBackend::Paritydb => DBManager::new_from_paritydb(
-                db,
-                pow.clone(),
-                true_genesis.hash(),
-            ),
-        };
+        let db_manager = DBManager::new_from_paritydb(
+            db,
+            pow.clone(),
+            true_genesis.hash(),
+        );
         let previous_db_progress =
             db_manager.gc_progress_from_db().unwrap_or(0);
 
@@ -1754,8 +1742,6 @@ impl BlockDataManager {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum BlockDbBackend {
-    Rocksdb,
-    Sqlite,
     Paritydb,
 }
 

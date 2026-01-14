@@ -4,12 +4,16 @@
 
 use std::{
     collections::HashMap,
+    env,
     fs::File,
     io::{BufRead, BufReader, Read},
+    path::Path,
     sync::Arc,
 };
 
 use rustc_hex::FromHex;
+use sha3_macro::keccak;
+use solidity_abi::ABIEncodable;
 use toml::Value;
 
 use keylib::KeyPair;
@@ -19,6 +23,7 @@ use mazze_parameters::{
     consensus::{GENESIS_GAS_LIMIT, ONE_MAZZE_IN_MAZZY},
     consensus_internal::GENESIS_TOKEN_COUNT_IN_MAZZE,
     genesis::*,
+    internal_contract_addresses::SHIELDED_POOL_CONTRACT_ADDRESS,
 };
 use mazze_statedb::StateDb;
 use mazze_storage::{StorageManager, StorageManagerTrait};
@@ -41,6 +46,20 @@ use mazze_executor::{
 };
 use mazze_vm_types::{CreateContractAddress, Env};
 use primitives::transaction::native_transaction::NativeTransaction;
+
+// Native treasury address (type bits 0x1) derived from the genesis key.
+const GENESIS_TREASURY_ADDRESS_HEX: &str =
+    "0x1fd05dc5b53db270b52b4bc2b5068d41cef1b240";
+const GENESIS_TREASURY_BALANCE_MAZZY_STR: &str =
+    "2500000000000000000000000000";
+const SHIELDED_POOL_GENESIS_FUND_MAZZE: u64 = 250_000_000;
+
+fn genesis_treasury_address() -> Address {
+    GENESIS_TREASURY_ADDRESS_HEX
+        .trim_start_matches("0x")
+        .parse::<Address>()
+        .unwrap()
+}
 
 pub fn default(dev_or_test_mode: bool) -> HashMap<AddressWithSpace, U256> {
     let mut accounts: HashMap<AddressWithSpace, U256> = HashMap::new();
@@ -66,11 +85,8 @@ pub fn default(dev_or_test_mode: bool) -> HashMap<AddressWithSpace, U256> {
         );
     }
 
-    let genesis_address = "0x144c9f06748b745fe9c74d91d8d089af8ba32167"
-        .trim_start_matches("0x")
-        .parse::<Address>()
-        .unwrap();
-    let balance = U256::from_dec_str("2500000000000000000000000000")
+    let genesis_address = genesis_treasury_address();
+    let balance = U256::from_dec_str(GENESIS_TREASURY_BALANCE_MAZZY_STR)
         .expect("Not overflow"); // 2.5B
     accounts.insert(genesis_address.with_native_space(), balance);
 
@@ -98,6 +114,15 @@ pub fn load_secrets_file(
         accounts.insert(keypair.address().with_native_space(), balance.clone());
         secret_store.insert(keypair);
     }
+    let treasury = genesis_treasury_address().with_native_space();
+    let treasury_balance =
+        U256::from_dec_str(GENESIS_TREASURY_BALANCE_MAZZY_STR).map_err(|e| {
+            format!(
+                "failed to parse treasury balance: value = {}, error = {:?}",
+                GENESIS_TREASURY_BALANCE_MAZZY_STR, e
+            )
+        })?;
+    accounts.entry(treasury).or_insert(treasury_balance);
     Ok(accounts)
 }
 
@@ -147,6 +172,34 @@ pub fn genesis_block(
         )
         .unwrap();
 
+    // Seed the shielded pool from the genesis treasury balance.
+    let shielded_pool_seed = U256::from(SHIELDED_POOL_GENESIS_FUND_MAZZE)
+        * U256::from(ONE_MAZZE_IN_MAZZY);
+    if !shielded_pool_seed.is_zero() {
+        let treasury = genesis_treasury_address().with_native_space();
+        let pool = SHIELDED_POOL_CONTRACT_ADDRESS.with_native_space();
+        if state.exists(&treasury).unwrap_or(false) {
+            let treasury_balance = state.balance(&treasury).unwrap_or_default();
+            if treasury_balance >= shielded_pool_seed {
+                state
+                    .transfer_balance(
+                        &treasury,
+                        &pool,
+                        &shielded_pool_seed,
+                        CleanupMode::NoEmpty,
+                    )
+                    .unwrap();
+            } else {
+                warn!(
+                    "Genesis treasury balance {} < shielded pool seed {}; skipping seed",
+                    treasury_balance, shielded_pool_seed
+                );
+            }
+        } else {
+            warn!("Genesis treasury account missing; skipping shielded pool seed");
+        }
+    }
+
     let mut debug_record = Some(ComputeEpochDebugRecord::default());
 
     let genesis_chain_id = genesis_chain_id.unwrap_or(0);
@@ -167,37 +220,56 @@ pub fn genesis_block(
     create_create2factory_transaction.gas_price = 1.into();
     create_create2factory_transaction.storage_limit = 512;
 
-    let genesis_transactions = vec![Arc::new(
+    let mut genesis_transactions = vec![Arc::new(
         create_create2factory_transaction.fake_sign(genesis_account_address),
     )];
 
+    let shielded_vk = load_shielded_vk_hex();
+    if let Some(vk_bytes) = shielded_vk.as_ref() {
+        let data = encode_set_verifying_key(vk_bytes);
+        let mut set_vk_tx = NativeTransaction::default();
+        set_vk_tx.nonce = U256::from(genesis_transactions.len());
+        set_vk_tx.data = data.into();
+        set_vk_tx.action = Action::Call(SHIELDED_POOL_CONTRACT_ADDRESS);
+        set_vk_tx.chain_id = genesis_chain_id;
+        set_vk_tx.gas = 5_000_000.into();
+        set_vk_tx.gas_price = 1.into();
+        set_vk_tx.storage_limit = 0;
+        genesis_transactions
+            .push(Arc::new(set_vk_tx.fake_sign(genesis_account_address)));
+    }
+
     if need_to_execute {
-        const CREATE2FACTORY_TX_INDEX: usize = 1;
-        let contract_name_list = vec!["CREATE2FACTORY"];
+        execute_genesis_transaction(
+            genesis_transactions[0].as_ref(),
+            &mut state,
+            machine.clone(),
+        );
 
-        for i in CREATE2FACTORY_TX_INDEX..=contract_name_list.len() {
-            execute_genesis_transaction(
-                genesis_transactions[i - 1].as_ref(),
-                &mut state,
-                machine.clone(),
-            );
+        let (contract_address, _) = contract_address(
+            CreateContractAddress::FromSenderNonceAndCodeHash,
+            0,
+            &genesis_account_address,
+            &0.into(),
+            genesis_transactions[0].as_ref().data(),
+        );
 
-            let (contract_address, _) = contract_address(
-                CreateContractAddress::FromSenderNonceAndCodeHash,
-                0,
-                &genesis_account_address,
-                &(i - 1).into(),
-                genesis_transactions[i - 1].as_ref().data(),
-            );
+        state
+            .set_admin(&contract_address.address, &Address::zero())
+            .expect("");
+        info!("Genesis {:?} addresses: {:?}", "CREATE2FACTORY", contract_address);
 
+        for tx in genesis_transactions.iter().skip(1) {
+            execute_genesis_transaction(tx.as_ref(), &mut state, machine.clone());
+        }
+
+        if shielded_vk.is_some() {
             state
-                .set_admin(&contract_address.address, &Address::zero())
-                .expect("");
-            info!(
-                "Genesis {:?} addresses: {:?}",
-                contract_name_list[i - 1],
-                contract_address
-            );
+                .set_admin(
+                    &SHIELDED_POOL_CONTRACT_ADDRESS,
+                    &Address::zero(),
+                )
+                .expect("failed to clear shielded pool admin");
         }
     }
 
@@ -254,6 +326,47 @@ pub fn genesis_block(
     );
 
     genesis
+}
+
+fn load_shielded_vk_hex() -> Option<Vec<u8>> {
+    let mut candidates = Vec::new();
+    if let Ok(path) = env::var("MAZZE_SHIELDED_VK_HEX") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            candidates.push(trimmed.to_string());
+        }
+    }
+    candidates.push("run/shielded_vk.hex".to_string());
+    candidates.push("shielded_vk.hex".to_string());
+
+    for path in candidates {
+        let path_ref = Path::new(&path);
+        if !path_ref.exists() {
+            continue;
+        }
+        let content = match std::fs::read_to_string(path_ref) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        let hex = content.trim();
+        if hex.is_empty() {
+            continue;
+        }
+        let hex = hex.strip_prefix("0x").unwrap_or(hex);
+        if let Ok(bytes) = hex.from_hex() {
+            return Some(bytes);
+        }
+    }
+
+    None
+}
+
+fn encode_set_verifying_key(vk: &[u8]) -> Vec<u8> {
+    let mut data = Vec::with_capacity(4 + vk.len() + 64);
+    let selector = keccak!("setVerifyingKey(bytes)");
+    data.extend_from_slice(&selector[0..4]);
+    data.extend_from_slice(&vk.to_vec().abi_encode());
+    data
 }
 
 fn execute_genesis_transaction(

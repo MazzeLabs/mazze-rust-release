@@ -176,8 +176,13 @@ impl GetBlockHeadersResponse {
                 || (header.height() == era_genesis_height
                     && header.hash() != era_genesis_hash)
             {
-                // TODO: optimize to make block body empty
-                assert!(true);
+                debug!(
+                    "Skip out-of-era header {:?} at height {} (era genesis height {})",
+                    hash,
+                    header.height(),
+                    era_genesis_height
+                );
+                continue;
             }
 
             // insert into sync graph

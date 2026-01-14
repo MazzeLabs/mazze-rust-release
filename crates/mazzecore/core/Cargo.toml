@@ -41,7 +41,6 @@ io = { path = "../../util/io" }
 jsonrpc-core = "15.1.0"
 keccak-hash = "0.5"
 kvdb = "0.4"
-kvdb-rocksdb = {path= "../../dbs/kvdb-rocksdb" }
 lazy_static = "1.4"
 link-cut-tree = { path = "../../util/link-cut-tree" }
 log = "0.4"

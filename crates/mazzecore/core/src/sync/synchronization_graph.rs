@@ -26,7 +26,8 @@ use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_executor::machine::Machine;
 use mazze_types::{H256, U256};
 use metrics::{
-    register_meter_with_group, register_queue, Meter, MeterTimer, Queue,
+    register_meter_with_group, register_queue, Gauge, GaugeUsize, Meter,
+    MeterTimer, Queue,
 };
 use primitives::{
     transaction::SignedTransaction, Block, BlockHeader, EpochNumber,
@@ -52,6 +53,12 @@ lazy_static! {
         register_meter_with_group("timer", "sync::insert_block");
     static ref CONSENSUS_WORKER_QUEUE: Arc<dyn Queue> =
         register_queue("consensus_worker_queue");
+    static ref SYNC_GRAPH_ARENA_SIZE: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("sync_graph", "arena_size");
+    static ref SYNC_GRAPH_OLD_ERA_FRONTIER_SIZE: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("sync_graph", "old_era_frontier_size");
+    static ref SYNC_GRAPH_NOT_READY_FRONTIER_SIZE: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("sync_graph", "not_ready_frontier_size");
 }
 
 const NULL: usize = !0;
@@ -266,8 +273,18 @@ impl SynchronizationGraphInner {
         (stable_hash, height)
     }
 
+    fn update_metrics(&self) {
+        SYNC_GRAPH_ARENA_SIZE.update(self.arena.len());
+        SYNC_GRAPH_OLD_ERA_FRONTIER_SIZE
+            .update(self.old_era_blocks_frontier_set.len());
+        SYNC_GRAPH_NOT_READY_FRONTIER_SIZE
+            .update(self.not_ready_blocks_frontier.len());
+    }
+
     fn try_clear_old_era_blocks(&mut self) {
-        let max_num_of_cleared_blocks = 2;
+        let backlog = self.old_era_blocks_frontier.len();
+        let max_num_of_cleared_blocks =
+            std::cmp::min(256, std::cmp::max(2, backlog / 8));
         let mut num_cleared = 0;
         let era_genesis = self.get_genesis_in_current_era();
         let genesis_seq_num = self
@@ -1553,6 +1570,7 @@ impl SynchronizationGraph {
         }
 
         inner.try_clear_old_era_blocks();
+        inner.update_metrics();
 
         (BlockHeaderInsertionResult::NewValid, need_to_relay)
     }
@@ -1774,6 +1792,7 @@ impl SynchronizationGraph {
 
         // Post-processing invalid blocks.
         inner.process_invalid_blocks(&invalid_set);
+        inner.update_metrics();
 
         debug!(
             "new block inserted into graph: block_header={:?}, tx_count={}, block_size={}",

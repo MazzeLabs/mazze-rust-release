@@ -26,7 +26,7 @@ use std::{collections::HashMap, hash::Hash, ops::Deref};
 
 use rlp;
 
-// database columns for rocksdb
+// database columns for the ledger database backend (ParityDB)
 /// Column for miscellaneous items
 pub const COL_MISC: u32 = 0;
 /// Column for Blocks.

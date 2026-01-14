@@ -91,13 +91,6 @@ impl SnapshotDbWriteableTrait for SnapshotDbWriteable {
     }
 }
 
-// The map from path to the already open snapshots.
-// when the mapped snapshot is None, the snapshot is open exclusively for write,
-// when the mapped snapshot is Some(), the snapshot can be shared by other
-// readers.
-pub type AlreadyOpenSnapshots<T> =
-    Arc<RwLock<HashMap<PathBuf, Option<Weak<T>>>>>;
-
 impl SnapshotDbManagerSqlite {
     pub const LATEST_MPT_SNAPSHOT_DIR: &'static str = "latest";
     const MPT_SNAPSHOT_DIR: &'static str = "mpt_snapshot";
@@ -1558,10 +1551,10 @@ use crate::{
         storage_manager::PersistedSnapshotInfoMap,
     },
     storage_db::{
-        key_value_db::KeyValueDbTraitSingleWriter, DbValueType,
-        KeyValueDbTypes, OpenSnapshotMptTrait, SnapshotDbManagerTrait,
-        SnapshotDbTrait, SnapshotDbWriteableTrait, SnapshotInfo,
-        SnapshotMptDbValue,
+        key_value_db::KeyValueDbTraitSingleWriter, AlreadyOpenSnapshots,
+        DbValueType, KeyValueDbTypes, OpenSnapshotMptTrait,
+        SnapshotDbManagerTrait, SnapshotDbTrait, SnapshotDbWriteableTrait,
+        SnapshotInfo, SnapshotMptDbValue,
     },
 };
 use fs_extra::dir::CopyOptions;
@@ -1570,7 +1563,6 @@ use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 use primitives::{EpochId, MerkleHash, NULL_EPOCH};
 use rustc_hex::ToHex;
 use std::{
-    collections::HashMap,
     fs,
     hint::unreachable_unchecked,
     path::{Path, PathBuf},

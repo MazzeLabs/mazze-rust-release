@@ -59,6 +59,8 @@ pub struct NodeMemoryManager<
     db_load_lock: Mutex<()>,
 
     // FIXME use other atomic integer types as they are in rust stable.
+    cache_accesses: AtomicUsize,
+    cache_misses: AtomicUsize,
     db_load_counter: AtomicUsize,
     uncached_leaf_load_times: AtomicUsize,
     uncached_leaf_db_loads: AtomicUsize,
@@ -121,6 +123,8 @@ impl<
                 cache_algorithm,
             }),
             db_load_lock: Default::default(),
+            cache_accesses: Default::default(),
+            cache_misses: Default::default(),
             db_load_counter: Default::default(),
             uncached_leaf_db_loads: Default::default(),
             uncached_leaf_load_times: Default::default(),
@@ -185,6 +189,13 @@ impl<
                 .fetch_add(db_load_count as usize, Ordering::Relaxed);
             self.uncached_leaf_load_times
                 .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn record_cache_access(&self, loaded_from_db: bool) {
+        self.cache_accesses.fetch_add(1, Ordering::Relaxed);
+        if loaded_from_db {
+            self.cache_misses.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -498,6 +509,7 @@ impl<
                     cache_manager_mut_wrapped.as_mut().unwrap(),
                     (mpt_id, *db_key),
                 );
+                self.record_cache_access(*is_loaded_from_db);
 
                 Ok(GuardedValue::new(cache_manager_mut_wrapped, trie_node))
             }
@@ -638,6 +650,33 @@ impl<
     pub fn log_usage(&self) {
         self.cache.lock().log_usage();
         let allocator_ref = self.get_allocator();
+        let cache_accesses = self.cache_accesses.load(Ordering::Relaxed);
+        let cache_misses = self.cache_misses.load(Ordering::Relaxed);
+        let cache_hit_rate_pct = if cache_accesses == 0 {
+            0
+        } else {
+            ((cache_accesses.saturating_sub(cache_misses)) * 100)
+                / cache_accesses
+        };
+        DELTA_MPT_CACHE_ACCESSES.update(cache_accesses);
+        DELTA_MPT_CACHE_MISSES.update(cache_misses);
+        DELTA_MPT_CACHE_HIT_RATE_PCT.update(cache_hit_rate_pct);
+        DELTA_MPT_DB_LOADS
+            .update(self.db_load_counter.load(Ordering::Relaxed));
+        DELTA_MPT_UNCACHED_LEAF_LOADS.update(
+            self.uncached_leaf_load_times.load(Ordering::Relaxed),
+        );
+        DELTA_MPT_UNCACHED_LEAF_DB_LOADS.update(
+            self.uncached_leaf_db_loads.load(Ordering::Relaxed),
+        );
+        DELTA_MPT_COMPUTE_MERKLE_DB_LOADS.update(
+            self.compute_merkle_db_loads.load(Ordering::Relaxed),
+        );
+        DELTA_MPT_CHILDREN_MERKLE_DB_LOADS.update(
+            self.children_merkle_db_loads.load(Ordering::Relaxed),
+        );
+        DELTA_MPT_ALLOCATOR_CAPACITY.update(allocator_ref.capacity());
+        DELTA_MPT_ALLOCATOR_LEN.update(allocator_ref.len());
         debug!(
             "trie node allocator: max allowed size: {}, \
              configured idle_size: {}, size: {}, allocated: {}",
@@ -780,6 +819,7 @@ use super::{
     slab::Slab,
     NodeRefDeltaMpt,
 };
+use metrics::{Gauge, GaugeUsize};
 use malloc_size_of_derive::MallocSizeOf as MallocSizeOfDerive;
 use parking_lot::{
     Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockUpgradableReadGuard,
@@ -790,5 +830,40 @@ use std::{
     cell::UnsafeCell,
     convert::TryInto,
     hint::unreachable_unchecked,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
+
+lazy_static! {
+    static ref DELTA_MPT_CACHE_ACCESSES: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("storage_mpt", "cache_accesses");
+    static ref DELTA_MPT_CACHE_MISSES: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("storage_mpt", "cache_misses");
+    static ref DELTA_MPT_CACHE_HIT_RATE_PCT: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("storage_mpt", "cache_hit_rate_pct");
+    static ref DELTA_MPT_DB_LOADS: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("storage_mpt", "db_loads");
+    static ref DELTA_MPT_UNCACHED_LEAF_LOADS: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("storage_mpt", "uncached_leaf_loads");
+    static ref DELTA_MPT_UNCACHED_LEAF_DB_LOADS: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group(
+            "storage_mpt",
+            "uncached_leaf_db_loads"
+        );
+    static ref DELTA_MPT_COMPUTE_MERKLE_DB_LOADS: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group(
+            "storage_mpt",
+            "compute_merkle_db_loads"
+        );
+    static ref DELTA_MPT_CHILDREN_MERKLE_DB_LOADS: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group(
+            "storage_mpt",
+            "children_merkle_db_loads"
+        );
+    static ref DELTA_MPT_ALLOCATOR_CAPACITY: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("storage_mpt", "allocator_capacity");
+    static ref DELTA_MPT_ALLOCATOR_LEN: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("storage_mpt", "allocator_len");
+}

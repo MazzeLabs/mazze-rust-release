@@ -1454,7 +1454,7 @@ impl ConsensusGraph {
                 .storage_manager
                 .get_state_no_commit_inner(
                     state_readonly_index,
-                    /* try_open = */ true,
+                    /* try_open = */ false,
                     true,
                 )
                 .map_err(|e| format!("Error to get state, err={:?}", e))?,
@@ -1501,7 +1501,7 @@ impl ConsensusGraph {
                 .storage_manager
                 .get_state_no_commit(
                     state_readonly_index,
-                    /* try_open = */ true,
+                    /* try_open = */ false,
                     space,
                 )
                 .map_err(|e| format!("Error to get state, err={:?}", e))?,
@@ -2211,14 +2211,6 @@ impl ConsensusGraphTrait for ConsensusGraph {
         // are consistent
         let inner = self.inner.read();
         if let Some(tx_info) = inner.get_transaction_info(hash) {
-            if let Some(executed) = &tx_info.maybe_executed_extra_info {
-                if executed.receipt.outcome_status == TransactionStatus::Skipped
-                {
-                    // A skipped transaction is not visible to clients if
-                    // accessed by its hash.
-                    return None;
-                }
-            }
             let block = self.data_man.block_by_hash(
                 &tx_info.tx_index.block_hash,
                 false, /* update_cache */

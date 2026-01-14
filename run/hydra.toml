@@ -422,7 +422,7 @@ persist_tx_index = true
 block_cache_gc_period_ms = 5_000
 
 # Database type to store block-related data.
-# Supported: rocksdb, sqlite, paritydb.
+# Supported: sqlite, paritydb.
 #
 block_db_type = "paritydb"
 
@@ -449,21 +449,10 @@ paritydb_disable_wal = false
 #
 ledger_cache_size = 4096
 
-# Rocksdb cache size.
-# Only applies if `block_db_type = "rocksdb"`.
-#
-rocksdb_cache_size = 512
-
-# Rocksdb compaction file path.
-# Only applies if `block_db_type = "rocksdb"`.
-# If not set, compaction configuration will be set automatically by rocksdb.
-#
-# rocksdb_compaction_profile = "./compact_file.conf"
-
 # State database backend used by the storage subsystem.
-# Supported: rocksdb, mdbx.
+# Supported: mdbx.
 #
-# state_db_type = "rocksdb"
+# state_db_type = "mdbx"
 
 # Additional MDBX parameters. Only in effect when `state_db_type = "mdbx"`.
 #
@@ -490,7 +479,7 @@ storage_delta_mpts_slab_idle_size = 400000
 # Idealy, if the RPC working set involves accessing X state ranges frequently (each range has 2000 epochs),
 # this value should be set to 2+2X to avoid thrashing.
 # However, increasing the value may increase the system memory usage by opening more database instances at the same
-# time, and the memory usage of an MPT is affected by `rocksdb_cache_size`.
+# time, and the memory usage of an MPT depends on the ParityDB configuration (cache sizes, columns, etc.).
 #
 storage_max_open_mpt_count = 8
 

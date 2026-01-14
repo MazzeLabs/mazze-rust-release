@@ -21,13 +21,13 @@ futures = { version = "0.3.3", features = ["compat"] }
 hashbrown = "0.7.1"
 keccak-hash = "0.5"
 kvdb = "0.4"
-kvdb-rocksdb = {path= "../kvdb-rocksdb" }
 lazy_static = "1.4"
 log = "0.4"
 log4rs = { version = "1.2.0", features = ["background_rotation", "gzip"] }
 db = { path = "../db" }
 malloc_size_of = {path = "../../util/malloc_size_of" }
 malloc_size_of_derive = {path = "../../util/malloc_size_of_derive" }
+metrics = { path = "../../util/metrics" }
 memoffset = "0.5.1"
 parking_lot = "0.11"
 primitives = { path = "../../primitives", optional = true }

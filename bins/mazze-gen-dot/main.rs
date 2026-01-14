@@ -10,13 +10,16 @@ use std::{
 };
 
 fn open_db(db_path: &str) -> std::io::Result<Arc<db::SystemDB>> {
-    let settings = db::rocksdb_settings(
-        db_path.into(),
-        None,
-        db::DatabaseCompactionProfile::default(),
-        mazzecore::db::NUM_COLUMNS,
-        false,
-    );
+    let parity_config = db::ParityDbOpenConfig {
+        columns: mazzecore::db::NUM_COLUMNS,
+        compression: None,
+        disable_wal: false,
+        stats: false,
+    };
+    let settings =
+        db::paritydb_settings(db_path.into(), &parity_config).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("{e}"))
+        })?;
 
     db::open_database(&settings)
 }

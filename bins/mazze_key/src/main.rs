@@ -192,7 +192,14 @@ fn display(
     let network = match network_id {
         Some("main") => Network::Main,
         Some("test") => Network::Test,
-        Some(id) => Network::Id(id.parse().unwrap_or(0)),
+        Some(id) => {
+            let parsed = id.parse().unwrap_or(0);
+            match parsed {
+                1 => Network::Test,
+                1990 => Network::Main,
+                _ => Network::Id(parsed),
+            }
+        }
         None => Network::Main,
     };
     let base32_address = mazze_addr_encode(

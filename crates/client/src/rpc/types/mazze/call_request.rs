@@ -21,7 +21,8 @@ use primitives::{
     transaction::{
         native_transaction::NativeTransaction as PrimitiveTransaction, Action,
         Mip1559Transaction, Mip2930Transaction, NativeTransaction,
-        TypedNativeTransaction::*, LEGACY_TX_TYPE, MIP1559_TYPE, MIP2930_TYPE,
+        ShieldedTransaction, TypedNativeTransaction::*, LEGACY_TX_TYPE,
+        MIP1559_TYPE, MIP2930_TYPE, MIP_SHIELDED_TYPE,
     },
     SignedTransaction, Transaction, TransactionWithSignature,
 };
@@ -74,6 +75,8 @@ pub struct SendTxRequest {
     pub storage_limit: Option<U256>,
     pub chain_id: Option<U256>,
     pub epoch_height: Option<U256>,
+    #[serde(rename = "type")]
+    pub transaction_type: Option<U64>,
 }
 
 #[derive(Debug, Default, PartialEq, Deserialize, Serialize)]
@@ -116,40 +119,99 @@ impl SendTxRequest {
         self, best_epoch_height: u64, chain_id: u32, password: Option<String>,
         accounts: Arc<AccountProvider>,
     ) -> RpcResult<TransactionWithSignature> {
-        let tx = PrimitiveTransaction {
-            nonce: self.nonce.unwrap_or_default().into(),
-            gas_price: self.gas_price.into(),
-            gas: self.gas.into(),
-            action: match self.to {
-                None => Action::Create,
-                Some(address) => Action::Call(address.into()),
-            },
-            value: self.value.into(),
-            storage_limit: self.storage_limit.unwrap_or_default().as_usize()
-                as u64,
-            epoch_height: self
-                .epoch_height
-                .unwrap_or(best_epoch_height.into())
-                .as_usize() as u64,
-            chain_id: self.chain_id.unwrap_or(chain_id.into()).as_u32(),
-            data: self.data.unwrap_or(Bytes::new(vec![])).into(),
+        let nonce = self.nonce.unwrap_or_default();
+        let gas_price = self.gas_price;
+        let gas = self.gas;
+        let action = match self.to {
+            None => Action::Create,
+            Some(address) => Action::Call(address.into()),
         };
+        let value = self.value;
+        let storage_limit =
+            self.storage_limit.unwrap_or_default().as_usize() as u64;
+        let epoch_height = self
+            .epoch_height
+            .unwrap_or(best_epoch_height.into())
+            .as_usize() as u64;
+        let chain_id = self.chain_id.unwrap_or(chain_id.into()).as_u32();
+        let data: mazze_bytes::Bytes =
+            self.data.unwrap_or(Bytes::new(vec![])).into();
+        let tx_type = self
+            .transaction_type
+            .map(|id| id.as_usize() as u8);
 
-        if tx.epoch_height == u64::MAX {
+        if matches!(tx_type, Some(MIP_SHIELDED_TYPE)) {
+            return Err(
+                "Shielded transactions must be submitted as unsigned raw transactions"
+                    .into(),
+            );
+        }
+
+        if epoch_height == u64::MAX {
             return Err("Can not sign Ethereum like transaction by RPC.".into());
         }
 
         let password = password.map(Password::from);
+        let (tx, sig_hash) = match tx_type {
+            Some(MIP_SHIELDED_TYPE) => {
+                if matches!(action, Action::Create) {
+                    return Err(
+                        "Shielded transaction requires a recipient".into()
+                    );
+                }
+                if data.is_empty() {
+                    return Err("Shielded payload must not be empty".into());
+                }
+                if !value.is_zero() {
+                    return Err(
+                        "Shielded transaction must not transfer value".into(),
+                    );
+                }
+                let tx = ShieldedTransaction {
+                    nonce: nonce.into(),
+                    gas_price: gas_price.into(),
+                    gas: gas.into(),
+                    action,
+                    value: value.into(),
+                    storage_limit,
+                    epoch_height,
+                    chain_id,
+                    data,
+                };
+                let sig_hash = Transaction::Native(Shielded(tx.clone()))
+                    .signature_hash();
+                (Transaction::Native(Shielded(tx)), sig_hash)
+            }
+            Some(other) => {
+                return Err(format!(
+                    "Unsupported transaction type {} for signTransaction",
+                    other
+                )
+                .into());
+            }
+            None => {
+                let tx = PrimitiveTransaction {
+                    nonce: nonce.into(),
+                    gas_price: gas_price.into(),
+                    gas: gas.into(),
+                    action,
+                    value: value.into(),
+                    storage_limit,
+                    epoch_height,
+                    chain_id,
+                    data,
+                };
+                let sig_hash = Transaction::from(tx.clone()).signature_hash();
+                (Transaction::from(tx), sig_hash)
+            }
+        };
+
         let sig = accounts
-            .sign(
-                self.from.into(),
-                password,
-                Transaction::from(tx.clone()).signature_hash(),
-            )
+            .sign(self.from.into(), password, sig_hash)
             // TODO: sign error into secret store error codes.
             .map_err(|e| format!("failed to sign transaction: {:?}", e))?;
 
-        Ok(Transaction::from(tx).with_signature(sig))
+        Ok(tx.with_signature(sig))
     }
 }
 
@@ -183,6 +245,30 @@ pub fn sign_call(
     let transaction_type = request
         .transaction_type
         .unwrap_or(U64::from(default_type_id));
+
+    if transaction_type.as_usize() as u8 == MIP_SHIELDED_TYPE {
+        if matches!(action, Action::Create) {
+            return Err(invalid_params(
+                "transaction_type",
+                "shielded transaction requires a recipient",
+            )
+            .into());
+        }
+        if data.is_empty() {
+            return Err(invalid_params(
+                "data",
+                "shielded payload must not be empty",
+            )
+            .into());
+        }
+        if !value.is_zero() {
+            return Err(invalid_params(
+                "value",
+                "shielded transaction must not transfer value",
+            )
+            .into());
+        }
+    }
 
     let gas_price = request.gas_price.unwrap_or(1.into());
     let max_fee_per_gas = request
@@ -230,12 +316,29 @@ pub fn sign_call(
             data,
             access_list: to_primitive_access_list(access_list),
         }),
+        MIP_SHIELDED_TYPE => Shielded(ShieldedTransaction {
+            nonce,
+            action,
+            gas,
+            gas_price,
+            value,
+            storage_limit,
+            epoch_height,
+            chain_id,
+            data,
+        }),
         x => {
             return Err(
                 invalid_params("Unrecognized transaction type", x).into()
             );
         }
     };
+
+    if matches!(transaction, Shielded(_)) {
+        let unsigned = Transaction::Native(transaction);
+        let tx_with_sig = TransactionWithSignature::new_unsigned(unsigned);
+        return Ok(SignedTransaction::new_shielded(tx_with_sig));
+    }
 
     let from = request
         .from

@@ -638,7 +638,9 @@ impl TransactionPool {
             Space::Ethereum => self.config.min_eth_tx_price,
         };
         // check transaction gas price
-        if *transaction.gas_price() < min_tx_price.into() {
+        if !transaction.is_shielded()
+            && *transaction.gas_price() < min_tx_price.into()
+        {
             trace!("Transaction {} discarded due to below minimal gas price: price {}", transaction.hash(), transaction.gas_price());
             return Err(format!(
                 "transaction gas price {} less than the minimum value {}",

@@ -569,6 +569,8 @@ pub struct TransactionPoolInner {
     /// Keeps all transactions in the transaction pool.
     /// It should contain the same transaction set as `deferred_pool`.
     txs: TransactionSet,
+    /// Shielded transactions keyed by hash (no nonce ordering).
+    shielded_pool: TransactionSet,
 }
 
 impl TransactionPoolInner {
@@ -589,6 +591,7 @@ impl TransactionPoolInner {
             ready_nonces_and_balances: HashMap::new(),
             garbage_collector: SpaceMap::default(),
             txs: TransactionSet::default(),
+            shielded_pool: TransactionSet::default(),
         }
     }
 
@@ -602,6 +605,7 @@ impl TransactionPoolInner {
         self.ready_nonces_and_balances.clear();
         self.garbage_collector.apply_all(|x| x.clear());
         self.txs.clear();
+        self.shielded_pool.clear();
         self.total_received_count = 0;
         self.unpacked_transaction_count = 0;
     }
@@ -1081,11 +1085,55 @@ impl TransactionPoolInner {
 
     pub fn check_tx_packed_in_deferred_pool(&self, tx_hash: &H256) -> bool {
         match self.txs.get(tx_hash) {
+            Some(tx) if tx.is_shielded() => false,
             Some(tx) => {
                 self.deferred_pool.check_tx_packed(tx.sender(), *tx.nonce())
             }
             None => false,
         }
+    }
+
+    fn pack_shielded_transactions<F>(
+        &self, num_txs: usize, mut gas_limit: U256, mut size_limit: usize,
+        validity: F,
+    ) -> Vec<Arc<SignedTransaction>>
+    where
+        F: Fn(&SignedTransaction) -> PackingCheckResult,
+    {
+        if num_txs == 0 || gas_limit.is_zero() || size_limit == 0 {
+            return Vec::new();
+        }
+
+        let mut candidates: Vec<Arc<SignedTransaction>> =
+            self.shielded_pool.values().cloned().collect();
+        candidates.sort_by(|a, b| {
+            b.gas_price()
+                .cmp(a.gas_price())
+                .then_with(|| a.hash().cmp(&b.hash()))
+        });
+
+        let mut packed = Vec::new();
+        for tx in candidates {
+            if packed.len() >= num_txs {
+                break;
+            }
+            match validity(&tx) {
+                PackingCheckResult::Pack => {}
+                PackingCheckResult::Pending | PackingCheckResult::Drop => {
+                    continue;
+                }
+            }
+            let tx_gas = *tx.gas();
+            let tx_size = tx.rlp_size();
+            if tx_gas > gas_limit || tx_size > size_limit {
+                continue;
+            }
+            gas_limit -= tx_gas;
+            size_limit -= tx_size;
+            packed.push(tx);
+        }
+
+        packed
     }
 
     /// pack at most num_txs transactions randomly
@@ -1123,7 +1171,8 @@ impl TransactionPoolInner {
             );
         packed_transactions.extend_from_slice(&sampled_tx);
 
-        let (sampled_tx, _, _) = self.deferred_pool.packing_sampler(
+        let (sampled_tx, native_used_gas, native_used_size) =
+            self.deferred_pool.packing_sampler(
             Space::Native,
             block_gas_limit - used_gas,
             block_size_limit - used_size,
@@ -1132,6 +1181,21 @@ impl TransactionPoolInner {
             validity,
         );
         packed_transactions.extend_from_slice(&sampled_tx);
+
+        let remaining_gas = block_gas_limit
+            .saturating_sub(used_gas)
+            .saturating_sub(native_used_gas);
+        let remaining_size = block_size_limit
+            .saturating_sub(used_size)
+            .saturating_sub(native_used_size);
+        let remaining_txs = num_txs.saturating_sub(packed_transactions.len());
+        let shielded_txs = self.pack_shielded_transactions(
+            remaining_txs,
+            remaining_gas,
+            remaining_size,
+            validity,
+        );
+        packed_transactions.extend_from_slice(&shielded_txs);
 
         if log::max_level() >= log::Level::Debug {
             let mut rlp_s = RlpStream::new();
@@ -1291,6 +1355,21 @@ impl TransactionPoolInner {
             }
         }
 
+        let mut remaining_gas = block_gas_limit;
+        let mut remaining_size = block_size_limit;
+        for tx in &packed_transactions {
+            remaining_gas = remaining_gas.saturating_sub(*tx.gas());
+            remaining_size = remaining_size.saturating_sub(tx.rlp_size());
+        }
+        let remaining_txs = num_txs.saturating_sub(packed_transactions.len());
+        let shielded_txs = self.pack_shielded_transactions(
+            remaining_txs,
+            remaining_gas,
+            remaining_size,
+            validity,
+        );
+        packed_transactions.extend_from_slice(&shielded_txs);
+
         if log::max_level() >= log::Level::Debug {
             let mut rlp_s = RlpStream::new();
             for tx in &packed_transactions {
@@ -1352,6 +1431,9 @@ impl TransactionPoolInner {
         transaction: Arc<SignedTransaction>, packed: bool, force: bool,
     ) -> Result<(), String> {
         let _timer = MeterTimer::time_func(TX_POOL_INNER_INSERT_TIMER.as_ref());
+        if transaction.is_shielded() {
+            return self.insert_shielded_transaction(transaction, packed);
+        }
         let (sponsored_gas, sponsored_storage) =
             self.get_sponsored_gas_and_storage(account_cache, &transaction)?;
 
@@ -1446,6 +1528,35 @@ impl TransactionPoolInner {
         .map_err(|e| {
             format!("Failed to read account_cache from storage: {}", e)
         })?;
+
+        Ok(())
+    }
+
+    fn insert_shielded_transaction(
+        &mut self, transaction: Arc<SignedTransaction>, packed: bool,
+    ) -> Result<(), String> {
+        let tx_hash = transaction.hash();
+        if packed {
+            self.shielded_pool.remove(&tx_hash);
+            if self.txs.remove(&tx_hash).is_some() {
+                if self.unpacked_transaction_count > 0 {
+                    self.unpacked_transaction_count -= 1;
+                }
+            }
+            return Ok(());
+        }
+
+        if self.is_full(Space::Native) {
+            return Err("Transaction pool is full".into());
+        }
+
+        if self.txs.get(&tx_hash).is_some() {
+            return Ok(());
+        }
+
+        self.shielded_pool.insert(tx_hash, transaction.clone());
+        self.txs.insert(tx_hash, transaction);
+        self.unpacked_transaction_count += 1;
 
         Ok(())
     }

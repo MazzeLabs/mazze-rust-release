@@ -33,7 +33,6 @@ macro_rules! build_config{
         use clap;
         use mazzecore::db::NUM_COLUMNS;
         use db;
-        use kvdb_rocksdb::DatabaseConfig;
         use log::LevelFilter;
         use network::{node_table::validate_node_url, ErrorKind, NetworkConfiguration};
         use std::{

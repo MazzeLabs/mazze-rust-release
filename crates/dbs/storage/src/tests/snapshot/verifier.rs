@@ -322,6 +322,40 @@ impl SnapshotMptTraitRw for Arc<Mutex<FakeSnapshotMptDb>> {
     }
 }
 
+impl<'db> OpenSnapshotMptTrait<'db> for Arc<Mutex<FakeSnapshotMptDb>> {
+    type SnapshotDbAsOwnedType = Arc<Mutex<FakeSnapshotMptDb>>;
+    type SnapshotDbBorrowMutType = Arc<Mutex<FakeSnapshotMptDb>>;
+    type SnapshotDbBorrowSharedType = Arc<Mutex<FakeSnapshotMptDb>>;
+
+    fn open_snapshot_mpt_owned(
+        &'db mut self,
+    ) -> Result<Self::SnapshotDbBorrowMutType> {
+        Ok(self.clone())
+    }
+
+    fn open_snapshot_mpt_as_owned(
+        &'db self,
+    ) -> Result<Self::SnapshotDbAsOwnedType> {
+        Ok(self.clone())
+    }
+
+    fn open_snapshot_mpt_shared(
+        &'db self,
+    ) -> Result<Self::SnapshotDbBorrowSharedType> {
+        Ok(self.clone())
+    }
+}
+
+impl SnapshotMptDbTrait for Arc<Mutex<FakeSnapshotMptDb>> {
+    fn start_transaction(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn commit_transaction(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
 impl WrappedTrait<dyn FallibleIterator<Item = MptKeyValue, Error = Error>>
     for KvdbIterIterator<MptKeyValue, [u8], FakeSnapshotDb>
 {
@@ -440,6 +474,7 @@ impl<'a>
 impl SnapshotDbTrait for Arc<Mutex<FakeSnapshotDb>> {
     type SnapshotKvdbIterTraitTag = FakeSnapshotDb;
     type SnapshotKvdbIterType = Self;
+    type SnapshotMptDb = Arc<Mutex<FakeSnapshotMptDb>>;
 
     fn get_null_snapshot() -> Self {
         unreachable!()
@@ -463,7 +498,7 @@ impl SnapshotDbTrait for Arc<Mutex<FakeSnapshotDb>> {
 
     fn direct_merge(
         &mut self, _old_snapshot_db: Option<&Arc<Self>>,
-        _mpt_snapshot: &mut Option<SnapshotMptDbSqlite>,
+        _mpt_snapshot: &mut Option<Self::SnapshotMptDb>,
         _recover_mpt_with_kv_snapshot_exist: bool,
         _in_reconstruct_snapshot_state: bool,
     ) -> Result<MerkleHash> {
@@ -472,7 +507,7 @@ impl SnapshotDbTrait for Arc<Mutex<FakeSnapshotDb>> {
 
     fn copy_and_merge(
         &mut self, _old_snapshot_db: &Arc<Self>,
-        _mpt_snapshot_db: &mut Option<SnapshotMptDbSqlite>,
+        _mpt_snapshot_db: &mut Option<Self::SnapshotMptDb>,
         _in_reconstruct_snapshot_state: bool,
     ) -> Result<MerkleHash> {
         unreachable!()
@@ -786,17 +821,14 @@ use crate::{
             full_sync_verifier::FullSyncVerifier,
             mpt_slice_verifier::MptSliceVerifier,
         },
-        storage_db::{
-            snapshot_db_manager_sqlite::AlreadyOpenSnapshots,
-            snapshot_mpt_db_sqlite::SnapshotMptDbSqlite,
-        },
         storage_manager::PersistedSnapshotInfoMap,
     },
     storage_db::{
-        DbValueType, KeyValueDbIterableTrait, KeyValueDbTraitOwnedRead,
-        KeyValueDbTraitRead, KeyValueDbTraitSingleWriter, KeyValueDbTypes,
-        KvdbIterIterator, OpenSnapshotMptTrait, SnapshotDbManagerTrait,
-        SnapshotDbTrait, SnapshotDbWriteableTrait, SnapshotInfo,
+        AlreadyOpenSnapshots, DbValueType, KeyValueDbIterableTrait,
+        KeyValueDbTraitOwnedRead, KeyValueDbTraitRead,
+        KeyValueDbTraitSingleWriter, KeyValueDbTypes, KvdbIterIterator,
+        OpenSnapshotMptTrait, SnapshotDbManagerTrait, SnapshotDbTrait,
+        SnapshotDbWriteableTrait, SnapshotInfo, SnapshotMptDbTrait,
         SnapshotMptIteraterTrait, SnapshotMptNode, SnapshotMptTraitRead,
         SnapshotMptTraitReadAndIterate, SnapshotMptTraitRw,
         SnapshotPersistState,

@@ -91,6 +91,48 @@ cargo build --release
 ./start-miner.sh
 ```
 
+## 3. Dev Mode (Local)
+
+Use dev mode for local testing (fast blocks, local RPC, shielded testing).
+
+1. (Optional) Re-genesis with shielded keys (wipes dev chain data):
+```bash
+./run/regenesis-shielded.sh --dev
+```
+
+2. Build the dev node binary:
+```bash
+cargo build -p mazze
+```
+
+3. Start the dev node:
+```bash
+./run/start-node-dev.sh
+```
+
+4. If blocks are not advancing, build and start the miner:
+```bash
+cargo build --release -p mazze-miner
+./run/start-miner.sh
+```
+
+5. Open the CLI:
+```bash
+./run/mazze-cli.sh
+```
+
+Logs:
+- Dev node: `run/logs/mazze-node-dev.log`
+- Miner: `run/logs/mazze-miner.log`
+
+Stop everything:
+```bash
+./run/stop.sh
+```
+
+Dev data directory:
+- `run/blockchain_data_dev`
+
 ## Important Notes
 Changing log level / config:
 
@@ -109,3 +151,7 @@ Container logging options are handled by Docker; compose already mounts `run/log
 - Monitor the logs directory for debugging information
 - For security reasons, consider configuring additional firewall rules
 - Backup your mining author address securely
+
+## Soak Testing
+
+For high-BPS soak runs and metrics-based GC/DB tuning, see `docs/soak-test.md`.

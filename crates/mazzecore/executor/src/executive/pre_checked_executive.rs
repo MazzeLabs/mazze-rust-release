@@ -38,7 +38,9 @@ pub(super) struct PreCheckedExecutive<'a, O: ExecutiveObserver> {
 
 impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
     pub(super) fn execute_transaction(mut self) -> DbResult<ExecutionOutcome> {
-        self.inc_sender_nonce()?;
+        if !self.tx.is_shielded() {
+            self.inc_sender_nonce()?;
+        }
 
         let (actual_gas_cost, insufficient_sender_balance) =
             self.charge_gas()?;
@@ -484,6 +486,10 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
     fn refund_gas(
         &mut self, params: &ActionParams, refund_value: U256,
     ) -> DbResult<()> {
+        if self.tx.is_shielded() {
+            return Ok(());
+        }
+
         let context = &mut self.context;
         let cost = &self.cost;
         let state = &mut context.state;

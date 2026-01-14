@@ -150,6 +150,7 @@ impl SnapshotDbTrait for SnapshotDbSqlite {
     type SnapshotKvdbIterTraitTag = KvdbSqliteShardedIteratorTag;
     type SnapshotKvdbIterType =
         KvdbSqliteSharded<<Self as KeyValueDbTypes>::ValueType>;
+    type SnapshotMptDb = SnapshotMptDbSqlite;
 
     fn get_null_snapshot() -> Self {
         Self {
@@ -238,9 +239,9 @@ use crate::{
         },
     },
     storage_db::{
-        KeyValueDbIterableTrait, KeyValueDbTypes, OpenSnapshotMptTrait,
-        OwnedReadImplFamily, ReadImplFamily, SingleWriterImplFamily,
-        SnapshotDbTrait, SnapshotMptDbValue,
+        AlreadyOpenSnapshots, KeyValueDbIterableTrait, KeyValueDbTypes,
+        OpenSnapshotMptTrait, OwnedReadImplFamily, ReadImplFamily,
+        SingleWriterImplFamily, SnapshotDbTrait, SnapshotMptDbValue,
     },
     utils::wrap::Wrap,
     KvdbSqliteStatements, MptKeyValue, SqliteConnection,
@@ -256,7 +257,6 @@ use super::{
         KvdbSqliteShardedBorrowShared, KvdbSqliteShardedDestructureTrait,
         KvdbSqliteShardedIteratorTag, KvdbSqliteShardedRefDestructureTrait,
     },
-    snapshot_db_manager_sqlite::AlreadyOpenSnapshots,
     snapshot_mpt::SnapshotMpt,
     snapshot_mpt_db_sqlite::SnapshotMptDbSqlite,
 };

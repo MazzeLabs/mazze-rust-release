@@ -15,6 +15,7 @@ use std::{
         Arc,
     },
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use hash::KECCAK_EMPTY_LIST_RLP;
@@ -34,7 +35,10 @@ use mazze_types::{
     address_util::AddressUtil, AddressSpaceUtil, AllChainID, BigEndianHash,
     Space, H160, H256, KECCAK_EMPTY_BLOOM, U256, U512,
 };
-use metrics::{register_meter_with_group, Meter, MeterTimer};
+use metrics::{
+    register_meter_with_group, register_timer_with_group, Meter, MeterTimer,
+    ScopeTimer, Timer,
+};
 use primitives::{
     compute_block_number, receipt::BlockReceipts, Block, BlockHeader,
     BlockHeaderBuilder, SignedTransaction, MERKLE_NULL_NODE,
@@ -82,7 +86,15 @@ lazy_static! {
         );
     static ref GOOD_TPS_METER: Arc<dyn Meter> =
         register_meter_with_group("system_metrics", "good_tps");
+    static ref CONSENSUS_STATE_COMMIT_TIMER: Arc<dyn Timer> =
+        register_timer_with_group("timer", "consensus::state_commit");
 }
+
+const STATE_INIT_RETRIES: usize = 8;
+const STATE_INIT_RETRY_DELAY_MS: u64 = 50;
+const STATE_INIT_REQUEUE_DELAY_MS: u64 = 250;
+const WAIT_FOR_RESULT_RETRY_DELAY_MS: u64 = 50;
+const WAIT_FOR_RESULT_WARN_EVERY: usize = 40;
 
 /// The RewardExecutionInfo struct includes most information to compute rewards
 /// for old epochs
@@ -267,7 +279,7 @@ impl ConsensusExecutor {
                         }
                     }
                 };
-                if !handler.handle_execution_work(task) {
+                if !executor_thread.handle_execution_work(task) {
                     // `task` is `Stop`, so just stop.
                     break;
                 }
@@ -308,18 +320,91 @@ impl ConsensusExecutor {
             }
             let (sender, receiver) = channel();
             debug!("Wait for execution result of epoch {:?}", epoch_hash);
-            self.sender
+            if self
+                .sender
                 .lock()
                 .send(ExecutionTask::GetResult(GetExecutionResultTask {
                     epoch_hash,
                     sender,
                 }))
-                .expect("Cannot fail");
-            receiver.recv().unwrap().ok_or(
-                "Waiting for an execution result that is not enqueued!"
-                    .to_string(),
-            )
+                .is_err()
+            {
+                return Err(
+                    "Consensus execution worker stopped unexpectedly"
+                        .to_string(),
+                );
+            }
+            match receiver.recv() {
+                Ok(Some(result)) => Ok(result),
+                Ok(None) => {
+                    let mut attempts = 0usize;
+                    loop {
+                        if let Some(result) =
+                            self.handler.get_execution_result(&epoch_hash)
+                        {
+                            return Ok(result);
+                        }
+                        attempts += 1;
+                        if attempts % WAIT_FOR_RESULT_WARN_EVERY == 0 {
+                            warn!(
+                                "wait_for_result still waiting for epoch {:?} after {} checks",
+                                epoch_hash, attempts
+                            );
+                        }
+                        thread::sleep(Duration::from_millis(
+                            WAIT_FOR_RESULT_RETRY_DELAY_MS,
+                        ));
+                    }
+                }
+                Err(RecvError) => Err(
+                    "Consensus execution worker stopped unexpectedly"
+                        .to_string(),
+                ),
+            }
         }
+    }
+
+    fn handle_execution_work(&self, task: ExecutionTask) -> bool {
+        debug!("Receive execution task: {:?}", task);
+        match task {
+            ExecutionTask::ExecuteEpoch(task) => {
+                self.handle_epoch_execution(task, None, false)
+            }
+            ExecutionTask::GetResult(task) => self.handle_get_result_task(task),
+            ExecutionTask::Stop => return false,
+        }
+        true
+    }
+
+    fn handle_epoch_execution(
+        &self, task: EpochExecutionTask,
+        debug_record: Option<&mut ComputeEpochDebugRecord>,
+        recover_mpt_during_construct_main_state: bool,
+    ) {
+        let _timer = MeterTimer::time_func(CONSENSIS_EXECUTION_TIMER.as_ref());
+        let executed = self.handler.handle_epoch_execution(
+            &task,
+            debug_record,
+            recover_mpt_during_construct_main_state,
+        );
+        if !executed && !self.stopped.load(Relaxed) {
+            let sender = self.sender.lock().clone();
+            thread::Builder::new()
+                .name("consensus_epoch_retry".into())
+                .spawn(move || {
+                    thread::sleep(Duration::from_millis(
+                        STATE_INIT_REQUEUE_DELAY_MS,
+                    ));
+                    let _ = sender.send(ExecutionTask::ExecuteEpoch(task));
+                })
+                .ok();
+        }
+    }
+
+    fn handle_get_result_task(&self, task: GetExecutionResultTask) {
+        let _ = task
+            .sender
+            .send(self.handler.get_execution_result(&task.epoch_hash));
     }
 
     fn get_optimistic_execution_task(
@@ -601,17 +686,18 @@ impl ConsensusExecutor {
         }
     }
 
-    /// Execute the epoch synchronously
+    /// Execute the epoch synchronously.
+    /// Returns false if state initialization fails after retries.
     pub fn compute_epoch(
         &self, task: EpochExecutionTask,
         debug_record: Option<&mut ComputeEpochDebugRecord>,
         recover_mpt_during_construct_main_state: bool,
-    ) {
+    ) -> bool {
         if self.consensus_graph_bench_mode {
-            return;
+            return true;
         }
         self.handler.handle_epoch_execution(
-            task,
+            &task,
             debug_record,
             recover_mpt_during_construct_main_state,
         )
@@ -855,24 +941,11 @@ impl ConsensusExecutionHandler {
         }
     }
 
-    /// Always return `true` for now
-    fn handle_execution_work(&self, task: ExecutionTask) -> bool {
-        debug!("Receive execution task: {:?}", task);
-        match task {
-            ExecutionTask::ExecuteEpoch(task) => {
-                self.handle_epoch_execution(task, None, false)
-            }
-            ExecutionTask::GetResult(task) => self.handle_get_result_task(task),
-            ExecutionTask::Stop => return false,
-        }
-        true
-    }
-
     fn handle_epoch_execution(
-        &self, task: EpochExecutionTask,
+        &self, task: &EpochExecutionTask,
         debug_record: Option<&mut ComputeEpochDebugRecord>,
         recover_mpt_during_construct_main_state: bool,
-    ) {
+    ) -> bool {
         let _timer = MeterTimer::time_func(CONSENSIS_EXECUTION_TIMER.as_ref());
         self.compute_epoch(
             &task.epoch_hash,
@@ -883,13 +956,7 @@ impl ConsensusExecutionHandler {
             debug_record,
             task.force_recompute,
             recover_mpt_during_construct_main_state,
-        );
-    }
-
-    fn handle_get_result_task(&self, task: GetExecutionResultTask) {
-        task.sender
-            .send(self.get_execution_result(&task.epoch_hash))
-            .expect("Consensus Worker fails");
+        )
     }
 
     /// Get `EpochExecutionCommitment` for an executed epoch.
@@ -931,7 +998,7 @@ impl ConsensusExecutionHandler {
                 state_index,
                 recover_mpt_during_construct_main_state,
             )
-            .expect("No db error")
+            ?
             // Unwrapping is safe because the state exists.
             .expect("State exists");
 
@@ -982,7 +1049,7 @@ impl ConsensusExecutionHandler {
         mut debug_record: Option<&mut ComputeEpochDebugRecord>,
         force_recompute: bool,
         recover_mpt_during_construct_main_state: bool,
-    ) {
+    ) -> bool {
         // FIXME: Question: where to calculate if we should make a snapshot?
         // FIXME: Currently we make the snapshotting decision when committing
         // FIXME: a new state.
@@ -1019,7 +1086,7 @@ impl ConsensusExecutionHandler {
                 &main_block_header,
                 on_local_main,
             );
-            return;
+            return true;
         }
 
         // Get blocks in this epoch after skip checking
@@ -1038,9 +1105,40 @@ impl ConsensusExecutionHandler {
             epoch_blocks.len(),
         );
 
-        let mut state = self
+        let mut state = match self
             .new_state(main_block, recover_mpt_during_construct_main_state)
-            .expect("Cannot init state");
+        {
+            Ok(state) => state,
+            Err(err) => {
+                let mut last_err = err;
+                let mut attempt = 1;
+                loop {
+                    warn!(
+                        "Consensus state init failed (attempt {}/{}): {}",
+                        attempt,
+                        STATE_INIT_RETRIES,
+                        last_err
+                    );
+                    if attempt >= STATE_INIT_RETRIES {
+                        warn!(
+                            "Consensus state init failed, skipping epoch"
+                        );
+                        return false;
+                    }
+                    thread::sleep(Duration::from_millis(
+                        STATE_INIT_RETRY_DELAY_MS,
+                    ));
+                    attempt += 1;
+                    match self.new_state(
+                        main_block,
+                        recover_mpt_during_construct_main_state,
+                    ) {
+                        Ok(state) => break state,
+                        Err(err) => last_err = err,
+                    }
+                }
+            }
+        };
 
         let epoch_receipts = self
             .process_epoch_transactions(
@@ -1074,6 +1172,8 @@ impl ConsensusExecutionHandler {
             );
         }
 
+        let _commit_timer =
+            ScopeTimer::time_scope(CONSENSUS_STATE_COMMIT_TIMER.clone());
         let commit_result = state
             .commit(*epoch_hash, debug_record.as_deref_mut())
             .expect(&concat!(file!(), ":", line!(), ":", column!()));
@@ -1101,6 +1201,7 @@ impl ConsensusExecutionHandler {
             .state_availability_boundary
             .write()
             .adjust_upper_bound(&main_block.block_header);
+        true
     }
 
     fn update_on_skipped_execution(

@@ -44,6 +44,8 @@ pub mod defaults {
     /// MPT, so setting this to 4 allows to access two states at the same
     /// time.
     pub const DEFAULT_MAX_OPEN_MPT: u32 = 4;
+    /// Default MDBX map size in MB to avoid hard failures at large state sizes.
+    pub const DEFAULT_MDBX_MAP_SIZE_MB: u64 = 65_536;
 
     use super::delta_mpt::node_memory_manager::DeltaMptsNodeMemoryManager;
 }

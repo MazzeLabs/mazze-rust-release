@@ -175,7 +175,7 @@ fn main() {
             timer_ratio,
             timer_beta,
             era_epoch_count,
-            BlockDbBackend::Sqlite,
+            BlockDbBackend::Paritydb,
             H256::zero(),
         );
 

@@ -118,6 +118,40 @@ pub struct Mip1559Transaction {
     pub access_list: Vec<AccessListItem>,
 }
 
+#[derive(
+    Default,
+    Debug,
+    Clone,
+    Eq,
+    PartialEq,
+    RlpEncodable,
+    RlpDecodable,
+    Serialize,
+    Deserialize,
+)]
+pub struct ShieldedTransaction {
+    /// Nonce.
+    pub nonce: U256,
+    /// Gas price.
+    pub gas_price: U256,
+    /// Gas paid up front for transaction execution.
+    pub gas: U256,
+    /// Action, can be either call or contract create.
+    pub action: Action,
+    /// Transferred value.
+    pub value: U256,
+    /// Maximum storage increasement in this execution.
+    pub storage_limit: u64,
+    /// The epoch height of the transaction. A transaction
+    /// can only be packed between the epochs of [epoch_height -
+    /// TRANSACTION_EPOCH_BOUND, epoch_height + TRANSACTION_EPOCH_BOUND]
+    pub epoch_height: u64,
+    /// The chain id of the transaction
+    pub chain_id: u32,
+    /// Encoded shielded payload (proof + commitments).
+    pub data: Bytes,
+}
+
 macro_rules! access_common_ref {
     ($field:ident, $ty:ty) => {
         pub fn $field(&self) -> &$ty {
@@ -125,6 +159,7 @@ macro_rules! access_common_ref {
                 TypedNativeTransaction::Mip155(tx) => &tx.$field,
                 TypedNativeTransaction::Mip2930(tx) => &tx.$field,
                 TypedNativeTransaction::Mip1559(tx) => &tx.$field,
+                TypedNativeTransaction::Shielded(tx) => &tx.$field,
             }
         }
     };
@@ -152,6 +187,7 @@ impl TypedNativeTransaction {
             Mip155(tx) => &tx.gas_price,
             Mip1559(tx) => &tx.max_fee_per_gas,
             Mip2930(tx) => &tx.gas_price,
+            Shielded(tx) => &tx.gas_price,
         }
     }
 
@@ -160,6 +196,7 @@ impl TypedNativeTransaction {
             Mip155(tx) => &tx.gas_price,
             Mip1559(tx) => &tx.max_priority_fee_per_gas,
             Mip2930(tx) => &tx.gas_price,
+            Shielded(tx) => &tx.gas_price,
         }
     }
 
@@ -168,6 +205,7 @@ impl TypedNativeTransaction {
             Mip155(tx) => &mut tx.nonce,
             Mip2930(tx) => &mut tx.nonce,
             Mip1559(tx) => &mut tx.nonce,
+            Shielded(tx) => &mut tx.nonce,
         }
     }
 
@@ -176,6 +214,7 @@ impl TypedNativeTransaction {
             Mip155(_tx) => None,
             Mip2930(tx) => Some(&tx.access_list),
             Mip1559(tx) => Some(&tx.access_list),
+            Shielded(_tx) => None,
         }
     }
 }
@@ -185,6 +224,7 @@ pub enum TypedNativeTransaction {
     Mip155(NativeTransaction),
     Mip2930(Mip2930Transaction),
     Mip1559(Mip1559Transaction),
+    Shielded(ShieldedTransaction),
 }
 
 impl TypedNativeTransaction {

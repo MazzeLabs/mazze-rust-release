@@ -14,17 +14,21 @@ use jsonrpc_http_server::Server as HttpServer;
 use jsonrpc_tcp_server::Server as TcpServer;
 use jsonrpc_ws_server::Server as WSServer;
 use parking_lot::{Condvar, Mutex};
+use rlp::Rlp;
 use threadpool::ThreadPool;
 
+use db::SystemDB;
 use blockgen::BlockGenerator;
 use keylib::KeyPair;
 use malloc_size_of::{new_malloc_size_ops, MallocSizeOf, MallocSizeOfOps};
 use mazze_executor::machine::{new_machine_with_builtin, Machine, VmFactory};
 use mazze_parameters::genesis::DEV_GENESIS_KEY_PAIR_2;
+use mazze_internal_common::DatabaseDecodable;
 use mazze_storage::StorageManager;
-use mazze_types::{address_util::AddressUtil, Address, Space, U256};
+use mazze_types::{address_util::AddressUtil, Address, Space, H256, U256};
 use mazzecore::{
     block_data_manager::BlockDataManager,
+    db::{COL_BLOCKS, COL_HASH_BY_BLOCK_NUMBER, COL_MISC},
     genesis_block::{self as genesis, genesis_block},
     pow::PowComputer,
     statistics::Statistics,
@@ -55,6 +59,41 @@ use crate::{
     },
     GENESIS_VERSION,
 };
+
+const BLOCK_TERMINAL_KEY: &[u8] = b"block_terminals";
+const BLOCK_BODY_SUFFIX_BYTE: u8 = 2;
+
+fn load_genesis_block_from_db(ledger_db: &SystemDB) -> Option<primitives::Block> {
+    let block0_key = 0u64.to_be_bytes();
+    let hash_bytes = ledger_db
+        .key_value()
+        .get(COL_HASH_BY_BLOCK_NUMBER, &block0_key)
+        .ok()
+        .flatten()?;
+    let genesis_hash = H256::db_decode(&hash_bytes).ok()?;
+
+    let header_bytes = ledger_db
+        .key_value()
+        .get(COL_BLOCKS, genesis_hash.as_bytes())
+        .ok()
+        .flatten()?;
+    let header = primitives::BlockHeader::db_decode(&header_bytes).ok()?;
+
+    let mut body_key = Vec::with_capacity(H256::len_bytes() + 1);
+    body_key.extend_from_slice(genesis_hash.as_bytes());
+    body_key.push(BLOCK_BODY_SUFFIX_BYTE);
+    let body_bytes = ledger_db
+        .key_value()
+        .get(COL_BLOCKS, &body_key)
+        .ok()
+        .flatten()?;
+    let body = primitives::Block::decode_body_with_tx_public(&Rlp::new(
+        &body_bytes,
+    ))
+    .ok()?;
+
+    Some(primitives::Block::new(header, body))
+}
 
 /// Hold all top-level components for a type of client.
 /// This struct implement ClientShutdownTrait.
@@ -255,15 +294,48 @@ pub fn initialize_common_modules(
     let vm = VmFactory::new(1024 * 32);
     let machine = Arc::new(new_machine_with_builtin(conf.common_params(), vm));
 
-    let genesis_block = genesis_block(
-        &storage_manager,
-        genesis_accounts.clone(),
-        Address::from_str(GENESIS_VERSION).unwrap(),
-        U256::zero(),
-        machine.clone(),
-        conf.raw_conf.execute_genesis, /* need_to_execute */
-        conf.raw_conf.chain_id,
-    );
+    let mut need_to_execute_genesis = conf.raw_conf.execute_genesis;
+    let mut genesis_block_from_db = load_genesis_block_from_db(ledger_db.as_ref());
+    let has_block_terminals = ledger_db
+        .key_value()
+        .get(COL_MISC, BLOCK_TERMINAL_KEY)
+        .ok()
+        .flatten()
+        .is_some();
+    if genesis_block_from_db.is_some() {
+        if need_to_execute_genesis {
+            warn!(
+                "execute_genesis=true but existing genesis block detected in db. Forcing execute_genesis=false; remove data dir to regenesis."
+            );
+        }
+        need_to_execute_genesis = false;
+    } else if need_to_execute_genesis {
+        let storage_max_epoch = storage_manager
+            .get_storage_manager()
+            .persisted_max_epoch_height();
+        if storage_max_epoch > 0 || has_block_terminals {
+            return Err(format!(
+                "chain data detected (storage_max_epoch={}, terminals={}) but genesis block is missing; please remove data dir or fix db",
+                storage_max_epoch, has_block_terminals
+            ));
+        }
+    }
+
+    let genesis_block = match genesis_block_from_db.take() {
+        Some(block) => {
+            info!("Loaded genesis block from db: {:?}", block.hash());
+            block
+        }
+        None => genesis_block(
+            &storage_manager,
+            genesis_accounts.clone(),
+            Address::from_str(GENESIS_VERSION).unwrap(),
+            U256::zero(),
+            machine.clone(),
+            need_to_execute_genesis, /* need_to_execute */
+            conf.raw_conf.chain_id,
+        ),
+    };
     storage_manager.notify_genesis_hash(genesis_block.hash());
     let mut genesis_accounts = genesis_accounts;
     let genesis_accounts = genesis_accounts

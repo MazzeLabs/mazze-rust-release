@@ -1,7 +1,7 @@
 name: mazze
 services:
   node:
-    image: mazzelabs/mazze-chain:node-x86-64
+    image: ${MAZZE_IMAGE_REGISTRY:-mazzelabs/mazze-chain}:node-${MAZZE_IMAGE_TAG:-x86-64}
     platform: linux/amd64
     volumes:
       - ./run/hydra.toml:/app/config/hydra.toml:ro
@@ -20,7 +20,7 @@ services:
     command: ['/app/start.sh']
 
   miner:
-    image: mazzelabs/mazze-chain:miner-x86-64
+    image: ${MAZZE_IMAGE_REGISTRY:-mazzelabs/mazze-chain}:miner-${MAZZE_IMAGE_TAG:-x86-64}
     platform: linux/amd64
     volumes:
       - ./run/hydra.toml:/app/config/hydra.toml:ro

@@ -300,6 +300,14 @@ impl StorageManager {
         new_storage_manager_result
     }
 
+    pub fn persisted_max_epoch_height(&self) -> u64 {
+        self.persist_state_from_initialization
+            .read()
+            .as_ref()
+            .map(|(_, _, max_epoch_height, _)| *max_epoch_height)
+            .unwrap_or(0)
+    }
+
     pub fn find_merkle_root(
         current_snapshots: &Vec<SnapshotInfo>, epoch_id: &EpochId,
     ) -> Option<MerkleHash> {

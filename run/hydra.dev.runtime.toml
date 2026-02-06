@@ -589,4 +589,4 @@ genesis_secrets = "/home/paladin0x/Desktop/mazze-node/bins/mazze/genesis_secrets
 
 mazze_data_dir = "/home/paladin0x/Desktop/mazze-node/run/blockchain_data_dev"
 
-execute_genesis = true
+execute_genesis = false

@@ -72,8 +72,10 @@ pub mod consensus_internal {
     // The initial base mining reward in uMAZZE.
     pub const INITIAL_BASE_MINING_REWARD_IN_UMAZZE: u64 = 4_000_000;
 
-    pub const GENESIS_TOKEN_COUNT_IN_MAZZE: u64 = 2_500_000_000;
-    pub const MAX_SUPPLY_TOKEN_COUNT_IN_MAZZE: u64 = 5_000_000_000;
+    pub const GENESIS_TOKEN_COUNT_IN_MAZZE: u64 = 3_900_000_000;
+    pub const MINING_SUPPLY_TARGET_IN_MAZZE: u64 = 2_500_000_000;
+    pub const MAX_SUPPLY_TOKEN_COUNT_IN_MAZZE: u64 =
+        GENESIS_TOKEN_COUNT_IN_MAZZE + MINING_SUPPLY_TARGET_IN_MAZZE;
     pub const HALVING_INTERVAL_IN_BLOCKS: u64 = 312_500_000;
 
     /// This is the cap of the size of the outlier barrier. If we have more

@@ -3,6 +3,7 @@
 This guide describes two methods for setting up a Mazze node and miner: using Docker (recommended) or building from source. For the Zurich development phase, we recommend using Docker.
 
 For reading logs, see our [Viewing Mazze Logs](viewing-logs.md) guide.
+For CLI usage, RPC details, and mining operations, see [Mazze CLI](mazze-cli.md), [RPC Guide](rpc.md), and [Mining Guide](mining.md).
 
 ## 1. Docker Setup
 
@@ -20,6 +21,20 @@ The repository includes a ready-to-use `docker-compose.yml`. To run Mazze:
 3. Start the services:
 ```bash
 sudo docker compose up -d
+```
+
+To roll out a freshly published image tag, pull and recreate:
+```bash
+# Optional if using non-default tag suffixes:
+# export MAZZE_IMAGE_TAG=<tag-suffix>
+sudo docker compose pull
+sudo docker compose up -d --force-recreate
+```
+
+Verify the deployed image revision:
+```bash
+sudo docker compose exec node cat /app/REVISION
+sudo docker compose exec miner cat /app/REVISION
 ```
 
 4. View logs:

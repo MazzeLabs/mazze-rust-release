@@ -71,6 +71,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM debian:bookworm-slim AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
+ARG VCS_REF=unknown
 # Install runtime dependencies only
 RUN --mount=type=cache,target=/var/lib/apt/lists \
     --mount=type=cache,target=/var/cache/apt \
@@ -88,7 +89,8 @@ RUN --mount=type=cache,target=/var/lib/apt/lists \
 WORKDIR /app
 COPY --from=builder /app/bin/mazze /app/mazze
 COPY docker/scripts/start-node.sh /app/start.sh
-RUN chmod +x /app/mazze /app/start.sh
+RUN chmod +x /app/mazze /app/start.sh && printf '%s\n' "${VCS_REF}" > /app/REVISION
+LABEL org.opencontainers.image.revision="${VCS_REF}"
 
 # Expose necessary ports
 EXPOSE 55555 52535 52536 52537 58545 58546

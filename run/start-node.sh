@@ -36,7 +36,20 @@ if grep -q '^\s*log_conf\s*=' "$TEMP_CONF"; then
 else
   printf '\nlog_conf = "%s"\n' "$ABS_LOG_CONF" >> "$TEMP_CONF"
 fi
-if compgen -G "$SCRIPT_DIR/blockchain_data/blockchain_db/*" > /dev/null; then
+has_chain_data() {
+  local base="$1"
+  if compgen -G "$base/blockchain_db/*" > /dev/null; then
+    return 0
+  fi
+  if compgen -G "$base/storage_db/*" > /dev/null; then
+    return 0
+  fi
+  if compgen -G "$base/net_config/*" > /dev/null; then
+    return 0
+  fi
+  return 1
+}
+if has_chain_data "$SCRIPT_DIR/blockchain_data"; then
   if grep -q '^\s*execute_genesis\s*=' "$TEMP_CONF"; then
     sed -i "s#^\s*execute_genesis\s*=.*#execute_genesis = false#" "$TEMP_CONF"
   else

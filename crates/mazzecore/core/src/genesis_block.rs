@@ -51,8 +51,8 @@ use primitives::transaction::native_transaction::NativeTransaction;
 const GENESIS_TREASURY_ADDRESS_HEX: &str =
     "0x1fd05dc5b53db270b52b4bc2b5068d41cef1b240";
 const GENESIS_TREASURY_BALANCE_MAZZY_STR: &str =
-    "2500000000000000000000000000";
-const SHIELDED_POOL_GENESIS_FUND_MAZZE: u64 = 250_000_000;
+    "39000000000000000000000000";
+const SHIELDED_POOL_GENESIS_FUND_MAZZE: u64 = 300_000_000;
 
 fn genesis_treasury_address() -> Address {
     GENESIS_TREASURY_ADDRESS_HEX
@@ -147,7 +147,9 @@ pub fn genesis_block(
     )
     .expect("no db error");
     trace!("genesis_accounts: {:?}", genesis_accounts);
+    let mut allocated_in_genesis_accounts = U256::zero();
     for (addr, balance) in genesis_accounts {
+        allocated_in_genesis_accounts += balance;
         state
             .add_balance(&addr, &balance, CleanupMode::NoEmpty)
             .unwrap();
@@ -158,12 +160,29 @@ pub fn genesis_block(
     }
     let genesis_account_address = GENESIS_ACCOUNT_ADDRESS.with_native_space();
 
-    let genesis_token_count = U256::from(GENESIS_TOKEN_COUNT_IN_MAZZE)
+    let target_genesis_token_count = U256::from(GENESIS_TOKEN_COUNT_IN_MAZZE)
         * U256::from(ONE_MAZZE_IN_MAZZY);
-    state.add_total_issued(genesis_token_count);
+
+    let genesis_account_token_count = if allocated_in_genesis_accounts
+        >= target_genesis_token_count
+    {
+        if allocated_in_genesis_accounts > target_genesis_token_count {
+            warn!(
+                "Genesis accounts ({}) exceed target genesis issuance ({}); skipping extra mint to genesis account",
+                allocated_in_genesis_accounts,
+                target_genesis_token_count,
+            );
+        }
+        U256::zero()
+    } else {
+        let remaining =
+            target_genesis_token_count - allocated_in_genesis_accounts;
+        state.add_total_issued(remaining);
+        remaining
+    };
 
     let genesis_account_init_balance =
-        U256::from(ONE_MAZZE_IN_MAZZY) * 100 + genesis_token_count;
+        U256::from(ONE_MAZZE_IN_MAZZY) * 100 + genesis_account_token_count;
     state
         .add_balance(
             &genesis_account_address,

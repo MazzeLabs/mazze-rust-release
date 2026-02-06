@@ -57,7 +57,20 @@ set_kv "mining_type" "\"disable\""
 set_kv "jsonrpc_local_http_port" "12539"
 set_kv "genesis_secrets" "\"$ABS_GENESIS_SECRETS\""
 set_kv "mazze_data_dir" "\"$DATA_DIR\""
-if compgen -G "$DATA_DIR/blockchain_db/*" > /dev/null; then
+has_chain_data() {
+  local base="$1"
+  if compgen -G "$base/blockchain_db/*" > /dev/null; then
+    return 0
+  fi
+  if compgen -G "$base/storage_db/*" > /dev/null; then
+    return 0
+  fi
+  if compgen -G "$base/net_config/*" > /dev/null; then
+    return 0
+  fi
+  return 1
+}
+if has_chain_data "$DATA_DIR"; then
   set_kv "execute_genesis" "false"
 else
   set_kv "execute_genesis" "true"

@@ -186,17 +186,19 @@ impl CommonParams {
 
 #[cfg(test)]
 mod tests {
+    use super::CommonParams;
 
     use mazze_parameters::{
         consensus::ONE_MAZZE_IN_UMAZZE,
         consensus_internal::{
             GENESIS_TOKEN_COUNT_IN_MAZZE, MAX_SUPPLY_TOKEN_COUNT_IN_MAZZE,
+            MINING_SUPPLY_TARGET_IN_MAZZE,
         },
     };
     use mazze_types::U256;
 
     #[test]
-    fn test_total_issuance_matches_max_supply() {
+    fn test_total_issuance_matches_mining_allocation() {
         let schedule = CommonParams::get_block_rewards_config();
 
         let mut issuance = String::new();
@@ -216,9 +218,14 @@ mod tests {
                 acc + (*reward * U256::from(blocks_at_this_reward))
             });
 
-        let expected = U256::from(
+        assert_eq!(
             MAX_SUPPLY_TOKEN_COUNT_IN_MAZZE - GENESIS_TOKEN_COUNT_IN_MAZZE,
-        ) * U256::from(ONE_MAZZE_IN_UMAZZE);
+            MINING_SUPPLY_TARGET_IN_MAZZE,
+            "Max supply must remain genesis + mining allocation",
+        );
+
+        let expected = U256::from(MINING_SUPPLY_TARGET_IN_MAZZE)
+            * U256::from(ONE_MAZZE_IN_UMAZZE);
 
         // With Bitcoin-style halving, we expect slightly less than the maximum supply
         // due to integer division rounding

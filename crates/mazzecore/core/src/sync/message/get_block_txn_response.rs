@@ -10,6 +10,7 @@ use crate::{
         },
         Error,
     },
+    verification::compute_transaction_root,
 };
 use mazze_types::H256;
 use metrics::MeterTimer;
@@ -72,8 +73,26 @@ impl Handleable for GetBlockTxnResponse {
                             }
                         }
                     }
-                    // FIXME Should check if hash matches
                     let block = Block::new(header, trans);
+                    let expected_root = *block.block_header.transactions_root();
+                    let actual_root =
+                        compute_transaction_root(&block.transactions);
+                    if actual_root != expected_root {
+                        warn!(
+                            "Recovered block transactions do not match header root, hash={}, expected_root={:?}, actual_root={:?}",
+                            resp_hash, expected_root, actual_root
+                        );
+                        ctx.manager.blocks_received(
+                            ctx.io,
+                            vec![req.block_hash].into_iter().collect(),
+                            received_blocks,
+                            true,
+                            Some(ctx.node_id.clone()),
+                            delay,
+                            None, /* preferred_node_type_for_block_request */
+                        );
+                        return Ok(());
+                    }
                     debug!(
                         "transaction received by block: ratio={:?}",
                         self.block_txn.len() as f64

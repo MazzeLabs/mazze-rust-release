@@ -1173,13 +1173,13 @@ impl TransactionPoolInner {
 
         let (sampled_tx, native_used_gas, native_used_size) =
             self.deferred_pool.packing_sampler(
-            Space::Native,
-            block_gas_limit - used_gas,
-            block_size_limit - used_size,
-            num_txs - sampled_tx.len(),
-            U256::zero(),
-            validity,
-        );
+                Space::Native,
+                block_gas_limit - used_gas,
+                block_size_limit - used_size,
+                num_txs - sampled_tx.len(),
+                U256::zero(),
+                validity,
+            );
         packed_transactions.extend_from_slice(&sampled_tx);
 
         let remaining_gas = block_gas_limit

@@ -575,10 +575,8 @@ impl Configuration {
 
         match self.raw_conf.block_db_type.as_str() {
             "paritydb" => {
-                let columns = self
-                    .raw_conf
-                    .paritydb_columns
-                    .unwrap_or(NUM_COLUMNS);
+                let columns =
+                    self.raw_conf.paritydb_columns.unwrap_or(NUM_COLUMNS);
                 let compression = self
                     .raw_conf
                     .paritydb_journal_compression

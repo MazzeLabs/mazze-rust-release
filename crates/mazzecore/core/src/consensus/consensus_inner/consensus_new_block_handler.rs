@@ -1531,7 +1531,8 @@ impl ConsensusNewBlockHandler {
             }
             // We can not assume that confirmed epoch are already executed,
             // but we can assume that the deferred block are executed.
-            self.data_man
+            if let Err(err) = self
+                .data_man
                 .storage_manager
                 .get_storage_manager()
                 .maintain_state_confirmed(
@@ -1541,8 +1542,12 @@ impl ConsensusNewBlockHandler {
                     confirmed_height,
                     &self.data_man.state_availability_boundary,
                 )
-                // FIXME: propogate error.
-                .expect(&concat!(file!(), ":", line!(), ":", column!()));
+            {
+                error!(
+                    "Failed to maintain confirmed state at epoch {}: {}",
+                    confirmed_height, err
+                );
+            }
             self.set_block_tx_packed(inner, me);
             self.delayed_tx_recycle_in_skipped_blocks(inner, capped_fork_at);
 

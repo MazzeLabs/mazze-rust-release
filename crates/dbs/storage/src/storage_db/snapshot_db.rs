@@ -181,9 +181,7 @@ pub trait SnapshotDbTrait:
 }
 
 use crate::{
-    impls::{
-        errors::Result as StorageResult,
-    },
+    impls::errors::Result as StorageResult,
     storage_db::{
         KeyValueDbIterableTrait, KeyValueDbTraitOwnedRead, KeyValueDbTraitRead,
         KeyValueDbTraitSingleWriter, SnapshotMptTraitRead, SnapshotMptTraitRw,
@@ -193,10 +191,10 @@ use crate::{
 };
 use derivative::Derivative;
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
+use parking_lot::RwLock;
 use primitives::{EpochId, MerkleHash, MERKLE_NULL_NODE, NULL_EPOCH};
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use rlp_derive::{RlpDecodable, RlpEncodable};
-use parking_lot::RwLock;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},

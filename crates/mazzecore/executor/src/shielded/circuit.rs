@@ -10,12 +10,14 @@ use ark_crypto_primitives::crh::poseidon::constraints::{
 use ark_crypto_primitives::crh::{CRHSchemeGadget, TwoToOneCRHSchemeGadget};
 use ark_ff::{One, Zero};
 use ark_r1cs_std::alloc::AllocVar;
-use ark_r1cs_std::boolean::Boolean;
 use ark_r1cs_std::bits::ToBitsGadget;
+use ark_r1cs_std::boolean::Boolean;
 use ark_r1cs_std::eq::EqGadget;
-use ark_r1cs_std::fields::FieldVar;
 use ark_r1cs_std::fields::fp::FpVar;
-use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
+use ark_r1cs_std::fields::FieldVar;
+use ark_relations::r1cs::{
+    ConstraintSynthesizer, ConstraintSystemRef, SynthesisError,
+};
 use ark_std::vec::Vec;
 
 pub const MAX_SHIELDED_INPUTS: usize = 8;
@@ -107,9 +109,7 @@ fn boolean_to_fp(cond: &Boolean<Fr>) -> Result<FpVar<Fr>, SynthesisError> {
 }
 
 fn enforce_if_equal(
-    cond: &Boolean<Fr>,
-    left: &FpVar<Fr>,
-    right: &FpVar<Fr>,
+    cond: &Boolean<Fr>, left: &FpVar<Fr>, right: &FpVar<Fr>,
 ) -> Result<(), SynthesisError> {
     let diff = left - right;
     let cond_fp = boolean_to_fp(cond)?;
@@ -117,8 +117,7 @@ fn enforce_if_equal(
 }
 
 fn enforce_if_zero(
-    cond: &Boolean<Fr>,
-    value: &FpVar<Fr>,
+    cond: &Boolean<Fr>, value: &FpVar<Fr>,
 ) -> Result<(), SynthesisError> {
     let cond_fp = boolean_to_fp(cond)?;
     (value * cond_fp).enforce_equal(&FpVar::constant(Fr::zero()))
@@ -138,11 +137,16 @@ fn enforce_count_bits(bits: &[Boolean<Fr>]) -> Result<(), SynthesisError> {
     Ok(())
 }
 
-fn is_greater(bits: &[Boolean<Fr>], value: usize) -> Result<Boolean<Fr>, SynthesisError> {
+fn is_greater(
+    bits: &[Boolean<Fr>], value: usize,
+) -> Result<Boolean<Fr>, SynthesisError> {
     let mut gt = Boolean::constant(false);
     let mut eq = Boolean::constant(true);
     for idx in (0..COUNT_BITS).rev() {
-        let bit = bits.get(idx).cloned().unwrap_or_else(|| Boolean::constant(false));
+        let bit = bits
+            .get(idx)
+            .cloned()
+            .unwrap_or_else(|| Boolean::constant(false));
         let value_bit = ((value >> idx) & 1) == 1;
         let bit_eq = if value_bit { bit.clone() } else { bit.not() };
         let bit_gt = if value_bit {
@@ -158,16 +162,13 @@ fn is_greater(bits: &[Boolean<Fr>], value: usize) -> Result<Boolean<Fr>, Synthes
 }
 
 fn poseidon_hash_var(
-    params: &CRHParametersVar<Fr>,
-    inputs: &[FpVar<Fr>],
+    params: &CRHParametersVar<Fr>, inputs: &[FpVar<Fr>],
 ) -> Result<FpVar<Fr>, SynthesisError> {
     CRHGadget::<Fr>::evaluate(params, inputs)
 }
 
 fn poseidon_hash2_var(
-    params: &CRHParametersVar<Fr>,
-    left: &FpVar<Fr>,
-    right: &FpVar<Fr>,
+    params: &CRHParametersVar<Fr>, left: &FpVar<Fr>, right: &FpVar<Fr>,
 ) -> Result<FpVar<Fr>, SynthesisError> {
     TwoToOneCRHGadget::<Fr>::compress(params, left, right)
 }
@@ -176,13 +177,15 @@ impl ConstraintSynthesizer<Fr> for ShieldedCircuit {
     fn generate_constraints(
         self, cs: ConstraintSystemRef<Fr>,
     ) -> Result<(), SynthesisError> {
-        let params = CRHParametersVar::new_constant(cs.clone(), poseidon_config())?;
+        let params =
+            CRHParametersVar::new_constant(cs.clone(), poseidon_config())?;
 
         let anchor = FpVar::new_input(cs.clone(), || Ok(self.anchor))?;
         let num_inputs =
             FpVar::new_input(cs.clone(), || Ok(Fr::from(self.num_inputs)))?;
-        let num_commitments =
-            FpVar::new_input(cs.clone(), || Ok(Fr::from(self.num_commitments)))?;
+        let num_commitments = FpVar::new_input(cs.clone(), || {
+            Ok(Fr::from(self.num_commitments))
+        })?;
         let num_outputs =
             FpVar::new_input(cs.clone(), || Ok(Fr::from(self.num_outputs)))?;
 
@@ -203,7 +206,11 @@ impl ConstraintSynthesizer<Fr> for ShieldedCircuit {
         }
 
         let mut outputs = Vec::with_capacity(MAX_TRANSPARENT_OUTPUTS);
-        for value in self.transparent_outputs.iter().take(MAX_TRANSPARENT_OUTPUTS) {
+        for value in self
+            .transparent_outputs
+            .iter()
+            .take(MAX_TRANSPARENT_OUTPUTS)
+        {
             outputs.push(FpVar::new_input(cs.clone(), || Ok(*value))?);
         }
         while outputs.len() < MAX_TRANSPARENT_OUTPUTS {
@@ -211,7 +218,9 @@ impl ConstraintSynthesizer<Fr> for ShieldedCircuit {
         }
 
         let mut values = Vec::with_capacity(MAX_TRANSPARENT_OUTPUTS);
-        for value in self.transparent_values.iter().take(MAX_TRANSPARENT_OUTPUTS) {
+        for value in
+            self.transparent_values.iter().take(MAX_TRANSPARENT_OUTPUTS)
+        {
             values.push(FpVar::new_input(cs.clone(), || Ok(*value))?);
         }
         while values.len() < MAX_TRANSPARENT_OUTPUTS {
@@ -230,7 +239,9 @@ impl ConstraintSynthesizer<Fr> for ShieldedCircuit {
         let mut sum_inputs = FpVar::constant(Fr::zero());
         let mut sum_outputs = FpVar::constant(Fr::zero());
 
-        for (idx, input) in self.inputs.iter().enumerate().take(MAX_SHIELDED_INPUTS) {
+        for (idx, input) in
+            self.inputs.iter().enumerate().take(MAX_SHIELDED_INPUTS)
+        {
             if input.path_elements.len() != MERKLE_DEPTH
                 || input.path_bits.len() != MERKLE_DEPTH
             {
@@ -251,7 +262,13 @@ impl ConstraintSynthesizer<Fr> for ShieldedCircuit {
 
             let commitment = poseidon_hash_var(
                 &params,
-                &[recipient_left, recipient_right, value.clone(), rho.clone(), rseed],
+                &[
+                    recipient_left,
+                    recipient_right,
+                    value.clone(),
+                    rho.clone(),
+                    rseed,
+                ],
             )?;
 
             let computed_nullifier =
@@ -265,7 +282,9 @@ impl ConstraintSynthesizer<Fr> for ShieldedCircuit {
                 let sibling = FpVar::new_witness(cs.clone(), || {
                     Ok(input.path_elements[level])
                 })?;
-                let bit = Boolean::new_witness(cs.clone(), || Ok(input.path_bits[level]))?;
+                let bit = Boolean::new_witness(cs.clone(), || {
+                    Ok(input.path_bits[level])
+                })?;
                 let left = bit.select(&sibling, &node)?;
                 let right = bit.select(&node, &sibling)?;
                 node = poseidon_hash2_var(&params, &left, &right)?;
@@ -273,11 +292,14 @@ impl ConstraintSynthesizer<Fr> for ShieldedCircuit {
 
             enforce_if_equal(&active, &node, &anchor)?;
 
-            let value_active = active.select(&value, &FpVar::constant(Fr::zero()))?;
+            let value_active =
+                active.select(&value, &FpVar::constant(Fr::zero()))?;
             sum_inputs += value_active;
         }
 
-        for (idx, output) in self.outputs.iter().enumerate().take(MAX_SHIELDED_OUTPUTS) {
+        for (idx, output) in
+            self.outputs.iter().enumerate().take(MAX_SHIELDED_OUTPUTS)
+        {
             let active = is_greater(&num_commitments_bits, idx)?;
             let inactive = active.not();
 
@@ -297,7 +319,8 @@ impl ConstraintSynthesizer<Fr> for ShieldedCircuit {
             enforce_if_equal(&active, &commitment, &commitments[idx])?;
             enforce_if_zero(&inactive, &commitments[idx])?;
 
-            let value_active = active.select(&value, &FpVar::constant(Fr::zero()))?;
+            let value_active =
+                active.select(&value, &FpVar::constant(Fr::zero()))?;
             sum_outputs += value_active;
         }
 
@@ -307,7 +330,8 @@ impl ConstraintSynthesizer<Fr> for ShieldedCircuit {
             let inactive = active.not();
             enforce_if_zero(&inactive, &outputs[idx])?;
             enforce_if_zero(&inactive, &value)?;
-            let value_active = active.select(&value, &FpVar::constant(Fr::zero()))?;
+            let value_active =
+                active.select(&value, &FpVar::constant(Fr::zero()))?;
             sum_transparent += value_active;
         }
 

@@ -17,13 +17,13 @@ use parking_lot::{Condvar, Mutex};
 use rlp::Rlp;
 use threadpool::ThreadPool;
 
-use db::SystemDB;
 use blockgen::BlockGenerator;
+use db::SystemDB;
 use keylib::KeyPair;
 use malloc_size_of::{new_malloc_size_ops, MallocSizeOf, MallocSizeOfOps};
 use mazze_executor::machine::{new_machine_with_builtin, Machine, VmFactory};
-use mazze_parameters::genesis::DEV_GENESIS_KEY_PAIR_2;
 use mazze_internal_common::DatabaseDecodable;
+use mazze_parameters::genesis::DEV_GENESIS_KEY_PAIR_2;
 use mazze_storage::StorageManager;
 use mazze_types::{address_util::AddressUtil, Address, Space, H256, U256};
 use mazzecore::{
@@ -63,7 +63,9 @@ use crate::{
 const BLOCK_TERMINAL_KEY: &[u8] = b"block_terminals";
 const BLOCK_BODY_SUFFIX_BYTE: u8 = 2;
 
-fn load_genesis_block_from_db(ledger_db: &SystemDB) -> Option<primitives::Block> {
+fn load_genesis_block_from_db(
+    ledger_db: &SystemDB,
+) -> Option<primitives::Block> {
     let block0_key = 0u64.to_be_bytes();
     let hash_bytes = ledger_db
         .key_value()
@@ -87,10 +89,9 @@ fn load_genesis_block_from_db(ledger_db: &SystemDB) -> Option<primitives::Block>
         .get(COL_BLOCKS, &body_key)
         .ok()
         .flatten()?;
-    let body = primitives::Block::decode_body_with_tx_public(&Rlp::new(
-        &body_bytes,
-    ))
-    .ok()?;
+    let body =
+        primitives::Block::decode_body_with_tx_public(&Rlp::new(&body_bytes))
+            .ok()?;
 
     Some(primitives::Block::new(header, body))
 }
@@ -295,7 +296,8 @@ pub fn initialize_common_modules(
     let machine = Arc::new(new_machine_with_builtin(conf.common_params(), vm));
 
     let mut need_to_execute_genesis = conf.raw_conf.execute_genesis;
-    let mut genesis_block_from_db = load_genesis_block_from_db(ledger_db.as_ref());
+    let mut genesis_block_from_db =
+        load_genesis_block_from_db(ledger_db.as_ref());
     let has_block_terminals = ledger_db
         .key_value()
         .get(COL_MISC, BLOCK_TERMINAL_KEY)

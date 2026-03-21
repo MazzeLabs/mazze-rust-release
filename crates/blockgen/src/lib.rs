@@ -454,8 +454,9 @@ impl BlockGenerator {
 
     /// Update and sync a new block
     pub fn on_mined_block(&self, block: Block) {
-        // FIXME: error handling.
-        self.sync.on_mined_block(block).ok();
+        if let Err(err) = self.sync.on_mined_block(block) {
+            warn!("Failed to submit mined block to sync service: {}", err);
+        }
     }
 
     /// Check if we need to mine on a new block

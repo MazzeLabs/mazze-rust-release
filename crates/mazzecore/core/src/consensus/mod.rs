@@ -295,11 +295,12 @@ impl ConsensusGraph {
             config: conf,
         };
         graph.update_best_info(false /* ready_for_mining */);
-        graph
+        if let Err(err) = graph
             .txpool
             .notify_new_best_info(graph.best_info.read_recursive().clone())
-            // FIXME: propogate error.
-            .expect(&concat!(file!(), ":", line!(), ":", column!()));
+        {
+            error!("Failed to notify txpool about initial best info: {}", err);
+        }
         graph
     }
 
@@ -2084,10 +2085,15 @@ impl ConsensusGraphTrait for ConsensusGraph {
         let ready_for_mining = self.ready_for_mining.load(Ordering::SeqCst);
         self.update_best_info(ready_for_mining);
         if ready_for_mining {
-            self.txpool
+            if let Err(err) = self
+                .txpool
                 .notify_new_best_info(self.best_info.read().clone())
-                // FIXME: propogate error.
-                .expect(&concat!(file!(), ":", line!(), ":", column!()));
+            {
+                error!(
+                    "Failed to notify txpool about updated best info for {:?}: {}",
+                    hash, err
+                );
+            }
         }
         debug!("Finish Consensus::on_new_block for {:?}", hash);
     }
@@ -2415,6 +2421,15 @@ impl ConsensusGraphTrait for ConsensusGraph {
         self.ready_for_mining.store(true, Ordering::SeqCst);
         self.update_best_info(true);
         self.txpool.set_ready();
+        self.txpool
+            .notify_new_best_info(self.best_info.read_recursive().clone())
+            .expect("No DB error")
+    }
+
+    fn leave_normal_phase(&self) {
+        self.ready_for_mining.store(false, Ordering::SeqCst);
+        self.update_best_info(false);
+        self.txpool.set_not_ready();
         self.txpool
             .notify_new_best_info(self.best_info.read_recursive().clone())
             .expect("No DB error")

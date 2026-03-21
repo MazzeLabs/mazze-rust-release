@@ -50,8 +50,7 @@ use primitives::transaction::native_transaction::NativeTransaction;
 // Native treasury address (type bits 0x1) derived from the genesis key.
 const GENESIS_TREASURY_ADDRESS_HEX: &str =
     "0x1fd05dc5b53db270b52b4bc2b5068d41cef1b240";
-const GENESIS_TREASURY_BALANCE_MAZZY_STR: &str =
-    "39000000000000000000000000";
+const GENESIS_TREASURY_BALANCE_MAZZY_STR: &str = "39000000000000000000000000";
 const SHIELDED_POOL_GENESIS_FUND_MAZZE: u64 = 300_000_000;
 
 fn genesis_treasury_address() -> Address {
@@ -115,13 +114,15 @@ pub fn load_secrets_file(
         secret_store.insert(keypair);
     }
     let treasury = genesis_treasury_address().with_native_space();
-    let treasury_balance =
-        U256::from_dec_str(GENESIS_TREASURY_BALANCE_MAZZY_STR).map_err(|e| {
-            format!(
-                "failed to parse treasury balance: value = {}, error = {:?}",
-                GENESIS_TREASURY_BALANCE_MAZZY_STR, e
-            )
-        })?;
+    let treasury_balance = U256::from_dec_str(
+        GENESIS_TREASURY_BALANCE_MAZZY_STR,
+    )
+    .map_err(|e| {
+        format!(
+            "failed to parse treasury balance: value = {}, error = {:?}",
+            GENESIS_TREASURY_BALANCE_MAZZY_STR, e
+        )
+    })?;
     accounts.entry(treasury).or_insert(treasury_balance);
     Ok(accounts)
 }
@@ -215,7 +216,9 @@ pub fn genesis_block(
                 );
             }
         } else {
-            warn!("Genesis treasury account missing; skipping shielded pool seed");
+            warn!(
+                "Genesis treasury account missing; skipping shielded pool seed"
+            );
         }
     }
 
@@ -276,18 +279,22 @@ pub fn genesis_block(
         state
             .set_admin(&contract_address.address, &Address::zero())
             .expect("");
-        info!("Genesis {:?} addresses: {:?}", "CREATE2FACTORY", contract_address);
+        info!(
+            "Genesis {:?} addresses: {:?}",
+            "CREATE2FACTORY", contract_address
+        );
 
         for tx in genesis_transactions.iter().skip(1) {
-            execute_genesis_transaction(tx.as_ref(), &mut state, machine.clone());
+            execute_genesis_transaction(
+                tx.as_ref(),
+                &mut state,
+                machine.clone(),
+            );
         }
 
         if shielded_vk.is_some() {
             state
-                .set_admin(
-                    &SHIELDED_POOL_CONTRACT_ADDRESS,
-                    &Address::zero(),
-                )
+                .set_admin(&SHIELDED_POOL_CONTRACT_ADDRESS, &Address::zero())
                 .expect("failed to clear shielded pool admin");
         }
     }

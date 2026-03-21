@@ -8,10 +8,10 @@ use crate::{
     sync::{Error as SyncError, ErrorKind as SyncErrorKind},
 };
 use mazze_executor::{machine::Machine, spec::TransitionsEpochHeight};
+use mazze_parameters::internal_contract_addresses::SHIELDED_POOL_CONTRACT_ADDRESS;
 use mazze_parameters::{
     block::*, consensus_internal::ELASTICITY_MULTIPLIER, sync::MAX_PACKET_SIZE,
 };
-use mazze_parameters::internal_contract_addresses::SHIELDED_POOL_CONTRACT_ADDRESS;
 use mazze_storage::{
     into_simple_mpt_key, make_simple_mpt, simple_mpt_merkle_root,
     simple_mpt_proof, SimpleMpt, TrieProof,
@@ -779,7 +779,8 @@ impl VerificationConfig {
                 Action::Call(ref address) => address,
                 Action::Create => {
                     bail!(TransactionError::InvalidShielded(
-                        "shielded transaction must call the shielded pool".into()
+                        "shielded transaction must call the shielded pool"
+                            .into()
                     ))
                 }
             };

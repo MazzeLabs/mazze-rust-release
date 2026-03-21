@@ -329,10 +329,8 @@ impl ConsensusExecutor {
                 }))
                 .is_err()
             {
-                return Err(
-                    "Consensus execution worker stopped unexpectedly"
-                        .to_string(),
-                );
+                return Err("Consensus execution worker stopped unexpectedly"
+                    .to_string());
             }
             match receiver.recv() {
                 Ok(Some(result)) => Ok(result),
@@ -356,10 +354,10 @@ impl ConsensusExecutor {
                         ));
                     }
                 }
-                Err(RecvError) => Err(
-                    "Consensus execution worker stopped unexpectedly"
-                        .to_string(),
-                ),
+                Err(RecvError) => {
+                    Err("Consensus execution worker stopped unexpectedly"
+                        .to_string())
+                }
             }
         }
     }
@@ -997,8 +995,7 @@ impl ConsensusExecutionHandler {
             .get_state_for_next_epoch(
                 state_index,
                 recover_mpt_during_construct_main_state,
-            )
-            ?
+            )?
             // Unwrapping is safe because the state exists.
             .expect("State exists");
 
@@ -1115,14 +1112,10 @@ impl ConsensusExecutionHandler {
                 loop {
                     warn!(
                         "Consensus state init failed (attempt {}/{}): {}",
-                        attempt,
-                        STATE_INIT_RETRIES,
-                        last_err
+                        attempt, STATE_INIT_RETRIES, last_err
                     );
                     if attempt >= STATE_INIT_RETRIES {
-                        warn!(
-                            "Consensus state init failed, skipping epoch"
-                        );
+                        warn!("Consensus state init failed, skipping epoch");
                         return false;
                     }
                     thread::sleep(Duration::from_millis(
@@ -1224,13 +1217,14 @@ impl ConsensusExecutionHandler {
                 .read()
                 .check_availability(main_block_header.height(), epoch_hash)
             {
-                self.tx_pool
-                    .set_best_executed_epoch(StateIndex::new_for_readonly(
-                        epoch_hash,
-                        &state_root,
-                    ))
-                    // FIXME: propogate error.
-                    .expect(&concat!(file!(), ":", line!(), ":", column!()));
+                if let Err(err) = self.tx_pool.set_best_executed_epoch(
+                    StateIndex::new_for_readonly(epoch_hash, &state_root),
+                ) {
+                    error!(
+                        "Failed to update txpool best executed epoch for skipped epoch {:?}: {}",
+                        epoch_hash, err
+                    );
+                }
             }
         }
         self.data_man
@@ -1243,28 +1237,43 @@ impl ConsensusExecutionHandler {
     fn notify_txpool(
         &self, commit_result: &StateCommitResult, epoch_hash: &H256,
     ) {
-        // FIXME: We may want to propagate the error up.
-
         let accounts_for_txpool = commit_result.accounts_for_txpool.clone();
         {
             debug!("Notify epoch[{}]", epoch_hash);
 
             // TODO: use channel to deliver the message.
             let txpool_clone = self.tx_pool.clone();
-            std::thread::Builder::new()
+            if let Err(err) = std::thread::Builder::new()
                 .name("txpool_update_state".into())
-                .spawn(move || {
-                    txpool_clone.notify_modified_accounts(accounts_for_txpool);
+                .spawn({
+                    let txpool_clone = txpool_clone.clone();
+                    let accounts_for_txpool = accounts_for_txpool.clone();
+                    move || {
+                        txpool_clone
+                            .notify_modified_accounts(accounts_for_txpool);
+                    }
                 })
-                .expect("can not notify tx pool to start state");
+            {
+                error!(
+                    "Failed to spawn txpool state update thread for epoch {:?}: {}",
+                    epoch_hash, err
+                );
+                txpool_clone.notify_modified_accounts(accounts_for_txpool);
+            }
         }
 
-        self.tx_pool
-            .set_best_executed_epoch(StateIndex::new_for_readonly(
-                epoch_hash,
-                &commit_result.state_root,
-            ))
-            .expect(&concat!(file!(), ":", line!(), ":", column!()));
+        if let Err(err) =
+            self.tx_pool
+                .set_best_executed_epoch(StateIndex::new_for_readonly(
+                    epoch_hash,
+                    &commit_result.state_root,
+                ))
+        {
+            error!(
+                "Failed to update txpool best executed epoch for committed epoch {:?}: {}",
+                epoch_hash, err
+            );
+        }
     }
 
     fn compute_block_base_reward(

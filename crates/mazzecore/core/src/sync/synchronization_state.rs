@@ -206,9 +206,9 @@ impl SynchronizationState {
         self.allow_phase_change_without_peer
     }
 
-    // FIXME: median_chain_height_from_peers.
-    // FIXME: it lead to more questions but these are questions on the
-    // FIXME: algorithm side.
+    /// Median epoch among peers that have explicitly announced they are in
+    /// normal phase. This keeps phase changes robust against outliers while
+    /// still allowing a clean-network fresh start to move forward.
     pub fn median_epoch_from_normal_peers(&self) -> Option<u64> {
         // This flag is set to true if all peers are just starting from a clean
         // state, so we can just enter the normal phase because there's

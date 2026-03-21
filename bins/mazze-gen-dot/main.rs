@@ -16,8 +16,8 @@ fn open_db(db_path: &str) -> std::io::Result<Arc<db::SystemDB>> {
         disable_wal: false,
         stats: false,
     };
-    let settings =
-        db::paritydb_settings(db_path.into(), &parity_config).map_err(|e| {
+    let settings = db::paritydb_settings(db_path.into(), &parity_config)
+        .map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::Other, format!("{e}"))
         })?;
 

@@ -859,15 +859,12 @@ impl SynchronizationProtocolHandler {
         }
     }
 
-    // FIXME Use another function for block catch up. It should only use local
-    // epoch set and end with all consensus block retrieved, not related to
-    // median peer epoch.
     pub fn request_epochs(&self, io: &dyn NetworkContext) {
         // make sure only one thread can request new epochs at a time
         let mut latest_requested = self.latest_epoch_requested.lock();
 
-        // We use median here instead of max, so w.h.p. we won't request all
-        // epoch sets from malicious peer.
+        // We advance epoch discovery conservatively against the median normal
+        // peer so a single outlier cannot drag catch-up arbitrarily far.
         // See https://github.com/s94130586/mazze-rust/issues/1466.
         let median_peer_epoch =
             self.syn.median_epoch_from_normal_peers().unwrap_or(0);
@@ -996,9 +993,27 @@ impl SynchronizationProtocolHandler {
         &self, io: &dyn NetworkContext, peer: Option<NodeId>,
         mut header_hashes: Vec<H256>, ignore_db: bool,
     ) {
+        let mut recovered_headers = Vec::new();
         if !ignore_db {
-            header_hashes
-                .retain(|hash| !self.try_request_header_from_db(io, hash));
+            header_hashes.retain(|hash| {
+                !self.try_request_header_from_db(hash, &mut recovered_headers)
+            });
+        }
+        if !recovered_headers.is_empty() {
+            let ctx = Context {
+                node_id: io.self_node_id(),
+                io,
+                manager: self,
+            };
+            if let Err(err) = GetBlockHeadersResponse::handle_local_headers(
+                &ctx,
+                recovered_headers,
+            ) {
+                warn!(
+                    "Failed to process block headers recovered from db: {:?}",
+                    err
+                );
+            }
         }
         // Headers may have been inserted into sync graph before as dependent
         // blocks
@@ -1015,13 +1030,14 @@ impl SynchronizationProtocolHandler {
     /// exists in db or is inserted before. Handle the block header if its
     /// seq_num is less than that of the current era genesis.
     fn try_request_header_from_db(
-        &self, io: &dyn NetworkContext, hash: &H256,
+        &self, hash: &H256, recovered_headers: &mut Vec<BlockHeader>,
     ) -> bool {
         if self.graph.contains_block_header(hash) {
             return true;
         }
 
-        if let Some(info) = self.graph.data_man.local_block_info_by_hash(hash) {
+        let local_info = self.graph.data_man.local_block_info_by_hash(hash);
+        if let Some(info) = local_info {
             if info.get_status() == BlockStatus::Invalid {
                 // this block was invalid before
                 return true;
@@ -1042,25 +1058,16 @@ impl SynchronizationProtocolHandler {
             }
         }
 
-        // FIXME: If there is no block info in db, whether we need to fetch
-        // block header from db?
         if let Some(header) = self.graph.data_man.block_header_by_hash(hash) {
-            debug!("Recovered header {:?} from db", hash);
-            // Process headers from db
-            let mut block_headers_resp = GetBlockHeadersResponse::default();
-            block_headers_resp.request_id = 0;
-            let mut headers = Vec::new();
-            headers.push((*header).clone());
-            block_headers_resp.headers = headers;
-
-            let ctx = Context {
-                node_id: io.self_node_id(),
-                io,
-                manager: self,
-            };
-
-            ctx.send_response(&block_headers_resp)
-                .expect("send response should not be error");
+            if local_info.is_some() {
+                debug!("Recovered header {:?} from db", hash);
+            } else {
+                debug!(
+                    "Recovered header {:?} from db without local block info; it will be re-verified before reuse",
+                    hash
+                );
+            }
+            recovered_headers.push((*header).clone());
             return true;
         } else {
             return false;

@@ -4,8 +4,8 @@
 
 use crate::rpc::{
     error_codes::{
-        call_execution_error, internal_error, invalid_params,
-        request_rejected_in_catch_up_mode, unknown_block,
+        call_execution_error, internal_error, internal_error_msg,
+        invalid_params, request_rejected_in_catch_up_mode, unknown_block,
     },
     impls::RpcImplConfiguration,
     traits::eth_space::eth::Eth,
@@ -241,11 +241,15 @@ impl EthHandler {
         }
         let (signed_trans, failed_trans) =
             self.tx_pool.insert_new_transactions(vec![tx]);
-        // FIXME: how is it possible?
         if signed_trans.len() + failed_trans.len() > 1 {
-            // This should never happen
-            error!("insert_new_transactions failed, invalid length of returned result vector {}", signed_trans.len() + failed_trans.len());
-            Ok(H256::zero().into())
+            let result_len = signed_trans.len() + failed_trans.len();
+            error!(
+                "insert_new_transactions returned an unexpected result length {}",
+                result_len
+            );
+            bail!(internal_error_msg(
+                "transaction pool returned an unexpected result length"
+            ))
         } else if signed_trans.len() + failed_trans.len() == 0 {
             // For tx in transactions_pubkey_cache, we simply ignore them
             debug!("insert_new_transactions ignores inserted transactions");

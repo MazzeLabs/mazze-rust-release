@@ -52,15 +52,17 @@ fn main() -> Result<(), String> {
             return Err(format!("proving key is empty: {}", path.display()));
         }
         let hex = trimmed.strip_prefix("0x").unwrap_or(trimmed);
-        let bytes: Vec<u8> = hex
-            .from_hex()
-            .map_err(|e| format!("invalid hex in {}: {:?}", path.display(), e))?;
+        let bytes: Vec<u8> = hex.from_hex().map_err(|e| {
+            format!("invalid hex in {}: {:?}", path.display(), e)
+        })?;
         let pk = ProvingKey::<Bls12_381>::deserialize_compressed(&*bytes)
-            .map_err(|e| format!("failed to deserialize proving key: {:?}", e))?;
+            .map_err(|e| {
+                format!("failed to deserialize proving key: {:?}", e)
+            })?;
         let mut vk_bytes = Vec::new();
-        pk.vk
-            .serialize_compressed(&mut vk_bytes)
-            .map_err(|e| format!("failed to serialize verifying key: {:?}", e))?;
+        pk.vk.serialize_compressed(&mut vk_bytes).map_err(|e| {
+            format!("failed to serialize verifying key: {:?}", e)
+        })?;
         let hash = keccak(vk_bytes.as_slice());
         println!("0x{}", hash.as_ref().to_hex::<String>());
         return Ok(());

@@ -661,20 +661,15 @@ impl<
         DELTA_MPT_CACHE_ACCESSES.update(cache_accesses);
         DELTA_MPT_CACHE_MISSES.update(cache_misses);
         DELTA_MPT_CACHE_HIT_RATE_PCT.update(cache_hit_rate_pct);
-        DELTA_MPT_DB_LOADS
-            .update(self.db_load_counter.load(Ordering::Relaxed));
-        DELTA_MPT_UNCACHED_LEAF_LOADS.update(
-            self.uncached_leaf_load_times.load(Ordering::Relaxed),
-        );
-        DELTA_MPT_UNCACHED_LEAF_DB_LOADS.update(
-            self.uncached_leaf_db_loads.load(Ordering::Relaxed),
-        );
-        DELTA_MPT_COMPUTE_MERKLE_DB_LOADS.update(
-            self.compute_merkle_db_loads.load(Ordering::Relaxed),
-        );
-        DELTA_MPT_CHILDREN_MERKLE_DB_LOADS.update(
-            self.children_merkle_db_loads.load(Ordering::Relaxed),
-        );
+        DELTA_MPT_DB_LOADS.update(self.db_load_counter.load(Ordering::Relaxed));
+        DELTA_MPT_UNCACHED_LEAF_LOADS
+            .update(self.uncached_leaf_load_times.load(Ordering::Relaxed));
+        DELTA_MPT_UNCACHED_LEAF_DB_LOADS
+            .update(self.uncached_leaf_db_loads.load(Ordering::Relaxed));
+        DELTA_MPT_COMPUTE_MERKLE_DB_LOADS
+            .update(self.compute_merkle_db_loads.load(Ordering::Relaxed));
+        DELTA_MPT_CHILDREN_MERKLE_DB_LOADS
+            .update(self.children_merkle_db_loads.load(Ordering::Relaxed));
         DELTA_MPT_ALLOCATOR_CAPACITY.update(allocator_ref.capacity());
         DELTA_MPT_ALLOCATOR_LEN.update(allocator_ref.len());
         debug!(
@@ -819,8 +814,8 @@ use super::{
     slab::Slab,
     NodeRefDeltaMpt,
 };
-use metrics::{Gauge, GaugeUsize};
 use malloc_size_of_derive::MallocSizeOf as MallocSizeOfDerive;
+use metrics::{Gauge, GaugeUsize};
 use parking_lot::{
     Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockUpgradableReadGuard,
 };

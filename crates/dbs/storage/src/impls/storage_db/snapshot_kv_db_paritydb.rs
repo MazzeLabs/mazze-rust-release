@@ -12,11 +12,11 @@ use crate::{
         },
     },
     storage_db::{
-        AlreadyOpenSnapshots, KeyValueDbIterableTrait, KeyValueDbTraitOwnedRead,
-        KeyValueDbTraitRead, KeyValueDbTraitSingleWriter, KeyValueDbTypes,
-        OpenSnapshotMptTrait, SnapshotDbTrait, SnapshotDbWriteableTrait,
-        SnapshotMptDbTrait, SnapshotMptDbValue, SnapshotMptTraitReadAndIterate,
-        SnapshotMptTraitRw,
+        AlreadyOpenSnapshots, KeyValueDbIterableTrait,
+        KeyValueDbTraitOwnedRead, KeyValueDbTraitRead,
+        KeyValueDbTraitSingleWriter, KeyValueDbTypes, OpenSnapshotMptTrait,
+        SnapshotDbTrait, SnapshotDbWriteableTrait, SnapshotMptDbTrait,
+        SnapshotMptDbValue, SnapshotMptTraitReadAndIterate, SnapshotMptTraitRw,
     },
     utils::{
         tuple::ElementSatisfy,
@@ -47,9 +47,8 @@ const PREFIX_DELTA_DEL: u8 = b'd';
 const PREFIX_MPT: u8 = b'm';
 
 lazy_static! {
-    static ref OPEN_PARITYDB_CACHE: RwLock<
-        HashMap<PathBuf, Weak<dyn KeyValueStore>>,
-    > = RwLock::new(HashMap::new());
+    static ref OPEN_PARITYDB_CACHE: RwLock<HashMap<PathBuf, Weak<dyn KeyValueStore>>> =
+        RwLock::new(HashMap::new());
 }
 
 #[derive(Clone)]
@@ -64,9 +63,7 @@ pub struct PrefixedKvdbParitydb<ValueType> {
 
 impl<ValueType> PrefixedKvdbParitydb<ValueType> {
     fn new(
-        kvdb: Arc<dyn KeyValueStore>,
-        col: u32,
-        prefix: u8,
+        kvdb: Arc<dyn KeyValueStore>, col: u32, prefix: u8,
         transaction: Arc<Mutex<Option<DBTransaction>>>,
     ) -> Self {
         Self {
@@ -108,7 +105,9 @@ impl KeyValueDbTraitOwnedRead for PrefixedKvdbParitydb<Box<[u8]>> {
 }
 
 impl KeyValueDbTraitSingleWriter for PrefixedKvdbParitydb<Box<[u8]>> {
-    fn delete(&mut self, key: &[u8]) -> Result<Option<Option<Self::ValueType>>> {
+    fn delete(
+        &mut self, key: &[u8],
+    ) -> Result<Option<Option<Self::ValueType>>> {
         let prefixed_key = self.prefixed_key(key);
         let mut tx_guard = self.transaction.lock();
         if let Some(tx) = tx_guard.as_mut() {
@@ -122,7 +121,8 @@ impl KeyValueDbTraitSingleWriter for PrefixedKvdbParitydb<Box<[u8]>> {
     }
 
     fn put(
-        &mut self, key: &[u8], value: &<Self::ValueType as crate::storage_db::DbValueType>::Type,
+        &mut self, key: &[u8],
+        value: &<Self::ValueType as crate::storage_db::DbValueType>::Type,
     ) -> Result<Option<Option<Self::ValueType>>> {
         let prefixed_key = self.prefixed_key(key);
         let mut tx_guard = self.transaction.lock();
@@ -155,7 +155,9 @@ impl KeyValueDbTraitOwnedRead for PrefixedKvdbParitydb<()> {
 }
 
 impl KeyValueDbTraitSingleWriter for PrefixedKvdbParitydb<()> {
-    fn delete(&mut self, key: &[u8]) -> Result<Option<Option<Self::ValueType>>> {
+    fn delete(
+        &mut self, key: &[u8],
+    ) -> Result<Option<Option<Self::ValueType>>> {
         let prefixed_key = self.prefixed_key(key);
         let mut tx_guard = self.transaction.lock();
         if let Some(tx) = tx_guard.as_mut() {
@@ -169,7 +171,8 @@ impl KeyValueDbTraitSingleWriter for PrefixedKvdbParitydb<()> {
     }
 
     fn put(
-        &mut self, key: &[u8], _value: &<Self::ValueType as crate::storage_db::DbValueType>::Type,
+        &mut self, key: &[u8],
+        _value: &<Self::ValueType as crate::storage_db::DbValueType>::Type,
     ) -> Result<Option<Option<Self::ValueType>>> {
         let prefixed_key = self.prefixed_key(key);
         let mut tx_guard = self.transaction.lock();
@@ -198,9 +201,7 @@ pub struct ParitydbRangeIter<'a, ValueType> {
 impl<'a, ValueType> ParitydbRangeIter<'a, ValueType> {
     fn new(
         iter: Box<dyn Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a>,
-        prefix: u8,
-        lower_bound: Option<Vec<u8>>,
-        lower_exclusive: bool,
+        prefix: u8, lower_bound: Option<Vec<u8>>, lower_exclusive: bool,
         upper_bound: Option<Vec<u8>>,
     ) -> Self {
         Self {
@@ -292,14 +293,17 @@ impl<'a>
     WrappedLifetimeFamily<
         'a,
         dyn FallibleIterator<Item = (Vec<u8>, Box<[u8]>), Error = Error>,
-    > for KvdbIterIterator<(Vec<u8>, Box<[u8]>), [u8], KvdbParitydbIteratorTag>
+    >
+    for KvdbIterIterator<(Vec<u8>, Box<[u8]>), [u8], KvdbParitydbIteratorTag>
 {
     type Out = ParitydbRangeIter<'a, Box<[u8]>>;
 }
 
-impl WrappedTrait<
+impl
+    WrappedTrait<
         dyn FallibleIterator<Item = (Vec<u8>, Box<[u8]>), Error = Error>,
-    > for KvdbIterIterator<(Vec<u8>, Box<[u8]>), [u8], KvdbParitydbIteratorTag>
+    >
+    for KvdbIterIterator<(Vec<u8>, Box<[u8]>), [u8], KvdbParitydbIteratorTag>
 {
 }
 
@@ -321,8 +325,9 @@ impl KeyValueDbIterableTrait<MptKeyValue, [u8], KvdbParitydbIteratorTag>
     for PrefixedKvdbParitydb<Box<[u8]>>
 where
     KvdbIterIterator<MptKeyValue, [u8], KvdbParitydbIteratorTag>:
-        WrappedTrait<dyn FallibleIterator<Item = MptKeyValue, Error = Error>>
-            + for<'a> WrappedLifetimeFamily<
+        WrappedTrait<
+                dyn FallibleIterator<Item = MptKeyValue, Error = Error>,
+            > + for<'a> WrappedLifetimeFamily<
                 'a,
                 dyn FallibleIterator<Item = MptKeyValue, Error = Error>,
                 Out = ParitydbRangeIter<'a, Box<[u8]>>,
@@ -436,14 +441,15 @@ where
     }
 }
 
-impl ElementSatisfy<
+impl
+    ElementSatisfy<
         dyn KeyValueDbIterableTrait<MptKeyValue, [u8], KvdbParitydbIteratorTag>,
     > for PrefixedKvdbParitydb<Box<[u8]>>
 {
     fn to_constrain_object(
         &self,
     ) -> &(dyn KeyValueDbIterableTrait<MptKeyValue, [u8], KvdbParitydbIteratorTag>
-          + 'static) {
+             + 'static) {
         self
     }
 
@@ -467,7 +473,8 @@ impl
     type Out = Self;
 }
 
-impl WrappedTrait<
+impl
+    WrappedTrait<
         dyn KeyValueDbIterableTrait<MptKeyValue, [u8], KvdbParitydbIteratorTag>,
     > for PrefixedKvdbParitydb<Box<[u8]>>
 {
@@ -601,7 +608,9 @@ impl SnapshotKvDbParitydb {
         Ok(self.prefixed_unit_db(PREFIX_DELTA_DEL))
     }
 
-    pub fn dump_delta_mpt(&mut self, delta_mpt: &DeltaMptIterator) -> Result<()> {
+    pub fn dump_delta_mpt(
+        &mut self, delta_mpt: &DeltaMptIterator,
+    ) -> Result<()> {
         SnapshotDbWriteableTrait::start_transaction(self)?;
         delta_mpt.iterate(&mut DeltaMptMergeDumperParitydb {
             set_db: self.prefixed_kv_db(PREFIX_DELTA_SET),
@@ -649,7 +658,11 @@ impl SnapshotKvDbParitydb {
     ) -> Result<
         Wrap<
             PrefixedKvdbParitydb<Box<[u8]>>,
-            dyn KeyValueDbIterableTrait<MptKeyValue, [u8], KvdbParitydbIteratorTag>,
+            dyn KeyValueDbIterableTrait<
+                MptKeyValue,
+                [u8],
+                KvdbParitydbIteratorTag,
+            >,
         >,
     > {
         Ok(Wrap(self.prefixed_kv_db(PREFIX_MPT)))
@@ -685,12 +698,15 @@ impl KeyValueDbTraitOwnedRead for SnapshotKvDbParitydb {
 }
 
 impl KeyValueDbTraitSingleWriter for SnapshotKvDbParitydb {
-    fn delete(&mut self, key: &[u8]) -> Result<Option<Option<Self::ValueType>>> {
+    fn delete(
+        &mut self, key: &[u8],
+    ) -> Result<Option<Option<Self::ValueType>>> {
         self.prefixed_kv_db(PREFIX_KV).delete(key)
     }
 
     fn put(
-        &mut self, key: &[u8], value: &<Self::ValueType as crate::storage_db::DbValueType>::Type,
+        &mut self, key: &[u8],
+        value: &<Self::ValueType as crate::storage_db::DbValueType>::Type,
     ) -> Result<Option<Option<Self::ValueType>>> {
         self.prefixed_kv_db(PREFIX_KV).put(key, value)
     }
@@ -720,7 +736,8 @@ impl SnapshotDbWriteableTrait for SnapshotKvDbParitydb {
     }
 
     fn put_kv(
-        &mut self, key: &[u8], value: &<Self::ValueType as crate::storage_db::DbValueType>::Type,
+        &mut self, key: &[u8],
+        value: &<Self::ValueType as crate::storage_db::DbValueType>::Type,
     ) -> Result<Option<Option<Self::ValueType>>> {
         self.put(key, value)
     }
@@ -782,27 +799,23 @@ impl SnapshotDbTrait for SnapshotKvDbParitydb {
 
     fn get_null_snapshot() -> Self {
         lazy_static! {
-            static ref NULL_SNAPSHOT_STORE: (Arc<dyn KeyValueStore>, PathBuf) =
-                {
-                    let null_path = env::temp_dir().join(format!(
-                        "mazze_null_snapshot_{}",
-                        std::process::id()
-                    ));
-                    let parity_config = db::ParityDbOpenConfig {
-                        columns: SnapshotKvDbParitydb::DB_COLUMNS,
-                        compression: None,
-                        disable_wal: false,
-                        stats: false,
-                    };
-                    let settings = db::paritydb_settings(
-                        null_path.clone(),
-                        &parity_config,
-                    )
-                    .expect("paritydb settings");
-                    let db =
-                        db::open_database(&settings).expect("open paritydb");
-                    (db.key_value(), null_path)
+            static ref NULL_SNAPSHOT_STORE: (Arc<dyn KeyValueStore>, PathBuf) = {
+                let null_path = env::temp_dir().join(format!(
+                    "mazze_null_snapshot_{}",
+                    std::process::id()
+                ));
+                let parity_config = db::ParityDbOpenConfig {
+                    columns: SnapshotKvDbParitydb::DB_COLUMNS,
+                    compression: None,
+                    disable_wal: false,
+                    stats: false,
                 };
+                let settings =
+                    db::paritydb_settings(null_path.clone(), &parity_config)
+                        .expect("paritydb settings");
+                let db = db::open_database(&settings).expect("open paritydb");
+                (db.key_value(), null_path)
+            };
         }
         let (kvdb, null_path) = &*NULL_SNAPSHOT_STORE;
         SnapshotKvDbParitydb {
@@ -858,8 +871,7 @@ impl SnapshotDbTrait for SnapshotKvDbParitydb {
     fn create(
         snapshot_path: &Path,
         _already_open_snapshots: &AlreadyOpenSnapshots<Self>,
-        open_semaphore: &Arc<Semaphore>,
-        _mpt_table_in_current_db: bool,
+        open_semaphore: &Arc<Semaphore>, _mpt_table_in_current_db: bool,
     ) -> Result<SnapshotKvDbParitydb> {
         if snapshot_path.exists() {
             bail!(ErrorKind::SnapshotAlreadyExists);
@@ -981,7 +993,11 @@ impl SnapshotDbTrait for SnapshotKvDbParitydb {
     ) -> Result<
         Wrap<
             PrefixedKvdbParitydb<Box<[u8]>>,
-            dyn KeyValueDbIterableTrait<MptKeyValue, [u8], KvdbParitydbIteratorTag>,
+            dyn KeyValueDbIterableTrait<
+                MptKeyValue,
+                [u8],
+                KvdbParitydbIteratorTag,
+            >,
         >,
     > {
         Ok(Wrap(self.prefixed_kv_db(PREFIX_KV)))

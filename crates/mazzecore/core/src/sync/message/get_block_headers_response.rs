@@ -121,7 +121,23 @@ impl Handleable for GetBlockHeadersResponse {
 }
 
 impl GetBlockHeadersResponse {
-    // FIXME Remove recursive call if block headers exist db
+    pub(crate) fn handle_local_headers(
+        ctx: &Context, headers: Vec<BlockHeader>,
+    ) -> Result<(), Error> {
+        let response = GetBlockHeadersResponse {
+            request_id: 0,
+            headers,
+        };
+        let requested = response.headers.iter().map(|h| h.hash()).collect();
+        response.handle_block_headers(
+            ctx,
+            &response.headers,
+            requested,
+            None,
+            None,
+        )
+    }
+
     fn handle_block_headers(
         &self, ctx: &Context, block_headers: &Vec<BlockHeader>,
         requested: HashSet<H256>, chosen_peer: Option<NodeId>,

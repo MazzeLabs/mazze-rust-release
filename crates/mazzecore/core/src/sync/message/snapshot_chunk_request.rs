@@ -10,11 +10,11 @@ use crate::{
     sync::{
         message::{
             msgid, Context, DynamicCapability, Handleable, KeyContainer,
-            SnapshotChunkResponse,
+            SnapshotChunkResponse, SnapshotChunkResponseV4,
         },
         request_manager::{AsAny, Request},
         state::storage::{Chunk, ChunkKey, SnapshotSyncCandidate},
-        Error, ErrorKind, ProtocolConfiguration, SYNC_PROTO_V1, SYNC_PROTO_V3,
+        Error, ErrorKind, ProtocolConfiguration, SYNC_PROTO_V1, SYNC_PROTO_V4,
     },
 };
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
@@ -34,7 +34,7 @@ pub struct SnapshotChunkRequest {
 
 build_msg_with_request_id_impl! {
     SnapshotChunkRequest, msgid::GET_SNAPSHOT_CHUNK,
-    "SnapshotChunkRequest", SYNC_PROTO_V1, SYNC_PROTO_V3
+    "SnapshotChunkRequest", SYNC_PROTO_V1, SYNC_PROTO_V4
 }
 
 impl SnapshotChunkRequest {
@@ -51,6 +51,10 @@ impl SnapshotChunkRequest {
 
 impl Handleable for SnapshotChunkRequest {
     fn handle(self, ctx: &Context) -> Result<(), Error> {
+        let peer_supports_v4 = matches!(
+            ctx.manager.syn.get_peer_version(&ctx.node_id),
+            Ok(version) if version >= SYNC_PROTO_V4
+        );
         let snapshot_epoch_id = match &self.snapshot_to_sync {
             SnapshotSyncCandidate::FullSync {
                 snapshot_epoch_id, ..
@@ -59,21 +63,31 @@ impl Handleable for SnapshotChunkRequest {
                 "OneStepSync/IncSync not yet implemented.".into()
             )),
         };
-        let chunk = match Chunk::load(
+        let maybe_chunk = match Chunk::load(
             snapshot_epoch_id,
             &self.chunk_key,
             &ctx.manager.graph.data_man.storage_manager,
             ctx.manager.protocol_config.chunk_size_byte * 2,
         ) {
-            Ok(Some(chunk)) => chunk,
+            Ok(chunk) => chunk,
             Err(r) => return Err(r),
-            _ => Chunk::default(),
         };
 
-        ctx.send_response(&SnapshotChunkResponse {
-            request_id: self.request_id,
-            chunk,
-        })
+        if peer_supports_v4 {
+            match maybe_chunk {
+                Some(chunk) => ctx.send_response(
+                    &SnapshotChunkResponseV4::available(self.request_id, chunk),
+                ),
+                None => ctx.send_response(
+                    &SnapshotChunkResponseV4::unavailable(self.request_id),
+                ),
+            }
+        } else {
+            ctx.send_response(&SnapshotChunkResponse {
+                request_id: self.request_id,
+                chunk: maybe_chunk.unwrap_or_default(),
+            })
+        }
     }
 }
 

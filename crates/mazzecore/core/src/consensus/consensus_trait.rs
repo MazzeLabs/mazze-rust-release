@@ -107,6 +107,7 @@ pub trait ConsensusGraphTrait: Send + Sync {
     fn catch_up_completed(&self, peer_median_epoch: u64) -> bool;
 
     fn enter_normal_phase(&self);
+    fn leave_normal_phase(&self);
     fn reset(&self);
 }
 

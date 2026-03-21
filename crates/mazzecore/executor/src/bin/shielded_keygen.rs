@@ -4,8 +4,8 @@
 
 use ark_bls12_381::Bls12_381;
 use ark_groth16::Groth16;
-use ark_snark::SNARK;
 use ark_serialize::CanonicalSerialize;
+use ark_snark::SNARK;
 use ark_std::rand::{rngs::StdRng, SeedableRng};
 use mazze_executor::shielded::circuit::ShieldedCircuit;
 use rustc_hex::ToHex;

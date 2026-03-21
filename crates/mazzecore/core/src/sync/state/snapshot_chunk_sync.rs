@@ -302,9 +302,10 @@ impl SnapshotChunkSync {
             .expect("Set after receving manifest");
         let mut deferred_block_hash =
             related_data.snapshot_info.get_snapshot_epoch_id().clone();
-        // FIXME: Because state_root_aux_info can't be computed for state block
-        // FIXME: before snapshot, for the reward epoch count, maybe
-        // FIXME: save it to a dedicated place for reward computation.
+        // Snapshot recovery gives us a fully verified state root at the sync
+        // point. Earlier reward-window entries reuse that root so receipt and
+        // bloom commitments remain available during recovery; later execution
+        // rewrites authoritative commitments as the chain advances.
         for i in related_data.blame_vec_offset
             ..(related_data.blame_vec_offset + REWARD_EPOCH_COUNT as usize)
         {
@@ -317,8 +318,6 @@ impl SnapshotChunkSync {
                 .data_man
                 .insert_epoch_execution_commitment(
                     deferred_block_hash,
-                    // FIXME: the state root is wrong for epochs before sync
-                    // FIXME: point. but these information won't be used.
                     related_data.true_state_root_by_blame_info.clone(),
                     related_data.receipt_blame_vec[i],
                     related_data.bloom_blame_vec[i],

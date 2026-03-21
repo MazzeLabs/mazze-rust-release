@@ -161,9 +161,7 @@ impl TransactionDataManager {
                 if tx.is_shielded() && tx.is_unsigned() {
                     recovered_trans.push((
                         idx,
-                        Arc::new(SignedTransaction::new_shielded(
-                            tx.clone(),
-                        )),
+                        Arc::new(SignedTransaction::new_shielded(tx.clone())),
                     ));
                 } else if let Ok(public) = tx.recover_public() {
                     recovered_trans.push((

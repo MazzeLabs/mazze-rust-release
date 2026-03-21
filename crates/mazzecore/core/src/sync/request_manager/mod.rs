@@ -155,10 +155,18 @@ impl RequestManager {
         let inflight_pending_tx_index_maintain_timeout =
             protocol_config.inflight_pending_tx_index_maintain_timeout;
 
-        // FIXME: make sent_transaction_window_size to be 2^pow.
         let sent_transaction_window_size =
-            protocol_config.tx_maintained_for_peer_timeout.as_millis()
-                / protocol_config.send_tx_period.as_millis();
+            if protocol_config.send_tx_period.is_zero() {
+                1
+            } else {
+                let raw_window_size =
+                    (protocol_config.tx_maintained_for_peer_timeout.as_millis()
+                        / protocol_config.send_tx_period.as_millis())
+                    .max(1) as usize;
+                raw_window_size
+                    .checked_next_power_of_two()
+                    .unwrap_or(raw_window_size)
+            };
         Self {
             received_transactions: Arc::new(RwLock::new(
                 ReceivedTransactionContainer::new(
@@ -171,7 +179,7 @@ impl RequestManager {
                 ),
             )),
             sent_transactions: RwLock::new(SentTransactionContainer::new(
-                sent_transaction_window_size as usize,
+                sent_transaction_window_size,
             )),
             inflight_keys: Default::default(),
             waiting_requests: Default::default(),
@@ -474,9 +482,10 @@ impl RequestManager {
             .update(tx_from_hashes_inflight_keys.len());
         TX_RECEIVED_POOL_METER.mark(received_transactions.get_length());
 
-        let (tx_hashes, indices) = {
+        let (tx_hashes, indices, requested_tx_hashes) = {
             let mut tx_hashes = HashSet::new();
             let mut indices = Vec::new();
+            let mut requested_tx_hashes = Vec::new();
 
             for i in 0..responded_tx_hashes.len() {
                 let tx_hash = responded_tx_hashes[i];
@@ -488,13 +497,14 @@ impl RequestManager {
                 if tx_from_hashes_inflight_keys.insert(Key::Hash(tx_hash)) {
                     indices.push(tx_hashes_indices[i]);
                     tx_hashes.insert(tx_hash);
+                    requested_tx_hashes.push(tx_hash);
                 } else {
                     // Already being requested
                     INFLIGHT_TX_REJECT_METER.mark(1);
                 }
             }
 
-            (tx_hashes, indices)
+            (tx_hashes, indices, requested_tx_hashes)
         };
         TX_REQUEST_METER.mark(tx_hashes.len());
         debug!(
@@ -508,6 +518,7 @@ impl RequestManager {
             window_index,
             indices,
             tx_hashes: tx_hashes.clone(),
+            requested_tx_hashes,
         };
 
         if request.is_empty() {

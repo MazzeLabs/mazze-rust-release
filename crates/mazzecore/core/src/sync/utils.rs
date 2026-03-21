@@ -111,11 +111,9 @@ pub fn initialize_data_manager(
         disable_wal: false,
         stats: false,
     };
-    let settings = db::paritydb_settings(
-        Path::new(db_dir).to_path_buf(),
-        &parity_config,
-    )
-    .expect("Failed to configure ParityDB");
+    let settings =
+        db::paritydb_settings(Path::new(db_dir).to_path_buf(), &parity_config)
+            .expect("Failed to configure ParityDB");
     let ledger_db = db::open_database(&settings)
         .map_err(|e| format!("Failed to open database {:?}", e))
         .unwrap();

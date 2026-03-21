@@ -1127,4 +1127,8 @@ impl TransactionPool {
     pub fn set_ready(&self) {
         self.ready_for_mining.store(true, Ordering::SeqCst);
     }
+
+    pub fn set_not_ready(&self) {
+        self.ready_for_mining.store(false, Ordering::SeqCst);
+    }
 }

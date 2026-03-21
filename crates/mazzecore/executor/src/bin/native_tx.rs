@@ -2,12 +2,14 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-use mazzekey::{KeyPair, Secret};
 use mazze_parameters::consensus::ONE_MAZZE_IN_MAZZY;
 use mazze_parameters::internal_contract_addresses::SHIELDED_POOL_CONTRACT_ADDRESS;
 use mazze_types::{Address, H256, U256};
+use mazzekey::{KeyPair, Secret};
 use primitives::{
-    transaction::{native_transaction::NativeTransaction, TypedNativeTransaction},
+    transaction::{
+        native_transaction::NativeTransaction, TypedNativeTransaction,
+    },
     Action, Transaction, TransactionWithSignature,
 };
 use rustc_hex::{FromHex, ToHex};
@@ -102,12 +104,14 @@ fn main() -> Result<(), String> {
             }
             "--value" => {
                 i += 1;
-                value = Some(parse_u256(args.get(i).ok_or("missing --value")?)?);
+                value =
+                    Some(parse_u256(args.get(i).ok_or("missing --value")?)?);
             }
             "--value-mazze" => {
                 i += 1;
-                value_mazze =
-                    Some(parse_u256(args.get(i).ok_or("missing --value-mazze")?)?);
+                value_mazze = Some(parse_u256(
+                    args.get(i).ok_or("missing --value-mazze")?,
+                )?);
             }
             "--gas" => {
                 i += 1;
@@ -147,8 +151,9 @@ fn main() -> Result<(), String> {
             }
             "--shield-commitment" => {
                 i += 1;
-                shield_commitment =
-                    Some(parse_h256(args.get(i).ok_or("missing --shield-commitment")?)?);
+                shield_commitment = Some(parse_h256(
+                    args.get(i).ok_or("missing --shield-commitment")?,
+                )?);
             }
             "--shield-ciphertext" => {
                 i += 1;
@@ -163,18 +168,22 @@ fn main() -> Result<(), String> {
         i += 1;
     }
 
-    let from_secret =
-        from_secret.ok_or("missing --from-secret")?.trim().to_string();
+    let from_secret = from_secret
+        .ok_or("missing --from-secret")?
+        .trim()
+        .to_string();
     let secret: Secret = from_secret
         .parse()
         .map_err(|e| format!("invalid secret: {:?}", e))?;
-    let _ = KeyPair::from_secret(secret.clone())
-        .map_err(|e| format!("{:?}", e))?;
+    let _ =
+        KeyPair::from_secret(secret.clone()).map_err(|e| format!("{:?}", e))?;
 
     let value = match (value, value_mazze) {
         (Some(raw), None) => raw,
         (None, Some(mazze)) => mazze * U256::from(ONE_MAZZE_IN_MAZZY),
-        (Some(_), Some(_)) => return Err("use either --value or --value-mazze".into()),
+        (Some(_), Some(_)) => {
+            return Err("use either --value or --value-mazze".into())
+        }
         (None, None) => U256::zero(),
     };
 
@@ -224,8 +233,8 @@ fn main() -> Result<(), String> {
         data: data.into(),
     };
 
-    let signed = Transaction::Native(TypedNativeTransaction::Mip155(tx))
-        .sign(&secret);
+    let signed =
+        Transaction::Native(TypedNativeTransaction::Mip155(tx)).sign(&secret);
     let signed_tx: TransactionWithSignature = signed.into();
     let raw = rlp::encode(&signed_tx);
 

@@ -142,7 +142,6 @@ pub struct ChunkKey {
     pub upper_bound_excl: Option<Vec<u8>>,
 }
 
-/// FIXME Handle the case `next.is_some()`
 #[derive(Default, Clone)]
 pub struct RangedManifest {
     pub chunk_boundaries: Vec<Vec<u8>>,
@@ -177,6 +176,12 @@ impl RangedManifest {
         if self.chunk_boundaries.len() != self.chunk_boundary_proofs.len() {
             bail!(ErrorKind::InvalidSnapshotManifest(
                 "chunk and proof number do not match".into(),
+            ));
+        }
+        if self.next.is_some() && self.chunk_boundaries.is_empty() {
+            bail!(ErrorKind::InvalidSnapshotManifest(
+                "manifest continuation requires at least one chunk boundary"
+                    .into(),
             ));
         }
         if let Some(next) = &self.next {
@@ -339,10 +344,9 @@ impl Chunk {
     pub fn validate(&self, key: &ChunkKey) -> Result<(), Error> {
         // chunk should not be empty
         if self.keys.is_empty() {
-            // TODO: Now this may happen if the requested peer has opened
-            // maximal number of snapshots and cannot give a
-            // response temporarily, we should differentiate this
-            // from dishonest behaviors.
+            // Legacy peers use an empty chunk to report a temporarily
+            // unavailable snapshot chunk. Protocol v4 peers signal this
+            // explicitly before chunk validation reaches this path.
             return Err(ErrorKind::EmptySnapshotChunk.into());
         }
         if self.keys.len() != self.values.len() {

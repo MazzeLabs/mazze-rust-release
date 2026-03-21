@@ -5,24 +5,27 @@
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_ff::{PrimeField, Zero};
 use ark_groth16::{prepare_verifying_key, Groth16};
-use ark_snark::SNARK;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_snark::SNARK;
 use ark_std::rand::{rngs::StdRng, RngCore, SeedableRng};
 use mazze_addr::mazze_addr_decode;
+use mazze_executor::shielded::circuit::{
+    ShieldedCircuit, ShieldedInputWitness, ShieldedOutputWitness, MERKLE_DEPTH,
+};
+use mazze_executor::shielded::{
+    fr_from_bytes, fr_from_h256 as shielded_fr_from_h256,
+    fr_from_u256 as shielded_fr_from_u256, fr_to_h256, poseidon_hash,
+    split_recipient,
+};
 use mazze_parameters::consensus::ONE_MAZZE_IN_MAZZY;
 use mazze_parameters::internal_contract_addresses::SHIELDED_POOL_CONTRACT_ADDRESS;
 use mazze_types::{Address, H256, U256};
 use mazzekey::crypto::ecies;
 use mazzekey::Public;
-use mazze_executor::shielded::{
-    fr_from_bytes, fr_from_h256 as shielded_fr_from_h256, fr_from_u256 as shielded_fr_from_u256,
-    fr_to_h256, poseidon_hash, split_recipient,
-};
-use mazze_executor::shielded::circuit::{
-    ShieldedCircuit, ShieldedInputWitness, ShieldedOutputWitness, MERKLE_DEPTH,
-};
 use primitives::{
-    transaction::{native_transaction::ShieldedTransaction, TypedNativeTransaction},
+    transaction::{
+        native_transaction::ShieldedTransaction, TypedNativeTransaction,
+    },
     Action, Transaction, TransactionWithSignature,
 };
 use rustc_hex::{FromHex, ToHex};
@@ -81,7 +84,9 @@ fn load_hex_file(path: &str) -> Result<Option<Vec<u8>>, String> {
     }
     let content = match fs::read_to_string(path) {
         Ok(s) => s,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None)
+        }
         Err(err) => return Err(format!("failed to read {}: {}", path, err)),
     };
     let trimmed = content.trim();
@@ -95,12 +100,17 @@ fn load_hex_file(path: &str) -> Result<Option<Vec<u8>>, String> {
     Ok(Some(bytes))
 }
 
-fn load_proving_key(path: &str) -> Result<Option<ark_groth16::ProvingKey<Bls12_381>>, String> {
+fn load_proving_key(
+    path: &str,
+) -> Result<Option<ark_groth16::ProvingKey<Bls12_381>>, String> {
     let Some(bytes) = load_hex_file(path)? else {
         return Ok(None);
     };
-    let pk = ark_groth16::ProvingKey::<Bls12_381>::deserialize_compressed(&*bytes)
-        .map_err(|e| format!("failed to deserialize proving key {}: {:?}", path, e))?;
+    let pk =
+        ark_groth16::ProvingKey::<Bls12_381>::deserialize_compressed(&*bytes)
+            .map_err(|e| {
+            format!("failed to deserialize proving key {}: {:?}", path, e)
+        })?;
     Ok(Some(pk))
 }
 
@@ -163,8 +173,9 @@ fn parse_hex_32(input: &str) -> Result<[u8; 32], String> {
 fn parse_address(input: &str) -> Result<Address, String> {
     let trimmed = input.trim();
     if trimmed.contains(':') {
-        let decoded = mazze_addr_decode(trimmed)
-            .map_err(|e| format!("invalid base32 address {}: {:?}", input, e))?;
+        let decoded = mazze_addr_decode(trimmed).map_err(|e| {
+            format!("invalid base32 address {}: {:?}", input, e)
+        })?;
         if let Some(addr) = decoded.hex_address {
             return Ok(addr);
         }
@@ -178,8 +189,9 @@ fn parse_address(input: &str) -> Result<Address, String> {
 fn parse_shielded_address(input: &str) -> Result<[u8; 64], String> {
     let trimmed = input.trim();
     if trimmed.contains(':') {
-        let decoded = mazze_addr_decode(trimmed)
-            .map_err(|e| format!("invalid base32 address {}: {:?}", input, e))?;
+        let decoded = mazze_addr_decode(trimmed).map_err(|e| {
+            format!("invalid base32 address {}: {:?}", input, e)
+        })?;
         if decoded.parsed_address_bytes.len() != 64 {
             return Err(format!(
                 "shielded address must be 64 bytes: {}",
@@ -282,13 +294,8 @@ fn build_commitment(
     let value_fr = shielded_fr_from_u256(value);
     let rho_fr = fr_from_bytes(rho);
     let rseed_fr = fr_from_bytes(rseed);
-    let commitment = poseidon_hash(&[
-        rcpt_left,
-        rcpt_right,
-        value_fr,
-        rho_fr,
-        rseed_fr,
-    ]);
+    let commitment =
+        poseidon_hash(&[rcpt_left, rcpt_right, value_fr, rho_fr, rseed_fr]);
     fr_to_h256(&commitment)
 }
 
@@ -316,8 +323,9 @@ fn build_shielded_notes(
         let plain = build_note_plain(value, &rho, &rseed);
         let mut public = Public::default();
         public.as_bytes_mut().copy_from_slice(output);
-        let ciphertext = ecies::encrypt(&public, commitment.as_ref(), &plain)
-            .map_err(|e| format!("note encryption failed: {:?}", e))?;
+        let ciphertext =
+            ecies::encrypt(&public, commitment.as_ref(), &plain)
+                .map_err(|e| format!("note encryption failed: {:?}", e))?;
         commitments.push(commitment);
         ciphertexts.push(ciphertext);
         secrets.push(NoteSecret {
@@ -401,8 +409,9 @@ fn main() -> Result<(), String> {
             }
             "--fee-mazze" => {
                 i += 1;
-                fee_mazze =
-                    Some(parse_u256(args.get(i).ok_or("missing --fee-mazze")?)?);
+                fee_mazze = Some(parse_u256(
+                    args.get(i).ok_or("missing --fee-mazze")?,
+                )?);
             }
             "--gas" => {
                 i += 1;
@@ -471,7 +480,9 @@ fn main() -> Result<(), String> {
                     _ => Err("path bits must be 0 or 1".to_string()),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            if path_elements.len() != MERKLE_DEPTH || path_bits.len() != MERKLE_DEPTH {
+            if path_elements.len() != MERKLE_DEPTH
+                || path_bits.len() != MERKLE_DEPTH
+            {
                 return Err("invalid merkle path length".into());
             }
 
@@ -528,7 +539,8 @@ fn main() -> Result<(), String> {
         (None, None) => Vec::new(),
     };
 
-    let shielded_outputs = parse_list(shielded_outputs, parse_shielded_address)?;
+    let shielded_outputs =
+        parse_list(shielded_outputs, parse_shielded_address)?;
     let shielded_values = match (shielded_values_raw, shielded_values_mazze) {
         (Some(raw), None) => parse_list(Some(raw), parse_u256)?,
         (None, Some(mazze)) => {
@@ -539,7 +551,10 @@ fn main() -> Result<(), String> {
             values
         }
         (Some(_), Some(_)) => {
-            return Err("use either --shielded-values or --shielded-values-mazze".into())
+            return Err(
+                "use either --shielded-values or --shielded-values-mazze"
+                    .into(),
+            )
         }
         (None, None) => Vec::new(),
     };
@@ -573,7 +588,11 @@ fn main() -> Result<(), String> {
         }
         let mut note_rng = StdRng::seed_from_u64(seed ^ 0x9e3779b97f4a7c15);
         let (note_commitments, note_ciphertexts, note_secrets) =
-            build_shielded_notes(&mut note_rng, &shielded_outputs, &shielded_values)?;
+            build_shielded_notes(
+                &mut note_rng,
+                &shielded_outputs,
+                &shielded_values,
+            )?;
         commitments = note_commitments;
         ciphertexts = note_ciphertexts;
         output_witnesses = note_secrets
@@ -602,7 +621,9 @@ fn main() -> Result<(), String> {
     let fee = match (fee, fee_mazze) {
         (Some(raw), None) => raw,
         (None, Some(mazze)) => mazze * U256::from(ONE_MAZZE_IN_MAZZY),
-        (Some(_), Some(_)) => return Err("use either --fee or --fee-mazze".into()),
+        (Some(_), Some(_)) => {
+            return Err("use either --fee or --fee-mazze".into())
+        }
         (None, None) => U256::zero(),
     };
 
@@ -614,23 +635,37 @@ fn main() -> Result<(), String> {
     if nullifiers.len() > 0 && input_witnesses.is_empty() {
         return Err("inputs file required for non-empty nullifiers".into());
     }
-    if !input_witnesses.is_empty() && input_witnesses.len() != nullifiers.len() {
+    if !input_witnesses.is_empty() && input_witnesses.len() != nullifiers.len()
+    {
         return Err("input witness length mismatch".into());
     }
 
-    let public_inputs =
-        build_public_inputs(&anchor, &nullifiers, &commitments, &outputs, &values, &fee);
+    let public_inputs = build_public_inputs(
+        &anchor,
+        &nullifiers,
+        &commitments,
+        &outputs,
+        &values,
+        &fee,
+    );
     if public_inputs.len() != PUBLIC_INPUT_LEN {
         return Err("public input length mismatch".into());
     }
 
-    let mut nullifiers_fr =
-        nullifiers.iter().map(shielded_fr_from_h256).collect::<Vec<_>>();
-    let mut commitments_fr =
-        commitments.iter().map(shielded_fr_from_h256).collect::<Vec<_>>();
-    let mut outputs_fr = outputs.iter().map(fr_from_address).collect::<Vec<_>>();
-    let mut values_fr =
-        values.iter().map(|v| shielded_fr_from_u256(v)).collect::<Vec<_>>();
+    let mut nullifiers_fr = nullifiers
+        .iter()
+        .map(shielded_fr_from_h256)
+        .collect::<Vec<_>>();
+    let mut commitments_fr = commitments
+        .iter()
+        .map(shielded_fr_from_h256)
+        .collect::<Vec<_>>();
+    let mut outputs_fr =
+        outputs.iter().map(fr_from_address).collect::<Vec<_>>();
+    let mut values_fr = values
+        .iter()
+        .map(|v| shielded_fr_from_u256(v))
+        .collect::<Vec<_>>();
     while nullifiers_fr.len() < MAX_NULLIFIERS {
         nullifiers_fr.push(Fr::zero());
     }
@@ -704,23 +739,16 @@ fn main() -> Result<(), String> {
         outputs: output_witnesses,
     };
 
-    let mut proof = Groth16::<Bls12_381>::prove(
-        &pk,
-        circuit.clone(),
-        &mut rng,
-    )
+    let mut proof = Groth16::<Bls12_381>::prove(&pk, circuit.clone(), &mut rng)
         .map_err(|e| format!("prove failed: {:?}", e))?;
     let pvk = prepare_verifying_key(&pk.vk);
     if !Groth16::<Bls12_381>::verify_proof(&pvk, &proof, &public_inputs)
         .unwrap_or(false)
     {
         let mut retry_rng = StdRng::seed_from_u64(seed.wrapping_add(1));
-        let retry_proof = Groth16::<Bls12_381>::prove(
-            &pk,
-            circuit.clone(),
-            &mut retry_rng,
-        )
-        .map_err(|e| format!("prove retry failed: {:?}", e))?;
+        let retry_proof =
+            Groth16::<Bls12_381>::prove(&pk, circuit.clone(), &mut retry_rng)
+                .map_err(|e| format!("prove retry failed: {:?}", e))?;
         if !Groth16::<Bls12_381>::verify_proof(
             &pvk,
             &retry_proof,
@@ -765,7 +793,8 @@ fn main() -> Result<(), String> {
         chain_id,
         data: data.into(),
     };
-    let unsigned = Transaction::Native(TypedNativeTransaction::Shielded(shielded_tx));
+    let unsigned =
+        Transaction::Native(TypedNativeTransaction::Shielded(shielded_tx));
     let tx_with_sig = TransactionWithSignature::new_unsigned(unsigned);
     let raw = rlp::encode(&tx_with_sig);
 

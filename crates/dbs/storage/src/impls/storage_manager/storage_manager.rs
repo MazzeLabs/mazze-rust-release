@@ -54,10 +54,8 @@ impl PersistedSnapshotInfoMap {
     }
 
     fn load_persist_state(&mut self) -> Result<()> {
-        for (key, value) in self
-            .snapshot_info_db
-            .kvdb
-            .iter(self.snapshot_info_db.col)
+        for (key, value) in
+            self.snapshot_info_db.kvdb.iter(self.snapshot_info_db.col)
         {
             if key.len() != EpochId::len_bytes() {
                 return Err(DecoderError::RlpInvalidLength.into());
@@ -1574,9 +1572,7 @@ use crate::{
         },
         errors::*,
         state_manager::{DeltaDbManager, SnapshotDb, SnapshotDbManager},
-        storage_db::{
-            snapshot_debug::check_key_value_load,
-        },
+        storage_db::snapshot_debug::check_key_value_load,
         storage_manager::snapshot_manager::SnapshotManager,
     },
     snapshot_manager::SnapshotManagerTrait,

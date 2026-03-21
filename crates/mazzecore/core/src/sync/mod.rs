@@ -53,13 +53,14 @@ use network::service::ProtocolVersion;
 /// deprecation.
 ///
 /// Do NOT make this const pub.
-const SYNCHRONIZATION_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(3);
+const SYNCHRONIZATION_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(4);
 /// Support at most this number of old versions.
 const SYNCHRONIZATION_PROTOCOL_OLD_VERSIONS_TO_SUPPORT: u8 = 2;
 /// The version to pass to Message for their lifetime declaration.
 pub const SYNC_PROTO_V1: ProtocolVersion = ProtocolVersion(1);
 pub const SYNC_PROTO_V2: ProtocolVersion = ProtocolVersion(2);
 pub const SYNC_PROTO_V3: ProtocolVersion = ProtocolVersion(3);
+pub const SYNC_PROTO_V4: ProtocolVersion = ProtocolVersion(4);
 
 pub mod random {
     use rand;

@@ -58,7 +58,10 @@ lazy_static! {
     static ref SYNC_GRAPH_OLD_ERA_FRONTIER_SIZE: Arc<dyn Gauge<usize>> =
         GaugeUsize::register_with_group("sync_graph", "old_era_frontier_size");
     static ref SYNC_GRAPH_NOT_READY_FRONTIER_SIZE: Arc<dyn Gauge<usize>> =
-        GaugeUsize::register_with_group("sync_graph", "not_ready_frontier_size");
+        GaugeUsize::register_with_group(
+            "sync_graph",
+            "not_ready_frontier_size"
+        );
 }
 
 const NULL: usize = !0;
@@ -1018,7 +1021,6 @@ impl SynchronizationGraph {
                         };
 
                         match maybe_item {
-                            // FIXME: We need to investigate why duplicate hash may send to the consensus worker
                             Ok(hash) => if !reverse_map.contains_key(&hash) {
                                 debug!("Worker thread receive: block = {}", hash);
                                 let header = data_man.block_header_by_hash(&hash).expect("Header must exist before sending to the consensus worker!");
@@ -1043,7 +1045,10 @@ impl SynchronizationGraph {
                                     counter_map.insert(hash, cnt);
                                 }
                             } else {
-                                warn!("Duplicate block = {} sent to the consensus worker", hash);
+                                trace!(
+                                    "Ignore duplicate consensus worker notification for {}",
+                                    hash
+                                );
                             },
                             Err(TryRecvError::Empty) => break 'inner,
                             Err(TryRecvError::Closed) => break 'outer,

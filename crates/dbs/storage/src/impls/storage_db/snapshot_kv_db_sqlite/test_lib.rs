@@ -32,7 +32,9 @@ pub fn open_snapshot_db_for_testing(
 }
 
 #[cfg(test)]
-use crate::impls::{errors::*, storage_db::snapshot_db_sqlite::SnapshotDbSqlite};
+use crate::impls::{
+    errors::*, storage_db::snapshot_db_sqlite::SnapshotDbSqlite,
+};
 
 #[cfg(test)]
 use crate::impls::{

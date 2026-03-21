@@ -244,7 +244,8 @@ impl SnapshotDbManagerTrait for SnapshotDbManagerParitydb {
         mut in_progress_snapshot_info: SnapshotInfo,
         snapshot_info_map_rwlock: &'m RwLock<PersistedSnapshotInfoMap>,
         _new_epoch_height: u64, recover_mpt_with_kv_snapshot_exist: bool,
-    ) -> Result<(RwLockWriteGuard<'m, PersistedSnapshotInfoMap>, SnapshotInfo)> {
+    ) -> Result<(RwLockWriteGuard<'m, PersistedSnapshotInfoMap>, SnapshotInfo)>
+    {
         info!(
             "new_snapshot_by_merging: old={:?} new={:?}",
             old_snapshot_epoch_id, snapshot_epoch_id,
@@ -315,7 +316,9 @@ impl SnapshotDbManagerTrait for SnapshotDbManagerParitydb {
     }
 
     fn destroy_snapshot(&self, snapshot_epoch_id: &EpochId) -> Result<()> {
-        Ok(fs::remove_dir_all(self.get_snapshot_db_path(snapshot_epoch_id))?)
+        Ok(fs::remove_dir_all(
+            self.get_snapshot_db_path(snapshot_epoch_id),
+        )?)
     }
 
     fn new_temp_snapshot_for_full_sync(

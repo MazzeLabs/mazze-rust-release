@@ -349,7 +349,9 @@ impl RpcImpl {
             TransactionWithSignature::from_raw(&raw.into_vec()),
         )?;
 
-        if !(tx.is_shielded() && tx.is_unsigned()) && tx.recover_public().is_err() {
+        if !(tx.is_shielded() && tx.is_unsigned())
+            && tx.recover_public().is_err()
+        {
             bail!(invalid_params(
                 "tx",
                 "Can not recover pubkey for Ethereum like tx"
@@ -429,11 +431,15 @@ impl RpcImpl {
         }
         let (signed_trans, failed_trans) =
             self.tx_pool.insert_new_transactions(vec![tx]);
-        // FIXME: how is it possible?
         if signed_trans.len() + failed_trans.len() > 1 {
-            // This should never happen
-            error!("insert_new_transactions failed, invalid length of returned result vector {}", signed_trans.len() + failed_trans.len());
-            Ok(H256::zero().into())
+            let result_len = signed_trans.len() + failed_trans.len();
+            error!(
+                "insert_new_transactions returned an unexpected result length {}",
+                result_len
+            );
+            bail!(internal_error_msg(
+                "transaction pool returned an unexpected result length"
+            ))
         } else if signed_trans.len() + failed_trans.len() == 0 {
             // For tx in transactions_pubkey_cache, we simply ignore them
             debug!("insert_new_transactions ignores inserted transactions");

@@ -31,7 +31,10 @@ impl DeltaDbManagerParitydb {
         };
         let settings = db::paritydb_settings(path.clone(), &parity_config)?;
         let db = db::open_database(&settings)?;
-        Ok(KvdbParitydb { kvdb: db.key_value(), col: 0 })
+        Ok(KvdbParitydb {
+            kvdb: db.key_value(),
+            col: 0,
+        })
     }
 }
 

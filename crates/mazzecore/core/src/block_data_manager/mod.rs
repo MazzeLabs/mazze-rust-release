@@ -182,11 +182,8 @@ impl BlockDataManager {
             config.tx_cache_index_maintain_timeout,
             worker_pool,
         );
-        let db_manager = DBManager::new_from_paritydb(
-            db,
-            pow.clone(),
-            true_genesis.hash(),
-        );
+        let db_manager =
+            DBManager::new_from_paritydb(db, pow.clone(), true_genesis.hash());
         let previous_db_progress =
             db_manager.gc_progress_from_db().unwrap_or(0);
 

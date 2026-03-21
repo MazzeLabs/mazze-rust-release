@@ -11,11 +11,11 @@ use crate::{
     sync::{
         message::{
             msgid, Context, DynamicCapability, Handleable, KeyContainer,
-            SnapshotManifestResponse,
+            SnapshotManifestResponse, SnapshotManifestResponseV4,
         },
         request_manager::{AsAny, Request},
         state::storage::{RangedManifest, SnapshotSyncCandidate},
-        Error, ProtocolConfiguration, SYNC_PROTO_V1, SYNC_PROTO_V3,
+        Error, ProtocolConfiguration, SYNC_PROTO_V1, SYNC_PROTO_V4,
     },
 };
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
@@ -40,11 +40,15 @@ pub struct SnapshotManifestRequest {
 
 build_msg_with_request_id_impl! {
     SnapshotManifestRequest, msgid::GET_SNAPSHOT_MANIFEST,
-    "SnapshotManifestRequest", SYNC_PROTO_V1, SYNC_PROTO_V3
+    "SnapshotManifestRequest", SYNC_PROTO_V1, SYNC_PROTO_V4
 }
 
 impl Handleable for SnapshotManifestRequest {
     fn handle(self, ctx: &Context) -> Result<(), Error> {
+        let peer_supports_v4 = matches!(
+            ctx.manager.syn.get_peer_version(&ctx.node_id),
+            Ok(version) if version >= SYNC_PROTO_V4
+        );
         // TODO Handle the case where we cannot serve the snapshot
         let snapshot_merkle_root;
         let manifest = match RangedManifest::load(
@@ -61,21 +65,28 @@ impl Handleable for SnapshotManifestRequest {
             _ => {
                 // Return an empty response to indicate that we cannot serve the
                 // state
-                ctx.send_response(&SnapshotManifestResponse {
+                let response = SnapshotManifestResponse {
                     request_id: self.request_id,
                     ..Default::default()
-                })?;
+                };
+                if peer_supports_v4 {
+                    ctx.send_response(
+                        &SnapshotManifestResponseV4::from_legacy(response),
+                    )?;
+                } else {
+                    ctx.send_response(&response)?;
+                }
                 return Ok(());
             }
         };
-        if self.is_initial_request() {
+        let response = if self.is_initial_request() {
             let (state_root_vec, receipt_blame_vec, bloom_blame_vec) =
                 self.get_blame_states(ctx).unwrap_or_default();
             let block_receipts =
                 self.get_block_receipts(ctx).unwrap_or_default();
 
             debug!("handle SnapshotManifestRequest {:?}", self,);
-            ctx.send_response(&SnapshotManifestResponse {
+            SnapshotManifestResponse {
                 request_id: self.request_id,
                 manifest,
                 snapshot_merkle_root,
@@ -83,9 +94,9 @@ impl Handleable for SnapshotManifestRequest {
                 receipt_blame_vec,
                 bloom_blame_vec,
                 block_receipts,
-            })
+            }
         } else {
-            ctx.send_response(&SnapshotManifestResponse {
+            SnapshotManifestResponse {
                 request_id: self.request_id,
                 manifest,
                 snapshot_merkle_root: Default::default(),
@@ -93,7 +104,14 @@ impl Handleable for SnapshotManifestRequest {
                 receipt_blame_vec: Default::default(),
                 bloom_blame_vec: Default::default(),
                 block_receipts: Default::default(),
-            })
+            }
+        };
+        if peer_supports_v4 {
+            ctx.send_response(&SnapshotManifestResponseV4::from_legacy(
+                response,
+            ))
+        } else {
+            ctx.send_response(&response)
         }
     }
 }

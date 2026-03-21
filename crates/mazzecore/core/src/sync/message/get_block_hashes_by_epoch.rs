@@ -6,10 +6,11 @@ use crate::{
     message::{Message, RequestId},
     sync::{
         message::{
-            Context, GetBlockHashesResponse, Handleable, Key, KeyContainer,
+            Context, EpochHashes, GetBlockHashesResponse,
+            GetBlockHashesResponseV4, Handleable, Key, KeyContainer,
         },
         request_manager::{AsAny, Request},
-        Error, ProtocolConfiguration,
+        Error, ProtocolConfiguration, SYNC_PROTO_V4,
     },
 };
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
@@ -64,22 +65,41 @@ impl Request for GetBlockHashesByEpoch {
 
 impl Handleable for GetBlockHashesByEpoch {
     fn handle(self, ctx: &Context) -> Result<(), Error> {
-        let hashes = self
+        let peer_supports_v4 = matches!(
+            ctx.manager.syn.get_peer_version(&ctx.node_id),
+            Ok(version) if version >= SYNC_PROTO_V4
+        );
+        let epoch_hashes = self
             .epochs
             .iter()
             .take(MAX_EPOCHS_TO_SEND as usize)
-            .map(|&e| ctx.manager.graph.get_all_block_hashes_by_epoch(e))
+            .map(|&epoch| {
+                ctx.manager
+                    .graph
+                    .get_all_block_hashes_by_epoch(epoch)
+                    .map(|hashes| (epoch, hashes))
+            })
             .filter_map(Result::ok)
-            .fold(vec![], |mut res, sub| {
-                res.extend(sub);
-                res
-            });
+            .collect::<Vec<_>>();
 
-        let response = GetBlockHashesResponse {
-            request_id: self.request_id,
-            hashes,
-        };
-
-        ctx.send_response(&response)
+        if peer_supports_v4 {
+            ctx.send_response(&GetBlockHashesResponseV4 {
+                request_id: self.request_id,
+                epoch_hashes: epoch_hashes
+                    .into_iter()
+                    .map(|(epoch, hashes)| EpochHashes { epoch, hashes })
+                    .collect(),
+            })
+        } else {
+            let hashes =
+                epoch_hashes.into_iter().fold(vec![], |mut res, (_, sub)| {
+                    res.extend(sub);
+                    res
+                });
+            ctx.send_response(&GetBlockHashesResponse {
+                request_id: self.request_id,
+                hashes,
+            })
+        }
     }
 }

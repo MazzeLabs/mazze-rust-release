@@ -60,7 +60,6 @@ fn rocks_db_col(table: DBTable) -> u32 {
     }
 }
 
-
 pub struct DBManager {
     table_db: HashMap<DBTable, Box<dyn KeyValueDbTrait<ValueType = Box<[u8]>>>>,
     pow: Arc<PowComputer>,

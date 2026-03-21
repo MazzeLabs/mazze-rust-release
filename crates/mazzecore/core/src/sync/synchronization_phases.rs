@@ -12,8 +12,11 @@ use crate::{
     },
     ConsensusGraph,
 };
-use mazze_internal_common::StateAvailabilityBoundary;
+use mazze_internal_common::{
+    EpochExecutionCommitment, StateAvailabilityBoundary,
+};
 use mazze_parameters::sync::CATCH_UP_EPOCH_LAG_THRESHOLD;
+use mazze_types::H256;
 use network::NetworkContext;
 use parking_lot::RwLock;
 use std::{
@@ -248,8 +251,8 @@ impl SynchronizationPhaseTrait for CatchUpSyncBlockHeaderPhase {
     }
 
     fn next(
-        &self, _io: &dyn NetworkContext,
-        _sync_handler: &SynchronizationProtocolHandler,
+        &self, io: &dyn NetworkContext,
+        sync_handler: &SynchronizationProtocolHandler,
     ) -> SyncPhaseType {
         let median_epoch = match self.syn.median_epoch_from_normal_peers() {
             None => {
@@ -266,10 +269,11 @@ impl SynchronizationPhaseTrait for CatchUpSyncBlockHeaderPhase {
             self.graph.consensus.best_epoch_number(),
             median_epoch
         );
-        // FIXME: OK, what if the chain height is close, or even local height is
-        // FIXME: larger, but the chain forked earlier very far away?
         if self.graph.consensus.catch_up_completed(median_epoch) {
-            return SyncPhaseType::CatchUpCheckpoint;
+            if normal_peers_share_known_terminal(&self.syn, &self.graph) {
+                return SyncPhaseType::CatchUpCheckpoint;
+            }
+            sync_handler.request_missing_terminals(io);
         }
 
         self.phase_type()
@@ -359,12 +363,8 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
             .get_cur_consensus_era_genesis_hash();
         let epoch_to_sync = sync_handler.graph.consensus.get_to_sync_epoch_id();
 
-        // FIXME: what happens if the snapshot before epoch_to_sync is
-        // corrupted?
-        if let Some(commitment) = sync_handler
-            .graph
-            .data_man
-            .load_epoch_execution_commitment_from_db(&epoch_to_sync)
+        if let Some(commitment) =
+            load_checkpoint_state_if_available(sync_handler, &epoch_to_sync)
         {
             info!("CatchUpCheckpointPhase: commitment for epoch {:?} exists, skip state sync. \
                 commitment={:?}", epoch_to_sync, commitment);
@@ -511,10 +511,9 @@ impl SynchronizationPhaseTrait for CatchUpSyncBlockPhase {
     }
 
     fn next(
-        &self, _io: &dyn NetworkContext,
+        &self, io: &dyn NetworkContext,
         sync_handler: &SynchronizationProtocolHandler,
     ) -> SyncPhaseType {
-        // FIXME: use target_height instead.
         let median_epoch = match self.syn.median_epoch_from_normal_peers() {
             None => {
                 return if self.syn.allow_phase_change_without_peer() {
@@ -526,14 +525,17 @@ impl SynchronizationPhaseTrait for CatchUpSyncBlockPhase {
             }
             Some(epoch) => epoch,
         };
-        // FIXME: OK, what if the chain height is close, or even local height is
-        // FIXME: larger, but the chain forked earlier very far away?
+        // Use the median normal-peer epoch as a conservative exit signal.
+        // Normal sync will return to catch-up if the node falls behind again.
         if self.graph.consensus.best_epoch_number()
             + CATCH_UP_EPOCH_LAG_THRESHOLD
             >= median_epoch
         {
-            sync_handler.graph.consensus.enter_normal_phase();
-            return SyncPhaseType::Normal;
+            if normal_peers_share_known_terminal(&self.syn, &self.graph) {
+                sync_handler.graph.consensus.enter_normal_phase();
+                return SyncPhaseType::Normal;
+            }
+            sync_handler.request_missing_terminals(io);
         }
 
         self.phase_type()
@@ -576,9 +578,19 @@ impl SynchronizationPhaseTrait for NormalSyncPhase {
 
     fn next(
         &self, _io: &dyn NetworkContext,
-        _sync_handler: &SynchronizationProtocolHandler,
+        sync_handler: &SynchronizationProtocolHandler,
     ) -> SyncPhaseType {
-        // FIXME: handle the case where we need to switch back phase
+        if let Some(median_epoch) =
+            sync_handler.syn.median_epoch_from_normal_peers()
+        {
+            if sync_handler.graph.consensus.best_epoch_number()
+                + CATCH_UP_EPOCH_LAG_THRESHOLD
+                < median_epoch
+            {
+                sync_handler.graph.consensus.leave_normal_phase();
+                return SyncPhaseType::CatchUpSyncBlock;
+            }
+        }
         self.phase_type()
     }
 
@@ -589,4 +601,70 @@ impl SynchronizationPhaseTrait for NormalSyncPhase {
         info!("start phase {:?}", self.name());
         sync_handler.request_missing_terminals(io);
     }
+}
+
+fn normal_peers_share_known_terminal(
+    syn: &SynchronizationState, graph: &SharedSynchronizationGraph,
+) -> bool {
+    let peers = syn.peers.read();
+    let mut saw_normal_peer = false;
+
+    for (_, peer_lock) in peers.iter() {
+        let peer = peer_lock.read();
+        if !peer
+            .capabilities
+            .contains(DynamicCapability::NormalPhase(true))
+        {
+            continue;
+        }
+        saw_normal_peer = true;
+        if peer
+            .latest_block_hashes
+            .iter()
+            .any(|hash| graph.contains_block_header(hash))
+        {
+            return true;
+        }
+    }
+
+    !saw_normal_peer
+}
+
+fn load_checkpoint_state_if_available(
+    sync_handler: &SynchronizationProtocolHandler, epoch_to_sync: &H256,
+) -> Option<EpochExecutionCommitment> {
+    let data_man = &sync_handler.graph.data_man;
+    let storage_manager = data_man.storage_manager.get_storage_manager();
+    if storage_manager
+        .get_snapshot_info_at_epoch(epoch_to_sync)
+        .is_none()
+    {
+        debug!(
+            "Checkpoint {:?} has execution commitment but no snapshot metadata; resync state",
+            epoch_to_sync
+        );
+        return None;
+    }
+
+    let snapshot_manager = storage_manager.get_snapshot_manager();
+    match snapshot_manager.get_snapshot_by_epoch_id(epoch_to_sync, true, false)
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            warn!(
+                "Checkpoint {:?} has execution commitment but no snapshot db; resync state",
+                epoch_to_sync
+            );
+            return None;
+        }
+        Err(err) => {
+            warn!(
+                "Checkpoint {:?} snapshot open failed: {}; resync state",
+                epoch_to_sync, err
+            );
+            return None;
+        }
+    }
+
+    data_man.load_epoch_execution_commitment_from_db(epoch_to_sync)
 }

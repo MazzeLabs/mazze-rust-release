@@ -91,6 +91,7 @@ const EPOCH_SYNC_RESTART_TIMEOUT_S: u64 = 60 * 10;
 const EPOCH_SYNC_MAX_INFLIGHT: u64 = 300;
 const EPOCH_SYNC_BATCH_SIZE: u64 = 30;
 const BLOCK_SYNC_MAX_INFLIGHT: usize = 1000;
+const ACTIVE_FRONTIER_RESCUE_BATCH_SIZE: usize = 128;
 
 #[derive(Debug, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
 pub enum SyncHandlerWorkType {
@@ -796,12 +797,7 @@ impl SynchronizationProtocolHandler {
                     // to request these old terminal blocks.
                     continue;
                 }
-                let terminals = {
-                    let mut info = info.write();
-                    let ts = info.latest_block_hashes.clone();
-                    info.latest_block_hashes.clear();
-                    ts
-                };
+                let terminals = info.read().latest_block_hashes.clone();
 
                 let to_request = terminals
                     .difference(&requested)
@@ -832,6 +828,24 @@ impl SynchronizationProtocolHandler {
         if requested.len() > 0 {
             debug!("{:?} missing terminal block(s) requested", requested.len());
         }
+    }
+
+    fn rescue_missing_frontier_dependencies(&self, io: &dyn NetworkContext) {
+        let missing = self.graph.collect_missing_frontier_dependencies(
+            ACTIVE_FRONTIER_RESCUE_BATCH_SIZE,
+        );
+        if missing.is_empty() {
+            return;
+        }
+
+        debug!(
+            "Active frontier rescue requesting {} missing dependency header(s): {:?}",
+            missing.len(),
+            missing
+        );
+        self.request_block_headers(
+            io, None, missing, false, /* ignore_db */
+        );
     }
 
     /// Request missing block bodies from random peers in batches.
@@ -1967,6 +1981,7 @@ impl NetworkProtocolHandler for SynchronizationProtocolHandler {
             }
             CHECK_REQUEST_TIMER => {
                 self.remove_expired_flying_request(io);
+                self.rescue_missing_frontier_dependencies(io);
             }
             HEARTBEAT_TIMER => {
                 self.send_heartbeat(io);

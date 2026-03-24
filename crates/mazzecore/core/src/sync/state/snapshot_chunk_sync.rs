@@ -407,6 +407,19 @@ impl SnapshotChunkSync {
                     if inner.sync_candidate_manager.pending_peers().is_empty() {
                         inner.status = Status::StartCandidateSync;
                         inner.sync_candidate_manager.set_active_candidate();
+                        if inner
+                            .sync_candidate_manager
+                            .get_active_candidate_and_peers()
+                            .is_none()
+                        {
+                            warn!(
+                                "No peers support snapshot candidate for {:?}; falling back to legacy body sync",
+                                epoch_to_sync
+                            );
+                            inner.status = Status::Invalid;
+                            inner.manifest_manager = None;
+                            inner.chunk_manager = None;
+                        }
                     }
                 }
                 Status::DownloadingManifest(_) => {

@@ -28,6 +28,23 @@ curl -s http://127.0.0.1:12539 \
   --data '{"jsonrpc":"2.0","id":1,"method":"mazze_getStatus","params":[]}'
 ```
 
+The response keeps the legacy top-level fields for compatibility and now also
+includes grouped `progress`, `randomx`, and `era` objects. For operator
+dashboards, prefer:
+- `progress.bestEpochNumber`
+- `progress.bestBlockNumber`
+- `progress.latestStateEpochNumber`
+- `randomx.epochNumber`
+- `era.number`
+
+`mazze_getRandomXEpochInfo` now uses:
+- `epochNumber`: RandomX epoch index
+- `selectedEpochNumber`: Mazze epoch used to resolve the query
+- `startEpochNumber` / `endEpochNumber` / `nextTransitionEpochNumber`
+
+The older `startBlockHeight` / `endBlockHeight` / `nextTransitionBlockHeight`
+fields are kept as legacy aliases.
+
 Mazze call (latest_state):
 ```bash
 curl -s http://127.0.0.1:12539 \

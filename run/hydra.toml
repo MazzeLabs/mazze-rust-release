@@ -1,11 +1,11 @@
-# Set the node type to Full node, Archive node, or Light node.
-# Possible values are "full", "archive", or "light".
-# The command line parameter `--full`, `--archive`, or `--light` will overwrite this parameter.
+# Set the node type to Full node, Full-fast node, Archive node, or Light node.
+# Possible values are "full", "full-fast", "archive", or "light".
+# The command line parameter `--full`, `--full-fast`, `--archive`, or `--light` will overwrite this parameter.
 #
 
-bootnodes = "mazzenode://a340a417a575dcbd5797252f88348550533989da203142ea5d02e84d4cefecadaafcc6a91ff6e598577ed79982b4dca310df5b046774e6ab96e19286efbbbb23@37.27.99.214:55555,mazzenode://be7846274d5dbf53b8c1f7078b45089a0d5693aca09557203cfa0f740443175148472cf7ffffd4fbc9fc0f5daa1bff7ae0328739ead4b1f111538499ddf0b591@138.201.206.108:55555,mazzenode://f66864acbeb39e0892d664f0f3919332c61d2de994f40b958a624ee8fc73fd2bbb8ce4f1d16fcce033b0e00bf73f888f8c3fe6edaba067233431e7aa210dfac8@37.27.134.37:55555,mazzenode://f0578f55e11dfba882d27ec583879b7d7d82d8edccba0be7631d24f75b428739d76951c11ebe4c4ec8d69677d8d73dc0775fb8f61d3ded30915015a5603b12cb@37.27.134.36:55555"
+bootnodes = "mazzenode://5f18a11c487f5d7bbb25a044d921457e4197bc6c249c8e44bdd338a06d0aeb86c69a8205830ab1a5a4c2155229250cd44c274594fecc3e5e913ec6224ccc6338@37.27.99.214:55555,mazzenode://c3db074bb782e0af4464cb5c2c928dee12ea2eac5025b020352df72e2d51988761be51cb7b4e2aa02a969c04d688f51e6eb4ef4f956cbc41142c419cc3021548@138.201.206.108:55555,mazzenode://eba44e83c09686721329243d13f43bf6ea63e97f3c74d758edaf9ad2124cb7fd35912e93db5706652ea213ec60847ceecbaed4eecc50cc1b627efc2adae0c42e@37.27.134.37:55555,mazzenode://0a543f006205573fab0ad7bcf0b4187d6b031d1e46793d29aad78e02ccc609f21ecbee28612084d45066e6de5445828ef88a1e44c94bb31a030cb4cdecfc0dd0@37.27.134.36:55555,mazzenode://1faedac0e1e212975e9b6dc9f17f9821668f58851234ef558ec114346c21cf81864fea229862255e4e08999da0ed944e535bf70baaa2c8644afcc77f6e3935de@37.27.134.141:55555"
 
-node_type = "archive"
+node_type = "full-fast"
 
 # Some preset develepment configurations.
 # It should not be set in production environment.
@@ -53,7 +53,7 @@ node_type = "archive"
 # mining_author controls where mining rewards are sent.
 # Leave unset unless you are mining and have a valid address.
 # It must be a valid base32 (CIP-37) or a 40-hex address.
-mining_author = "mazze:aasxjrswnsed5jptgw02vhj462ubvjn5fu2tc3bjg5"
+mining_author = "mazze:aamzbekyhkk2ag8rzwvyetyecrvncyg0hjpw84k5yr"
 
 # `mining_type` controls whether the mining process goes through the
 # stratum protocol, uses CPU-mining, or disable mining.
@@ -73,7 +73,7 @@ stratum_port = 32525
 
 # Window size for PoW manager
 #
-pow_problem_window_size = 30
+pow_problem_window_size = 1
 
 # Secret key for stratum.
 # The value is 64-digit hex string.
@@ -106,7 +106,7 @@ log_level = "info"
 # If not set, the process will try to find out the public IP with best effort, and use `tcp_port` as public port.
 # However, it's HIGHLY RECOMMENDED to set the value manually, especially for machines with IP translated by NAT.
 #
-public_address = "YourIP"
+public_address = "Public-IP"
 
 # `tcp_port` is the TCP port that the process listens for P2P messages. The default is 55555.
 #
@@ -399,6 +399,11 @@ persist_tx_index = true
 # tx_pool_min_eth_tx_gas_price = 20_000_000_000
 
 # ------------------ Storage Parameters ----------------------
+
+# Align sync snapshots with RandomX epoch boundaries so fresh nodes can
+# bootstrap from the latest downloadable PoW epoch checkpoint.
+snapshot_epoch_count = 2048
+provide_more_snapshot_for_sync = "checkpoint,multiple_of_2048"
 
 # The number of additional snapshot before the current stable checkpoint that we will maintain.
 # If it's 0, all snapshot before stable genesis will be deleted and the states are unavailable.

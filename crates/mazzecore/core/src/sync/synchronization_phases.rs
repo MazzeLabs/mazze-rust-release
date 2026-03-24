@@ -338,6 +338,14 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
             io,
             sync_handler,
         );
+        if self.state_sync.status() == Status::Invalid {
+            warn!(
+                "Checkpoint sync is unavailable for {:?}; falling back to legacy body sync",
+                epoch_to_sync
+            );
+            *sync_handler.synced_epoch_id.lock() = None;
+            return SyncPhaseType::CatchUpFillBlockBodyPhase;
+        }
         if self.state_sync.status() == Status::Completed {
             self.state_sync.restore_execution_state(sync_handler);
             *sync_handler.synced_epoch_id.lock() = Some(epoch_to_sync);
@@ -352,6 +360,8 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
         sync_handler: &SynchronizationProtocolHandler,
     ) {
         info!("start phase {:?}", self.name());
+        self.has_state.store(false, AtomicOrdering::SeqCst);
+        *sync_handler.synced_epoch_id.lock() = None;
         sync_handler.graph.inner.write().locked_for_catchup = true;
         while sync_handler.graph.is_consensus_worker_busy() {
             //Thread sleep for 10ms to avoid busy-waiting

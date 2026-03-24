@@ -1891,6 +1891,85 @@ impl SynchronizationGraph {
         self.inner.read().block_to_fill_set.is_empty()
     }
 
+    /// Collect missing header dependencies for blocks currently stranded in
+    /// the not-ready frontier. This complements the normal dependency
+    /// requests triggered while handling fresh header responses.
+    pub fn collect_missing_frontier_dependencies(
+        &self, limit: usize,
+    ) -> Vec<H256> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let inner = self.inner.read();
+        if inner.locked_for_catchup {
+            return Vec::new();
+        }
+
+        let genesis_hash = self.data_man.get_cur_consensus_era_genesis_hash();
+        let genesis_seq_num =
+            match self.data_man.local_block_info_by_hash(&genesis_hash) {
+                Some(info) => info.get_seq_num(),
+                None => return Vec::new(),
+            };
+
+        let mut requested = HashSet::new();
+        let mut missing = Vec::new();
+        let frontier_snapshot: Vec<usize> = inner
+            .not_ready_blocks_frontier
+            .get_frontier()
+            .iter()
+            .copied()
+            .collect();
+
+        for index in frontier_snapshot {
+            let node = &inner.arena[index];
+
+            if node.parent == NULL
+                && !node.parent_reclaimed
+                && !inner.is_graph_ready_in_db(
+                    node.block_header.parent_hash(),
+                    genesis_seq_num,
+                )
+            {
+                let parent = *node.block_header.parent_hash();
+                if requested.insert(parent) {
+                    missing.push(parent);
+                    if missing.len() >= limit {
+                        break;
+                    }
+                }
+            }
+
+            let referee_hash_in_mem: HashSet<_> = node
+                .referees
+                .iter()
+                .map(|referee| inner.arena[*referee].block_header.hash())
+                .collect();
+
+            for referee_hash in node.block_header.referee_hashes() {
+                if referee_hash_in_mem.contains(referee_hash)
+                    || inner.is_graph_ready_in_db(referee_hash, genesis_seq_num)
+                {
+                    continue;
+                }
+
+                if requested.insert(*referee_hash) {
+                    missing.push(*referee_hash);
+                    if missing.len() >= limit {
+                        break;
+                    }
+                }
+            }
+
+            if missing.len() >= limit {
+                break;
+            }
+        }
+
+        missing
+    }
+
     /// Construct the states along the main chain, set all
     /// `BLOCK_HEADER_GRAPH_READY` blocks as `BLOCK_GRAPH_READY` and remove all
     /// other blocks. All blocks in the future can be processed normally in

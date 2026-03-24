@@ -3403,10 +3403,15 @@ impl ConsensusGraphInner {
         epoch_to_sync
     }
 
-    /// FIXME Use snapshot-related information when we can sync snapshot states.
     /// Return the latest height that a snapshot should be available.
     fn latest_snapshot_height(&self) -> u64 {
-        self.cur_era_stable_height
+        let snapshot_epoch_count =
+            self.data_man.get_snapshot_epoch_count() as u64;
+        if snapshot_epoch_count == 0 {
+            return self.cur_era_stable_height;
+        }
+
+        self.cur_era_stable_height / snapshot_epoch_count * snapshot_epoch_count
     }
 
     fn collect_defer_blocks_missing_execution_commitments(

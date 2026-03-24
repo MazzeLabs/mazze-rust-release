@@ -185,7 +185,7 @@ impl Handleable for StatusV3 {
                 let value: String = NODE_TAG_ARCHIVE.into();
                 ctx.insert_peer_node_tag(ctx.node_id(), &key, &value);
             }
-            NodeType::Full => {
+            NodeType::Full | NodeType::FullFast => {
                 let key: String = NODE_TAG_NODE_TYPE.into();
                 let value: String = NODE_TAG_FULL.into();
                 ctx.insert_peer_node_tag(ctx.node_id(), &key, &value);

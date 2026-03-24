@@ -55,13 +55,12 @@ async fn connect_with_retry(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::builder()
-        .format_timestamp_millis()
-        .filter_module(
-            "mazze_miner::core::atomic_state",
-            log::LevelFilter::Debug,
-        )
-        .init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    )
+    .format_timestamp_millis()
+    .filter_module("mazze_miner::core::atomic_state", log::LevelFilter::Debug)
+    .init();
 
     info!("Initializing Mazze Miner client...");
 

@@ -15,7 +15,8 @@ use mazze_internal_common::{
     ChainIdParams, ChainIdParamsInner, ChainIdParamsOneChainInner,
 };
 use mazze_parameters::{
-    block::DEFAULT_TARGET_BLOCK_GAS_LIMIT, tx_pool::TXPOOL_DEFAULT_NONCE_BITS,
+    block::DEFAULT_TARGET_BLOCK_GAS_LIMIT, pow::RANDOMX_EPOCH_LENGTH,
+    tx_pool::TXPOOL_DEFAULT_NONCE_BITS,
 };
 use mazze_storage::{
     defaults::DEFAULT_DEBUG_SNAPSHOT_CHECKER_THREADS, storage_dir,
@@ -57,6 +58,15 @@ lazy_static! {
 }
 const BLOCK_DB_DIR_NAME: &str = "blockchain_db";
 const NET_CONFIG_DB_DIR_NAME: &str = "net_config";
+const FULL_FAST_MIN_OUTGOING_PEERS: usize = 32;
+const FULL_FAST_MIN_INFLIGHT_REQUEST_COUNT: u64 = 2_000;
+const FULL_FAST_MIN_UNPROCESSED_BLOCK_SIZE_MB: usize = 256;
+const FULL_FAST_MIN_DOWNLOADING_CHUNKS: usize = 48;
+const FULL_FAST_MIN_CHUNK_SIZE_BYTES: u64 = 1_024 * 1_024;
+const FULL_FAST_MIN_OPEN_SNAPSHOTS: u16 = 16;
+const FULL_FAST_MIN_OPEN_MPTS: u32 = 16;
+const FULL_FAST_MIN_PARITYDB_OPEN_FILES: u32 = 1024;
+const FULL_FAST_MIN_SNAPSHOT_COUNT: u32 = 2;
 
 // usage:
 // ```
@@ -134,8 +144,11 @@ build_config! {
         (evm_chain_id, (Option<u32>), None)
         (execute_genesis, (bool), true)
         (default_transition_time, (Option<u64>), None)
-        // Snapshot Epoch Count is a consensus parameter. This flag overrides
-        // the parameter, which only take effect in `dev` mode.
+        // Snapshot cadence controls the local checkpoint/snapshot grid used
+        // for state sync. Keep the historical default for existing profiles;
+        // `full-fast` overrides it to align with RandomX epochs.
+        (snapshot_epoch_count, (u32), SNAPSHOT_EPOCHS_CAPACITY)
+        // This test-only override is kept for snapshot-focused tests.
         (dev_snapshot_epoch_count, (u32), SNAPSHOT_EPOCHS_CAPACITY)
         (era_epoch_count, (u64), ERA_DEFAULT_EPOCH_COUNT)
         (heavy_block_difficulty_ratio, (u64), HEAVY_BLOCK_DEFAULT_DIFFICULTY_RATIO)
@@ -415,13 +428,73 @@ impl Configuration {
 
         if matches.is_present("archive") {
             config.raw_conf.node_type = Some(NodeType::Archive);
+        } else if matches.is_present("full-fast") {
+            config.raw_conf.node_type = Some(NodeType::FullFast);
         } else if matches.is_present("full") {
             config.raw_conf.node_type = Some(NodeType::Full);
         } else if matches.is_present("light") {
             config.raw_conf.node_type = Some(NodeType::Light);
         }
 
+        config.apply_node_type_profile();
+
         Ok(config)
+    }
+
+    fn apply_node_type_profile(&mut self) {
+        if matches!(self.raw_conf.node_type, Some(NodeType::FullFast)) {
+            self.apply_full_fast_profile();
+        }
+    }
+
+    fn apply_full_fast_profile(&mut self) {
+        let raw = &mut self.raw_conf;
+        if raw.snapshot_epoch_count < RANDOMX_EPOCH_LENGTH as u32 {
+            raw.snapshot_epoch_count = RANDOMX_EPOCH_LENGTH as u32;
+        }
+        let snapshot_epoch_count = raw.snapshot_epoch_count as u64;
+        let full_fast_snapshot =
+            ProvideExtraSnapshotSyncConfig::EpochNearestMultipleOf(
+                raw.snapshot_epoch_count,
+            );
+
+        raw.request_block_with_public = true;
+        raw.max_outgoing_peers =
+            raw.max_outgoing_peers.max(FULL_FAST_MIN_OUTGOING_PEERS);
+        raw.max_inflight_request_count = raw
+            .max_inflight_request_count
+            .max(FULL_FAST_MIN_INFLIGHT_REQUEST_COUNT);
+        raw.max_unprocessed_block_size_mb = raw
+            .max_unprocessed_block_size_mb
+            .max(FULL_FAST_MIN_UNPROCESSED_BLOCK_SIZE_MB);
+        raw.max_downloading_chunks = raw
+            .max_downloading_chunks
+            .max(FULL_FAST_MIN_DOWNLOADING_CHUNKS);
+        raw.chunk_size_byte =
+            raw.chunk_size_byte.max(FULL_FAST_MIN_CHUNK_SIZE_BYTES);
+        raw.storage_max_open_snapshots = raw
+            .storage_max_open_snapshots
+            .max(FULL_FAST_MIN_OPEN_SNAPSHOTS);
+        raw.storage_max_open_mpt_count =
+            raw.storage_max_open_mpt_count.max(FULL_FAST_MIN_OPEN_MPTS);
+        raw.additional_maintained_snapshot_count = raw
+            .additional_maintained_snapshot_count
+            .max(FULL_FAST_MIN_SNAPSHOT_COUNT);
+        if raw.provide_more_snapshot_for_sync
+            == vec![ProvideExtraSnapshotSyncConfig::StableCheckpoint]
+        {
+            raw.provide_more_snapshot_for_sync.push(full_fast_snapshot);
+        }
+        raw.paritydb_max_open_files = Some(
+            raw.paritydb_max_open_files
+                .unwrap_or_default()
+                .max(FULL_FAST_MIN_PARITYDB_OPEN_FILES),
+        );
+        raw.sync_state_epoch_gap = Some(
+            raw.sync_state_epoch_gap
+                .unwrap_or_default()
+                .max(snapshot_epoch_count),
+        );
     }
 
     fn network_id(&self) -> u64 {
@@ -764,7 +837,7 @@ impl Configuration {
                 snapshot_epoch_count: if self.is_test_mode() {
                     self.raw_conf.dev_snapshot_epoch_count
                 } else {
-                    SNAPSHOT_EPOCHS_CAPACITY
+                    self.raw_conf.snapshot_epoch_count
                 },
                 era_epoch_count: self.raw_conf.era_epoch_count,
             },

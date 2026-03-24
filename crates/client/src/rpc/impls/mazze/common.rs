@@ -13,8 +13,10 @@ use crate::rpc::{
     types::{
         errors::check_rpc_address_network, AccountPendingInfo,
         AccountPendingTransactions, Block as RpcBlock, BlockHashOrEpochNumber,
-        Bytes, CheckBalanceAgainstTransactionResponse, EpochNumber, FeeHistory,
-        MazzeFeeHistory, RpcAddress, Status as RpcStatus,
+        Bytes, ChainProgress as RpcChainProgress,
+        CheckBalanceAgainstTransactionResponse, EpochNumber,
+        EraProgress as RpcEraProgress, FeeHistory, MazzeFeeHistory,
+        RandomXProgress as RpcRandomXProgress, RpcAddress, Status as RpcStatus,
         Transaction as RpcTransaction, TxPoolPendingNonceRange, TxPoolStatus,
         TxWithPoolInfo, U64 as HexU64,
     },
@@ -743,47 +745,94 @@ impl RpcImpl {
     }
 
     pub fn get_status(&self) -> RpcResult<RpcStatus> {
+        use mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
+
         let consensus_graph = self.consensus_graph();
 
-        let (best_info, block_number) = {
+        let (best_info, processed_block_count) = {
             // keep read lock to maintain consistent view
             let _inner = &*consensus_graph.inner.read();
 
             let best_info = self.consensus.best_info();
 
-            let block_number = self.consensus.block_count();
+            let processed_block_count = self.consensus.block_count();
 
-            (best_info, block_number)
+            (best_info, processed_block_count)
         };
 
         let tx_count = self.tx_pool.total_unpacked();
 
-        let latest_checkpoint = consensus_graph
+        let latest_checkpoint: U64 = consensus_graph
             .get_height_from_epoch_number(EpochNumber::LatestCheckpoint.into())?
             .into();
 
-        let latest_confirmed = consensus_graph
+        let latest_confirmed: U64 = consensus_graph
             .get_height_from_epoch_number(EpochNumber::LatestConfirmed.into())?
             .into();
 
-        let latest_state = consensus_graph
+        let latest_state: U64 = consensus_graph
             .get_height_from_epoch_number(EpochNumber::LatestState.into())?
             .into();
 
+        let best_epoch_number = best_info.best_epoch_number;
+        let best_block_number = best_info.best_block_number;
+        let randomx_epoch_number = best_epoch_number / RANDOMX_EPOCH_LENGTH;
+        let randomx_start_epoch_number =
+            randomx_epoch_number * RANDOMX_EPOCH_LENGTH;
+        let randomx_end_epoch_number =
+            randomx_start_epoch_number + RANDOMX_EPOCH_LENGTH - 1;
+
+        let (era_epoch_count, era_start_epoch_number) = {
+            let inner = consensus_graph.inner.read();
+            (
+                inner.inner_conf.era_epoch_count,
+                inner.get_cur_era_genesis_height(),
+            )
+        };
+        let era_end_epoch_number =
+            era_start_epoch_number + era_epoch_count.saturating_sub(1);
+        let era_number = if era_epoch_count == 0 {
+            0
+        } else {
+            era_start_epoch_number / era_epoch_count
+        };
+
         Ok(RpcStatus {
             best_hash: best_info.best_block_hash.into(),
-            block_number: block_number.into(),
+            block_number: processed_block_count.into(),
             chain_id: best_info.chain_id.in_native_space().into(),
             ethereum_space_chain_id: best_info
                 .chain_id
                 .in_space(Space::Ethereum)
                 .into(),
-            epoch_number: best_info.best_epoch_number.into(),
+            epoch_number: best_epoch_number.into(),
             latest_checkpoint,
             latest_confirmed,
             latest_state,
             network_id: self.network.network_id().into(),
             pending_tx_number: tx_count.into(),
+            progress: RpcChainProgress {
+                best_epoch_number: best_epoch_number.into(),
+                best_block_number: best_block_number.into(),
+                processed_block_count: processed_block_count.into(),
+                latest_checkpoint_epoch_number: latest_checkpoint,
+                latest_confirmed_epoch_number: latest_confirmed,
+                latest_state_epoch_number: latest_state,
+            },
+            randomx: RpcRandomXProgress {
+                epoch_number: randomx_epoch_number.into(),
+                epoch_length: RANDOMX_EPOCH_LENGTH.into(),
+                start_epoch_number: randomx_start_epoch_number.into(),
+                end_epoch_number: randomx_end_epoch_number.into(),
+                next_transition_epoch_number: (randomx_end_epoch_number + 1)
+                    .into(),
+            },
+            era: RpcEraProgress {
+                number: era_number.into(),
+                epoch_count: era_epoch_count.into(),
+                start_epoch_number: era_start_epoch_number.into(),
+                end_epoch_number: era_end_epoch_number.into(),
+            },
         })
     }
 
@@ -1329,20 +1378,25 @@ impl RpcImpl {
                 EpochNumber::Num(n) => n.as_u64(),
             };
 
-        let current_epoch = epoch_num / RANDOMX_EPOCH_LENGTH;
-        let start_block_height = current_epoch * RANDOMX_EPOCH_LENGTH;
-        let end_block_height = start_block_height + RANDOMX_EPOCH_LENGTH - 1;
-        let next_transition_block_height = end_block_height + 1;
+        let randomx_epoch_number = epoch_num / RANDOMX_EPOCH_LENGTH;
+        let start_epoch_number = randomx_epoch_number * RANDOMX_EPOCH_LENGTH;
+        let end_epoch_number = start_epoch_number + RANDOMX_EPOCH_LENGTH - 1;
+        let next_transition_epoch_number = end_epoch_number + 1;
 
         let seed_hash =
             self.data_man.db_manager.get_current_seed_hash(epoch_num);
 
         let obj = serde_json::json!({
-            "epochNumber": epoch_num,
+            "epochNumber": randomx_epoch_number,
+            "selectedEpochNumber": epoch_num,
             "randomXSeedHash": H256::from(seed_hash),
-            "startBlockHeight": start_block_height,
-            "endBlockHeight": end_block_height,
-            "nextTransitionBlockHeight": next_transition_block_height,
+            "startEpochNumber": start_epoch_number,
+            "endEpochNumber": end_epoch_number,
+            "nextTransitionEpochNumber": next_transition_epoch_number,
+            // Legacy aliases retained for older clients.
+            "startBlockHeight": start_epoch_number,
+            "endBlockHeight": end_epoch_number,
+            "nextTransitionBlockHeight": next_transition_epoch_number,
         });
         Ok(obj)
     }

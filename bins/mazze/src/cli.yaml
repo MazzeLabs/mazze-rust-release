@@ -201,6 +201,8 @@ args:
         long: tg_archive
     - full:
         long: full
+    - full-fast:
+        long: full-fast
 subcommands:
     - account:
         about: Manage accounts

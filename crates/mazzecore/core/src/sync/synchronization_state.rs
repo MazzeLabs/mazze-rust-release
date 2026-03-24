@@ -199,7 +199,7 @@ impl SynchronizationState {
     }
 
     pub fn is_full_node(&self) -> bool {
-        self.node_type == NodeType::Full
+        matches!(self.node_type, NodeType::Full | NodeType::FullFast)
     }
 
     pub fn allow_phase_change_without_peer(&self) -> bool {

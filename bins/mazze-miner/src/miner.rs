@@ -237,9 +237,40 @@ impl Miner {
 
         barrier.wait();
 
+        let mut idle_logged = false;
+
         // Mining loop
         loop {
+            if !vm_manager.has_job() {
+                if assignment.thread_id == 0 && !idle_logged {
+                    info!(
+                        "[{}] No mining job available yet, miner is idle",
+                        worker_name
+                    );
+                    idle_logged = true;
+                }
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            idle_logged = false;
+
             let result = vm_manager.with_vm(assignment, |vm| {
+                if !vm.has_job()
+                    || !vm_manager.is_block_hash_matching(
+                        &vm.get_current_block_hash(),
+                    )
+                {
+                    debug!(
+                        "[{}] Loading latest mining job into thread-local VM",
+                        worker_name
+                    );
+                    vm.update(
+                        vm_manager.get_reference_state(),
+                        vm_manager.get_context(),
+                    )
+                    .unwrap();
+                }
+
                 let start_nonce = Self::get_nonce_range_start(
                     assignment.thread_id,
                     num_threads,

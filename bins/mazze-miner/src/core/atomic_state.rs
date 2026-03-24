@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 #[derive(Debug)]
 pub struct ProblemState {
+    has_job: bool,
     block_height: u64,
     block_hash: [u8; 32],
     boundary: [u8; 32],
@@ -20,6 +21,7 @@ impl ProblemState {
         boundary.to_big_endian(&mut boundary_bytes);
 
         Self {
+            has_job: true,
             block_height,
             block_hash: block_hash.as_bytes().try_into().unwrap(),
             boundary: boundary_bytes,
@@ -34,6 +36,7 @@ impl From<&ProofOfWorkProblem> for ProblemState {
         problem.boundary.to_big_endian(&mut boundary_bytes);
 
         Self {
+            has_job: true,
             block_height: problem.block_height,
             block_hash: problem.block_hash.as_bytes().try_into().unwrap(),
             boundary: boundary_bytes,
@@ -44,7 +47,13 @@ impl From<&ProofOfWorkProblem> for ProblemState {
 
 impl From<&AtomicProblemState> for ProblemState {
     fn from(state: &AtomicProblemState) -> Self {
-        state.get_problem_details().into()
+        state.with_state(|current| Self {
+            has_job: current.has_job,
+            block_height: current.block_height,
+            block_hash: current.block_hash,
+            boundary: current.boundary,
+            seed_hash: current.seed_hash,
+        })
     }
 }
 
@@ -63,6 +72,7 @@ pub struct AtomicProblemState {
 impl Default for AtomicProblemState {
     fn default() -> Self {
         let initial_state = ProblemState {
+            has_job: false,
             block_height: 0,
             block_hash: H256::zero().as_bytes().try_into().unwrap(),
             boundary: [0u8; 32],
@@ -83,6 +93,7 @@ impl AtomicProblemState {
         boundary.to_big_endian(&mut boundary_bytes);
 
         let initial_state = ProblemState {
+            has_job: true,
             block_height,
             block_hash: block_hash.as_bytes().try_into().unwrap(),
             boundary: boundary_bytes,
@@ -107,6 +118,10 @@ impl AtomicProblemState {
 
     pub fn matches(&self, block_hash: &H256) -> bool {
         self.get_block_hash() == *block_hash
+    }
+
+    pub fn has_job(&self) -> bool {
+        self.with_state(|state| state.has_job)
     }
 
     pub fn update(&self, new_state: ProblemState) {

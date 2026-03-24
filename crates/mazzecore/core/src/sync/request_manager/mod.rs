@@ -99,6 +99,8 @@ lazy_static! {
         Duration::from_secs(2);
 }
 
+const PINNED_PEER_RETRY_ROUNDS: u32 = 3;
+
 #[derive(Debug)]
 struct WaitingRequest(Box<dyn Request>, Duration); // (request, delay)
 
@@ -214,6 +216,7 @@ impl RequestManager {
         &self, io: &dyn NetworkContext, mut request: Box<dyn Request>,
         mut peer: Option<NodeId>, delay: Option<Duration>,
     ) {
+        let mut waiting_peer = peer;
         // retain the request items that not in flight.
         request.with_inflight(&self.inflight_keys);
 
@@ -227,6 +230,7 @@ impl RequestManager {
             && delay.is_none()
             && !self.check_and_update_net_inflight_blocks(&request)
         {
+            waiting_peer = peer;
             peer = None;
         }
 
@@ -242,7 +246,7 @@ impl RequestManager {
             self.waiting_requests.lock().push(TimedWaitingRequest::new(
                 Instant::now() + cur_delay,
                 WaitingRequest(request, next_delay),
-                peer,
+                waiting_peer,
             ));
             return;
         }
@@ -890,6 +894,7 @@ impl RequestManager {
         let now = Instant::now();
         let mut batcher =
             RequestBatcher::new(*DEFAULT_REQUEST_BATCH_BUCKET_SIZE);
+        let mut pinned_peer_requests = Vec::new();
 
         let mut cancelled_requests = Vec::new();
         while let Some(req) = waiting_requests.pop() {
@@ -909,6 +914,7 @@ impl RequestManager {
             // Waiting requests are already in-flight, so send them without
             // checking
             let WaitingRequest(request, delay) = req.request;
+            let pinned_peer = req.peer;
             let request = match request.resend() {
                 Some(r) => r,
                 None => continue,
@@ -922,11 +928,55 @@ impl RequestManager {
                     now + delay,
                     // Do not increase delay because this is not a failure.
                     WaitingRequest(request, delay),
-                    None,
+                    pinned_peer,
                 ));
                 continue;
             }
+            if let Some(peer) = pinned_peer {
+                if delay
+                    <= *REQUEST_START_WAITING_TIME * PINNED_PEER_RETRY_ROUNDS
+                {
+                    let mut peer_set = HashSet::new();
+                    peer_set.insert(peer);
+                    let mut filter = PeerFilter::new(request.msg_id())
+                        .choose_from(&peer_set);
+                    if let Some(cap) = request.required_capability() {
+                        filter = filter.with_cap(cap);
+                    }
+                    if let Some(preferred_node_type) =
+                        request.preferred_node_type()
+                    {
+                        filter = filter
+                            .with_preferred_node_type(preferred_node_type);
+                    }
+                    if filter.select(&self.syn).is_some() {
+                        pinned_peer_requests.push((delay, peer, request));
+                        continue;
+                    }
+                }
+            }
             batcher.insert(delay, request);
+        }
+
+        for (next_delay, chosen_peer, request) in pinned_peer_requests {
+            debug!(
+                "Send waiting req {:?} to pinned peer={} with next_delay={:?}",
+                request, chosen_peer, next_delay
+            );
+            if let Err(request) = self.request_handler.send_request(
+                io,
+                Some(chosen_peer),
+                request,
+                Some(next_delay),
+            ) {
+                let keep_peer = next_delay
+                    <= *REQUEST_START_WAITING_TIME * PINNED_PEER_RETRY_ROUNDS;
+                waiting_requests.push(TimedWaitingRequest::new(
+                    Instant::now() + next_delay,
+                    WaitingRequest(request, next_delay),
+                    if keep_peer { Some(chosen_peer) } else { None },
+                ));
+            }
         }
 
         for (next_delay, request) in

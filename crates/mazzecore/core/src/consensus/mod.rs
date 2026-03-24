@@ -2389,28 +2389,35 @@ impl ConsensusGraphTrait for ConsensusGraph {
     /// Check if we have downloaded all the headers to find the lowest needed
     /// checkpoint. We can enter `CatchUpCheckpoint` if it's true.
     fn catch_up_completed(&self, peer_median_epoch: u64) -> bool {
-        let stable_genesis_height = self
+        let epoch_to_sync = self.get_to_sync_epoch_id();
+        let sync_target_height = self
             .data_man
-            .block_height_by_hash(
-                &self.data_man.get_cur_consensus_era_stable_hash(),
-            )
-            .expect("stable exists");
+            .block_height_by_hash(&epoch_to_sync)
+            .expect("sync target exists");
+        let snapshot_epoch_count =
+            self.data_man.get_snapshot_epoch_count() as u64;
 
-        if self.best_epoch_number() < stable_genesis_height {
-            // For an archive node, if its terminals are overwritten with
-            // earlier blocks during recovery, it's possible to
-            // reach here with a main chain before stable era
-            // checkpoint. Here we wait for it to recover the missing headers
-            // after the overwritten terminals.
+        if self.best_epoch_number() < sync_target_height {
+            // If the active main chain regressed behind the selected snapshot
+            // sync target, wait for header recovery before starting state
+            // sync.
             return false;
         }
         if let Some(target_epoch) = self.config.sync_state_starting_epoch {
-            if stable_genesis_height < target_epoch {
+            if sync_target_height < target_epoch {
                 return false;
             }
         }
-        if let Some(gap) = self.config.sync_state_epoch_gap {
-            if self.best_epoch_number() + gap < peer_median_epoch {
+
+        // Once the remaining history after the chosen snapshot target fits in
+        // one snapshot window, checkpoint sync can start. The old
+        // `sync_state_epoch_gap` remains as an optional tighter override.
+        if sync_target_height + snapshot_epoch_count < peer_median_epoch {
+            if let Some(gap) = self.config.sync_state_epoch_gap {
+                if self.best_epoch_number() + gap < peer_median_epoch {
+                    return false;
+                }
+            } else {
                 return false;
             }
         }

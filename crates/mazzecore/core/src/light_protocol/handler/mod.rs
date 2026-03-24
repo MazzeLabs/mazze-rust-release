@@ -355,6 +355,7 @@ impl Handler {
         match node_type {
             NodeType::Archive => Ok(()),
             NodeType::Full => Ok(()),
+            NodeType::FullFast => Ok(()),
             _ => bail!(ErrorKind::UnexpectedPeerType { node_type }),
         }
     }

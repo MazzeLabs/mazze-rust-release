@@ -226,7 +226,10 @@ except Exception as exc:
     sys.stderr.write(f"Failed to parse JSON: {exc}\n{raw}\n"); sys.exit(2)
 if "result" not in data:
     sys.stderr.write(f"RPC error: {data}\n"); sys.exit(2)
-print(data["result"][field])' "$field"
+value=data["result"]
+for part in field.split("."):
+    value=value[part]
+print(value)' "$field"
 }
 
 json_get_quiet() {
@@ -241,7 +244,10 @@ except Exception:
 if "result" not in data:
     sys.exit(1)
 try:
-    print(data["result"][field])
+    value=data["result"]
+    for part in field.split("."):
+        value=value[part]
+    print(value)
 except Exception:
     sys.exit(1)' "$field" 2>/dev/null || true
 }
@@ -871,8 +877,10 @@ dashboard_print() {
   local status
   status="$(rpc_call_with_retry mazze_getStatus "[]" 1 0.1 2>/dev/null)" || return
   local epoch block pending best
-  epoch="$(printf '%s' "$status" | json_get_quiet epochNumber)"
-  block="$(printf '%s' "$status" | json_get_quiet blockNumber)"
+  epoch="$(printf '%s' "$status" | json_get_quiet progress.bestEpochNumber)"
+  [[ -z "$epoch" ]] && epoch="$(printf '%s' "$status" | json_get_quiet epochNumber)"
+  block="$(printf '%s' "$status" | json_get_quiet progress.bestBlockNumber)"
+  [[ -z "$block" ]] && block="$(printf '%s' "$status" | json_get_quiet blockNumber)"
   pending="$(printf '%s' "$status" | json_get_quiet pendingTxNumber)"
   best="$(printf '%s' "$status" | json_get_quiet bestHash)"
   if [[ -z "$epoch" || -z "$block" || -z "$best" ]]; then
@@ -974,19 +982,30 @@ cmd_status() {
 cmd_summary() {
   local status
   status="$(rpc_call_with_retry mazze_getStatus "[]" 1 0.1)" || return 1
-  local epoch block pending best chain_id network_id latest_state latest_confirmed latest_checkpoint
-  epoch="$(printf '%s' "$status" | json_get_quiet epochNumber)"
-  block="$(printf '%s' "$status" | json_get_quiet blockNumber)"
+  local epoch block processed pending best chain_id network_id latest_state latest_confirmed latest_checkpoint randomx_epoch era_number
+  epoch="$(printf '%s' "$status" | json_get_quiet progress.bestEpochNumber)"
+  [[ -z "$epoch" ]] && epoch="$(printf '%s' "$status" | json_get_quiet epochNumber)"
+  block="$(printf '%s' "$status" | json_get_quiet progress.bestBlockNumber)"
+  [[ -z "$block" ]] && block="$(printf '%s' "$status" | json_get_quiet blockNumber)"
+  processed="$(printf '%s' "$status" | json_get_quiet progress.processedBlockCount)"
   pending="$(printf '%s' "$status" | json_get_quiet pendingTxNumber)"
   best="$(printf '%s' "$status" | json_get_quiet bestHash)"
   chain_id="$(printf '%s' "$status" | json_get_quiet chainId)"
   network_id="$(printf '%s' "$status" | json_get_quiet networkId)"
-  latest_state="$(printf '%s' "$status" | json_get_quiet latestState)"
-  latest_confirmed="$(printf '%s' "$status" | json_get_quiet latestConfirmed)"
-  latest_checkpoint="$(printf '%s' "$status" | json_get_quiet latestCheckpoint)"
+  latest_state="$(printf '%s' "$status" | json_get_quiet progress.latestStateEpochNumber)"
+  [[ -z "$latest_state" ]] && latest_state="$(printf '%s' "$status" | json_get_quiet latestState)"
+  latest_confirmed="$(printf '%s' "$status" | json_get_quiet progress.latestConfirmedEpochNumber)"
+  [[ -z "$latest_confirmed" ]] && latest_confirmed="$(printf '%s' "$status" | json_get_quiet latestConfirmed)"
+  latest_checkpoint="$(printf '%s' "$status" | json_get_quiet progress.latestCheckpointEpochNumber)"
+  [[ -z "$latest_checkpoint" ]] && latest_checkpoint="$(printf '%s' "$status" | json_get_quiet latestCheckpoint)"
+  randomx_epoch="$(printf '%s' "$status" | json_get_quiet randomx.epochNumber)"
+  era_number="$(printf '%s' "$status" | json_get_quiet era.number)"
 
   printf '%-16s %s\n' "epoch" "$(bold "$(hex_to_dec "$epoch")")"
   printf '%-16s %s\n' "block" "$(bold "$(hex_to_dec "$block")")"
+  if [[ -n "$processed" ]]; then
+    printf '%-16s %s\n' "processed" "$(bold "$(hex_to_dec "$processed")")"
+  fi
   printf '%-16s %s\n' "pending" "$(bold "$(hex_to_dec "${pending:-0x0}")")"
   printf '%-16s %s\n' "best" "$(blue "${best:0:10}...${best: -6}")"
   printf '%-16s %s\n' "chainId" "$(bold "$(hex_to_dec "$chain_id")")"
@@ -994,6 +1013,12 @@ cmd_summary() {
   printf '%-16s %s\n' "latestState" "$(bold "$(hex_to_dec "$latest_state")")"
   printf '%-16s %s\n' "latestConfirmed" "$(bold "$(hex_to_dec "$latest_confirmed")")"
   printf '%-16s %s\n' "latestCheckpoint" "$(bold "$(hex_to_dec "$latest_checkpoint")")"
+  if [[ -n "$randomx_epoch" ]]; then
+    printf '%-16s %s\n' "randomxEpoch" "$(bold "$(hex_to_dec "$randomx_epoch")")"
+  fi
+  if [[ -n "$era_number" ]]; then
+    printf '%-16s %s\n' "era" "$(bold "$(hex_to_dec "$era_number")")"
+  fi
 }
 
 cmd_wallet_new() {

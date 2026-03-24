@@ -160,9 +160,14 @@ Current Version: 1.0.0
         }
         NodeType::Full => {
             info!("Starting full client...");
-            info!("{:?}", conf);
             FullClient::start(conf, exit.clone())
                 .map_err(|e| format!("failed to start full client: {:?}", e))?
+        }
+        NodeType::FullFast => {
+            info!("Starting full-fast client...");
+            FullClient::start(conf, exit.clone()).map_err(|e| {
+                format!("failed to start full-fast client: {:?}", e)
+            })?
         }
         NodeType::Light => {
             info!("Starting light client...");

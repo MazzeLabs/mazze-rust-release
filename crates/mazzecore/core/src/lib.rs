@@ -45,6 +45,9 @@ pub mod transaction_pool;
 pub mod unique_id;
 pub mod verification;
 
+#[cfg(test)]
+mod node_type_tests;
+
 pub use crate::{
     block_data_manager::BlockDataManager,
     channel::Notifications,

@@ -371,6 +371,7 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
         sync_handler: &SynchronizationProtocolHandler,
     ) {
         info!("start phase {:?}", self.name());
+        self.state_sync.reset();
         self.has_state.store(false, AtomicOrdering::SeqCst);
         *sync_handler.synced_epoch_id.lock() = None;
         sync_handler.graph.inner.write().locked_for_catchup = true;

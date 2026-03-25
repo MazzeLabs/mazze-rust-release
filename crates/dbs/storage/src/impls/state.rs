@@ -361,12 +361,12 @@ impl StateTrait for State {
 
             commit_result?;
         }
-        let snapshot_epoch_count =
-            self.manager.get_storage_manager().get_snapshot_epoch_count();
+        let snapshot_epoch_count = self
+            .manager
+            .get_storage_manager()
+            .get_snapshot_epoch_count();
         let snapshot_trigger_delta_height =
-            Self::snapshot_creation_trigger_delta_height(
-                snapshot_epoch_count,
-            );
+            Self::snapshot_creation_trigger_delta_height(snapshot_epoch_count);
         if self.delta_trie_height.unwrap() >= snapshot_trigger_delta_height
             && self.maybe_intermediate_trie.is_some()
         {

@@ -207,6 +207,10 @@ impl SnapshotChunkSync {
         }
     }
 
+    pub fn reset(&self) {
+        *self.inner.write() = Inner::new();
+    }
+
     pub fn status(&self) -> Status {
         self.inner.read().status
     }
@@ -392,6 +396,14 @@ impl SnapshotChunkSync {
             },
         );
 
+        if inner.status == Status::Invalid {
+            debug!(
+                "sync state status remains invalid for {:?}; waiting for phase fallback/reset",
+                epoch_to_sync
+            );
+            return;
+        }
+
         // If we moves into the next era, we should force state_sync to change
         // the candidates to states with in the new stable era. If the
         // era stays the same and a new snapshot becomes available, we
@@ -419,6 +431,7 @@ impl SnapshotChunkSync {
                             inner.status = Status::Invalid;
                             inner.manifest_manager = None;
                             inner.chunk_manager = None;
+                            inner.related_data = None;
                         }
                     }
                 }
@@ -450,7 +463,8 @@ impl SnapshotChunkSync {
                 }
                 _ => {}
             }
-            if inner.sync_candidate_manager.is_inactive()
+            if inner.status != Status::Invalid
+                && inner.sync_candidate_manager.is_inactive()
                 && inner
                     .chunk_manager
                     .as_ref()
@@ -466,6 +480,8 @@ impl SnapshotChunkSync {
                 warn!("current sync candidate becomes inactive: {:?}", inner);
                 inner.status = Status::Inactive;
                 inner.manifest_manager = None;
+                inner.chunk_manager = None;
+                inner.related_data = None;
             }
             // We need to start/restart syncing states for a candidate.
             if inner.status == Status::StartCandidateSync {

@@ -30,6 +30,6 @@ Thumbs.db
 run/blockchain_data
 run/blockchain_data_runcpu
 run/blockchain_data_old
-hydra.toml
-hydra.runtime.toml
+run/hydra.toml
+run/hydra.runtime.toml
 blockchain_data

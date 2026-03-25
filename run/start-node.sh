@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 EXECUTABLE="$REPO_ROOT/target/release/mazze"
 CONFIG_FILE="$SCRIPT_DIR/hydra.toml"
-LOG_DIR="$REPO_ROOT/logs"
+LOG_DIR="$REPO_ROOT/run/logs"
 PID_FILE="$SCRIPT_DIR/node_pid.txt"
 LOG_FILE="$LOG_DIR/mazze-node.log"
 

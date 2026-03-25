@@ -168,14 +168,43 @@ impl RequestHandler {
                 self.match_request(&sync_req.peer_id, sync_req.request_id)
             {
                 let peer_id = sync_req.peer_id.clone();
+                let request_msg_id = req.request.msg_id();
                 if let Some(request_container) =
                     self.peers.lock().get_mut(&peer_id)
                 {
                     if request_container
                         .on_timeout_should_disconnect(&self.protocol_config)
                     {
+                        warn!(
+                            "Disconnecting peer={} after request timeout budget exceeded: \
+                             timed_out_msg_id={}, timeout_count={}, timeout_window_s={}, \
+                             timeout_limit={}, inflight_requests={}, pending_requests={}, \
+                             max_inflight_request_count={}",
+                            peer_id,
+                            request_msg_id,
+                            request_container.timeout_statistics.len(),
+                            self.protocol_config.timeout_observing_period_s,
+                            self.protocol_config
+                                .max_allowed_timeout_in_observing_period,
+                            request_container.inflight_requests.len(),
+                            request_container.pending_requests.len(),
+                            request_container.max_inflight_request_count,
+                        );
                         peers_to_disconnect.insert(peer_id);
                     } else {
+                        debug!(
+                            "Peer={} request timeout within budget: timed_out_msg_id={}, \
+                             timeout_count={}, timeout_window_s={}, timeout_limit={}, \
+                             inflight_requests={}, pending_requests={}",
+                            peer_id,
+                            request_msg_id,
+                            request_container.timeout_statistics.len(),
+                            self.protocol_config.timeout_observing_period_s,
+                            self.protocol_config
+                                .max_allowed_timeout_in_observing_period,
+                            request_container.inflight_requests.len(),
+                            request_container.pending_requests.len(),
+                        );
                         peers_to_send_pending_requests.insert(peer_id);
                     }
                 }

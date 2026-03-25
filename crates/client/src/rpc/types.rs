@@ -58,7 +58,9 @@ pub use self::{
     reward_info::RewardInfo,
     sponsor_info::SponsorInfo,
     stat_on_gas_load::StatOnGasLoad,
-    status::{ChainProgress, EraProgress, RandomXProgress, Status},
+    status::{
+        ChainProgress, EraProgress, RandomXProgress, SnapshotProgress, Status,
+    },
     storage_collateral_info::StorageCollateralInfo,
     sync_graph_states::SyncGraphStates,
     token_supply_info::TokenSupplyInfo,

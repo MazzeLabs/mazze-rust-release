@@ -106,7 +106,7 @@ log_level = "info"
 # If not set, the process will try to find out the public IP with best effort, and use `tcp_port` as public port.
 # However, it's HIGHLY RECOMMENDED to set the value manually, especially for machines with IP translated by NAT.
 #
-public_address = "Public-IP"
+public_address = "5.12.37.188"
 
 # `tcp_port` is the TCP port that the process listens for P2P messages. The default is 55555.
 #
@@ -168,11 +168,11 @@ public_evm_rpc_apis = "evm"
 
 # Timeout for block-related requests (GetBlock, GetCmpctBlock, GetBlockTxn)
 #
-# blocks_request_timeout_ms = 20_000
+blocks_request_timeout_ms = 30_000
 
 # Time interval to check timeout requests periodically.
 #
-# check_request_period_ms=5000
+check_request_period_ms = 3000
 
 # Chunk size for snapshot retrieval
 #
@@ -203,7 +203,7 @@ egress_max_throttle = 256
 
 # Timeout for header-related requests (GetBlockHeaders)
 #
-# headers_request_timeout_ms=10_000
+headers_request_timeout_ms = 15_000
 
 # Time interval to broadcast Status as heartbeat periodically
 #
@@ -217,7 +217,7 @@ egress_max_throttle = 256
 # If the max is reached, the peer will be disconnected.
 # `demote_peer_for_timeout` controls if the peer will be demoted in this case.
 #
-# max_allowed_timeout_in_observing_period = 10
+max_allowed_timeout_in_observing_period = 25
 
 # Maximum number of peers to download state chunks from.
 #
@@ -244,7 +244,7 @@ max_outgoing_peers = 32
 ## Maximum number of inflight requests for each peer.
 ## If the max is reached, requests will be buffered until inflight requests are responded or timeout.
 ## Lowered to reduce memory/CPU pressure during catchup.
-max_inflight_request_count = 2000
+max_inflight_request_count = 512
 
 # Maximum number of peers to broadcast transaction digests.
 #
@@ -297,7 +297,7 @@ request_block_with_public = true
 
 # The time period to observe if a peers has too many timeouts.
 #
-# timeout_observing_period_s = 600
+timeout_observing_period_s = 900
 
 # Timeout for transaction requests.
 #

@@ -781,6 +781,16 @@ impl RpcImpl {
             randomx_epoch_number * RANDOMX_EPOCH_LENGTH;
         let randomx_end_epoch_number =
             randomx_start_epoch_number + RANDOMX_EPOCH_LENGTH - 1;
+        let state_manager = &self.consensus.get_data_manager().storage_manager;
+        let storage_manager = state_manager.get_storage_manager();
+        let latest_snapshot_epoch_number: U64 = storage_manager
+            .latest_snapshot_epoch_height()
+            .unwrap_or_default()
+            .into();
+        let available_snapshot_count_value =
+            storage_manager.available_snapshot_count() as u64;
+        let available_snapshot_count: U64 =
+            available_snapshot_count_value.into();
 
         let (era_epoch_count, era_start_epoch_number) = {
             let inner = consensus_graph.inner.read();
@@ -826,6 +836,16 @@ impl RpcImpl {
                 end_epoch_number: randomx_end_epoch_number.into(),
                 next_transition_epoch_number: (randomx_end_epoch_number + 1)
                     .into(),
+            },
+            snapshots: crate::rpc::types::SnapshotProgress {
+                epoch_length: self
+                    .consensus
+                    .get_data_manager()
+                    .get_snapshot_epoch_count()
+                    .into(),
+                latest_snapshot_epoch_number,
+                available_snapshot_count,
+                serving: available_snapshot_count_value != 0,
             },
             era: RpcEraProgress {
                 number: era_number.into(),

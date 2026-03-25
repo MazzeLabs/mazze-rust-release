@@ -982,7 +982,7 @@ cmd_status() {
 cmd_summary() {
   local status
   status="$(rpc_call_with_retry mazze_getStatus "[]" 1 0.1)" || return 1
-  local epoch block processed pending best chain_id network_id latest_state latest_confirmed latest_checkpoint randomx_epoch era_number
+  local epoch block processed pending best chain_id network_id latest_state latest_confirmed latest_checkpoint randomx_epoch era_number latest_snapshot snapshot_count
   epoch="$(printf '%s' "$status" | json_get_quiet progress.bestEpochNumber)"
   [[ -z "$epoch" ]] && epoch="$(printf '%s' "$status" | json_get_quiet epochNumber)"
   block="$(printf '%s' "$status" | json_get_quiet progress.bestBlockNumber)"
@@ -999,6 +999,8 @@ cmd_summary() {
   latest_checkpoint="$(printf '%s' "$status" | json_get_quiet progress.latestCheckpointEpochNumber)"
   [[ -z "$latest_checkpoint" ]] && latest_checkpoint="$(printf '%s' "$status" | json_get_quiet latestCheckpoint)"
   randomx_epoch="$(printf '%s' "$status" | json_get_quiet randomx.epochNumber)"
+  latest_snapshot="$(printf '%s' "$status" | json_get_quiet snapshots.latestSnapshotEpochNumber)"
+  snapshot_count="$(printf '%s' "$status" | json_get_quiet snapshots.availableSnapshotCount)"
   era_number="$(printf '%s' "$status" | json_get_quiet era.number)"
 
   printf '%-16s %s\n' "epoch" "$(bold "$(hex_to_dec "$epoch")")"
@@ -1013,6 +1015,12 @@ cmd_summary() {
   printf '%-16s %s\n' "latestState" "$(bold "$(hex_to_dec "$latest_state")")"
   printf '%-16s %s\n' "latestConfirmed" "$(bold "$(hex_to_dec "$latest_confirmed")")"
   printf '%-16s %s\n' "latestCheckpoint" "$(bold "$(hex_to_dec "$latest_checkpoint")")"
+  if [[ -n "$latest_snapshot" ]]; then
+    printf '%-16s %s\n' "latestSnapshot" "$(bold "$(hex_to_dec "$latest_snapshot")")"
+  fi
+  if [[ -n "$snapshot_count" ]]; then
+    printf '%-16s %s\n' "snapshotCount" "$(bold "$(hex_to_dec "$snapshot_count")")"
+  fi
   if [[ -n "$randomx_epoch" ]]; then
     printf '%-16s %s\n' "randomxEpoch" "$(bold "$(hex_to_dec "$randomx_epoch")")"
   fi

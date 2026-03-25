@@ -7,11 +7,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 EXECUTABLE="$REPO_ROOT/target/release/mazze"
 CONFIG_FILE="$SCRIPT_DIR/hydra.toml"
-LOG_DIR="$SCRIPT_DIR/logs"
+LOG_DIR="$REPO_ROOT/logs"
 PID_FILE="$SCRIPT_DIR/node_pid.txt"
 LOG_FILE="$LOG_DIR/mazze-node.log"
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$LOG_DIR/archive"
 
 if [[ ! -x "$EXECUTABLE" ]]; then
   echo "Error: binary not found at $EXECUTABLE. Did you run: cargo build --release?" >&2
@@ -49,7 +49,7 @@ has_chain_data() {
   fi
   return 1
 }
-if has_chain_data "$SCRIPT_DIR/blockchain_data"; then
+if has_chain_data "$REPO_ROOT/blockchain_data"; then
   if grep -q '^\s*execute_genesis\s*=' "$TEMP_CONF"; then
     sed -i "s#^\s*execute_genesis\s*=.*#execute_genesis = false#" "$TEMP_CONF"
   else
@@ -57,9 +57,9 @@ if has_chain_data "$SCRIPT_DIR/blockchain_data"; then
   fi
 fi
 
-# Run from the config directory so relative paths (blockchain_data, logs, etc.)
-# stay consistent across restarts.
-pushd "$SCRIPT_DIR" >/dev/null
+# Run from the repository root so log4rs and helper logs share the same
+# canonical ./logs directory.
+pushd "$REPO_ROOT" >/dev/null
 
 "$EXECUTABLE" --config "$TEMP_CONF" >> "$LOG_FILE" 2>&1 &
 PID=$!

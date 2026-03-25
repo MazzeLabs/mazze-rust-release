@@ -338,6 +338,17 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
             io,
             sync_handler,
         );
+        if sync_handler.syn.allow_phase_change_without_peer()
+            && sync_handler.syn.peers.read().is_empty()
+            && self.state_sync.status() == Status::Inactive
+        {
+            warn!(
+                "No peers available for checkpoint sync at {:?}; continuing with local body sync",
+                epoch_to_sync
+            );
+            *sync_handler.synced_epoch_id.lock() = None;
+            return SyncPhaseType::CatchUpFillBlockBodyPhase;
+        }
         if self.state_sync.status() == Status::Invalid {
             warn!(
                 "Checkpoint sync is unavailable for {:?}; falling back to legacy body sync",

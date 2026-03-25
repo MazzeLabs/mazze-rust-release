@@ -72,7 +72,7 @@ In dev mode, blocks can be generated without PoW:
 Use `run/start-node-dev.sh` to generate a dev config automatically.
 
 ## Monitoring mining
-- Logs: `run/logs/mazze-node.log` and `run/logs/mazze-miner.log`.
+- Logs: `logs/mazze-node.log` and `logs/mazze-miner.log`.
 - RPC checks:
   - `mazze_getStatus` (chain progress).
   - `mazze_getBlockRewardInfo` (reward data per epoch).

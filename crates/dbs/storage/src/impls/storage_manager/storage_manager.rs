@@ -408,6 +408,19 @@ impl StorageManager {
             .map(Clone::clone)
     }
 
+    pub fn latest_snapshot_epoch_height(&self) -> Option<u64> {
+        self.snapshot_info_map_by_epoch
+            .read()
+            .get_map()
+            .values()
+            .map(|snapshot| snapshot.height)
+            .max()
+    }
+
+    pub fn available_snapshot_count(&self) -> usize {
+        self.snapshot_info_map_by_epoch.read().get_map().len()
+    }
+
     pub fn get_delta_mpt(
         self: &Arc<Self>, snapshot_epoch_id: &EpochId,
     ) -> Result<Arc<DeltaMpt>> {

@@ -551,6 +551,36 @@ impl SynchronizationProtocolHandler {
             && !self.syn.is_full_node()
     }
 
+    fn peer_debug_context(&self, peer: &NodeId) -> String {
+        if let Some(state) = self.syn.peers.read().get(peer).cloned() {
+            let state = state.read();
+            return format!(
+                "peer_known=true handshaking=false peer_version={:?} node_type={:?} best_epoch={} latest_hashes={} heartbeat_ms={}",
+                state.protocol_version,
+                state.node_type,
+                state.best_epoch,
+                state.latest_block_hashes.len(),
+                state.heartbeat.elapsed().as_millis(),
+            );
+        }
+
+        let handshaking = self
+            .syn
+            .handshaking_peers
+            .read()
+            .get(peer)
+            .map(|(version, since)| {
+                format!(
+                    "handshaking=true peer_version={:?} handshake_age_ms={}",
+                    version,
+                    since.elapsed().as_millis()
+                )
+            })
+            .unwrap_or_else(|| "handshaking=false".to_string());
+
+        format!("peer_known=false {}", handshaking)
+    }
+
     pub fn preferred_peer_node_type_for_get_block(&self) -> Option<NodeType> {
         if self.need_block_from_archive_node() {
             Some(NodeType::Archive)
@@ -609,9 +639,16 @@ impl SynchronizationProtocolHandler {
             warn!("Unknown message: peer={:?} msgid={:?}", peer, msg_id);
             let reason =
                 format!("unknown sync protocol message id {:?}", msg_id);
+            warn!(
+                "Disconnecting peer for unknown sync message: peer={} msgid={:?} protocol={:?} {}",
+                peer,
+                msg_id,
+                io.get_protocol(),
+                self.peer_debug_context(peer),
+            );
             io.disconnect_peer(
                 peer,
-                Some(UpdateNodeOperation::Remove),
+                Some(UpdateNodeOperation::Failure),
                 reason.as_str(),
             );
         }
@@ -640,9 +677,9 @@ impl SynchronizationProtocolHandler {
                 op = Some(UpdateNodeOperation::Demotion)
             }
             ErrorKind::InvalidMessageFormat => {
-                // TODO: Shall we blacklist a node when the message format is
-                // wrong? maybe it's a different version of sync protocol?
-                op = Some(UpdateNodeOperation::Remove)
+                // Do not turn a possible version-skew or transient parse issue
+                // into a long-lived blacklist entry.
+                op = Some(UpdateNodeOperation::Failure)
             }
             ErrorKind::UnknownPeer => {
                 warn = false;
@@ -683,7 +720,7 @@ impl SynchronizationProtocolHandler {
                     disconnect = true;
                 }
             }
-            ErrorKind::Decoder(_) => op = Some(UpdateNodeOperation::Remove),
+            ErrorKind::Decoder(_) => op = Some(UpdateNodeOperation::Failure),
             ErrorKind::Io(_) => disconnect = false,
             ErrorKind::Network(kind) => match kind {
                 network::ErrorKind::SendUnsupportedMessage { .. } => {
@@ -737,7 +774,7 @@ impl SynchronizationProtocolHandler {
             ErrorKind::RpcCancelledByDisconnection => {}
             ErrorKind::RpcTimeout => {}
             ErrorKind::UnexpectedMessage(_) => {
-                op = Some(UpdateNodeOperation::Remove)
+                op = Some(UpdateNodeOperation::Failure)
             }
             ErrorKind::NotSupported(_) => disconnect = false,
         }
@@ -751,6 +788,18 @@ impl SynchronizationProtocolHandler {
             debug!(
                 "Minor error while handling message, peer={}, msgid={:?}, error={}",
                 peer, msg_id, error_reason
+            );
+        }
+
+        if matches!(op, Some(UpdateNodeOperation::Remove)) {
+            error!(
+                "Sync peer removal decision: peer={} msgid={:?} protocol={:?} display_reason={} debug_reason={} {}",
+                peer,
+                msg_id,
+                io.get_protocol(),
+                reason,
+                error_reason,
+                self.peer_debug_context(peer),
             );
         }
 
@@ -1901,12 +1950,22 @@ impl NetworkProtocolHandler for SynchronizationProtocolHandler {
         let (msg_id, rlp) = match decode_msg(raw) {
             Some(msg) => msg,
             None => {
+                let raw_prefix: Vec<u8> =
+                    raw.iter().copied().take(12).collect();
+                warn!(
+                    "Invalid sync payload received: peer={} protocol={:?} raw_len={} raw_prefix={:?} {}",
+                    peer,
+                    io.get_protocol(),
+                    raw.len(),
+                    raw_prefix,
+                    self.peer_debug_context(peer),
+                );
                 return self.handle_error(
                     io,
                     peer,
                     msgid::INVALID,
                     ErrorKind::InvalidMessageFormat.into(),
-                )
+                );
             }
         };
 

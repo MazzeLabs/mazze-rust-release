@@ -52,6 +52,19 @@ pub struct EraProgress {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SnapshotProgress {
+    /// Number of epochs between snapshot boundaries.
+    pub epoch_length: U64,
+    /// Latest locally available snapshot epoch number.
+    pub latest_snapshot_epoch_number: U64,
+    /// Number of locally available snapshots that can be served.
+    pub available_snapshot_count: U64,
+    /// Whether the node currently has at least one snapshot to serve.
+    pub serving: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Status {
     /// Hash of the block
     pub best_hash: H256,
@@ -77,6 +90,8 @@ pub struct Status {
     pub progress: ChainProgress,
     /// Explicit RandomX epoch fields derived from the current best epoch.
     pub randomx: RandomXProgress,
+    /// Snapshot production and serving information for fast bootstrap.
+    pub snapshots: SnapshotProgress,
     /// Explicit era fields for the current consensus era.
     pub era: EraProgress,
 }

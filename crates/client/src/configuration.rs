@@ -67,6 +67,7 @@ const FULL_FAST_MIN_OPEN_SNAPSHOTS: u16 = 16;
 const FULL_FAST_MIN_OPEN_MPTS: u32 = 16;
 const FULL_FAST_MIN_PARITYDB_OPEN_FILES: u32 = 1024;
 const FULL_FAST_MIN_SNAPSHOT_COUNT: u32 = 2;
+const DEFAULT_SERVING_SNAPSHOT_COUNT: u32 = 2;
 
 // usage:
 // ```
@@ -145,10 +146,10 @@ build_config! {
         (execute_genesis, (bool), true)
         (default_transition_time, (Option<u64>), None)
         // Snapshot cadence controls the local checkpoint/snapshot grid used
-        // for state sync. Keep the historical default for existing profiles;
-        // `full-fast` overrides it to align with RandomX epochs.
+        // for state sync across all node profiles.
         (snapshot_epoch_count, (u32), SNAPSHOT_EPOCHS_CAPACITY)
-        // This test-only override is kept for snapshot-focused tests.
+        // Legacy compatibility alias. Runtime behavior always follows
+        // `snapshot_epoch_count`.
         (dev_snapshot_epoch_count, (u32), SNAPSHOT_EPOCHS_CAPACITY)
         (era_epoch_count, (u64), ERA_DEFAULT_EPOCH_COUNT)
         (heavy_block_difficulty_ratio, (u64), HEAVY_BLOCK_DEFAULT_DIFFICULTY_RATIO)
@@ -442,21 +443,42 @@ impl Configuration {
     }
 
     fn apply_node_type_profile(&mut self) {
-        if matches!(self.raw_conf.node_type, Some(NodeType::FullFast)) {
+        let node_type = self.node_type();
+        if !matches!(node_type, NodeType::Light) {
+            self.apply_snapshot_serving_defaults();
+        }
+        if matches!(node_type, NodeType::FullFast) {
             self.apply_full_fast_profile();
+        }
+    }
+
+    fn apply_snapshot_serving_defaults(&mut self) {
+        let raw = &mut self.raw_conf;
+        if raw.snapshot_epoch_count < RANDOMX_EPOCH_LENGTH as u32 {
+            raw.snapshot_epoch_count = RANDOMX_EPOCH_LENGTH as u32;
+        }
+        // Keep the legacy field aligned so test mode cannot diverge from the
+        // canonical snapshot cadence.
+        raw.dev_snapshot_epoch_count = raw.snapshot_epoch_count;
+
+        raw.additional_maintained_snapshot_count = raw
+            .additional_maintained_snapshot_count
+            .max(DEFAULT_SERVING_SNAPSHOT_COUNT);
+
+        if raw.provide_more_snapshot_for_sync
+            == vec![ProvideExtraSnapshotSyncConfig::StableCheckpoint]
+        {
+            raw.provide_more_snapshot_for_sync.push(
+                ProvideExtraSnapshotSyncConfig::EpochNearestMultipleOf(
+                    raw.snapshot_epoch_count,
+                ),
+            );
         }
     }
 
     fn apply_full_fast_profile(&mut self) {
         let raw = &mut self.raw_conf;
-        if raw.snapshot_epoch_count < RANDOMX_EPOCH_LENGTH as u32 {
-            raw.snapshot_epoch_count = RANDOMX_EPOCH_LENGTH as u32;
-        }
         let snapshot_epoch_count = raw.snapshot_epoch_count as u64;
-        let full_fast_snapshot =
-            ProvideExtraSnapshotSyncConfig::EpochNearestMultipleOf(
-                raw.snapshot_epoch_count,
-            );
 
         raw.request_block_with_public = true;
         raw.max_outgoing_peers =
@@ -480,11 +502,6 @@ impl Configuration {
         raw.additional_maintained_snapshot_count = raw
             .additional_maintained_snapshot_count
             .max(FULL_FAST_MIN_SNAPSHOT_COUNT);
-        if raw.provide_more_snapshot_for_sync
-            == vec![ProvideExtraSnapshotSyncConfig::StableCheckpoint]
-        {
-            raw.provide_more_snapshot_for_sync.push(full_fast_snapshot);
-        }
         raw.paritydb_max_open_files = Some(
             raw.paritydb_max_open_files
                 .unwrap_or_default()
@@ -834,11 +851,7 @@ impl Configuration {
                 .raw_conf
                 .additional_maintained_snapshot_count,
             consensus_param: ConsensusParam {
-                snapshot_epoch_count: if self.is_test_mode() {
-                    self.raw_conf.dev_snapshot_epoch_count
-                } else {
-                    self.raw_conf.snapshot_epoch_count
-                },
+                snapshot_epoch_count: self.raw_conf.snapshot_epoch_count,
                 era_epoch_count: self.raw_conf.era_epoch_count,
             },
             debug_snapshot_checker_threads:
@@ -1431,8 +1444,9 @@ pub fn parse_config_address_string(
 #[cfg(test)]
 mod tests {
     use mazze_addr::Network;
+    use mazzecore::NodeType;
 
-    use crate::configuration::parse_config_address_string;
+    use crate::configuration::{parse_config_address_string, Configuration};
 
     #[test]
     fn test_config_address_string() {
@@ -1467,6 +1481,26 @@ mod tests {
                 &Network::Main,
             )
             .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_snapshot_epoch_count_is_canonical_in_test_mode() {
+        let mut conf = Configuration::default();
+        conf.raw_conf.mode = Some("test".into());
+        conf.raw_conf.node_type = Some(NodeType::Archive);
+        conf.raw_conf.snapshot_epoch_count = 2048;
+        conf.raw_conf.dev_snapshot_epoch_count = 2000;
+
+        conf.apply_node_type_profile();
+
+        assert_eq!(conf.raw_conf.snapshot_epoch_count, 2048);
+        assert_eq!(conf.raw_conf.dev_snapshot_epoch_count, 2048);
+        assert_eq!(
+            conf.storage_config(&NodeType::Archive)
+                .consensus_param
+                .snapshot_epoch_count,
+            2048
         );
     }
 }

@@ -440,13 +440,20 @@ fn handle_snapshot_manifest_response_message(
 ) -> Result<(), Error> {
     let min_supported_version = ctx.manager.minimum_supported_version();
     let protocol = ctx.io.get_protocol();
-    let peer_version = ctx
-        .manager
-        .syn
-        .get_peer_version(&ctx.node_id)
-        .unwrap_or(SYNC_PROTO_V1);
+    let peer_version = match ctx.manager.syn.get_peer_version(&ctx.node_id) {
+        Ok(version) => Some(version),
+        Err(err) => {
+            warn!(
+                "Peer version unavailable while decoding SnapshotManifestResponse from peer={}, protocol={:?}: {:?}. Trying v4 then legacy decode.",
+                ctx.node_id,
+                protocol,
+                err,
+            );
+            None
+        }
+    };
 
-    if peer_version >= SYNC_PROTO_V4 {
+    if peer_version.map_or(true, |version| version >= SYNC_PROTO_V4) {
         if let Ok(msg) = decode_rlp_and_check_deprecation::<
             SnapshotManifestResponseV4,
         >(rlp, min_supported_version, protocol)
@@ -463,13 +470,20 @@ fn handle_get_block_hashes_response_message(
 ) -> Result<(), Error> {
     let min_supported_version = ctx.manager.minimum_supported_version();
     let protocol = ctx.io.get_protocol();
-    let peer_version = ctx
-        .manager
-        .syn
-        .get_peer_version(&ctx.node_id)
-        .unwrap_or(SYNC_PROTO_V1);
+    let peer_version = match ctx.manager.syn.get_peer_version(&ctx.node_id) {
+        Ok(version) => Some(version),
+        Err(err) => {
+            warn!(
+                "Peer version unavailable while decoding GetBlockHashesResponse from peer={}, protocol={:?}: {:?}. Trying v4 then legacy decode.",
+                ctx.node_id,
+                protocol,
+                err,
+            );
+            None
+        }
+    };
 
-    if peer_version >= SYNC_PROTO_V4 {
+    if peer_version.map_or(true, |version| version >= SYNC_PROTO_V4) {
         if let Ok(msg) = decode_rlp_and_check_deprecation::<
             GetBlockHashesResponseV4,
         >(rlp, min_supported_version, protocol)
@@ -486,13 +500,20 @@ fn handle_snapshot_chunk_response_message(
 ) -> Result<(), Error> {
     let min_supported_version = ctx.manager.minimum_supported_version();
     let protocol = ctx.io.get_protocol();
-    let peer_version = ctx
-        .manager
-        .syn
-        .get_peer_version(&ctx.node_id)
-        .unwrap_or(SYNC_PROTO_V1);
+    let peer_version = match ctx.manager.syn.get_peer_version(&ctx.node_id) {
+        Ok(version) => Some(version),
+        Err(err) => {
+            warn!(
+                "Peer version unavailable while decoding SnapshotChunkResponse from peer={}, protocol={:?}: {:?}. Trying v4 then legacy decode.",
+                ctx.node_id,
+                protocol,
+                err,
+            );
+            None
+        }
+    };
 
-    if peer_version >= SYNC_PROTO_V4 {
+    if peer_version.map_or(true, |version| version >= SYNC_PROTO_V4) {
         if let Ok(msg) = decode_rlp_and_check_deprecation::<
             SnapshotChunkResponseV4,
         >(rlp, min_supported_version, protocol)

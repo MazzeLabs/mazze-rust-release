@@ -29,12 +29,14 @@ curl -s http://127.0.0.1:12539 \
 ```
 
 The response keeps the legacy top-level fields for compatibility and now also
-includes grouped `progress`, `randomx`, and `era` objects. For operator
+includes grouped `progress`, `randomx`, `snapshots`, and `era` objects. For operator
 dashboards, prefer:
 - `progress.bestEpochNumber`
 - `progress.bestBlockNumber`
 - `progress.latestStateEpochNumber`
 - `randomx.epochNumber`
+- `snapshots.latestSnapshotEpochNumber`
+- `snapshots.availableSnapshotCount`
 - `era.number`
 
 `mazze_getRandomXEpochInfo` now uses:

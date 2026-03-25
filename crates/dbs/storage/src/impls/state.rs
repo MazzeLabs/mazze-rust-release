@@ -35,7 +35,17 @@ pub struct State {
     recover_mpt_during_construct_main_state: bool,
 }
 
+const SNAPSHOT_CREATION_DELAY_AFTER_BOUNDARY: u32 = 200;
+
 impl State {
+    fn snapshot_creation_trigger_delta_height(
+        snapshot_epoch_count: u32,
+    ) -> u32 {
+        SNAPSHOT_CREATION_DELAY_AFTER_BOUNDARY
+            .min(snapshot_epoch_count.saturating_sub(1))
+            .max(1)
+    }
+
     pub fn new(
         manager: Arc<StateManager>, state_trees: StateTrees,
         construct_main_state: bool,
@@ -351,15 +361,17 @@ impl StateTrait for State {
 
             commit_result?;
         }
-        if self.delta_trie_height.unwrap()
-            >= self
-                .manager
-                .get_storage_manager()
-                .get_snapshot_epoch_count()
-                / 3
+        let snapshot_epoch_count =
+            self.manager.get_storage_manager().get_snapshot_epoch_count();
+        let snapshot_trigger_delta_height =
+            Self::snapshot_creation_trigger_delta_height(
+                snapshot_epoch_count,
+            );
+        if self.delta_trie_height.unwrap() >= snapshot_trigger_delta_height
             && self.maybe_intermediate_trie.is_some()
         {
-            // TODO: use a better criteria and put it in consensus maybe.
+            // Trigger snapshot generation a fixed distance after the
+            // boundary instead of right around the RandomX epoch switch.
             let snapshot_height = self.height.clone().unwrap()
                 - self.delta_trie_height.unwrap() as u64;
             self.manager.check_make_snapshot(
@@ -372,6 +384,22 @@ impl StateTrait for State {
         }
 
         Ok(self.state_root(merkle_root))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::State;
+
+    #[test]
+    fn snapshot_trigger_uses_fixed_delay_for_large_windows() {
+        assert_eq!(State::snapshot_creation_trigger_delta_height(2048), 200);
+    }
+
+    #[test]
+    fn snapshot_trigger_is_capped_for_small_windows() {
+        assert_eq!(State::snapshot_creation_trigger_delta_height(10), 9);
+        assert_eq!(State::snapshot_creation_trigger_delta_height(1), 1);
     }
 }
 

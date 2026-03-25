@@ -137,8 +137,8 @@ cargo build --release -p mazze-miner
 ```
 
 Logs:
-- Dev node: `run/logs/mazze-node-dev.log`
-- Miner: `run/logs/mazze-miner.log`
+- Dev node: `logs/mazze-node-dev.log`
+- Miner: `logs/mazze-miner.log`
 
 Stop everything:
 ```bash

@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 EXECUTABLE="$REPO_ROOT/target/debug/mazze"
 CONFIG_FILE="$SCRIPT_DIR/hydra.toml"
-LOG_DIR="$SCRIPT_DIR/logs"
+LOG_DIR="$REPO_ROOT/logs"
 PID_FILE="$SCRIPT_DIR/node_pid_dev.txt"
 LOG_FILE="$LOG_DIR/mazze-node-dev.log"
 TEMP_CONF="$SCRIPT_DIR/hydra.dev.runtime.toml"
@@ -15,7 +15,7 @@ ABS_LOG_CONF="$SCRIPT_DIR/log.yaml"
 ABS_GENESIS_SECRETS="$REPO_ROOT/bins/mazze/genesis_secrets.toml"
 DATA_DIR="$SCRIPT_DIR/blockchain_data_dev"
 
-mkdir -p "$LOG_DIR" "$DATA_DIR"
+mkdir -p "$LOG_DIR" "$LOG_DIR/archive" "$DATA_DIR"
 
 if [[ ! -x "$EXECUTABLE" ]]; then
   echo "Debug binary not found at $EXECUTABLE. Building..." >&2
@@ -78,7 +78,7 @@ fi
 
 echo "-------$(date '+%Y-%m-%d %H:%M:%S')-------" >> "$LOG_FILE"
 
-pushd "$SCRIPT_DIR" >/dev/null
+pushd "$REPO_ROOT" >/dev/null
 "$EXECUTABLE" --config "$TEMP_CONF" >> "$LOG_FILE" 2>&1 &
 PID=$!
 echo "$PID" > "$PID_FILE"

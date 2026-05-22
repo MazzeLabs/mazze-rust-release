@@ -20,6 +20,7 @@ mazze-vm-tracer-derive = { path= "../../util/mazze-vm-tracer-derive" }
 mazze-types = { path = "../../mazze_types" }
 mazze-vm-types = { path = "../vm-types" }
 mazze-vm-interpreter = { path = "../vm-interpreter" }
+mazze-eth-vm = { path = "../eth-vm" }
 error-chain = { version = "0.12.4", default-features = false }
 keccak-hash = "0.5"
 lazy_static = "1.4"
@@ -27,7 +28,12 @@ log = "0.4"
 malloc_size_of = {path = "../../util/malloc_size_of" }
 malloc_size_of_derive = {path = "../../util/malloc_size_of_derive" }
 num = "0.2"
-parity-crypto = "0.9.0"
+# M-4 migration: maintained RustCrypto replacements for the
+# (now removed) `parity-crypto 0.9.0` dep. EVM precompiles 0x02
+# (SHA-256) and 0x03 (RIPEMD-160) produce byte-identical output
+# (state-test corpus validates).
+sha2 = "0.10"
+ripemd = "0.1"
 parking_lot = "0.11"
 primitives = { path = "../../primitives" }
 rlp = "0.4.0"
@@ -48,7 +54,9 @@ impl-tools = "^0.10"
 typemap = { package = "typemap-ors", version = "1.0"}
 hex-literal = "0.4.1"
 derive_more = "0.99"
-c-kzg = { version = "1.0.2", default-features = false}
+# c-kzg removed: KZG point-evaluation (precompile 0x0a) is now provided
+# by revm in the eSpace VM (crates/mazzecore/eth-vm/). Native space no
+# longer ships a KZG precompile.
 once_cell = "1.19"
 ark-bls12-381 = "0.4"
 ark-ec = "0.4"

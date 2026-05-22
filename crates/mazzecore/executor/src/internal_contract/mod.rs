@@ -10,7 +10,8 @@ mod utils;
 pub use self::{
     components::{
         InterfaceTrait, InternalContractExec, InternalContractMap,
-        InternalContractTrait, InternalRefContext, SolidityEventTrait,
+        InternalContractTrait, InternalRefContext, InternalTrapResult,
+        SolidityEventTrait,
     },
     contracts::{
         cross_space::{

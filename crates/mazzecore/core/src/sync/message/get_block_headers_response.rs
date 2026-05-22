@@ -65,12 +65,32 @@ impl Handleable for GetBlockHeadersResponse {
             return Ok(());
         }
 
-        let req = ctx.match_request(self.request_id)?;
-        let delay = req.delay;
-        let req = req.downcast_ref::<GetBlockHeaders>(
-            ctx.io,
-            &ctx.manager.request_manager,
-        )?;
+        let (requested, delay): (HashSet<H256>, Option<Duration>) =
+            match ctx.match_request(self.request_id) {
+                Ok(req) => {
+                    let delay = req.delay;
+                    let req = req.downcast_ref::<GetBlockHeaders>(
+                        ctx.io,
+                        &ctx.manager.request_manager,
+                    )?;
+                    (req.hashes.iter().cloned().collect(), delay)
+                }
+                Err(e) => match &e.0 {
+                    ErrorKind::RequestNotFound => {
+                        trace!(
+                            "late GetBlockHeadersResponse request_id={} peer={:?} headers={}",
+                            self.request_id,
+                            ctx.node_id,
+                            self.headers.len()
+                        );
+                        (
+                            self.headers.iter().map(|h| h.hash()).collect(),
+                            None,
+                        )
+                    }
+                    _ => return Err(e),
+                },
+            };
 
         // keep first time drift validation error to return later
         let now_timestamp = SystemTime::now()
@@ -107,7 +127,6 @@ impl Handleable for GetBlockHeadersResponse {
         };
 
         // re-request headers requested but not received
-        let requested: HashSet<H256> = req.hashes.iter().cloned().collect();
         self.handle_block_headers(
             ctx,
             &self.headers,

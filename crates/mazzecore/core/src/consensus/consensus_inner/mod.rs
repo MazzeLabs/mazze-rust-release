@@ -48,6 +48,19 @@ lazy_static! {
             "system_metrics",
             "invalid_blame_or_state_root_count"
         );
+    // outlier_cache hit/miss. A "miss" forces a brute-force outlier walk
+    // that scales with DAG size; high miss rates explain on_new_block lag.
+    // See docs/flow-audit.md G-CN-2.
+    static ref OUTLIER_CACHE_HITS: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("consensus_cache", "outlier_hits");
+    static ref OUTLIER_CACHE_MISSES: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("consensus_cache", "outlier_misses");
+    // pastset_cache hit/miss. Misses trigger compute_pastset_brutal which
+    // walks the block past set.
+    static ref PASTSET_CACHE_HITS: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("consensus_cache", "pastset_hits");
+    static ref PASTSET_CACHE_MISSES: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("consensus_cache", "pastset_misses");
 }
 
 #[derive(Clone)]
@@ -451,10 +464,14 @@ pub struct ConsensusGraphInner {
     /// original genesis. As time goes, it will move to future era genesis
     /// checkpoint.
     cur_era_genesis_block_arena_index: usize,
-    /// The height of the ``current'' era_genesis block
+    /// Epoch number of the ``current'' era's genesis block. Stored as
+    /// `u64` and named `*_height` for historical reasons, but it is an
+    /// **epoch number** — see `docs/chain-model.md` §1.
     cur_era_genesis_height: u64,
-    /// The height of the ``stable'' era block, unless from the start, it is
-    /// always era_epoch_count higher than era_genesis_height
+    /// Epoch number of the ``current'' era's stable block. Unless from
+    /// the start, it is always `era_epoch_count` higher than
+    /// `cur_era_genesis_height`. Stored as `u64`; semantically an
+    /// epoch number — see `docs/chain-model.md` §1.
     cur_era_stable_height: u64,
     /// If this value is not none, then we are still expecting the initial
     /// stable block to come. This value would equal to the expected hash of
@@ -932,8 +949,11 @@ impl ConsensusGraphInner {
             let lca = self.lca(last, parent);
             assert!(lca != NULL);
             if self.pastset_cache.get_and_update_cache(lca).is_none() {
+                PASTSET_CACHE_MISSES.inc(1);
                 let pastset = self.compute_pastset_brutal(lca);
                 self.pastset_cache.update(lca, pastset);
+            } else {
+                PASTSET_CACHE_HITS.inc(1);
             }
             self.compute_blockset_in_own_view_of_epoch_impl(lca, main);
         }
@@ -1176,6 +1196,7 @@ impl ConsensusGraphInner {
         let parent_outlier_opt = self.outlier_cache.get(parent_arena_index);
         let mut outlier;
         if parent_outlier_opt.is_none() {
+            OUTLIER_CACHE_MISSES.inc(1);
             outlier = consensus_new_block_handler::ConsensusNewBlockHandler::compute_outlier_bruteforce(
                 self, parent_arena_index,
             );
@@ -1183,6 +1204,7 @@ impl ConsensusGraphInner {
                 outlier.add(i);
             }
         } else {
+            OUTLIER_CACHE_HITS.inc(1);
             outlier = self.compute_future_bitset(parent_arena_index);
             for index in parent_outlier_opt.unwrap() {
                 outlier.add(*index as u32);
@@ -3396,11 +3418,32 @@ impl ConsensusGraphInner {
     /// Return the epoch that we are going to sync the state
     pub fn get_to_sync_epoch_id(&self) -> EpochId {
         let height_to_sync = self.latest_snapshot_height();
-        // The height_to_sync is within the range of `self.pivit_chain`.
-        let epoch_to_sync = self.arena
-            [self.main_chain[self.height_to_main_index(height_to_sync)]]
-        .hash;
-        epoch_to_sync
+        // In rare recovery/corruption cases main_chain can be shorter than the
+        // computed height window. Do not panic; fall back to the latest known
+        // main-chain epoch so sync can continue.
+        let main_index = self.height_to_main_index(height_to_sync);
+        if let Some(&arena_index) = self.main_chain.get(main_index) {
+            if let Some(epoch) = self.arena.get(arena_index) {
+                return epoch.hash;
+            }
+        }
+
+        warn!(
+            "get_to_sync_epoch_id fallback: height_to_sync={}, main_index={}, main_chain_len={}",
+            height_to_sync,
+            main_index,
+            self.main_chain.len(),
+        );
+
+        let fallback_arena_index = self
+            .main_chain
+            .last()
+            .copied()
+            .unwrap_or(self.cur_era_genesis_block_arena_index);
+        self.arena
+            .get(fallback_arena_index)
+            .map(|epoch| epoch.hash)
+            .unwrap_or_default()
     }
 
     /// Return the latest height that a snapshot should be available.
@@ -3792,6 +3835,7 @@ impl ConsensusGraphInner {
         let parent_outlier_opt = self.outlier_cache.get(parent_arena_index);
         let mut outlier;
         if parent_outlier_opt.is_none() {
+            OUTLIER_CACHE_MISSES.inc(1);
             outlier = consensus_new_block_handler::ConsensusNewBlockHandler::compute_outlier_bruteforce(
                 self, parent_arena_index,
             );
@@ -3799,6 +3843,7 @@ impl ConsensusGraphInner {
                 outlier.add(i);
             }
         } else {
+            OUTLIER_CACHE_HITS.inc(1);
             outlier = self.compute_future_bitset(parent_arena_index);
             for index in parent_outlier_opt.unwrap() {
                 outlier.add(*index as u32);

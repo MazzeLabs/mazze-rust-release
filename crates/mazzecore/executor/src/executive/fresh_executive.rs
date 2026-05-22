@@ -99,11 +99,35 @@ impl<'a, O: ExecutiveObserver> FreshExecutive<'a, O> {
             early_return_on_err!(self.check_epoch_bound()?);
         }
 
+        // Reject `gas < intrinsic` before `pre_checked_executive`
+        // does the unchecked `tx.gas() - base_gas` subtraction — that
+        // path would otherwise panic on U256 underflow, exposing a
+        // peer-DoS vector.
+        early_return_on_err!(self.check_intrinsic_gas());
+
         let cost = early_return_on_err!(self.compute_cost_info()?);
 
         early_return_on_err!(self.check_sender_exist(&cost)?);
 
         Ok(Ok(self.into_pre_checked(cost)))
+    }
+
+    /// Refuse transactions whose `gas` is below the intrinsic gas the
+    /// `base_gas` calculation computed. Returns `TxDropError::NotEnoughGasLimit`
+    /// — the same error the estimation path already uses.
+    fn check_intrinsic_gas(&self) -> Result<(), ExecutionOutcome> {
+        let tx_gas = *self.tx.gas();
+        let base_gas = U256::from(self.base_gas);
+        if tx_gas < base_gas {
+            Err(ExecutionOutcome::NotExecutedDrop(
+                TxDropError::NotEnoughGasLimit {
+                    expected: base_gas,
+                    got: tx_gas,
+                },
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     fn into_pre_checked(self, cost: CostInfo) -> PreCheckedExecutive<'a, O> {

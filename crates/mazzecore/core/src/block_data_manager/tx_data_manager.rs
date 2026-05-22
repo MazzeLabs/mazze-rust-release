@@ -156,7 +156,7 @@ impl TransactionDataManager {
         &self, uncached_trans: Vec<(usize, TransactionWithSignature)>,
     ) -> Result<Vec<(usize, Arc<SignedTransaction>)>, DecoderError> {
         let mut recovered_trans = Vec::new();
-        if uncached_trans.len() < WORKER_COMPUTATION_PARALLELISM * 8 {
+        if uncached_trans.len() < WORKER_COMPUTATION_PARALLELISM * 2 {
             for (idx, tx) in uncached_trans {
                 if tx.is_shielded() && tx.is_unsigned() {
                     recovered_trans.push((
@@ -235,7 +235,15 @@ impl TransactionDataManager {
                             break;
                         }
                     }
-                    sender.send(signed_txns).unwrap();
+                    // If the receiver was dropped (parent thread shutting
+                    // down), there's nothing useful to do; logging once is
+                    // enough so we don't panic the worker pool thread.
+                    if let Err(e) = sender.send(signed_txns) {
+                        warn!(
+                            "tx recovery worker: receiver dropped before send: {}",
+                            e
+                        );
+                    }
                 });
             }
 

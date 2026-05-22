@@ -17,7 +17,8 @@ error_chain! {
         IntegerConversionError(std::num::TryFromIntError);
         ParseIntError(num::ParseIntError);
         RlpDecodeError(rlp::DecoderError);
-        SqliteError(sqlite::Error);
+        // SqliteError dropped along with the SQLite parallel backend;
+        // ParityDB errors surface via the `Io` link.
         StrfmtFmtError(strfmt::FmtError);
     }
 

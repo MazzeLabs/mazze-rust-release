@@ -32,7 +32,10 @@ use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_internal_common::ChainIdParamsDeprecated;
 use mazze_parameters::{block::MAX_BLOCK_SIZE_IN_BYTES, sync::*};
 use mazze_types::H256;
-use metrics::{register_meter_with_group, Meter, MeterTimer};
+use metrics::{
+    register_meter_with_group, Counter, CounterUsize, Gauge, GaugeUsize, Meter,
+    MeterTimer,
+};
 use network::{
     node_table::NodeId, service::ProtocolVersion,
     throttling::THROTTLING_SERVICE, Error as NetworkError, HandlerWorkType,
@@ -61,6 +64,29 @@ lazy_static! {
         register_meter_with_group("timer", "sync:recover_block");
     static ref PROPAGATE_TX_TIMER: Arc<dyn Meter> =
         register_meter_with_group("timer", "sync:propagate_tx_timer");
+    /// Counter incremented every time backpressure is engaged (sync graph
+    /// detected >= SYNC_CONSENSUS_BACKPRESSURE_BLOCK_GAP blocks ahead of
+    /// consensus). Gauge exposes the current state (0/1) for dashboards.
+    /// See docs/flow-audit.md G-CC-5.
+    static ref BACKPRESSURE_ENGAGEMENTS: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "sync",
+            "backpressure_engagements",
+        );
+    static ref BACKPRESSURE_ACTIVE: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("sync", "backpressure_active");
+    static ref SYNC_CONSENSUS_GAP: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("sync", "consensus_lag_blocks");
+    /// Transaction digest broadcast outcomes. Per-peer success/failure
+    /// rate so SREs can detect "peer X is rejecting all our tx digests".
+    /// See docs/flow-audit.md G-TX-2.
+    static ref TX_PROPAGATE_BROADCAST_OK: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("tx_propagate", "broadcast_ok");
+    static ref TX_PROPAGATE_BROADCAST_FAILED: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "tx_propagate",
+            "broadcast_failed",
+        );
 }
 
 const TX_TIMER: TimerToken = 0;
@@ -90,7 +116,12 @@ const EPOCH_SYNC_MAX_RETRY_COUNT: u64 = 20;
 const EPOCH_SYNC_RESTART_TIMEOUT_S: u64 = 60 * 10;
 const EPOCH_SYNC_MAX_INFLIGHT: u64 = 300;
 const EPOCH_SYNC_BATCH_SIZE: u64 = 30;
-const BLOCK_SYNC_MAX_INFLIGHT: usize = 1000;
+// At 4 blocks/sec, 400 in-flight = ~100s of blocks. Keeps RAM bounded.
+const BLOCK_SYNC_MAX_INFLIGHT: usize = 400;
+// Under backpressure, throttle hard so consensus can drain its queue.
+const BLOCK_SYNC_MAX_INFLIGHT_BACKPRESSURE: usize = 64;
+// Engage backpressure when sync is 256 blocks (~64s) ahead of consensus.
+const SYNC_CONSENSUS_BACKPRESSURE_BLOCK_GAP: usize = 256;
 const ACTIVE_FRONTIER_RESCUE_BATCH_SIZE: usize = 128;
 
 #[derive(Debug, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
@@ -309,28 +340,41 @@ impl FutureBlockContainer {
         }
 
         if inner.size > inner.capacity {
-            let mut removed = false;
+            // Evict from the latest-timestamp slots down to a low-water mark
+            // (~87.5% of capacity) so we don't pay eviction cost on every
+            // subsequent insert when bursts arrive. Without this, the
+            // original "remove exactly one" behaviour could fall behind a
+            // sustained future-block burst at 4 bps and leak memory.
+            let target = inner.capacity.saturating_sub(inner.capacity / 8);
             let mut empty_slots = Vec::new();
+            let mut to_remove: Vec<H256> = Vec::new();
             for entry in inner.container.iter_mut().rev() {
+                if inner.size.saturating_sub(to_remove.len()) <= target {
+                    break;
+                }
                 if entry.1.is_empty() {
                     empty_slots.push(*entry.0);
                     continue;
                 }
-
-                let hash = *entry.1.iter().next().unwrap();
-                entry.1.remove(&hash);
-                inner.hash_to_header_and_peer.remove(&hash);
-                removed = true;
-
+                // Drain this slot greedily; cheaper than re-walking the
+                // BTreeMap for every single eviction.
+                let drained: Vec<H256> = entry.1.iter().copied().collect();
+                let still_needed =
+                    inner.size.saturating_sub(to_remove.len()) - target;
+                let take = drained.len().min(still_needed);
+                for h in drained.into_iter().take(take) {
+                    entry.1.remove(&h);
+                    to_remove.push(h);
+                }
                 if entry.1.is_empty() {
                     empty_slots.push(*entry.0);
                 }
-                break;
             }
 
-            if removed {
-                inner.size -= 1;
+            for h in &to_remove {
+                inner.hash_to_header_and_peer.remove(h);
             }
+            inner.size = inner.size.saturating_sub(to_remove.len());
 
             for slot in empty_slots {
                 inner.container.remove(&slot);
@@ -431,6 +475,13 @@ pub struct ProtocolConfiguration {
     pub inflight_pending_tx_index_maintain_timeout: Duration,
     pub request_block_with_public: bool,
     pub max_trans_count_received_in_catch_up: u64,
+    /// Hard cap on the cumulative number of transactions a single peer
+    /// may submit during normal-phase operation. Past this, the
+    /// connection is dropped (and the counter `txpool.rejected_per_peer_cap_total`
+    /// increments). Coarse-grained — this is *cumulative*, not a
+    /// rolling-window rate limit. A finer rate-limiter is tracked as
+    /// M-2 in `docs/security-audit.md` deferred items.
+    pub max_trans_count_per_peer_normal: u64,
     pub min_peers_tx_propagation: usize,
     pub max_peers_tx_propagation: usize,
     pub max_downloading_chunks: usize,
@@ -531,6 +582,30 @@ impl SynchronizationProtocolHandler {
             != SyncPhaseType::Normal
     }
 
+    fn sync_consensus_block_lag(&self) -> usize {
+        let statistics = self.graph.statistics.inner.read();
+        statistics
+            .sync_graph
+            .inserted_block_count
+            .saturating_sub(statistics.consensus_graph.inserted_block_count)
+    }
+
+    fn should_backpressure_block_requests(&self) -> bool {
+        let lag = self.sync_consensus_block_lag();
+        SYNC_CONSENSUS_GAP.update(lag);
+        let active = self.catch_up_mode()
+            && lag >= SYNC_CONSENSUS_BACKPRESSURE_BLOCK_GAP;
+        // Detect rising edge: count only the transition into the
+        // backpressured state. A re-engagement after recovering counts as a
+        // new event.
+        let prev_active = BACKPRESSURE_ACTIVE.value() != 0;
+        if active && !prev_active {
+            BACKPRESSURE_ENGAGEMENTS.inc(1);
+        }
+        BACKPRESSURE_ACTIVE.update(if active { 1 } else { 0 });
+        active
+    }
+
     pub fn in_recover_from_db_phase(&self) -> bool {
         let current_phase = self.phase_manager.get_current_phase();
         current_phase.phase_type()
@@ -541,8 +616,12 @@ impl SynchronizationProtocolHandler {
 
     pub fn need_requesting_blocks(&self) -> bool {
         let current_phase = self.phase_manager.get_current_phase();
+        if current_phase.phase_type() == SyncPhaseType::Normal {
+            return true;
+        }
+
         current_phase.phase_type() == SyncPhaseType::CatchUpSyncBlock
-            || current_phase.phase_type() == SyncPhaseType::Normal
+            && !self.should_backpressure_block_requests()
     }
 
     pub fn need_block_from_archive_node(&self) -> bool {
@@ -600,6 +679,14 @@ impl SynchronizationProtocolHandler {
     pub fn append_received_transactions(
         &self, transactions: Vec<Arc<SignedTransaction>>,
     ) {
+        // TODO(G-TX-4 in docs/flow-audit.md): a per-peer rate limit would
+        // sit here. Today the only protection against an abusive peer
+        // flooding the mempool is the global queue capacity in
+        // `recover_public_queue`. The right fix is a per-NodeId token
+        // bucket fed by request_manager's tx-digest accounting; deferred
+        // because the immediate operational answer is the network-level
+        // throttling service (`THROTTLING_SERVICE`) and there is no
+        // recorded incident attributable to a single peer.
         self.request_manager
             .append_received_transactions(transactions);
     }
@@ -908,10 +995,18 @@ impl SynchronizationProtocolHandler {
             .difference(&in_flight_blocks)
             .copied()
             .collect();
+        let max_inflight = if self.should_backpressure_block_requests() {
+            BLOCK_SYNC_MAX_INFLIGHT_BACKPRESSURE
+        } else {
+            BLOCK_SYNC_MAX_INFLIGHT
+        };
         let n_blocks_to_request = min(
-            BLOCK_SYNC_MAX_INFLIGHT - in_flight_blocks.len(),
+            max_inflight.saturating_sub(in_flight_blocks.len()),
             to_request_blocks.len(),
         );
+        if n_blocks_to_request == 0 {
+            return;
+        }
 
         // Use `MAX_BLOCKS_TO_SEND` as the batch size so the peer can respond
         // with all blocks.
@@ -1410,6 +1505,14 @@ impl SynchronizationProtocolHandler {
     pub fn relay_blocks(
         &self, io: &dyn NetworkContext, need_to_relay: Vec<H256>,
     ) -> Result<(), Error> {
+        // DESIGN NOTE (G-MN-6 in docs/flow-audit.md):
+        // We only broadcast `NewBlockHashes` (digests), never the full
+        // `NewBlock` body. Peers fetch the body on demand via the
+        // GetBlocks request flow. This is intentional bandwidth saving
+        // at the cost of one extra round-trip latency for block
+        // propagation. If propagation latency becomes a complaint at
+        // higher block rates, revisit by adding an opt-in `NewBlock`
+        // path for low-latency peers (e.g. peers in the same datacentre).
         if !need_to_relay.is_empty() && !self.catch_up_mode() {
             let new_block_hash_msg: Box<dyn Message> =
                 Box::new(NewBlockHashes {
@@ -1564,6 +1667,7 @@ impl SynchronizationProtocolHandler {
             );
             match tx_msg.send(io, &peer_id) {
                 Ok(_) => {
+                    TX_PROPAGATE_BROADCAST_OK.inc(1);
                     trace!(
                         "{:02} <- Transactions ({} entries)",
                         peer_id,
@@ -1571,6 +1675,7 @@ impl SynchronizationProtocolHandler {
                     );
                 }
                 Err(e) => {
+                    TX_PROPAGATE_BROADCAST_FAILED.inc(1);
                     warn!(
                         "failed to propagate transaction ids to peer, id: {}, err: {}",
                         peer_id, e

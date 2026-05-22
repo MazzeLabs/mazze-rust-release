@@ -18,7 +18,6 @@
 
 extern crate edit_distance;
 extern crate mazze_types;
-extern crate parity_crypto;
 extern crate parity_wordlist;
 #[macro_use]
 extern crate quick_error;
@@ -78,7 +77,7 @@ pub use mazze_types::{Address, Public};
 pub type Message = H256;
 
 lazy_static! {
-    pub static ref SECP256K1: secp256k1::Secp256k1 =
+    pub static ref SECP256K1: secp256k1::Secp256k1<secp256k1::All> =
         secp256k1::Secp256k1::new();
 }
 

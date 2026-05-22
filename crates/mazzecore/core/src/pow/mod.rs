@@ -10,6 +10,7 @@ use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_parameters::pow::*;
 use mazze_types::{BigEndianHash, H256, U256, U512};
+use metrics::{Counter, CounterUsize, Gauge, GaugeUsize};
 use parking_lot::RwLock;
 use static_assertions::_core::str::FromStr;
 use std::{
@@ -17,6 +18,16 @@ use std::{
     convert::TryFrom,
     sync::Arc,
 };
+
+lazy_static! {
+    /// Difficulty retargets are high-signal but low-frequency: emit
+    /// info-level logs + a counter for "we retargeted" + a gauge for
+    /// the latest target value. See docs/flow-audit.md G-MN-2.
+    static ref DIFFICULTY_RETARGETS: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("pow", "difficulty_retargets");
+    static ref DIFFICULTY_CURRENT: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("pow", "current_target_difficulty");
+}
 
 #[cfg(target_endian = "big")]
 compile_error!("The PoW implementation requires little-endian platform");
@@ -384,6 +395,24 @@ where
     data_man
         .target_difficulty_manager
         .set(*cur_hash, target_diff);
+
+    // Surface the retarget as an info-level event. Direction lets
+    // operators tell at a glance whether the network is speeding up or
+    // slowing down without parsing two big numbers.
+    let direction = if target_diff > cur_difficulty {
+        "up"
+    } else if target_diff < cur_difficulty {
+        "down"
+    } else {
+        "unchanged"
+    };
+    info!(
+        "PoW difficulty retarget at epoch {}: {} -> {} ({}). block_count={}, timespan_s={}",
+        epoch, cur_difficulty, target_diff, direction, block_count,
+        max_time.saturating_sub(min_time)
+    );
+    DIFFICULTY_RETARGETS.inc(1);
+    DIFFICULTY_CURRENT.update(target_diff.low_u64() as usize);
 
     target_diff
 }

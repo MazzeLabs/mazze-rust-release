@@ -50,7 +50,8 @@ use primitives::transaction::native_transaction::NativeTransaction;
 // Native treasury address (type bits 0x1) derived from the genesis key.
 const GENESIS_TREASURY_ADDRESS_HEX: &str =
     "0x1fd05dc5b53db270b52b4bc2b5068d41cef1b240";
-const GENESIS_TREASURY_BALANCE_MAZZY_STR: &str = "39000000000000000000000000";
+const GENESIS_TREASURY_BALANCE_MAZZY_STR: &str =
+    "3900000000000000000000000000";
 const SHIELDED_POOL_GENESIS_FUND_MAZZE: u64 = 300_000_000;
 
 fn genesis_treasury_address() -> Address {
@@ -86,7 +87,7 @@ pub fn default(dev_or_test_mode: bool) -> HashMap<AddressWithSpace, U256> {
 
     let genesis_address = genesis_treasury_address();
     let balance = U256::from_dec_str(GENESIS_TREASURY_BALANCE_MAZZY_STR)
-        .expect("Not overflow"); // 2.5B
+        .expect("Not overflow");
     accounts.insert(genesis_address.with_native_space(), balance);
 
     accounts
@@ -108,8 +109,21 @@ pub fn load_secrets_file(
             )
         })?;
     for line in buffered.lines() {
-        let keypair =
-            KeyPair::from_secret(line.unwrap().parse().unwrap()).unwrap();
+        let raw = line
+            .map_err(|e| format!("genesis-secrets read error: {:?}", e))?;
+        // Skip blank lines and `#`-prefixed comments so the file can
+        // carry a header warning. See bins/mazze/genesis_secrets.toml
+        // and docs/security-audit.md finding C-3 / Phase F.
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let secret = trimmed.parse().map_err(|e| {
+            format!("genesis-secrets bad secret line {:?}: {:?}", trimmed, e)
+        })?;
+        let keypair = KeyPair::from_secret(secret).map_err(|e| {
+            format!("genesis-secrets bad keypair: {:?}", e)
+        })?;
         accounts.insert(keypair.address().with_native_space(), balance.clone());
         secret_store.insert(keypair);
     }

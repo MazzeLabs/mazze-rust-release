@@ -187,7 +187,13 @@ build_config! {
         (jsonrpc_http_threads, (Option<usize>), None)
         (jsonrpc_cors, (Option<String>), None)
         (jsonrpc_http_keep_alive, (bool), false)
-        (jsonrpc_ws_max_payload_bytes, (usize), 30 * 1024 * 1024)
+        // M-12 (docs/security-audit.md): tightened default from
+        // 30 MB to 10 MB. Legitimate eth_getLogs / mazze_getLogs over
+        // WebSocket return well under 10 MB for any sane epoch range;
+        // the previous 30 MB allowed memory pressure from a single
+        // hostile WS client. Operators serving large batched
+        // subscriptions can raise this in hydra.toml.
+        (jsonrpc_ws_max_payload_bytes, (usize), 10 * 1024 * 1024)
         (jsonrpc_http_eth_port, (Option<u16>), None)
         (jsonrpc_ws_eth_port, (Option<u16>), None)
         // The network_id, if unset, defaults to the chain_id.
@@ -322,6 +328,10 @@ build_config! {
         (get_logs_filter_max_block_number_range, (Option<u64>), None)
         (get_logs_epoch_batch_size, (usize), 32)
         (max_trans_count_received_in_catch_up, (u64), 60_000)
+        // Per-peer cumulative tx cap during normal phase. None = use
+        // the built-in default (500_000). See
+        // docs/security-audit.md finding H-3.
+        (max_trans_count_per_peer_normal, (Option<u64>), None)
         (persist_tx_index, (bool), false)
         (persist_block_number_index, (bool), true)
         (print_memory_usage_period_s, (Option<u64>), None)
@@ -397,16 +407,6 @@ build_config! {
             _ =>  Err("Invalid single_mpt_space".to_owned()),
         })
     }
-}
-
-#[allow(unused_macros)]
-macro_rules! set_conf {
-    ($src: expr; $dst: expr => {$($field: tt),* }) => {
-        {
-            let number = $src;
-            $($dst.$field = number;)*
-        }
-    };
 }
 
 #[derive(Debug)]
@@ -566,8 +566,11 @@ impl Configuration {
                     sync_mode,
                 })
             }
+            // Fallback during the MDBX rollout. Slated for removal —
+            // see docs/storage-architecture.md.
+            "paritydb" => StateDbBackend::ParityDb,
             other => panic!(
-                "Invalid state_db_type parameter: {other}. Expected mdbx"
+                "Invalid state_db_type parameter: {other}. Expected mdbx or paritydb"
             ),
         }
     }
@@ -959,6 +962,15 @@ impl Configuration {
             max_trans_count_received_in_catch_up: self
                 .raw_conf
                 .max_trans_count_received_in_catch_up,
+            // Per-peer cumulative cap on tx submissions during normal
+            // phase. Operators can override via `hydra.toml`; default
+            // intentionally generous so a legit explorer-node peer
+            // sending high tx volume isn't disconnected by accident.
+            // See docs/security-audit.md finding H-3.
+            max_trans_count_per_peer_normal: self
+                .raw_conf
+                .max_trans_count_per_peer_normal
+                .unwrap_or(500_000),
             min_peers_tx_propagation: self.raw_conf.min_peers_tx_propagation,
             max_peers_tx_propagation: self.raw_conf.max_peers_tx_propagation,
             max_downloading_chunks: self.raw_conf.max_downloading_chunks,

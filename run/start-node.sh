@@ -27,6 +27,34 @@ export MAZZE_SHIELDED_VK_HEX="${MAZZE_SHIELDED_VK_HEX:-$SCRIPT_DIR/shielded_vk.h
 
 echo "-------$(date '+%Y-%m-%d %H:%M:%S')-------" >> "$LOG_FILE"
 
+SECRETS_FILE="$SCRIPT_DIR/hydra.secrets.toml"
+ensure_stratum_secret() {
+  if [[ ! -f "$SECRETS_FILE" ]]; then
+    echo "Generating $SECRETS_FILE (first-run stratum secret)..." >&2
+    local generated
+    if command -v openssl >/dev/null 2>&1; then
+      generated="$(openssl rand -hex 32)"
+    else
+      generated="$(head -c 32 /dev/urandom | xxd -p -c 64)"
+    fi
+    umask 077
+    cat > "$SECRETS_FILE" <<EOF
+# Auto-generated per-deployment secrets. Do not commit.
+# See run/hydra.secrets.toml.example for the format and rotation guidance.
+stratum_secret = "$generated"
+EOF
+    chmod 600 "$SECRETS_FILE"
+  fi
+  STRATUM_SECRET="$(grep -E '^[[:space:]]*stratum_secret[[:space:]]*=' "$SECRETS_FILE" \
+    | head -n1 \
+    | sed -E 's/^[[:space:]]*stratum_secret[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/')"
+  if [[ -z "$STRATUM_SECRET" ]]; then
+    echo "Error: stratum_secret missing or unparseable in $SECRETS_FILE" >&2
+    exit 1
+  fi
+}
+ensure_stratum_secret
+
 # Ensure log_conf in config is absolute so it works regardless of CWD
 ABS_LOG_CONF="$SCRIPT_DIR/log.yaml"
 TEMP_CONF="$SCRIPT_DIR/hydra.runtime.toml"
@@ -35,6 +63,11 @@ if grep -q '^\s*log_conf\s*=' "$TEMP_CONF"; then
   sed -i "s#^\s*log_conf\s*=.*#log_conf = \"$ABS_LOG_CONF\"#" "$TEMP_CONF"
 else
   printf '\nlog_conf = "%s"\n' "$ABS_LOG_CONF" >> "$TEMP_CONF"
+fi
+if grep -q '^\s*stratum_secret\s*=' "$TEMP_CONF"; then
+  sed -i "s#^\s*stratum_secret\s*=.*#stratum_secret = \"$STRATUM_SECRET\"#" "$TEMP_CONF"
+else
+  printf '\nstratum_secret = "%s"\n' "$STRATUM_SECRET" >> "$TEMP_CONF"
 fi
 has_chain_data() {
   local base="$1"

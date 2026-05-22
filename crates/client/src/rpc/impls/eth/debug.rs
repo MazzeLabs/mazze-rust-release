@@ -74,6 +74,12 @@ impl Debug for GethDebugHandler {
                     GethDebugBuiltInTracerType::MuxTracer => {
                         return Err(invalid_params_msg("not supported"))
                     }
+                    // alloy-rpc-types-trace 2.0 added these tracers; not
+                    // supported by Mazze's debug RPC.
+                    GethDebugBuiltInTracerType::FlatCallTracer
+                    | GethDebugBuiltInTracerType::Erc7562Tracer => {
+                        return Err(invalid_params_msg("not supported"))
+                    }
                 },
                 JsTracer(_) => return Err(invalid_params_msg("not supported")),
             }

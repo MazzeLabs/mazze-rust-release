@@ -24,6 +24,7 @@ use crate::sync::{
 use mazze_parameters::consensus_internal::REWARD_EPOCH_COUNT;
 use mazze_storage::Result as StorageResult;
 use mazze_types::H256;
+use metrics::{Counter, CounterUsize};
 use network::{node_table::NodeId, NetworkContext};
 use parking_lot::RwLock;
 use primitives::EpochId;
@@ -33,6 +34,142 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+
+/// D.2 — How many snapshot-aligned epochs above `epoch_to_sync` to
+/// propose as candidates. Each step is `snapshot_epoch_count` epochs
+/// (cf. `BlockDataManager::get_snapshot_epoch_count`). The default 6
+/// covers a full era (`era_epoch_count / snapshot_epoch_count = 10`)
+/// minus the trailing-headroom needed for the trusted-blame check —
+/// generous for fast chains while bounded against canvass spam.
+const D2_FORWARD_CANDIDATE_WINDOW: usize = 6;
+
+lazy_static! {
+    /// Counter for snapshot-sync transitions into Status::Invalid.
+    /// Each increment means the node fell back from snapshot-based sync to
+    /// legacy body sync for this era. See docs/flow-audit.md G-CC-4.
+    static ref SNAPSHOT_SYNC_INVALID_TRANSITIONS: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "snapshot_sync",
+            "invalid_transitions",
+        );
+
+    /// D.2 — Bumped when snapshot-sync truly falls back to legacy body
+    /// sync (= genesis replay if no checkpoint state is on disk).
+    /// Separate counters per `reason` discriminator so operators can
+    /// tell apart "no peer offered any candidate" (network problem)
+    /// from "manifest exhausted" (chunk-download failure) from
+    /// "state-root mismatch" (peer-side corruption / wrong-fork).
+    /// Distinct from `invalid_transitions` because that counts every
+    /// transition into Status::Invalid — including ones where we
+    /// resume (B.2 path), whereas this counts only the terminal
+    /// genesis-replay-bound fallback. Phase D.2 in
+    /// `docs/checkpoint-snapshot-lifecycle.md`.
+    static ref SNAPSHOT_SYNC_FALLBACK_MANIFEST_EXHAUSTED: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "snapshot_sync",
+            "fallback_total.manifest_exhausted",
+        );
+    static ref SNAPSHOT_SYNC_FALLBACK_NO_PEER_OFFERED: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "snapshot_sync",
+            "fallback_total.no_peer_offered_candidate",
+        );
+    static ref SNAPSHOT_SYNC_LAST_DITCH_CANVASSES: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "snapshot_sync",
+            "last_ditch_canvasses_total",
+        );
+    static ref SNAPSHOT_SYNC_LAST_DITCH_RECOVERIES: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "snapshot_sync",
+            "last_ditch_recoveries_total",
+        );
+}
+
+/// D.2 — Enumerate snapshot-aligned epochs the local header chain knows
+/// about, ordered newest-first, ready to be proposed as alternative
+/// snapshot-sync candidates. The original target (`primary`) is always
+/// the *first* candidate the caller pairs with these; we generate
+/// forward-direction (= newer) alternatives.
+///
+/// **Why**: on a fast chain producing many blocks per second, peers
+/// regularly prune past the era-genesis epoch by the time a fresh node
+/// joins. The original `start_sync` proposed a single candidate
+/// (`epoch_to_sync`); if no peer still has it, the node fell back to
+/// genesis replay even though everyone holds a newer snapshot. We
+/// avoid that by canvassing for the newest snapshot-aligned epoch a
+/// quorum of peers supports.
+///
+/// **Trusted-blame headroom**: each proposed candidate must be at
+/// least `snapshot_epoch_count` below the network tip so that the
+/// trusted-blame verification has a stable blame block to anchor
+/// against (cf. `ConsensusGraph::catch_up_completed`). Candidates that
+/// don't pass `get_trusted_blame_block_for_snapshot` later are
+/// filtered at activation time.
+fn enumerate_forward_candidates(
+    sync_handler: &SynchronizationProtocolHandler,
+    primary_hash: &EpochId, primary_height: u64,
+) -> Vec<SnapshotSyncCandidate> {
+    let data_man = &sync_handler.graph.data_man;
+    let snapshot_epoch_count =
+        data_man.get_snapshot_epoch_count() as u64;
+    if snapshot_epoch_count == 0 {
+        return Vec::new();
+    }
+    let best_height = sync_handler.graph.consensus.best_epoch_number();
+
+    let mut alternatives = Vec::new();
+    let mut height = primary_height.saturating_add(snapshot_epoch_count);
+    let mut steps_remaining = D2_FORWARD_CANDIDATE_WINDOW;
+    while steps_remaining > 0 {
+        // Trusted-blame headroom: the candidate must be at least one
+        // snapshot cadence below the chain tip we've already seen so
+        // we have a stable blame block to anchor against.
+        if height + snapshot_epoch_count > best_height {
+            break;
+        }
+        if let Ok(hash) = sync_handler
+            .graph
+            .consensus
+            .get_hash_from_epoch_number(primitives::EpochNumber::Number(height))
+        {
+            // Skip vacuous identities (already covered by `primary`).
+            if &hash != primary_hash {
+                alternatives.push(SnapshotSyncCandidate::FullSync {
+                    height,
+                    snapshot_epoch_id: hash,
+                });
+            }
+        }
+        height = height.saturating_add(snapshot_epoch_count);
+        steps_remaining -= 1;
+    }
+
+    // Newest first — `set_active_candidate` picks the first one with
+    // peer support, and the newest snapshot means the least catch-up
+    // work after sync completes.
+    alternatives.sort_by(|a, b| b.get_height().cmp(&a.get_height()));
+    alternatives
+}
+
+/// D.2 — Loud, structured operator-facing log explaining why
+/// snapshot-sync is about to genesis-replay. One line, parseable.
+fn log_terminal_fallback(
+    reason: &'static str, epoch_to_sync: &EpochId, peers_canvassed: usize,
+    candidates_tried: usize,
+) {
+    error!(
+        "SNAPSHOT-SYNC FALLBACK to legacy/genesis-replay: \
+         reason={}  epoch_to_sync={:?}  peers_canvassed={}  \
+         candidates_tried={}  recovery_estimate=\"hours to days\". \
+         Operator action: confirm at least one peer in active_peers \
+         holds a snapshot for an epoch within the last \
+         era_epoch_count window; if peers have pruned past every \
+         snapshot-aligned epoch you have headers for, the only \
+         recovery is full genesis replay.",
+        reason, epoch_to_sync, peers_canvassed, candidates_tried,
+    );
+}
 
 #[derive(Copy, Clone, PartialEq)]
 pub enum Status {
@@ -85,6 +222,12 @@ struct Inner {
 
     related_data: Option<RelatedData>,
     manifest_attempts: usize,
+    /// D.2 — Last-ditch canvass already fired for the current sync
+    /// attempt. Latched on first attempt so we don't loop the canvass
+    /// forever; cleared by `Inner::new` / `SnapshotChunkSync::reset`
+    /// on era rollover. Without this flag the manifest-exhaustion
+    /// path would re-canvass on every `update_status` tick.
+    last_ditch_canvass_done: bool,
 }
 
 impl Default for Inner {
@@ -102,6 +245,7 @@ impl Inner {
             chunk_manager: None,
             manifest_manager: None,
             manifest_attempts: 0,
+            last_ditch_canvass_done: false,
         }
     }
 
@@ -240,6 +384,7 @@ impl SnapshotChunkSync {
                         related_data.parent_snapshot_info.clone(),
                         manifest_manager.chunk_boundaries.clone(),
                         manifest_manager.chunk_boundary_proofs.clone(),
+                        manifest_manager.chunk_hashes.clone(),
                         manifest_manager.active_peers.clone(),
                         self.config.chunk_config(),
                         // This delta_root is the intermediate_delta_root of
@@ -376,13 +521,114 @@ impl SnapshotChunkSync {
         io: &dyn NetworkContext, sync_handler: &SynchronizationProtocolHandler,
     ) {
         let mut inner = self.inner.write();
+        // D.2 — Era rollover refresh: a new sync target deserves a
+        // fresh manifest-retry budget AND a fresh last-ditch canvass
+        // opportunity. The first-ever sync attempt (era_genesis still
+        // default) is excluded — `start_sync` will initialise the
+        // candidate manager's era field.
+        if inner.sync_candidate_manager.current_era_genesis
+            != current_era_genesis
+            && inner.sync_candidate_manager.current_era_genesis
+                != EpochId::default()
+        {
+            debug!(
+                "D.2: era rollover detected ({:?} -> {:?}); resetting \
+                 manifest_attempts + last_ditch_canvass_done.",
+                inner.sync_candidate_manager.current_era_genesis,
+                current_era_genesis,
+            );
+            inner.manifest_attempts = 0;
+            inner.last_ditch_canvass_done = false;
+        }
         if inner.manifest_attempts
             >= self.config.max_downloading_manifest_attempts
         {
-            panic!(
-                "Exceed max manifest attempts {}",
-                self.config.max_downloading_manifest_attempts
+            // D.2 — Pre-Invalid last-ditch canvass. The era-genesis
+            // target we were asked to sync may be pruned at every
+            // peer, while NEWER snapshot-aligned epochs are still
+            // available everywhere. Before settling for legacy body
+            // sync (= genesis replay for a fresh joiner), enumerate
+            // forward candidates from the local header chain and ask
+            // ALL connected peers which they support. If anyone
+            // responds, restart sync with the discovered candidate
+            // list. The flag latches so we don't loop forever.
+            if !inner.last_ditch_canvass_done {
+                inner.last_ditch_canvass_done = true;
+                let primary_height = sync_handler
+                    .graph
+                    .data_man
+                    .block_height_by_hash(&epoch_to_sync)
+                    .unwrap_or(0);
+                let mut candidates =
+                    vec![SnapshotSyncCandidate::FullSync {
+                        height: primary_height,
+                        snapshot_epoch_id: epoch_to_sync,
+                    }];
+                let forward = enumerate_forward_candidates(
+                    sync_handler,
+                    &epoch_to_sync,
+                    primary_height,
+                );
+                let forward_count = forward.len();
+                candidates.extend(forward);
+                let peers = PeerFilter::new(
+                    msgid::STATE_SYNC_CANDIDATE_REQUEST,
+                )
+                .select_all(&sync_handler.syn);
+                let peer_count = peers.len();
+                SNAPSHOT_SYNC_LAST_DITCH_CANVASSES.inc(1);
+                error!(
+                    "snapshot-sync: exhausted max manifest attempts ({}) \
+                     for epoch_to_sync={:?}. Mounting last-ditch canvass: \
+                     {} forward snapshot-aligned candidates × {} peers \
+                     before falling back to genesis replay.",
+                    self.config.max_downloading_manifest_attempts,
+                    epoch_to_sync,
+                    forward_count,
+                    peer_count,
+                );
+                if peer_count > 0 && !candidates.is_empty() {
+                    // Reset retry budget for the broader candidate set.
+                    inner.manifest_attempts = 0;
+                    inner.manifest_manager = None;
+                    inner.chunk_manager = None;
+                    inner.related_data = None;
+                    inner.status = Status::Inactive;
+                    inner.start_sync(
+                        current_era_genesis,
+                        candidates,
+                        io,
+                        sync_handler,
+                    );
+                    SNAPSHOT_SYNC_LAST_DITCH_RECOVERIES.inc(1);
+                    return;
+                }
+                // No peers / no candidates → fall through to terminal
+                // fallback with the no-peer reason.
+                SNAPSHOT_SYNC_FALLBACK_NO_PEER_OFFERED.inc(1);
+                SNAPSHOT_SYNC_INVALID_TRANSITIONS.inc(1);
+                log_terminal_fallback(
+                    "no_peer_offered_candidate",
+                    &epoch_to_sync,
+                    peer_count,
+                    candidates.len(),
+                );
+                inner.status = Status::Invalid;
+                return;
+            }
+            // Already canvassed once. Real terminal fallback.
+            SNAPSHOT_SYNC_FALLBACK_MANIFEST_EXHAUSTED.inc(1);
+            SNAPSHOT_SYNC_INVALID_TRANSITIONS.inc(1);
+            log_terminal_fallback(
+                "manifest_exhausted",
+                &epoch_to_sync,
+                /* peers_canvassed */ 0,
+                /* candidates_tried */ self
+                    .config
+                    .max_downloading_manifest_attempts,
             );
+            inner.status = Status::Invalid;
+            return;
         }
 
         debug!("sync state status before updating: {:?}", *inner);
@@ -424,11 +670,23 @@ impl SnapshotChunkSync {
                             .get_active_candidate_and_peers()
                             .is_none()
                         {
+                            // D.2 — Don't surrender yet. The
+                            // last-ditch canvass branch above will
+                            // get a chance via the manifest-attempts
+                            // exhaustion path on the next tick. Mark
+                            // Inactive so the loop reissues
+                            // `start_sync` (now with multi-candidate
+                            // enumeration on the rebound at the
+                            // bottom of `update_status`). We only
+                            // truly terminate via the fallback paths
+                            // above, which emit `fallback_total{reason}`.
                             warn!(
-                                "No peers support snapshot candidate for {:?}; falling back to legacy body sync",
+                                "snapshot-sync: no peers support the current candidate set for {:?}. \
+                                 Bouncing back through Status::Inactive so a refreshed multi-candidate \
+                                 enumeration can pick newer snapshot-aligned epochs (D.2).",
                                 epoch_to_sync
                             );
-                            inner.status = Status::Invalid;
+                            inner.status = Status::Inactive;
                             inner.manifest_manager = None;
                             inner.chunk_manager = None;
                             inner.related_data = None;
@@ -518,18 +776,40 @@ impl SnapshotChunkSync {
         }
 
         if inner.status == Status::Inactive {
-            // New era started or all candidates fail, we should restart
-            // candidates sync
+            // D.2 — Multi-candidate enumeration on every restart. The
+            // primary candidate is the era-genesis target we were
+            // asked to sync, but we also propose forward
+            // snapshot-aligned epochs from the local header chain so
+            // peers that have pruned past `epoch_to_sync` can still
+            // offer us a newer snapshot. `set_active_candidate` walks
+            // these newest-first, so a successful sync to a newer
+            // epoch costs less catch-up afterward.
             let height = sync_handler
                 .graph
                 .data_man
                 .block_header_by_hash(&epoch_to_sync)
                 .expect("Syncing checkpoint should have available header")
                 .height();
-            let candidates = vec![SnapshotSyncCandidate::FullSync {
+            let mut candidates = vec![SnapshotSyncCandidate::FullSync {
                 height,
                 snapshot_epoch_id: epoch_to_sync,
             }];
+            let forward = enumerate_forward_candidates(
+                sync_handler,
+                &epoch_to_sync,
+                height,
+            );
+            if !forward.is_empty() {
+                debug!(
+                    "D.2: enumerated {} forward snapshot-aligned candidates \
+                     (window={}, snapshot_epoch_count={}) on top of primary {:?}",
+                    forward.len(),
+                    D2_FORWARD_CANDIDATE_WINDOW,
+                    sync_handler.graph.data_man.get_snapshot_epoch_count(),
+                    epoch_to_sync,
+                );
+            }
+            candidates.extend(forward);
             inner.start_sync(current_era_genesis, candidates, io, sync_handler)
         }
         debug!("sync state status after updating: {:?}", *inner);

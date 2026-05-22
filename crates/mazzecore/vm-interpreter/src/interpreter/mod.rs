@@ -752,15 +752,17 @@ impl<Cost: CostType, const CANCUN: bool> Interpreter<Cost, CANCUN> {
                 let endowment = self.stack.pop_back();
                 let init_off = self.stack.pop_back();
                 let init_size = self.stack.pop_back();
+                // Native-only: eSpace routes through revm (mazze-eth-vm),
+                // so this interpreter never sees Space::Ethereum frames.
+                debug_assert_eq!(context.space(), Space::Native);
                 let address_scheme = match instruction {
-					instructions::CREATE if context.space() == Space::Native => CreateContractAddress::FromSenderNonceAndCodeHash,
-                    instructions::CREATE if context.space() == Space::Ethereum => CreateContractAddress::FromSenderNonce,
-					instructions::CREATE2 => {
+                    instructions::CREATE => CreateContractAddress::FromSenderNonceAndCodeHash,
+                    instructions::CREATE2 => {
                         let h: H256 = BigEndianHash::from_uint(&self.stack.pop_back());
                         CreateContractAddress::FromSenderSaltAndCodeHash(h)
                     },
-					_ => unreachable!("instruction can only be CREATE/CREATE2 checked above; qed"),
-				};
+                    _ => unreachable!("instruction can only be CREATE/CREATE2 checked above; qed"),
+                };
 
                 let create_gas = provided.expect("`provided` comes through Self::exec from `Gasometer::get_gas_cost_mem`; `gas_gas_mem_cost` guarantees `Some` when instruction is `CALL`/`CALLCODE`/`DELEGATECALL`/`CREATE`; this is `CREATE`; qed");
 
@@ -910,11 +912,11 @@ impl<Cost: CostType, const CANCUN: bool> Interpreter<Cost, CANCUN> {
                 // clear return data buffer before creating new call frame.
                 self.return_data = ReturnData::empty();
 
-                let valid_code_address = if context.space() == Space::Native {
-                    context.spec().is_valid_address(&code_address)
-                } else {
-                    true
-                };
+                // Native-only branch: eSpace runs in revm, which has its
+                // own address-validity rules.
+                debug_assert_eq!(context.space(), Space::Native);
+                let valid_code_address =
+                    context.spec().is_valid_address(&code_address);
 
                 let can_call = has_balance
                     && context.depth() < context.spec().max_depth
@@ -1231,11 +1233,11 @@ impl<Cost: CostType, const CANCUN: bool> Interpreter<Cost, CANCUN> {
                 self.stack.push(U256::from(context.env().timestamp));
             }
             instructions::NUMBER => {
-                let block_number = match context.space() {
-                    Space::Native => context.env().number,
-                    Space::Ethereum => context.env().epoch_height,
-                };
-                self.stack.push(U256::from(block_number));
+                // Native-only: eSpace's NUMBER source (epoch_height) is
+                // handled by mazze-eth-vm's BlockEnv. Here we always
+                // return the native block number.
+                debug_assert_eq!(context.space(), Space::Native);
+                self.stack.push(U256::from(context.env().number));
             }
             instructions::DIFFICULTY => {
                 self.stack.push(context.env().difficulty.clone());

@@ -370,20 +370,36 @@ impl ConsensusGraph {
         &self, inner: &mut ConsensusGraphInner, parent_hash: &H256,
         referees: &Vec<H256>, difficulty: &U256,
     ) -> bool {
-        let parent_index =
-            *inner.hash_to_arena_indices.get(parent_hash).expect(
-                "parent_hash is the main chain tip,\
-                 so should still exist in ConsensusInner",
-            );
-        let referee_indices: Vec<_> = referees
-            .iter()
-            .map(|h| {
-                *inner
-                    .hash_to_arena_indices
-                    .get(h)
-                    .expect("Checked by the caller")
-            })
-            .collect();
+        let parent_index = match inner.hash_to_arena_indices.get(parent_hash) {
+            Some(&idx) => idx,
+            None => {
+                // Parent was pruned or reorganized away after the miner
+                // prepared this candidate. Refuse adaptivity rather than
+                // crash; the miner will see false and either retry on a new
+                // parent or use the non-adaptive path.
+                warn!(
+                    "check_mining_adaptive_block: parent {:?} no longer in \
+                     consensus arena; returning false",
+                    parent_hash
+                );
+                return false;
+            }
+        };
+        let mut referee_indices: Vec<usize> = Vec::with_capacity(referees.len());
+        for h in referees {
+            match inner.hash_to_arena_indices.get(h) {
+                Some(&idx) => referee_indices.push(idx),
+                None => {
+                    // Same situation as parent — drop the referee silently;
+                    // it was already a soft hint, not load-bearing.
+                    debug!(
+                        "check_mining_adaptive_block: dropping missing \
+                         referee {:?}",
+                        h
+                    );
+                }
+            }
+        }
         inner.check_mining_adaptive_block(
             parent_index,
             referee_indices,
@@ -402,18 +418,29 @@ impl ConsensusGraph {
             // the lock scope here.
             let mut inner = self.inner.write();
             referees.retain(|h| inner.hash_to_arena_indices.contains_key(h));
-            let parent_index =
-                *inner.hash_to_arena_indices.get(parent_hash).expect(
-                    "parent_hash is the main chain tip,\
-                     so should still exist in ConsensusInner",
-                );
+            let parent_index = match inner
+                .hash_to_arena_indices
+                .get(parent_hash)
+            {
+                Some(&idx) => idx,
+                None => {
+                    // Parent was reorganized away while the miner was
+                    // preparing this block. Leave parent_hash / referees
+                    // unchanged so the caller can retry on the next tick.
+                    warn!(
+                        "choose_correct_parent: parent {:?} not in arena; \
+                         leaving block proposal unchanged",
+                        parent_hash
+                    );
+                    return;
+                }
+            };
+            // Referees were just retained against hash_to_arena_indices, so
+            // every lookup below must succeed.
             let referee_indices: Vec<_> = referees
                 .iter()
-                .map(|h| {
-                    *inner
-                        .hash_to_arena_indices
-                        .get(h)
-                        .expect("Checked by the caller")
+                .filter_map(|h| {
+                    inner.hash_to_arena_indices.get(h).copied()
                 })
                 .collect();
             let correct_parent =
@@ -947,31 +974,35 @@ impl ConsensusGraph {
         &self, filter: &LogFilter, bloom_possibilities: &Vec<Bloom>,
         epochs: Vec<u64>, consistency_check_data: &mut Option<(u64, H256)>,
     ) -> Result<Vec<LocalizedLogEntry>, FilterError> {
-        // lock so that we have a consistent view during this batch
-        let inner = self.inner.read();
-
+        // Hold the lock only for the fast in-memory consistency check.
+        // Releasing it before DB I/O prevents inner.write() (on_new_block) from
+        // being starved by long-running log scans at high RPC load.
+        //
         // NOTE: as batches are processed atomically and only the
         // first batch (last few epochs) is likely to fluctuate, it is unlikely
         // that releasing the lock between batches would cause inconsistency:
         // we assume there are no main chain reorgs deeper than batch_size.
         // However, we still add a simple sanity check here:
+        {
+            let inner = self.inner.read();
 
-        if let Some((epoch, main)) = *consistency_check_data {
-            let new_main = inner.get_main_hash_from_epoch_number(epoch)?;
+            if let Some((epoch, main)) = *consistency_check_data {
+                let new_main = inner.get_main_hash_from_epoch_number(epoch)?;
 
-            if main != new_main {
-                return Err(FilterError::MainChainReorg {
-                    epoch,
-                    from: main,
-                    to: new_main,
-                });
+                if main != new_main {
+                    return Err(FilterError::MainChainReorg {
+                        epoch,
+                        from: main,
+                        to: new_main,
+                    });
+                }
             }
-        }
 
-        *consistency_check_data = Some((
-            epochs[0],
-            inner.get_main_hash_from_epoch_number(epochs[0])?,
-        ));
+            *consistency_check_data = Some((
+                epochs[0],
+                inner.get_main_hash_from_epoch_number(epochs[0])?,
+            ));
+        } // lock released here — DB I/O below runs without holding inner
 
         let epoch_batch_logs = epochs
             .into_par_iter() // process each epoch of this batch in parallel
@@ -985,9 +1016,6 @@ impl ConsensusGraph {
         &self, from_epoch: EpochNumber, to_epoch: EpochNumber,
         check_range: bool,
     ) -> Result<impl Iterator<Item = u64>, FilterError> {
-        // lock so that we have a consistent view
-        let _inner = self.inner.read_recursive();
-
         let from_epoch =
             self.get_height_from_epoch_number(from_epoch.clone())?;
         let to_epoch = self.get_height_from_epoch_number(to_epoch.clone())?;
@@ -1025,9 +1053,6 @@ impl ConsensusGraph {
     pub fn get_trace_filter_epoch_range(
         &self, filter: &TraceFilter,
     ) -> Result<impl Iterator<Item = u64>, FilterError> {
-        // lock so that we have a consistent view
-        let _inner = self.inner.read_recursive();
-
         let from_epoch =
             self.get_height_from_epoch_number(filter.from_epoch.clone())?;
         let to_epoch =
@@ -1529,33 +1554,57 @@ impl ConsensusGraph {
     /// If `ready_for_mining` is `false`, the terminal information will not be
     /// needed, so we do not compute bounded terminals in this case.
     fn update_best_info(&self, ready_for_mining: bool) {
-        let mut inner = self.inner.write();
-        let mut best_info = self.best_info.write();
-
-        let bounded_terminal_block_hashes = if ready_for_mining {
-            inner.bounded_terminal_block_hashes(self.config.referee_bound)
-        } else {
-            // `bounded_terminal` is only needed for mining and serve syncing.
-            // As the computation cost is high, we do not compute it when we are
-            // catching up because we cannot mine blocks in
-            // catching-up phases. Use `best_block_hash` to
-            // represent terminals here to remain consistent.
-            vec![inner.best_block_hash()]
-        };
-        let best_epoch_number = inner.best_epoch_number();
-        BEST_EPOCH_NUMBER.update(best_epoch_number as usize);
-        *best_info = Arc::new(BestInformation {
-            chain_id: self
-                .config
-                .chain_id
-                .read()
-                .get_chain_id(best_epoch_number),
-            best_block_hash: inner.best_block_hash(),
-            best_block_number: inner.best_block_number(),
+        // Gather everything that comes from `self.inner` under a single
+        // write lock, then drop the lock before touching `best_info` and
+        // `chain_id`. The previous code held all three locks at once on
+        // every block, starving RPC readers and serialising tx-pool
+        // notifications.
+        let (
+            bounded_terminal_block_hashes,
             best_epoch_number,
-            current_difficulty: inner.current_difficulty,
+            best_block_hash,
+            best_block_number,
+            current_difficulty,
+        ) = {
+            let mut inner = self.inner.write();
+            let terminals = if ready_for_mining {
+                inner.bounded_terminal_block_hashes(self.config.referee_bound)
+            } else {
+                // `bounded_terminal` is only needed for mining and serve
+                // syncing. As the computation cost is high, we skip it
+                // during catch-up (we can't mine then) and use the best
+                // block hash as a single-element placeholder.
+                vec![inner.best_block_hash()]
+            };
+            (
+                terminals,
+                inner.best_epoch_number(),
+                inner.best_block_hash(),
+                inner.best_block_number(),
+                inner.current_difficulty,
+            )
+        };
+
+        BEST_EPOCH_NUMBER.update(best_epoch_number as usize);
+
+        // Resolve chain id without holding `inner` or `best_info`.
+        let chain_id = self
+            .config
+            .chain_id
+            .read()
+            .get_chain_id(best_epoch_number);
+
+        let new_best = Arc::new(BestInformation {
+            chain_id,
+            best_block_hash,
+            best_block_number,
+            best_epoch_number,
+            current_difficulty,
             bounded_terminal_block_hashes,
         });
+
+        let mut best_info = self.best_info.write();
+        *best_info = new_best;
         debug!("update_best_info to {:?}", best_info);
     }
 

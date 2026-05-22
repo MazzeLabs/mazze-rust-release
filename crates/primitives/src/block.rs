@@ -16,7 +16,27 @@ use std::{
     sync::Arc,
 };
 
+/// Ethereum-compatible linear block index. Computed as
+/// `epoch_start_block_number + block_index_in_epoch` (see
+/// [`crate::block_number::compute_block_number`]). This is what
+/// `eth_blockNumber` returns and what user-facing RPCs expose. **It is
+/// not** the same as `BlockHeight` — that's a header-metadata field
+/// recording the producer's DAG-local distance from genesis. Prefer
+/// `BlockNumber` when you mean "where does this block sit in the linear
+/// order an Ethereum client would expect".
+///
+/// See `docs/chain-model.md` §1 for the full glossary of chain-height
+/// terms.
 pub type BlockNumber = u64;
+
+/// DAG-local distance from genesis as recorded by the block's producer
+/// in its header. **Not** a consensus sort key — many blocks can share
+/// the same `BlockHeight` because Mazze is a DAG. Use `EpochNumber` for
+/// consensus ordering and `BlockNumber` for the Ethereum-compatible
+/// linear index.
+///
+/// See `docs/chain-model.md` §1 for the full glossary of chain-height
+/// terms.
 pub type BlockHeight = u64;
 
 /// A block, encoded as it is on the block chain.

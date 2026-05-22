@@ -34,7 +34,8 @@ use mazze_types::{
 };
 use mazze_vm_types::Spec;
 use metrics::{
-    register_meter_with_group, Gauge, GaugeUsize, Lock, Meter, MeterTimer,
+    register_meter_with_group, Counter, CounterUsize, Gauge, GaugeUsize, Lock,
+    Meter, MeterTimer,
     RwLockExtensions,
 };
 use parking_lot::{Mutex, RwLock};
@@ -75,6 +76,18 @@ lazy_static! {
         register_meter_with_group("timer", "tx_pool::verify");
     static ref TX_POOL_GET_STATE_TIMER: Arc<dyn Meter> =
         register_meter_with_group("timer", "tx_pool::get_state");
+    // Per-reason rejection counters for verify_transaction_tx_pool.
+    // Aggregated INSERT_TXS_FAILURE_TPS still exists; these break it down
+    // so dashboards can graph "spike in nonce mismatches" vs "spike in low
+    // gas price" vs "size limit". See docs/flow-audit.md G-TX-1.
+    static ref TX_REJECT_SIZE: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("txpool_reject", "size");
+    static ref TX_REJECT_COMMON_VERIFY: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("txpool_reject", "common_verify");
+    static ref TX_REJECT_GAS_LIMIT: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("txpool_reject", "gas_limit");
+    static ref TX_REJECT_GAS_PRICE: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("txpool_reject", "gas_price");
     static ref INSERT_TXS_QUOTA_LOCK: Lock =
         Lock::register("txpool_insert_txs_quota_lock");
     static ref INSERT_TXS_ENQUEUE_LOCK: Lock =
@@ -599,9 +612,11 @@ impl TransactionPool {
         let mode = VerifyTxMode::Local(VerifyTxLocalMode::MaybeLater, spec);
 
         if basic_check {
-            self.verification_config
-                .check_tx_size(transaction)
-                .map_err(|e| e.to_string())?;
+            if let Err(e) = self.verification_config.check_tx_size(transaction)
+            {
+                TX_REJECT_SIZE.inc(1);
+                return Err(e.to_string());
+            }
             if let Err(e) = self.verification_config.verify_transaction_common(
                 transaction,
                 chain_id,
@@ -609,6 +624,7 @@ impl TransactionPool {
                 transitions,
                 mode,
             ) {
+                TX_REJECT_COMMON_VERIFY.inc(1);
                 warn!("Transaction {:?} discarded due to not passing basic verification.", transaction.hash());
                 return Err(format!("{:?}", e));
             }
@@ -622,6 +638,7 @@ impl TransactionPool {
         // check transaction gas limit
         let max_tx_gas = *self.config.max_tx_gas.read();
         if *transaction.gas() > max_tx_gas {
+            TX_REJECT_GAS_LIMIT.inc(1);
             warn!(
                 "Transaction discarded due to above gas limit: {} > {:?}",
                 transaction.gas(),
@@ -641,6 +658,7 @@ impl TransactionPool {
         if !transaction.is_shielded()
             && *transaction.gas_price() < min_tx_price.into()
         {
+            TX_REJECT_GAS_PRICE.inc(1);
             trace!("Transaction {} discarded due to below minimal gas price: price {}", transaction.hash(), transaction.gas_price());
             return Err(format!(
                 "transaction gas price {} less than the minimum value {}",
@@ -978,13 +996,15 @@ impl TransactionPool {
             consensus_best_info_clone
         );
 
-        let parent_block = self
+        // The parent block header is normally always present, but during
+        // a reorg/prune race the RPC caller can hit a brief window where
+        // it isn't — return None for the base price rather than panic.
+        let base_price = self
             .data_man
             .block_header_by_hash(&consensus_best_info_clone.best_block_hash)
-            // The parent block must exists.
-            .expect(&concat!(file!(), ":", line!(), ":", column!()));
+            .and_then(|h| h.base_price());
 
-        (consensus_best_info_clone, parent_block.base_price())
+        (consensus_best_info_clone, base_price)
     }
 
     pub fn get_best_info_with_packed_transactions(

@@ -22,7 +22,6 @@ extern crate dir;
 extern crate libc;
 extern crate mazze_types;
 extern crate mazzekey as _mazzekey;
-extern crate parity_crypto as crypto;
 extern crate parity_wordlist;
 extern crate parking_lot;
 extern crate rand;
@@ -44,6 +43,7 @@ extern crate matches;
 
 mod account;
 pub mod accounts_dir;
+mod crypto;
 mod error;
 mod import;
 mod json;

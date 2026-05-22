@@ -288,4 +288,94 @@ pub trait Context {
     fn is_static_or_reentrancy(&self) -> bool;
 
     fn blockhash_source(&self) -> BlockHashSource;
+
+    // ---------------------------------------------------------------------
+    // By-address state access.
+    //
+    // The Parity-derived custom interpreter operates one-Context-per-contract:
+    // each frame's `Context` is pinned to the executing contract's address via
+    // `origin`, and `storage_at`/`set_storage` use that pinned address. revm
+    // does not work that way — it has a single Database per transaction and
+    // asks for storage at arbitrary addresses via `Database::storage(addr,
+    // key)`.
+    //
+    // These default impls return `Error::Wasm("...")` so the custom
+    // interpreter (which never calls them) keeps working unchanged. The
+    // executor::Context (used by both VMs) overrides them with real impls
+    // backed by `State`. Tests using MockContext inherit the default.
+    //
+    // See `crates/mazzecore/eth-vm/` for the revm adapter that needs these.
+    // ---------------------------------------------------------------------
+
+    /// Read storage of an arbitrary account.
+    fn storage_at_address(
+        &self, _address: &Address, _key: &[u8],
+    ) -> Result<U256> {
+        Err(Error::Wasm(
+            "storage_at_address not supported by this Context".to_string(),
+        ))
+    }
+
+    /// Write storage of an arbitrary account.
+    fn set_storage_at_address(
+        &mut self, _address: &Address, _key: Vec<u8>, _value: U256,
+    ) -> Result<()> {
+        Err(Error::Wasm(
+            "set_storage_at_address not supported by this Context".to_string(),
+        ))
+    }
+
+    /// Read the nonce of an arbitrary account.
+    fn nonce_of(&self, _address: &Address) -> Result<U256> {
+        Err(Error::Wasm(
+            "nonce_of not supported by this Context".to_string(),
+        ))
+    }
+
+    /// Set the balance of an arbitrary account.
+    fn set_balance(&mut self, _address: &Address, _value: U256) -> Result<()> {
+        Err(Error::Wasm(
+            "set_balance not supported by this Context".to_string(),
+        ))
+    }
+
+    /// Set the nonce of an arbitrary account.
+    fn set_nonce(&mut self, _address: &Address, _value: U256) -> Result<()> {
+        Err(Error::Wasm(
+            "set_nonce not supported by this Context".to_string(),
+        ))
+    }
+
+    /// Set the code of an arbitrary account (used after CREATE deploys
+    /// bytecode).
+    fn set_code(&mut self, _address: &Address, _code: Vec<u8>) -> Result<()> {
+        Err(Error::Wasm(
+            "set_code not supported by this Context".to_string(),
+        ))
+    }
+
+    /// Emit a log entry attributed to an arbitrary address (revm tracks the
+    /// executing contract; we don't always have it as `origin`).
+    fn log_for_address(
+        &mut self, _address: &Address, _topics: Vec<H256>, _data: &[u8],
+    ) -> Result<()> {
+        Err(Error::Wasm(
+            "log_for_address not supported by this Context".to_string(),
+        ))
+    }
+
+    /// Record a SELFDESTRUCT for an arbitrary contract address. The custom
+    /// interpreter calls [`Self::suicide`] which is pinned to `origin.address`,
+    /// but revm reports selfdestructed accounts as part of its EvmState diff
+    /// for *any* contract that participated in the tx — not just the top-level
+    /// frame's address. This by-address variant lets the eSpace adapter push
+    /// each selfdestructed account into the executor's `substate.suicides` so
+    /// the post-tx cleanup path removes it.
+    fn suicide_for_address(
+        &mut self, _contract: &Address, _refund: &Address,
+    ) -> Result<()> {
+        Err(Error::Wasm(
+            "suicide_for_address not supported by this Context".to_string(),
+        ))
+    }
 }

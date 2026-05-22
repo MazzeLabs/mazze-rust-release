@@ -21,6 +21,25 @@ run/*.toml.backup
 run/blockchain_data
 run/blockchain_data_dev
 
+# Per-deployment generated configs (start-node{,-dev,-miner}.sh write these
+# from run/hydra.toml at launch — they contain absolute paths and the live
+# stratum_secret, so they must not be tracked).
+run/hydra.runtime.toml
+run/hydra.dev.runtime.toml
+run/hydra.miner.runtime.toml
+
+# Stratum (and any future) per-deployment secrets — auto-generated on first
+# run. The committed example is run/hydra.secrets.toml.example.
+run/hydra.secrets.toml
+
+# Groth16 shielded proving key — large (~54 MB), not consensus-critical.
+# Joining/validating nodes only need the verifying key baked into genesis;
+# only wallets that *create* shielded transactions need the PK. Obtain it
+# out-of-band (download or `cargo run -p mazze-executor --bin shielded_keygen`
+# — the latter only works at chain genesis time, since the new PK pairs with
+# a new VK that won't match the chain's on-chain VK).
+run/shielded_pk.hex
+
 # Editors/OS
 .vscode/
 .idea/
@@ -33,3 +52,47 @@ run/blockchain_data_old
 run/hydra.toml
 run/hydra.runtime.toml
 blockchain_data
+docs/
+
+# Claude / AI tooling local state
+.claude/
+
+# Local environment / secrets
+# (bins/mazze/genesis_secrets.toml is intentionally tracked as a dev-only stub
+#  with a public-by-design warning header; production keys must not be committed.)
+.env
+.env.*
+*.env
+secrets.toml
+secrets.local.*
+*.secret.toml
+genesis_secrets.local.toml
+genesis_secrets.prod.toml
+
+# Test scratch data dirs (per-test storage_db / paritydb / mdbx artifacts)
+**/mazze_unit_test_data_dir*/
+**/mazze_test_data_dir*/
+**/paritydb_[0-9a-f]*/
+mdbx.dat
+mdbx.lck
+
+# Coverage / profiling output
+coverage/
+tarpaulin-report.*
+*.profraw
+*.profdata
+lcov.info
+flamegraph.svg
+perf.data
+perf.data.old
+*.heap
+
+# Crash dumps
+core
+core.*
+
+# Backup / patch / merge leftovers
+*.bak
+*.orig
+*.rej
+*~

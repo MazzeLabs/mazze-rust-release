@@ -16,6 +16,8 @@
 
 use super::{Generator, KeyPair, SECP256K1};
 use rand::rngs::OsRng;
+use rand::RngCore;
+use secp256k1::{PublicKey, SecretKey};
 
 /// Randomly generates new keypair, instantiating the RNG each time.
 pub struct Random;
@@ -35,9 +37,17 @@ impl Generator for OsRng {
     type Error = crate::Void;
 
     fn generate(&mut self) -> Result<KeyPair, Self::Error> {
-        let (sec, publ) = SECP256K1
-            .generate_keypair(self)
-            .expect("context always created with full capabilities; qed");
+        // Draw 32 random bytes from OsRng and loop until they form a
+        // valid secp256k1 scalar. Retry probability ≈ 2⁻¹²⁸.
+        let sec = loop {
+            let mut bytes = [0u8; 32];
+            self.fill_bytes(&mut bytes);
+            if let Ok(sec) = SecretKey::from_slice(&bytes) {
+                break sec;
+            }
+            // Probability of failure ≈ 2^-128; mainly defensive.
+        };
+        let publ = PublicKey::from_secret_key(&SECP256K1, &sec);
 
         Ok(KeyPair::from_keypair(sec, publ))
     }

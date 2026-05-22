@@ -125,15 +125,6 @@ macro_rules! evm_test(
 	}
 );
 
-/// Create ignored tests by injecting different VM factories
-#[macro_export]
-macro_rules! evm_test_ignore(
-	($name_test: ident: $name_int: ident) => {
-		#[test]
-		#[ignore]
-		#[cfg(feature = "ignored-tests")]
-		fn $name_int() {
-			$name_test(Factory::new(VMType::Interpreter, 1024 * 32));
-		}
-	}
-);
+// `evm_test_ignore!` was removed: it was gated on a feature flag
+// (`ignored-tests`) that is not declared in any Cargo.toml, and the macro
+// had no callers in the workspace.

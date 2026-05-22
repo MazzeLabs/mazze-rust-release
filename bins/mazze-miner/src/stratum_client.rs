@@ -41,13 +41,24 @@ impl StratumClient {
 
     async fn subscribe(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         info!("Sending subscription request");
+        // Protocol note (G-MN-5 in docs/flow-audit.md):
+        // The stratum server stores `stratum_secret` as a 64-hex H256 in
+        // hydra.toml, but compares it via `keccak(received_string) ==
+        // configured_h256`. So the operator must put `keccak(<plaintext>)`
+        // hex in hydra.toml and the miner must send the *plaintext* here.
+        // The previous hardcoded "test" assumed the node was configured
+        // with keccak("test"); we now use the configured value so a single
+        // shared config file works.
+        let secret = if self.stratum_secret.is_empty() {
+            // Backwards-compatible default that matched the prior behaviour.
+            "test".to_string()
+        } else {
+            self.stratum_secret.clone()
+        };
         let request = json!({
             "id": self.miner.worker_id,
             "method": "mining.subscribe",
-            // TODO: investigate why self.stratum_secret is not working
-            // (same config file used in miner and node too)
-            // "params": ["999", self.stratum_secret]
-            "params": ["999", "test"]
+            "params": ["999", secret]
         });
         let request_json = serde_json::to_string(&request)?;
         trace!("Subscription request JSON: {}", request_json);

@@ -45,12 +45,78 @@ use mazze_execute_helper::{
 use mazze_internal_common::{
     EpochExecutionCommitment, StateAvailabilityBoundary, StateRootWithAuxInfo,
 };
-use metrics::{register_meter_with_group, Meter, MeterTimer};
+use metrics::{
+    register_meter_with_group, Gauge, GaugeUsize, Meter, MeterTimer,
+};
 use std::{hash::Hash, time::Duration};
 
 lazy_static! {
     static ref TX_POOL_RECOVER_TIMER: Arc<dyn Meter> =
         register_meter_with_group("timer", "tx_pool::recover_public");
+    // Width of state_availability_boundary (upper - lower). A shrinking
+    // width is an early warning of an over-aggressive pruner or a stalled
+    // executor. See docs/flow-audit.md G-ST-3.
+    static ref STATE_AVAILABILITY_WIDTH: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group(
+            "state",
+            "availability_boundary_width",
+        );
+    static ref STATE_AVAILABILITY_LOWER: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group(
+            "state",
+            "availability_boundary_lower",
+        );
+    static ref STATE_AVAILABILITY_UPPER: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group(
+            "state",
+            "availability_boundary_upper",
+        );
+    // GC progress signals. epochs_gced is a monotonic counter useful for
+    // computing GC throughput in dashboards. gc_lag exposes the gap between
+    // next_to_process and gc_end so operators can confirm GC is keeping up
+    // with consensus. See docs/flow-audit.md G-ST-2.
+    static ref GC_EPOCHS_PROCESSED: Arc<dyn metrics::Counter<usize>> =
+        metrics::CounterUsize::register_with_group(
+            "gc",
+            "epochs_processed",
+        );
+    static ref GC_NEXT_TO_PROCESS: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("gc", "next_to_process_epoch");
+    static ref GC_END: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("gc", "end_epoch");
+    static ref GC_LAG: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("gc", "lag_epochs");
+
+    // In-memory write-through caches in BlockDataManager. These are
+    // *unbounded* HashMaps today — see `docs/storage-architecture.md`
+    // §5. The gauges below let operators detect unbounded growth on
+    // archive nodes before it turns into OOM. LRU bounds themselves
+    // are a follow-up refactor (storage-cleanup plan Phase G2).
+
+    // Current consensus checkpoint epoch number — refreshed each time
+    // `set_cur_consensus_era_genesis_hash` successfully writes through
+    // the monotonicity gate. Use this for "is the checkpoint
+    // advancing?" dashboards. See docs/checkpoint-snapshot-lifecycle.md
+    // Phase C.3.
+    static ref CHECKPOINT_EPOCH_NUMBER_GAUGE: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group(
+            "consensus",
+            "checkpoint_epoch_number"
+        );
+
+    static ref BDM_HEADER_CACHE_SIZE: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("bdm", "block_header_cache_size");
+    static ref BDM_BLOCK_CACHE_SIZE: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("bdm", "block_cache_size");
+    static ref BDM_RECEIPT_CACHE_SIZE: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("bdm", "block_receipt_cache_size");
+    static ref BDM_TX_INDEX_CACHE_SIZE: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("bdm", "tx_index_cache_size");
+    static ref BDM_BLOCKNUM_INDEX_CACHE_SIZE: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group(
+            "bdm",
+            "hash_by_block_number_cache_size"
+        );
 }
 
 pub const NULLU64: u64 = !0;
@@ -313,6 +379,31 @@ impl BlockDataManager {
                     &cur_era_genesis_hash,
                     &local_block_info,
                 );
+            } else if let Some(genesis_header) =
+                data_man.block_header_by_hash(&cur_era_genesis_hash)
+            {
+                // Keep startup resilient when era-genesis local info is
+                // missing/corrupted in db.
+                let fallback_seq_num = genesis_header.height();
+                warn!(
+                    "Missing local_block_info for era genesis {:?}; synthesizing fallback seq_num={} instance_id={}",
+                    cur_era_genesis_hash,
+                    fallback_seq_num,
+                    data_man.get_instance_id(),
+                );
+                data_man.db_manager.insert_local_block_info_to_db(
+                    &cur_era_genesis_hash,
+                    &LocalBlockInfo::new(
+                        BlockStatus::Valid,
+                        fallback_seq_num,
+                        data_man.get_instance_id(),
+                    ),
+                );
+            } else {
+                warn!(
+                    "Missing both local_block_info and block header for era genesis {:?}; will continue with network recovery",
+                    cur_era_genesis_hash,
+                );
             }
             // The commitments of cur_era_genesis will be recovered in
             // `construct_main_state` with other epochs
@@ -323,6 +414,19 @@ impl BlockDataManager {
 
     pub fn get_instance_id(&self) -> u64 {
         *self.instance_id.lock()
+    }
+
+    /// Update the state-availability gauges from the current boundary.
+    /// Call this after any write to `state_availability_boundary` so SREs
+    /// can see the width shrink/grow over time.
+    pub fn sample_state_availability_metrics(&self) {
+        let b = self.state_availability_boundary.read();
+        let lower = b.lower_bound as usize;
+        let upper = b.upper_bound as usize;
+        let width = upper.saturating_sub(lower);
+        STATE_AVAILABILITY_LOWER.update(lower);
+        STATE_AVAILABILITY_UPPER.update(upper);
+        STATE_AVAILABILITY_WIDTH.update(width);
     }
 
     pub fn initialize_instance_id(&self) {
@@ -578,7 +682,9 @@ impl BlockDataManager {
             },
             Some(CacheId::BlockHeader(hash)),
             persistent,
-        )
+        );
+        BDM_HEADER_CACHE_SIZE.update(self.block_headers.read().len());
+        BDM_BLOCK_CACHE_SIZE.update(self.blocks.read().len());
     }
 
     /// remove block header in memory cache and db
@@ -687,6 +793,7 @@ impl BlockDataManager {
             CacheId::BlockReceipts(hash),
             persistent,
         );
+        BDM_RECEIPT_CACHE_SIZE.update(self.block_receipts.read().len());
         trace! {"insert_block_traces end main={:?}", epoch};
     }
 
@@ -783,6 +890,8 @@ impl BlockDataManager {
                 .lock()
                 .note_used(CacheId::TransactionAddress(*hash));
         }
+        BDM_TX_INDEX_CACHE_SIZE
+            .update(self.transaction_indices.read().len());
     }
 
     pub fn hash_by_block_number(
@@ -831,6 +940,8 @@ impl BlockDataManager {
                 .lock()
                 .note_used(CacheId::HashByBlockNumber(block_number));
         }
+        BDM_BLOCKNUM_INDEX_CACHE_SIZE
+            .update(self.hash_by_block_number.read().len());
     }
 
     pub fn insert_local_block_info(&self, hash: &H256, info: LocalBlockInfo) {
@@ -1234,16 +1345,43 @@ impl BlockDataManager {
             {
                 let mut mazze_tx_index = 0;
 
-                let block = self
+                let block = match self
                     .block_by_hash(block_hash, true /* update_cache */)
-                    .expect("block exists");
+                {
+                    Some(b) => b,
+                    None => {
+                        // Body missing locally — treat the epoch as not
+                        // fully recovered so consensus re-executes rather
+                        // than crashing the caller (often an RPC handler).
+                        warn!(
+                            "epoch_executed_and_recovered: missing block body \
+                             for {:?} in epoch {:?}",
+                            block_hash, epoch_hash
+                        );
+                        return false;
+                    }
+                };
 
                 for (tx_idx, tx) in block.transactions.iter().enumerate() {
+                    let receipt = match epoch_receipts
+                        .get(block_idx)
+                        .and_then(|r| r.receipts.get(tx_idx))
+                    {
+                        Some(r) => r,
+                        None => {
+                            warn!(
+                                "epoch_executed_and_recovered: missing receipt \
+                                 for block {} tx {} in epoch {:?}",
+                                block_idx, tx_idx, epoch_hash
+                            );
+                            return false;
+                        }
+                    };
                     let Receipt {
                         outcome_status,
                         logs,
                         ..
-                    } = epoch_receipts[block_idx].receipts.get(tx_idx).unwrap();
+                    } = receipt;
 
                     let rpc_index = match tx.space() {
                         Space::Native => {
@@ -1473,16 +1611,41 @@ impl BlockDataManager {
         self.block_cache_gc();
     }
 
+    /// Persist the new (era_genesis, era_stable) hash pair AND tag it
+    /// with `cur_era_genesis_epoch_number` for the C.3 monotonicity
+    /// gate in `insert_checkpoint_hashes_to_db`.
+    ///
+    /// On a monotonicity violation, the DB write is refused, the
+    /// in-memory pointers are NOT updated, and `error!` is logged.
+    /// Callers should treat this as a soft fault (the bug that
+    /// produced the non-monotonic write must be diagnosed; the chain
+    /// stays on the previous checkpoint until then).
     pub fn set_cur_consensus_era_genesis_hash(
         &self, cur_era_hash: &H256, next_era_hash: &H256,
+        cur_era_genesis_epoch_number: u64,
     ) {
-        self.db_manager
-            .insert_checkpoint_hashes_to_db(cur_era_hash, next_era_hash);
-
-        let mut era_hash = self.cur_consensus_era_genesis_hash.write();
-        let mut stable_hash = self.cur_consensus_era_stable_hash.write();
-        *era_hash = cur_era_hash.clone();
-        *stable_hash = next_era_hash.clone();
+        match self.db_manager.insert_checkpoint_hashes_to_db(
+            cur_era_hash,
+            next_era_hash,
+            cur_era_genesis_epoch_number,
+        ) {
+            Ok(()) => {
+                let mut era_hash = self.cur_consensus_era_genesis_hash.write();
+                let mut stable_hash =
+                    self.cur_consensus_era_stable_hash.write();
+                *era_hash = cur_era_hash.clone();
+                *stable_hash = next_era_hash.clone();
+                CHECKPOINT_EPOCH_NUMBER_GAUGE
+                    .update(cur_era_genesis_epoch_number as usize);
+            }
+            Err(msg) => {
+                error!(
+                    "set_cur_consensus_era_genesis_hash: DB rejected the write. \
+                     In-memory pointers NOT updated. cause={}",
+                    msg
+                );
+            }
+        }
     }
 
     pub fn get_cur_consensus_era_genesis_hash(&self) -> H256 {
@@ -1629,6 +1792,18 @@ impl BlockDataManager {
             gc_progress.next_to_process = end;
             self.db_manager.insert_gc_progress_to_db(end);
             debug!("Database GC progress: {:?}", gc_progress);
+            // Surface progress for dashboards. `end - start` is how many
+            // epochs we collected this pass; `gc_end - next_to_process`
+            // is the remaining lag.
+            GC_EPOCHS_PROCESSED.inc((end - start) as usize);
+            GC_NEXT_TO_PROCESS.update(gc_progress.next_to_process as usize);
+            GC_END.update(gc_progress.gc_end as usize);
+            GC_LAG.update(
+                gc_progress
+                    .gc_end
+                    .saturating_sub(gc_progress.next_to_process)
+                    as usize,
+            );
         }
     }
 

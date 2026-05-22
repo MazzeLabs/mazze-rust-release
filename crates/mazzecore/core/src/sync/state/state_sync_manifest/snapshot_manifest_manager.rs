@@ -45,6 +45,14 @@ pub struct SnapshotManifestManager {
 
     pub chunk_boundaries: Vec<Vec<u8>>,
     pub chunk_boundary_proofs: Vec<TrieProof>,
+    /// D.1 — keccak256 of `rlp(Chunk)` per chunk, accumulated across
+    /// manifest pages. Once manifest completion is signalled, this
+    /// vector's length matches
+    /// `RangedManifest::convert_boundaries_to_chunks(chunk_boundaries)`
+    /// (= boundaries + 1). Consumed by
+    /// `SnapshotChunkManager::new_and_start` to drive fail-fast
+    /// per-chunk verification on receive.
+    pub chunk_hashes: Vec<H256>,
 
     related_data: Option<RelatedData>,
     config: SnapshotManifestConfig,
@@ -76,6 +84,7 @@ impl SnapshotManifestManager {
             active_peers,
             chunk_boundaries: vec![],
             chunk_boundary_proofs: vec![],
+            chunk_hashes: vec![],
             related_data: None,
             config,
         };
@@ -218,6 +227,13 @@ impl SnapshotManifestManager {
             .extend_from_slice(&response.manifest.chunk_boundaries);
         self.chunk_boundary_proofs
             .extend_from_slice(&response.manifest.chunk_boundary_proofs);
+        // D.1 — accumulate per-chunk hashes across pages. Per-page
+        // cardinality was already enforced by `RangedManifest::validate`,
+        // so simple extend is correct: intermediate pages contribute
+        // `boundaries.len()` hashes, the final page contributes
+        // `boundaries.len() + 1` (trailing unbounded chunk).
+        self.chunk_hashes
+            .extend_from_slice(&response.manifest.chunk_hashes);
         if response.manifest.next.is_none() {
             return Ok(self.related_data.clone());
         } else {

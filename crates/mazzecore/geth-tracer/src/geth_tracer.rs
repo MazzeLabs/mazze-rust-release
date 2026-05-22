@@ -21,11 +21,9 @@ use mazze_executor::{
 };
 use mazze_types::H160;
 use mazze_vm_types::{ActionParams, CallType, Error, InterpreterInfo};
-use revm::{
-    db::InMemoryDB,
-    interpreter::{Gas, InstructionResult, InterpreterResult},
-    primitives::State,
-};
+use revm::database::InMemoryDB;
+use revm::interpreter::{Gas, InstructionResult, InterpreterResult};
+use revm::state::EvmState as State;
 use std::sync::Arc;
 
 pub struct GethTracer {
@@ -53,7 +51,14 @@ impl GethTracer {
         let config = match opts.tracer {
             Some(GethDebugTracerType::BuiltInTracer(builtin_tracer)) => {
                 match builtin_tracer {
-                    FourByteTracer | NoopTracer | MuxTracer => {
+                    // alloy 2.0 added FlatCallTracer + Erc7562Tracer.
+                    // We don't implement these specialised tracers; fall
+                    // back to a no-op tracer config.
+                    FourByteTracer
+                    | NoopTracer
+                    | MuxTracer
+                    | GethDebugBuiltInTracerType::FlatCallTracer
+                    | GethDebugBuiltInTracerType::Erc7562Tracer => {
                         TracingInspectorConfig::none()
                     }
                     CallTracer => {
@@ -148,7 +153,12 @@ impl GethTracer {
                         .unwrap();
                     GethTrace::PreStateTracer(frame)
                 }
-                NoopTracer | MuxTracer => {
+                // alloy 2.0 added FlatCallTracer + Erc7562Tracer. We don't
+                // implement those specialised outputs; render as Noop.
+                NoopTracer
+                | MuxTracer
+                | GethDebugBuiltInTracerType::FlatCallTracer
+                | GethDebugBuiltInTracerType::Erc7562Tracer => {
                     GethTrace::NoopTracer(NoopFrame::default())
                 }
             },
@@ -258,7 +268,7 @@ impl CallTracer for GethTracer {
 
         let instruction_result = to_instruction_result(result);
 
-        if instruction_result.is_error() {
+        if instruction_result.is_halt() {
             self.inner.gas_inspector.set_gas_remainning(0);
         }
 
@@ -325,7 +335,7 @@ impl CallTracer for GethTracer {
 
         let instruction_result = to_instruction_result(result);
 
-        if instruction_result.is_error() {
+        if instruction_result.is_halt() {
             self.inner.gas_inspector.set_gas_remainning(0);
         }
 

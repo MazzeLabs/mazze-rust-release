@@ -10,7 +10,7 @@ use crate::{
             Handleable,
         },
         synchronization_protocol_handler::RecoverPublicTask,
-        Error,
+        Error, ErrorKind,
     },
 };
 use mazze_types::H256;
@@ -54,14 +54,40 @@ impl Handleable for GetBlocksResponse {
             );
         }
 
-        let req = ctx.match_request(self.request_id)?;
-        let delay = req.delay;
-        let requested_blocks: HashSet<H256> = req
-            .downcast_ref::<GetBlocks>(ctx.io, &ctx.manager.request_manager)?
-            .hashes
-            .iter()
-            .cloned()
-            .collect();
+        let (requested_blocks, delay): (HashSet<H256>, _) =
+            match ctx.match_request(self.request_id) {
+                Ok(req) => {
+                    let delay = req.delay;
+                    let requested_blocks: HashSet<H256> = req
+                        .downcast_ref::<GetBlocks>(
+                            ctx.io,
+                            &ctx.manager.request_manager,
+                        )?
+                        .hashes
+                        .iter()
+                        .cloned()
+                        .collect();
+                    (requested_blocks, delay)
+                }
+                Err(e) => match &e.0 {
+                    ErrorKind::RequestNotFound => {
+                        trace!(
+                            "late GetBlocksResponse request_id={} peer={:?} blocks={}",
+                            self.request_id,
+                            ctx.node_id,
+                            self.blocks.len()
+                        );
+                        (
+                            self.blocks
+                                .iter()
+                                .map(|b| b.block_header.hash())
+                                .collect(),
+                            None,
+                        )
+                    }
+                    _ => return Err(e),
+                },
+            };
 
         ctx.manager.recover_public_queue.dispatch(
             ctx.io,
@@ -100,21 +126,46 @@ impl Handleable for GetBlocksWithPublicResponse {
             warn!("recover_public_queue is full, discard GetBlocksWithPublicResponse");
             return Ok(());
         }
-        let req = ctx.match_request(self.request_id)?;
-        let delay = req.delay;
-        let req_hashes: HashSet<H256> = if let Ok(req) = req
-            .downcast_ref::<GetCompactBlocks>(
-                ctx.io,
-                &ctx.manager.request_manager,
-            ) {
-            req.hashes.iter().cloned().collect()
-        } else {
-            let req = req.downcast_ref::<GetBlocks>(
-                ctx.io,
-                &ctx.manager.request_manager,
-            )?;
-            req.hashes.iter().cloned().collect()
-        };
+        let (req_hashes, delay): (HashSet<H256>, _) =
+            match ctx.match_request(self.request_id) {
+                Ok(req) => {
+                    let delay = req.delay;
+
+                    // Avoid RequestMessage::downcast_ref probing here because it has
+                    // resend side effects on mismatch.
+                    let req_hashes: HashSet<H256> = if let Some(req) =
+                        req.request.as_any().downcast_ref::<GetCompactBlocks>()
+                    {
+                        req.hashes.iter().cloned().collect()
+                    } else if let Some(req) =
+                        req.request.as_any().downcast_ref::<GetBlocks>()
+                    {
+                        req.hashes.iter().cloned().collect()
+                    } else {
+                        return Err(ErrorKind::UnexpectedResponse.into());
+                    };
+
+                    (req_hashes, delay)
+                }
+                Err(e) => match &e.0 {
+                    ErrorKind::RequestNotFound => {
+                        trace!(
+                            "late GetBlocksWithPublicResponse request_id={} peer={:?} blocks={}",
+                            self.request_id,
+                            ctx.node_id,
+                            self.blocks.len()
+                        );
+                        (
+                            self.blocks
+                                .iter()
+                                .map(|b| b.block_header.hash())
+                                .collect(),
+                            None,
+                        )
+                    }
+                    _ => return Err(e),
+                },
+            };
 
         ctx.manager.recover_public_queue.dispatch(
             ctx.io,

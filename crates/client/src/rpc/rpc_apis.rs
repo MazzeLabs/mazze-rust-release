@@ -31,7 +31,18 @@ impl FromStr for Api {
             "eth" => Ok(Eth),
             "debug" => Ok(Debug),
             "pubsub" => Ok(Pubsub),
+            // `test` exposes state-mutation RPCs (e.g. `test_setChainParams`).
+            // Compiled out of release builds entirely — operators who
+            // include "test" in `public_rpc_apis` on a release build get
+            // an explicit error rather than a silently-enabled namespace.
+            // See docs/security-audit.md finding C-2.
+            #[cfg(any(test, debug_assertions, feature = "test-rpc"))]
             "test" => Ok(Test),
+            #[cfg(not(any(test, debug_assertions, feature = "test-rpc")))]
+            "test" => Err(
+                "`test` API is not available in release builds; rebuild with `--features test-rpc` if you really mean this"
+                    .into(),
+            ),
             "trace" => Ok(Trace),
             "txpool" => Ok(TxPool),
             "ethpubsub" => Ok(EthPubsub),
@@ -69,17 +80,25 @@ impl ApiSet {
     pub fn list_apis(&self) -> HashSet<Api> {
         match *self {
             ApiSet::List(ref apis) => apis.clone(),
-            ApiSet::All => [
-                Api::Mazze,
-                Api::Debug,
-                Api::Pubsub,
-                Api::Test,
-                Api::Trace,
-                Api::TxPool,
-            ]
-            .iter()
-            .cloned()
-            .collect(),
+            // `Api::Test` is included only on test/debug/feature-gated
+            // release builds. See docs/security-audit.md finding C-2.
+            ApiSet::All => {
+                let mut s: HashSet<Api> = [
+                    Api::Mazze,
+                    Api::Debug,
+                    Api::Pubsub,
+                    Api::Trace,
+                    Api::TxPool,
+                ]
+                .iter()
+                .cloned()
+                .collect();
+                #[cfg(any(test, debug_assertions, feature = "test-rpc"))]
+                {
+                    s.insert(Api::Test);
+                }
+                s
+            }
             ApiSet::Safe => [Api::Mazze, Api::Pubsub, Api::TxPool]
                 .iter()
                 .cloned()

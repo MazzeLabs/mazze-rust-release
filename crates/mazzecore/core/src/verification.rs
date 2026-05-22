@@ -30,12 +30,64 @@ use primitives::{
     Action, Block, BlockHeader, BlockReceipts, MerkleHash, Receipt,
     SignedTransaction, Transaction, TransactionWithSignature,
 };
+use lazy_static::lazy_static;
+use metrics::{register_meter_with_group, Meter};
 use rlp::Encodable;
 use rlp_derive::{RlpDecodable, RlpEncodable};
 use serde_derive::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::{collections::HashSet, convert::TryInto, sync::Arc};
 use unexpected::{Mismatch, OutOfBounds};
+
+// PoW gate observability. Every `verify_pow()` outcome bumps exactly one
+// of these counters. The ratio of bypassed vs verified is the canonical
+// signal for "is this node actually validating proof-of-work?".
+// See docs/chain-model.md §3 (PoW bypass table).
+lazy_static! {
+    static ref POW_VERIFIED_METER: Arc<dyn Meter> =
+        register_meter_with_group("pow", "verification_verified");
+    /// Bumped when `verify_pow()` returns `Ok(())` because catch-up
+    /// mode is enabled. Expected to fire during initial sync; an
+    /// elevated rate on a synced node indicates a stuck phase manager.
+    static ref POW_SKIPPED_CATCH_UP: Arc<dyn Meter> =
+        register_meter_with_group("pow", "verification_skipped_catch_up");
+    /// Bumped when the RandomX seed for this block's epoch is not yet
+    /// known (early-epoch case). Should only fire in the first
+    /// `RANDOMX_EPOCH_LENGTH` blocks of a fresh chain.
+    static ref POW_SKIPPED_ZERO_SEED: Arc<dyn Meter> =
+        register_meter_with_group(
+            "pow",
+            "verification_skipped_zero_seed_hash"
+        );
+    /// Bumped every time `set_catch_up_mode` flips the catch-up flag.
+    /// Operators can graph this — any non-sync-phase-triggered flip is
+    /// a tell. See docs/security-audit.md finding H-7.
+    static ref CATCH_UP_TRANSITIONS: Arc<dyn Meter> =
+        register_meter_with_group("pow", "catch_up_transitions_total");
+}
+
+/// External (sync graph) bypass counters. Defined here so all PoW
+/// bypass metrics live in one namespace.
+pub mod pow_metrics {
+    use super::*;
+
+    lazy_static! {
+        /// Bumped when consortium mode short-circuits `verify_header_pow`.
+        pub static ref SKIPPED_CONSORTIUM: Arc<dyn Meter> =
+            register_meter_with_group(
+                "pow",
+                "verification_skipped_consortium"
+            );
+        /// Bumped when a locally-mined block in `bench_mode` fails PoW
+        /// verification but is accepted anyway. A non-zero rate on a
+        /// production node is a *real* anomaly — investigate.
+        pub static ref BENCH_MODE_FAILURE: Arc<dyn Meter> =
+            register_meter_with_group(
+                "pow",
+                "verification_bench_mode_failure"
+            );
+    }
+}
 
 #[derive(Clone)]
 pub struct VerificationConfig {
@@ -313,23 +365,21 @@ impl VerificationConfig {
     pub fn verify_pow(
         &self, pow: &PowComputer, header: &mut BlockHeader, seed_hash: &H256,
     ) -> Result<(), Error> {
-        //If catch-up mode is enabled, skip PoW verification
+        // PoW bypass A: catch-up mode (bulk sync). See
+        // docs/chain-model.md §3. Counter is intentional — operators
+        // can observe sync progress + spot stuck catch-up modes.
         if self.catch_up_mode() {
-            // //If difficulty is zero, return error
-            // if header.difficulty().is_zero() {
-            //     return Err(From::from(BlockError::InvalidDifficulty(OutOfBounds {
-            //         min: Some(1.into()),
-            //         max: None,
-            //         found: 0.into(),
-            //     })));
-            // }
-
+            POW_SKIPPED_CATCH_UP.mark(1);
             return Ok(());
         }
 
-        // If seed hash is unknown (e.g., epoch seed not yet available from DB),
-        // skip PoW verification to avoid false negatives during era/epoch transitions
+        // PoW bypass B: zero seed hash. The RandomX seed for a block's
+        // epoch lives at `block(RANDOMX_EPOCH_LENGTH * (N - 1))`. For
+        // the first epoch no seed exists yet, so the validator can't
+        // recompute the PoW hash — accept the block. See
+        // docs/chain-model.md §3.
         if seed_hash.is_zero() {
+            POW_SKIPPED_ZERO_SEED.mark(1);
             return Ok(());
         }
 
@@ -349,6 +399,7 @@ impl VerificationConfig {
         let boundary = pow::difficulty_to_boundary(&difficulty);
 
         if quality <= boundary {
+            POW_VERIFIED_METER.mark(1);
             Ok(())
         } else {
             Err(From::from(BlockError::InvalidProofOfWork(OutOfBounds {
@@ -837,8 +888,29 @@ impl VerificationConfig {
         self.catch_up_mode.load(AtomicOrdering::SeqCst)
     }
 
+    /// Set the catch-up flag. **Only one legitimate caller exists**:
+    /// [`SynchronizationProtocolHandler::update_sync_phase`] in
+    /// `crates/mazzecore/core/src/sync/synchronization_protocol_handler.rs`.
+    /// That setter mirrors the sync-phase manager's view of the
+    /// catch-up state so [`Self::verify_pow`] can short-circuit PoW
+    /// checks during bulk header sync (see docs/chain-model.md §3
+    /// bypass table).
+    ///
+    /// **DO NOT** call from RPC handlers, peer message handlers, or
+    /// any other code path. A `true` here disables PoW verification
+    /// for every subsequent block until restored to `false`. Every
+    /// transition is metered as `pow.catch_up_transitions_total` so
+    /// operators can spot unexpected flips. See
+    /// docs/security-audit.md finding H-7.
     pub fn set_catch_up_mode(&self, mode: bool) {
-        self.catch_up_mode.store(mode, AtomicOrdering::SeqCst)
+        let prev = self.catch_up_mode.swap(mode, AtomicOrdering::SeqCst);
+        if prev != mode {
+            CATCH_UP_TRANSITIONS.mark(1);
+            log::info!(
+                "verify_pow catch_up_mode transition: {} -> {}",
+                prev, mode
+            );
+        }
     }
 }
 

@@ -374,6 +374,9 @@ impl StateTrait for State {
             // boundary instead of right around the RandomX epoch switch.
             let snapshot_height = self.height.clone().unwrap()
                 - self.delta_trie_height.unwrap() as u64;
+            SNAPSHOT_CREATION_TRIGGERED.inc(1);
+            let _t =
+                MeterTimer::time_func(SNAPSHOT_CREATION_TIMER.as_ref());
             self.manager.check_make_snapshot(
                 self.maybe_intermediate_trie.clone(),
                 self.intermediate_trie_root.clone(),
@@ -1000,8 +1003,29 @@ use crate::{
     StorageRootProof,
 };
 use fallible_iterator::FallibleIterator;
+use lazy_static::lazy_static;
 use mazze_internal_common::{StateRootAuxInfo, StateRootWithAuxInfo};
 use mazze_types::AddressWithSpace;
+use metrics::{
+    register_meter_with_group, Counter, CounterUsize, Meter, MeterTimer,
+};
+
+lazy_static! {
+    /// Latency of `check_make_snapshot` (the trigger path that promotes a
+    /// delta MPT into a new snapshot). Snapshot creation is the rarest
+    /// high-cost storage operation and was previously unmetered.
+    /// See docs/flow-audit.md G-ST-1.
+    static ref SNAPSHOT_CREATION_TIMER: Arc<dyn Meter> =
+        register_meter_with_group(
+            "timer",
+            "storage::check_make_snapshot",
+        );
+    static ref SNAPSHOT_CREATION_TRIGGERED: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "storage",
+            "snapshot_creation_triggered",
+        );
+}
 use primitives::{
     DeltaMptKeyPadding, EpochId, MerkleHash, MptValue, NodeMerkleTriplet,
     SkipInputCheck, StateRoot, StaticBool, StorageKey, StorageKeyWithSpace,

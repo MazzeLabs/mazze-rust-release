@@ -25,6 +25,7 @@
 //! Client-side stratum job dispatcher and mining notifier handler
 
 use crate::miner::work_notify::NotifyWork;
+use lazy_static::lazy_static;
 use log::{info, trace, warn};
 use mazze_stratum::{
     Error as StratumServiceError, JobDispatcher, PushWorkHandler,
@@ -34,6 +35,7 @@ use mazze_types::{H256, U256};
 use mazzecore::pow::{
     validate, PowComputer, ProofOfWorkProblem, ProofOfWorkSolution,
 };
+use metrics::{Counter, CounterUsize};
 use parking_lot::Mutex;
 use std::{
     collections::HashSet,
@@ -41,6 +43,21 @@ use std::{
     net::{AddrParseError, SocketAddr},
     sync::{mpsc, Arc},
 };
+
+lazy_static! {
+    /// Stratum share outcomes. accepted = nonce validated and forwarded;
+    /// duplicate = same nonce already accepted; invalid_pow = nonce did
+    /// not meet boundary; stale = problem no longer in recent window.
+    /// See docs/flow-audit.md G-MN-1.
+    static ref STRATUM_SHARE_ACCEPTED: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("stratum", "shares_accepted");
+    static ref STRATUM_SHARE_DUPLICATE: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("stratum", "shares_duplicate");
+    static ref STRATUM_SHARE_INVALID_POW: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("stratum", "shares_invalid_pow");
+    static ref STRATUM_SHARE_STALE: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("stratum", "shares_stale");
+}
 
 /// Configures stratum server options.
 #[derive(Debug, PartialEq, Clone)]
@@ -142,6 +159,7 @@ impl JobDispatcher for StratumJobDispatcher {
             for (pow_prob, solved_nonce) in probs.iter_mut() {
                 if pow_prob.block_hash == payload.pow_hash {
                     if solved_nonce.contains(&sol.nonce) {
+                        STRATUM_SHARE_DUPLICATE.inc(1);
                         return Err(StratumServiceError::InvalidSolution(
                             format!(
                                 "Problem already solved with nonce = {}! worker_id = {}",
@@ -150,12 +168,14 @@ impl JobDispatcher for StratumJobDispatcher {
                         ));
                     } else if validate(self.pow.clone(), pow_prob, &sol) {
                         solved_nonce.insert(sol.nonce);
+                        STRATUM_SHARE_ACCEPTED.inc(1);
                         info!(
                             "Stratum worker {} mined a block!",
                             payload.worker_id
                         );
                         found = true;
                     } else {
+                        STRATUM_SHARE_INVALID_POW.inc(1);
                         return Err(StratumServiceError::InvalidSolution(
                             format!(
                                 "Incorrect Nonce! worker_id = {}!",
@@ -167,6 +187,7 @@ impl JobDispatcher for StratumJobDispatcher {
                 }
             }
             if !found {
+                STRATUM_SHARE_STALE.inc(1);
                 return Err(StratumServiceError::InvalidSolution(
                     format!(
                         "Solution for a stale job! worker_id = {}",

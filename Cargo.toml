@@ -30,6 +30,7 @@ members = [
     "crates/dbs/storage",
     "crates/mazzecore/vm-interpreter",
     "crates/mazzecore/vm-types",
+    "crates/mazzecore/eth-vm",
     "crates/util/mazze-vm-tracer-derive",
     "crates/util/dag",
     "crates/util/delegate",
@@ -72,8 +73,12 @@ license-file = "LICENSE"
 [profile.test]
 debug-assertions = true
 
+# M-4 migration: replaced the abandoned `parity-secp256k1` fork with
+# the upstream `rust-bitcoin/rust-secp256k1` crate workspace-wide.
+# Compile the now-canonical `secp256k1` at -O3 in tests so the FFI
+# overhead doesn't dominate test runtime.
 [profile.test.package]
-parity-secp256k1 = { opt-level = 3 }
+secp256k1 = { opt-level = 3 }
 
 [profile.bench]
 debug-assertions = true
@@ -88,5 +93,11 @@ debug-assertions = true
 serde = { version = "1.0", features = ["derive", "alloc"] }
 serde_json = "1.0"
 
-alloy-primitives = "0.7.1"
-alloy-rpc-types-trace = { git = "https://github.com/alloy-rs/alloy", rev = "4e22b9e" }
+# Alloy modernization (in progress, multi-step):
+# Step 1 (done): bump from the early-2024 git rev 4e22b9e (which pinned
+# c-kzg 1.x via alloy-consensus) to the crates.io 1.6/2.0 releases.
+# These resolve the c-kzg 1.x conflict that was blocking revm 40.
+# Step 2 (pending): adjust API imports in geth-tracer, execute-helper,
+# mazzecore-core, and client to match the alloy 1.x/2.x module layout.
+alloy-primitives = "1.6"
+alloy-rpc-types-trace = "2.0"

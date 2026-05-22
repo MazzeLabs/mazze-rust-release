@@ -17,8 +17,9 @@ use mazze_internal_common::{
 };
 use mazze_parameters::sync::CATCH_UP_EPOCH_LAG_THRESHOLD;
 use mazze_types::H256;
+use metrics::{Counter, CounterUsize, Gauge, GaugeUsize};
 use network::NetworkContext;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::{
     collections::HashMap,
     sync::{
@@ -28,6 +29,21 @@ use std::{
     thread,
     time::{self, Instant},
 };
+
+lazy_static! {
+    /// Current sync phase as an ordinal (matches SyncPhaseType discriminant).
+    /// 0 = CatchUpRecoverBlockHeaderFromDB, ..., 5 = Normal.
+    /// See docs/flow-audit.md G-CC-3.
+    static ref SYNC_PHASE_ORDINAL: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("sync_phase", "current_ordinal");
+    /// Number of phase transitions since startup.
+    static ref SYNC_PHASE_TRANSITIONS: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("sync_phase", "transitions");
+    /// Duration in seconds spent in the previous phase (updated on each
+    /// transition).
+    static ref SYNC_PHASE_LAST_DURATION_SECS: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("sync_phase", "last_phase_secs");
+}
 
 /// Both Archive and Full node go through the following phases:
 ///     CatchUpRecoverBlockHeaderFromDB --> CatchUpSyncBlockHeader -->
@@ -81,7 +97,29 @@ impl SynchronizationPhaseManagerInner {
     pub fn get_phase(
         &self, phase_type: SyncPhaseType,
     ) -> Arc<dyn SynchronizationPhaseTrait> {
-        self.phases.get(&phase_type).unwrap().clone()
+        if let Some(p) = self.phases.get(&phase_type) {
+            return p.clone();
+        }
+        // Phases are populated at startup via register_phase(); a miss here
+        // means the manager was constructed without all phases registered.
+        // Fall back to the conservative initial-recovery phase rather than
+        // crashing the protocol handler. If even that is missing we have no
+        // safe phase to run with — panic with a clear diagnostic.
+        error!(
+            "SynchronizationPhaseManager: requested phase {:?} not registered; \
+             falling back to CatchUpRecoverBlockHeaderFromDB",
+            phase_type
+        );
+        self.phases
+            .get(&SyncPhaseType::CatchUpRecoverBlockHeaderFromDB)
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!(
+                    "SynchronizationPhaseManager has no phases registered; \
+                     cannot recover (requested={:?})",
+                    phase_type
+                )
+            })
     }
 
     pub fn get_current_phase(&self) -> Arc<dyn SynchronizationPhaseTrait> {
@@ -104,6 +142,9 @@ impl SynchronizationPhaseManagerInner {
 
 pub struct SynchronizationPhaseManager {
     inner: RwLock<SynchronizationPhaseManagerInner>,
+    /// Instant at which the current phase was entered. Used to compute
+    /// SYNC_PHASE_LAST_DURATION_SECS on each transition.
+    phase_started_at: Mutex<Instant>,
 }
 
 impl SynchronizationPhaseManager {
@@ -113,10 +154,12 @@ impl SynchronizationPhaseManager {
         sync_graph: SharedSynchronizationGraph,
         state_sync: Arc<SnapshotChunkSync>, consensus: Arc<ConsensusGraph>,
     ) -> Self {
+        SYNC_PHASE_ORDINAL.update(initial_phase_type as usize);
         let sync_manager = SynchronizationPhaseManager {
             inner: RwLock::new(SynchronizationPhaseManagerInner::new(
                 initial_phase_type,
             )),
+            phase_started_at: Mutex::new(Instant::now()),
         };
 
         sync_manager.register_phase(Arc::new(
@@ -160,6 +203,17 @@ impl SynchronizationPhaseManager {
         &self, phase_type: SyncPhaseType, io: &dyn NetworkContext,
         sync_handler: &SynchronizationProtocolHandler,
     ) {
+        // Record how long we spent in the previous phase, then stamp the
+        // new one.
+        {
+            let mut started = self.phase_started_at.lock();
+            let elapsed = started.elapsed().as_secs() as usize;
+            SYNC_PHASE_LAST_DURATION_SECS.update(elapsed);
+            *started = Instant::now();
+        }
+        SYNC_PHASE_ORDINAL.update(phase_type as usize);
+        SYNC_PHASE_TRANSITIONS.inc(1);
+
         self.inner.write().change_phase_to(phase_type);
         let current_phase = self.get_current_phase();
         current_phase.start(io, sync_handler);
@@ -468,12 +522,23 @@ impl SynchronizationPhaseTrait for CatchUpFillBlockBodyPhase {
             // `state_availability_boundary` to
             // `[cur_era_stable_height, cur_era_stable_height]`.
             if let Some(epoch_synced) = &*sync_handler.synced_epoch_id.lock() {
-                let epoch_synced_height = self
+                let epoch_synced_height = match self
                     .graph
                     .data_man
                     .block_header_by_hash(epoch_synced)
-                    .expect("Header for checkpoint exists")
-                    .height();
+                {
+                    Some(h) => h.height(),
+                    None => {
+                        error!(
+                            "CatchUpFillBlockBodyPhase: missing header for \
+                             synced checkpoint {:?}; aborting phase start so \
+                             the sync state machine can re-derive the \
+                             checkpoint",
+                            epoch_synced
+                        );
+                        return;
+                    }
+                };
                 *self.graph.data_man.state_availability_boundary.write() =
                     StateAvailabilityBoundary::new(
                         *epoch_synced,
@@ -489,12 +554,21 @@ impl SynchronizationPhaseTrait for CatchUpFillBlockBodyPhase {
             } else {
                 let cur_era_stable_hash =
                     self.graph.data_man.get_cur_consensus_era_stable_hash();
-                let cur_era_stable_height = self
+                let cur_era_stable_height = match self
                     .graph
                     .data_man
                     .block_header_by_hash(&cur_era_stable_hash)
-                    .expect("stable era block header must exist")
-                    .height();
+                {
+                    Some(h) => h.height(),
+                    None => {
+                        error!(
+                            "CatchUpFillBlockBodyPhase: missing stable era \
+                             header {:?}; aborting phase start",
+                            cur_era_stable_hash
+                        );
+                        return;
+                    }
+                };
                 *self.graph.data_man.state_availability_boundary.write() =
                     StateAvailabilityBoundary::new(
                         cur_era_stable_hash,
@@ -503,6 +577,7 @@ impl SynchronizationPhaseTrait for CatchUpFillBlockBodyPhase {
                         full_state_space,
                     );
             }
+            self.graph.data_man.sample_state_availability_metrics();
             self.graph.inner.write().block_to_fill_set =
                 self.graph.consensus.get_blocks_needing_bodies();
             sync_handler.request_block_bodies(io);

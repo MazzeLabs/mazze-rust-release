@@ -787,10 +787,16 @@ impl RpcImpl {
             .latest_snapshot_epoch_height()
             .unwrap_or_default()
             .into();
+        let earliest_snapshot_epoch_number: U64 = storage_manager
+            .earliest_snapshot_epoch_height()
+            .unwrap_or_default()
+            .into();
         let available_snapshot_count_value =
             storage_manager.available_snapshot_count() as u64;
         let available_snapshot_count: U64 =
             available_snapshot_count_value.into();
+        let keeps_pre_stable_snapshot =
+            storage_manager.keeps_pre_stable_snapshot();
 
         let (era_epoch_count, era_start_epoch_number) = {
             let inner = consensus_graph.inner.read();
@@ -846,6 +852,8 @@ impl RpcImpl {
                 latest_snapshot_epoch_number,
                 available_snapshot_count,
                 serving: available_snapshot_count_value != 0,
+                earliest_snapshot_epoch_number,
+                keeps_pre_stable_snapshot,
             },
             era: RpcEraProgress {
                 number: era_number.into(),
@@ -976,21 +984,20 @@ impl RpcImpl {
     pub fn txpool_transaction_by_address_and_nonce(
         &self, address: RpcAddress, nonce: U256,
     ) -> RpcResult<Option<RpcTransaction>> {
-        let tx = self
-            .tx_pool
-            .get_transaction_by_address2nonce(
-                Address::from(address).with_native_space(),
-                nonce,
-            )
-            .map(|tx| {
-                RpcTransaction::from_signed(
-                    &tx,
-                    None,
-                    *self.network.get_network_type(),
-                )
-                .unwrap() // TODO check the unwrap()
-            });
-        Ok(tx)
+        let tx = match self.tx_pool.get_transaction_by_address2nonce(
+            Address::from(address).with_native_space(),
+            nonce,
+        ) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        let rpc_tx = RpcTransaction::from_signed(
+            &tx,
+            None,
+            *self.network.get_network_type(),
+        )
+        .map_err(RpcError::invalid_params)?;
+        Ok(Some(rpc_tx))
     }
 
     pub fn txpool_content(

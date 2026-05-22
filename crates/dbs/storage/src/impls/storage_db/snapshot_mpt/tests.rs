@@ -2,65 +2,15 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-const DB_PATH: &'static str = "unspecified";
-const MPT_DB_PATH: &'static str = "unspecified";
-
-#[test]
-fn check_snapshot_mpt_integrity() {
-    if DB_PATH == "unspecified" {
-        return;
-    }
-    let db_path = Path::new(DB_PATH);
-    let snapshot_db = open_snapshot_db_for_testing(
-        db_path,
-        /* readonly = */ true,
-        Path::new(MPT_DB_PATH),
-    )
-    .unwrap();
-    let mut key_value_iter = snapshot_db.snapshot_kv_iterator().unwrap().take();
-    let total_kvs = check_key_value_load(
-        &snapshot_db,
-        key_value_iter.iter_range(&[], None).unwrap().take(),
-        /* check_value = */ true,
-    )
-    .unwrap();
-    println!("verified {} key values", total_kvs);
-}
-
-#[test]
-fn check_snapshot_mpt_root() {
-    if DB_PATH == "unspecified" {
-        return;
-    }
-    let db_path = Path::new(DB_PATH);
-    let snapshot_db = open_snapshot_db_for_testing(
-        db_path,
-        /* readonly = */ true,
-        Path::new(MPT_DB_PATH),
-    )
-    .unwrap();
-    let mut key_value_iter = snapshot_db.snapshot_kv_iterator().unwrap().take();
-    let mut kv_iter = key_value_iter.iter_range(&[], None).unwrap().take();
-
-    let merkle_root =
-        (&snapshot_db.open_snapshot_mpt_shared().unwrap()).get_merkle_root();
-
-    let mut mpt_kvs = vec![];
-    while let Ok(Some((key, value))) = kv_iter.next() {
-        if value.len() == 0 {
-            println!("snapshot db value can't be 0");
-            assert!(false);
-        }
-        mpt_kvs.push((key, value));
-    }
-
-    let mut new_mpt = FakeSnapshotMptDb::new_discard_write();
-    let new_merkle_root = MptMerger::new(None, &mut new_mpt)
-        .merge(&DumpedMptKvIterator { kv: mpt_kvs })
-        .unwrap();
-
-    assert_eq!(merkle_root, new_merkle_root);
-}
+// The three former `check_snapshot_mpt_*` debug utilities relied on the
+// SQLite-backed `open_snapshot_db_for_testing` helper. They guarded with
+// `if DB_PATH == "unspecified" { return; }` and therefore never did any
+// work on a normal `cargo test` run — they only fired when a developer
+// hand-edited the constants to point at an on-disk DB. They were removed
+// along with the SQLite parallel implementation
+// (see ../../../../../docs/storage-architecture.md). `verify_snapshot_db`
+// below remains as the real consumer surface (called from
+// `crates/dbs/storage/src/tests/snapshot.rs`).
 
 pub struct MptIter<'a> {
     cursor: MptCursor<
@@ -199,29 +149,18 @@ where
     assert_eq!(no_more_key_value, None);
 }
 
-#[test]
-fn check_snapshot_mpt_by_iter() {
-    if DB_PATH == "unspecified" {
-        return;
-    }
-    let db_path = Path::new(DB_PATH);
-    let snapshot_db = open_snapshot_db_for_testing(
-        db_path,
-        /* readonly = */ true,
-        Path::new(MPT_DB_PATH),
-    )
-    .unwrap();
-    verify_snapshot_db(&snapshot_db)
-}
+// The former `check_snapshot_mpt_by_iter` test relied on the
+// SQLite-backed `open_snapshot_db_for_testing`. It guarded with
+// `if DB_PATH == "unspecified" { return; }` and never did any work on a
+// normal `cargo test` run. Removed along with the SQLite parallel backend.
+// `verify_snapshot_db` above is the real consumer surface used by
+// `crates/dbs/storage/src/tests/snapshot.rs`.
 
 use crate::{
     impls::{
         errors::*,
         merkle_patricia_trie::{mpt_cursor::*, MptMerger, *},
-        storage_db::{
-            snapshot_debug::check_key_value_load,
-            snapshot_kv_db_sqlite::test_lib::open_snapshot_db_for_testing,
-        },
+        storage_db::snapshot_debug::check_key_value_load,
     },
     storage_db::{
         key_value_db::KeyValueDbIterableTrait,

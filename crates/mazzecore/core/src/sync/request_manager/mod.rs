@@ -1087,21 +1087,25 @@ impl RequestManager {
 pub fn try_get_block_hashes(request: &Box<dyn Request>) -> Option<&Vec<H256>> {
     match request.msg_id() {
         msgid::GET_BLOCKS | msgid::GET_CMPCT_BLOCKS => {
-            let hashes = if let Some(req) =
-                request.as_any().downcast_ref::<GetBlocks>()
-            {
-                &req.hashes
+            if let Some(req) = request.as_any().downcast_ref::<GetBlocks>() {
+                Some(&req.hashes)
             } else if let Some(req) =
                 request.as_any().downcast_ref::<GetCompactBlocks>()
             {
-                &req.hashes
+                Some(&req.hashes)
             } else {
-                panic!(
-                    "MessageId and Request not match, request={:?}",
+                // msg_id() claims this is a GetBlocks/GetCompactBlocks
+                // request but the concrete type is neither. This indicates a
+                // programming bug in the request constructor — log loudly
+                // and return None so callers treat it as "no hashes" rather
+                // than crashing the request manager.
+                error!(
+                    "msg_id/Request type mismatch in try_get_block_hashes: \
+                     request={:?}",
                     request
                 );
-            };
-            Some(hashes)
+                None
+            }
         }
         _ => None,
     }

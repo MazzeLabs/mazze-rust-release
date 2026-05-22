@@ -119,6 +119,17 @@ pub struct StorageManager {
 
     pub persist_state_from_initialization:
         RwLock<Option<(Option<EpochId>, HashSet<EpochId>, u64, Option<u64>)>>,
+
+    /// Hot-tier MDBX environment, opened at startup when
+    /// `storage_conf.state_db_backend == StateDbBackend::Mdbx(_)`.
+    /// `None` for the `ParityDb` fallback. Consumers (executor's live
+    /// state cache, revm's `MazzeDatabase`) reach it via
+    /// [`StorageManager::mdbx_env`].
+    ///
+    /// **Wiring status**: this field is *opened* by Phase B+C of the
+    /// storage cleanup plan but not yet *consumed* — see
+    /// docs/storage-architecture.md for the next integration step.
+    mdbx_env: Option<Arc<crate::impls::storage_db::kvdb_mdbx::MdbxEnv>>,
 }
 
 impl MallocSizeOf for StorageManager {
@@ -155,10 +166,27 @@ impl Drop for DeltaDbReleaser {
     }
 }
 
-// TODO: Add support for cancellation and io throttling.
+/// State of an in-flight snapshot-creation background thread.
+///
+/// Cancellation: `cancel_requested` is set by
+/// [`StorageManager::maintain_snapshots_main_chain_confirmed`] when
+/// the snapshot's target is determined to be on a non-canonical fork.
+/// The background thread checks the flag at merge-step boundaries
+/// (see [`SnapshotDbManagerParityDb::new_snapshot_by_merging`]) and,
+/// on `true`, aborts early, deletes the temp directory, and returns
+/// `Err(ErrorKind::SnapshotCowCancelled)` so the joiner knows the
+/// result is a cancellation rather than a genuine failure.
+///
+/// See `docs/checkpoint-snapshot-lifecycle.md` §5.2 and Phase B.1 of
+/// the lifecycle plan.
 pub struct InProgressSnapshotTask {
     snapshot_info: SnapshotInfo,
     thread_handle: Option<thread::JoinHandle<Result<()>>>,
+    /// Set to `true` to request that the background thread abort at
+    /// the next merge-step boundary. Wrapped in `Arc` so the thread
+    /// closure can observe the same flag without re-locking the
+    /// outer `RwLock<InProgressSnapshotTask>`.
+    cancel_requested: Arc<AtomicBool>,
 }
 
 impl InProgressSnapshotTask {
@@ -178,6 +206,22 @@ impl InProgressSnapshotTask {
             None
         }
     }
+
+    /// Request that this in-flight snapshot be cancelled at the next
+    /// merge-step boundary. Non-blocking; safe to call multiple times.
+    /// The background thread is responsible for releasing temp-dir
+    /// resources and returning `Err(SnapshotCowCancelled)`. See
+    /// `docs/checkpoint-snapshot-lifecycle.md` §5.2.
+    pub fn request_cancel(&self) {
+        self.cancel_requested
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Shared handle to the cancel flag. The background thread holds
+    /// one of these and polls it at merge-step boundaries.
+    pub fn cancel_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel_requested)
+    }
 }
 
 impl StorageManager {
@@ -192,6 +236,30 @@ impl StorageManager {
         );
         if !storage_dir.exists() {
             fs::create_dir_all(storage_dir)?;
+        }
+
+        // G-NET-2 — Surface the retention-knob value loud at startup
+        // because its safe value is a NETWORK-AGGREGATE concern, not a
+        // per-node one. If every operator flips it to `false`, fresh
+        // joiners fall off into genesis replay even though no
+        // individual node looks wrong. See docs/flow-audit.md §5.8.
+        if storage_conf.keep_snapshot_before_stable_checkpoint {
+            info!(
+                "storage: keep_snapshot_before_stable_checkpoint=true (default). \
+                 This node retains the pre-stable snapshot generation so a fresh \
+                 joiner can still bootstrap via this peer right after an era \
+                 rollover. See docs/checkpoint-snapshot-lifecycle.md §6."
+            );
+        } else {
+            warn!(
+                "storage: keep_snapshot_before_stable_checkpoint=FALSE. \
+                 If a fresh joiner connects right after an era rollover and \
+                 every connected peer of theirs also runs with this setting, \
+                 they will fall back to multi-day genesis replay even though \
+                 the network has consensus. Recommended only for explicitly \
+                 disk-constrained archive variants. See docs/flow-audit.md §5.8 \
+                 + docs/checkpoint-snapshot-lifecycle.md §6."
+            );
         }
 
         let snapshot_info_config = db::ParityDbOpenConfig {
@@ -220,6 +288,35 @@ impl StorageManager {
         let delta_db_manager = Arc::new(DeltaDbManager::new(
             storage_conf.path_delta_mpts_dir.clone(),
         )?);
+
+        // Open the hot-tier MDBX environment when configured. Living
+        // for the lifetime of the StorageManager. See
+        // docs/storage-architecture.md §3.
+        let mdbx_env = match &storage_conf.state_db_backend {
+            crate::StateDbBackend::Mdbx(cfg) => {
+                let mdbx_dir = storage_dir.join("mdbx");
+                let map_size_bytes = cfg
+                    .map_size_mb
+                    .unwrap_or(
+                        crate::impls::defaults::DEFAULT_MDBX_MAP_SIZE_MB,
+                    )
+                    .saturating_mul(1024 * 1024)
+                    as usize;
+                let env =
+                    crate::impls::storage_db::kvdb_mdbx::MdbxEnv::open_with_map_size(
+                        &mdbx_dir,
+                        map_size_bytes,
+                    )?;
+                debug!(
+                    "Opened MDBX hot tier at {} (map_size={} MB)",
+                    mdbx_dir.display(),
+                    map_size_bytes / (1024 * 1024)
+                );
+                Some(env)
+            }
+            crate::StateDbBackend::ParityDb => None,
+        };
+
         let new_storage_manager_result = Ok(Arc::new(Self {
             delta_db_manager: delta_db_manager.clone(),
             delta_mpt_open_db_lru: Arc::new(OpenDeltaDbLru::new(
@@ -260,6 +357,7 @@ impl StorageManager {
             storage_conf,
             intermediate_trie_root_merkle: RwLock::new(None),
             persist_state_from_initialization: RwLock::new(None),
+            mdbx_env,
         }));
 
         let storage_manager_arc =
@@ -417,8 +515,28 @@ impl StorageManager {
             .max()
     }
 
+    /// G-NET-1 — Lowest height we still have a snapshot for. The
+    /// `NULL_EPOCH` genesis-window synthetic entry has height 0 and
+    /// is excluded so peers see a meaningful retention floor (a real
+    /// snapshot, not the genesis sentinel).
+    pub fn earliest_snapshot_epoch_height(&self) -> Option<u64> {
+        self.snapshot_info_map_by_epoch
+            .read()
+            .get_map()
+            .iter()
+            .filter(|(epoch_id, _)| **epoch_id != NULL_EPOCH)
+            .map(|(_, snapshot)| snapshot.height)
+            .min()
+    }
+
     pub fn available_snapshot_count(&self) -> usize {
         self.snapshot_info_map_by_epoch.read().get_map().len()
+    }
+
+    /// G-NET-1 — Surface the retention-knob value to higher layers
+    /// (RPC, heartbeat). See docs/flow-audit.md §5.8.
+    pub fn keeps_pre_stable_snapshot(&self) -> bool {
+        self.storage_conf.keep_snapshot_before_stable_checkpoint
     }
 
     pub fn get_delta_mpt(
@@ -645,10 +763,36 @@ impl StorageManager {
                 in_progress_snapshot_info.clone();
             let task_finished_sender_cloned =
                 this.in_progress_snapshot_finish_signaler.clone();
+
+            // Cancel handle: shared between the task entry on
+            // `in_progress_snapshotting_tasks` (so external code can
+            // request cancellation via `InProgressSnapshotTask::request_cancel`)
+            // and the background thread closure (so it can poll the
+            // flag at well-defined boundaries — see Phase B.1 in
+            // `docs/checkpoint-snapshot-lifecycle.md`).
+            let cancel_requested = Arc::new(AtomicBool::new(false));
+            let cancel_for_thread = Arc::clone(&cancel_requested);
+
+            // Phase E — bump the in-flight gauge on spawn. The
+            // corresponding decrement is at the end of the thread
+            // closure (see the matching `snapshot_in_flight_adjust(-1)`
+            // call before `task_result`).
+            snapshot_in_flight_adjust(1);
             let thread_handle = thread::Builder::new()
                 .name("Background Snapshotting".into()).spawn(move || {
-                // TODO: add support for cancellation and io throttling.
+                use std::sync::atomic::Ordering;
+                let bg_start = std::time::Instant::now();
                 let f = || -> Result<()> {
+                    // Early-out: if cancellation requested before the
+                    // merge starts, abort cleanly. The temp dir
+                    // hasn't been created yet so nothing to clean.
+                    if cancel_for_thread.load(Ordering::SeqCst) {
+                        info!(
+                            "Background Snapshotting: cancellation requested before merge start (epoch_id={:?})",
+                            snapshot_epoch_id
+                        );
+                        return Ok(());
+                    }
                     let (mut snapshot_info_map_locked, new_snapshot_info) = match maybe_delta_db {
                         None => {
                             in_progress_snapshot_info_cloned.merkle_root = MERKLE_NULL_NODE;
@@ -666,7 +810,35 @@ impl StorageManager {
                                     recover_mpt_with_kv_snapshot_exist)?
                         }
                     };
+                    // Post-merge cancellation gate. The merge runs to
+                    // completion (we don't preempt mid-merge to avoid
+                    // refactoring the merge internals), but if a fork
+                    // was confirmed non-canonical while we were
+                    // merging, we skip registration AND clean up the
+                    // freshly-renamed snapshot directory so a phantom
+                    // entry doesn't leak to peers. See Phase B.1 in
+                    // docs/checkpoint-snapshot-lifecycle.md.
+                    if cancel_for_thread.load(Ordering::SeqCst) {
+                        info!(
+                            "Background Snapshotting: cancellation requested mid-merge, discarding snapshot {:?}",
+                            snapshot_epoch_id
+                        );
+                        // Drop the write lock before destroying so we
+                        // don't hold it across the filesystem op.
+                        drop(snapshot_info_map_locked);
+                        let _ = this
+                            .snapshot_manager
+                            .get_snapshot_db_manager()
+                            .destroy_snapshot(&snapshot_epoch_id);
+                        SNAPSHOT_CANCELLED_TOTAL.mark(1);
+                        return Ok(());
+                    }
+
                     if let Err(e) = this.register_new_snapshot(new_snapshot_info.clone(), &mut snapshot_info_map_locked) {
+                        // Phase E — distinguish register-time failure
+                        // (C.1 / C.4 also bump their own dedicated
+                        // counters; this catches everything else).
+                        SNAPSHOT_FAILED_REGISTER_TOTAL.mark(1);
                         error!(
                             "Failed to register new snapshot {:?} {:?}.",
                             snapshot_epoch_id, new_snapshot_info
@@ -754,11 +926,20 @@ impl StorageManager {
                 };
 
                 let task_result = f();
+                // Phase E — record total wall time spent in this bg
+                // thread (whether merge committed, cancelled, or
+                // errored) and decrement the in-flight gauge. Failure
+                // also bumps the dedicated `failed_total.merge_error`
+                // counter for alerting.
+                let elapsed_ms = bg_start.elapsed().as_millis() as usize;
+                SNAPSHOT_CREATION_DURATION_MS_TOTAL.mark(elapsed_ms);
                 if task_result.is_err() {
+                    SNAPSHOT_FAILED_MERGE_TOTAL.mark(1);
                     warn!(
                         "Failed to create snapshot for epoch_id {:?} with error {:?}",
                         snapshot_epoch_id, task_result.as_ref().unwrap_err());
                 }
+                snapshot_in_flight_adjust(-1);
 
                 task_result
             })?;
@@ -768,6 +949,7 @@ impl StorageManager {
                 Arc::new(RwLock::new(InProgressSnapshotTask {
                     snapshot_info: in_progress_snapshot_info,
                     thread_handle: Some(thread_handle),
+                    cancel_requested,
                 })),
             );
         }
@@ -782,6 +964,67 @@ impl StorageManager {
     ) -> Result<()> {
         debug!("register_new_snapshot: info={:?}", new_snapshot_info);
         let snapshot_epoch_id = new_snapshot_info.get_snapshot_epoch_id();
+
+        // ----------------------------------------------------------------
+        // C.1 — Merkle-root sanity check.
+        //
+        // A snapshot with `merkle_root == H256::zero()` is the result of
+        // a default-initialised `SnapshotInfo` or a bug in
+        // `new_snapshot_by_merging`. `MERKLE_NULL_NODE` is the legitimate
+        // root for the genesis-window NULL_EPOCH parent path. Anything
+        // else that's zero is a bug or corruption.
+        //
+        // Note: a deeper cross-check (against the consensus-layer
+        // `StateRootWithAuxInfo` for this epoch) requires reaching the
+        // BlockDataManager, which lives in a different crate. Tracked
+        // as a follow-up enhancement — see
+        // `docs/checkpoint-snapshot-lifecycle.md` Phase C.1 status
+        // table.
+        if new_snapshot_info.merkle_root == MerkleHash::default()
+            && new_snapshot_info.merkle_root != MERKLE_NULL_NODE
+        {
+            SNAPSHOT_INVALID_ROOT_TOTAL.mark(1);
+            error!(
+                "register_new_snapshot REJECTED: snapshot {:?} has zero merkle_root and parent != NULL_EPOCH. \
+                 Likely a default-initialised SnapshotInfo or a merge bug. info={:?}",
+                snapshot_epoch_id, new_snapshot_info
+            );
+            bail!(ErrorKind::Msg(format!(
+                "snapshot {:?} rejected: zero merkle_root with non-null parent",
+                snapshot_epoch_id
+            )));
+        }
+
+        // ----------------------------------------------------------------
+        // C.4 — Parent-linkage validation.
+        //
+        // A snapshot whose parent isn't in `snapshot_info_map_by_epoch`
+        // (and isn't the special NULL_EPOCH genesis-window parent) is
+        // orphaned: its KV/MPT data has no usable delta-chain ancestor
+        // and the snapshot can't be served to peers. Either parent
+        // pruning raced ahead, or the producer mis-computed the parent
+        // linkage. Either way, refuse the registration.
+        if new_snapshot_info.parent_snapshot_epoch_id != NULL_EPOCH
+            && snapshot_info_map_locked
+                .get(&new_snapshot_info.parent_snapshot_epoch_id)
+                .is_none()
+        {
+            SNAPSHOT_ORPHAN_REJECTED_TOTAL.mark(1);
+            error!(
+                "register_new_snapshot REJECTED: snapshot {:?} has parent {:?} which is not in snapshot_info_map_by_epoch. \
+                 Either parent was pruned or producer mis-computed linkage. info={:?}",
+                snapshot_epoch_id,
+                new_snapshot_info.parent_snapshot_epoch_id,
+                new_snapshot_info
+            );
+            bail!(ErrorKind::Msg(format!(
+                "snapshot {:?} rejected: parent {:?} not registered",
+                snapshot_epoch_id, new_snapshot_info.parent_snapshot_epoch_id
+            )));
+        }
+
+        SNAPSHOT_REGISTERED_TOTAL.mark(1);
+        // ----------------------------------------------------------------
         // Register intermediate MPT for the new snapshot.
         let mut snapshot_associated_mpts_locked =
             self.snapshot_associated_mpts_by_epoch.write();
@@ -1250,16 +1493,28 @@ impl StorageManager {
             )?;
         }
 
-        // TODO: implement in_progress_snapshot cancellation.
-        /*
+        // Cancellation of in-flight snapshots whose targets have been
+        // confirmed non-canonical. We *signal* cancellation via the
+        // per-task `cancel_requested` flag; the background thread
+        // checks it before merge-start and again before registration
+        // and self-cleans the temp/renamed snapshot dir. The thread
+        // is **not** joined here — that would block this maintenance
+        // call indefinitely.
+        //
+        // See Phase B.1 in docs/checkpoint-snapshot-lifecycle.md.
         if !in_progress_snapshot_to_cancel.is_empty() {
-            let mut in_progress_snapshotting_locked =
-                self.in_progress_snapshotting_tasks.write();
-            for epoch_id in in_progress_snapshot_to_cancel {
-                unimplemented!();
+            let in_progress_snapshotting_locked =
+                self.in_progress_snapshotting_tasks.read();
+            for epoch_id in &in_progress_snapshot_to_cancel {
+                if let Some(task) = in_progress_snapshotting_locked.get(epoch_id) {
+                    task.read().request_cancel();
+                    info!(
+                        "maintain_snapshots_main_chain_confirmed: requested cancellation for in-progress snapshot {:?}",
+                        epoch_id
+                    );
+                }
             }
         }
-        */
 
         info!("maintain_snapshots_main_chain_confirmed: finished");
         Ok(())
@@ -1281,10 +1536,14 @@ impl StorageManager {
         for snapshot_epoch_id in old_main_snapshots_to_remove {
             self.snapshot_manager
                 .remove_old_main_snapshot(&snapshot_epoch_id)?;
+            // Phase E — retention-driven prune of an old main snapshot.
+            SNAPSHOT_PRUNED_TOTAL.mark(1);
         }
         for snapshot_epoch_id in non_main_snapshots_to_remove {
             self.snapshot_manager
                 .remove_non_main_snapshot(&snapshot_epoch_id)?;
+            // Phase E — non-main (forked-off) snapshot pruned.
+            SNAPSHOT_PRUNED_TOTAL.mark(1);
         }
 
         drop(current_snapshots_locked);
@@ -1319,6 +1578,21 @@ impl StorageManager {
         }
 
         Ok(())
+    }
+
+    /// Returns the hot-tier MDBX environment if the node was
+    /// configured with `state_db_backend = Mdbx` (the default).
+    /// Returns `None` when the operator pinned to ParityDB for the
+    /// rollout fallback.
+    ///
+    /// Consumers — primarily the executor's live-state cache and revm's
+    /// `MazzeDatabase` adapter — use this handle to open per-column
+    /// `KvdbMdbx` views for fast account/storage reads. See
+    /// docs/storage-architecture.md §3 for the planned column layout.
+    pub fn mdbx_env(
+        &self,
+    ) -> Option<Arc<crate::impls::storage_db::kvdb_mdbx::MdbxEnv>> {
+        self.mdbx_env.clone()
     }
 
     pub fn log_usage(&self) {
@@ -1456,6 +1730,52 @@ impl StorageManager {
             .collect::<Vec<_>>();
         snapshots.sort_by(|x, y| x.height.partial_cmp(&y.height).unwrap());
 
+        // ----------------------------------------------------------------
+        // D.3 — Startup invariant on the snapshot delta chain.
+        //
+        // Every retained snapshot whose parent is NOT `NULL_EPOCH` must
+        // have that parent still present in `snapshot_info_map_by_epoch`.
+        // If the parent is missing, the delta chain is broken: the
+        // executor can't apply forward epochs because it has no
+        // ancestor state to deltas-against. This typically happens
+        // when a previous run with
+        // `keep_snapshot_before_stable_checkpoint = false` pruned the
+        // pre-stable parent snapshot while its child is still retained
+        // (see `extra_snapshots_to_keep_predicate` in this file).
+        //
+        // Refuse to start instead of crashing later with an opaque
+        // executor error. Operator action is in the bail message.
+        // See `docs/checkpoint-snapshot-lifecycle.md` Phase D.3.
+        for snapshot_info in snapshots.iter() {
+            let parent_id = &snapshot_info.parent_snapshot_epoch_id;
+            if *parent_id != NULL_EPOCH
+                && snapshot_info_map.get(parent_id).is_none()
+            {
+                let snapshot_id = snapshot_info.get_snapshot_epoch_id();
+                let height = snapshot_info.height;
+                let msg = format!(
+                    "D.3 startup invariant violated: retained snapshot {:?} \
+                     (height {}) has parent {:?} which is missing from the \
+                     snapshot info map. The delta chain is broken — the \
+                     executor cannot apply forward epochs without the \
+                     parent snapshot's state. Likely cause: a previous \
+                     run with `keep_snapshot_before_stable_checkpoint = \
+                     false` (in hydra.toml) pruned the pre-stable parent. \
+                     Operator action: either (a) set \
+                     `keep_snapshot_before_stable_checkpoint = true` AND \
+                     re-bootstrap by deleting `storage_db/snapshot/` and \
+                     re-syncing from peers; or (b) accept the corruption \
+                     and delete the orphan snapshot at {:?} from \
+                     `storage_db/snapshot/` to let the node continue \
+                     without it (catch-up replay will be longer). \
+                     Refusing to start.",
+                    snapshot_id, height, parent_id, snapshot_id,
+                );
+                error!("{}", msg);
+                bail!(ErrorKind::Msg(msg));
+            }
+        }
+
         let current_snapshots = &mut *self.current_snapshots.write();
         *current_snapshots = snapshots;
 
@@ -1498,9 +1818,16 @@ fn extra_snapshots_to_keep_predicate(
                 // the execution of the epochs following
                 // stable_genesis can go through a normal path where both
                 // snapshot and intermediate delta mpt exist.
-                // TODO:
-                //  this is a corner case which should be addressed, so that we
-                //  can don't really need the snapshot prior to the checkpoint.
+                //
+                // The historical corner case here — operators setting
+                // `keep_snapshot_before_stable_checkpoint = false` and
+                // ending up with an unexecutable orphan child — is now
+                // guarded against by D.3's startup invariant in
+                // `load_persist_state`: if pruning ever produces a
+                // child whose parent is gone, the node refuses to
+                // start with an actionable error pointing at this
+                // config knob. See
+                // `docs/checkpoint-snapshot-lifecycle.md` Phase D.3.
                 let check_next_snapshot_height = height
                     + (storage_conf.consensus_param.snapshot_epoch_count
                         as u64);
@@ -1605,13 +1932,104 @@ use mazze_internal_common::{
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use primitives::{EpochId, MerkleHash, MERKLE_NULL_NODE, NULL_EPOCH};
 use rlp::{Decodable, DecoderError, Encodable, Rlp};
+use lazy_static::lazy_static;
+use metrics::{register_meter_with_group, Meter};
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
     fs,
     sync::{
+        atomic::AtomicBool,
         mpsc::{channel, Sender},
         Arc, Weak,
     },
     thread::{self, JoinHandle},
 };
+
+/// Phase E — Atomic backing for the `snapshot.in_flight` gauge. The
+/// `Gauge` trait only exposes `update`, so we keep the source of truth
+/// here and push the value into the gauge on every change.
+static SNAPSHOT_IN_FLIGHT_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+lazy_static! {
+    /// Bumped when a background snapshot-creation thread observes
+    /// `cancel_requested` (set by `maintain_snapshots_main_chain_confirmed`
+    /// when the snapshot's target is determined to be on a
+    /// non-canonical fork) and self-aborts before registration. See
+    /// Phase B.1 in `docs/checkpoint-snapshot-lifecycle.md`.
+    static ref SNAPSHOT_CANCELLED_TOTAL: Arc<dyn Meter> =
+        register_meter_with_group("snapshot", "cancelled_total");
+
+    /// Bumped when `register_new_snapshot` accepts a new snapshot
+    /// after passing all sanity checks (merkle_root, parent linkage).
+    static ref SNAPSHOT_REGISTERED_TOTAL: Arc<dyn Meter> =
+        register_meter_with_group("snapshot", "registered_total");
+
+    /// Bumped when `register_new_snapshot` rejects a snapshot for a
+    /// zero merkle_root on a non-NULL_EPOCH parent. Indicates either a
+    /// default-init bug or merge corruption. See Phase C.1.
+    static ref SNAPSHOT_INVALID_ROOT_TOTAL: Arc<dyn Meter> =
+        register_meter_with_group("snapshot", "invalid_root_at_registration_total");
+
+    /// Bumped when `register_new_snapshot` rejects a snapshot because
+    /// its parent snapshot has been pruned or never existed. See
+    /// Phase C.4.
+    static ref SNAPSHOT_ORPHAN_REJECTED_TOTAL: Arc<dyn Meter> =
+        register_meter_with_group("snapshot", "orphan_rejected_at_registration_total");
+
+    /// Phase E — Bumped when the background snapshot thread returns
+    /// `Err` (anywhere in `new_snapshot_by_merging` — disk full, MPT
+    /// corruption, lock contention, etc.). Distinct from
+    /// `cancelled_total` (B.1, voluntary fork-cancellation) and from
+    /// `invalid_root_at_registration_total` / `orphan_rejected_at_registration_total`
+    /// (C.1 / C.4, rejected at registration after a successful merge).
+    static ref SNAPSHOT_FAILED_MERGE_TOTAL: Arc<dyn Meter> =
+        register_meter_with_group("snapshot", "failed_total.merge_error");
+
+    /// Phase E — Bumped on the catch-all `Err` return from
+    /// `register_new_snapshot` that isn't the merkle-root / orphan
+    /// reject. Captures DB-layer write failures during registration.
+    static ref SNAPSHOT_FAILED_REGISTER_TOTAL: Arc<dyn Meter> =
+        register_meter_with_group("snapshot", "failed_total.register_error");
+
+    /// Phase E — Bumped on every `destroy_snapshot` call from
+    /// `StorageManager` (retention pruning + non-canonical-fork
+    /// cleanup). Doesn't fire from `register_new_snapshot`'s reject
+    /// paths because those never wrote anything to disk.
+    static ref SNAPSHOT_PRUNED_TOTAL: Arc<dyn Meter> =
+        register_meter_with_group("snapshot", "pruned_total");
+
+    /// Phase E — Cumulative milliseconds spent inside the background
+    /// snapshot thread between spawn and completion (whether the
+    /// merge committed, was cancelled, or errored). Divide by
+    /// `cancelled + registered + failed_merge` for a mean per-snapshot
+    /// cost. Cheap to maintain — one extra `Instant::elapsed` per
+    /// snapshot.
+    static ref SNAPSHOT_CREATION_DURATION_MS_TOTAL: Arc<dyn Meter> =
+        register_meter_with_group("snapshot", "creation_duration_ms_total");
+
+    /// Phase E — Gauge of the current number of in-flight snapshot
+    /// background threads. Sustained `> 1` over multiple minutes
+    /// indicates a stuck merge or a stuck joiner; should normally be
+    /// 0 with brief spikes to 1 around era boundaries.
+    static ref SNAPSHOT_IN_FLIGHT_GAUGE: Arc<dyn metrics::Gauge<usize>> =
+        metrics::GaugeUsize::register_with_group("snapshot", "in_flight");
+}
+
+/// Phase E — Helper that adjusts the in-flight count and republishes
+/// it into the gauge. Called on bg-thread spawn (delta=+1) and on
+/// completion (delta=-1).
+fn snapshot_in_flight_adjust(delta: i64) {
+    let new_value = if delta >= 0 {
+        SNAPSHOT_IN_FLIGHT_COUNT
+            .fetch_add(delta as usize, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(delta as usize)
+    } else {
+        let dec = (-delta) as usize;
+        let prev = SNAPSHOT_IN_FLIGHT_COUNT
+            .fetch_sub(dec, std::sync::atomic::Ordering::SeqCst);
+        prev.saturating_sub(dec)
+    };
+    SNAPSHOT_IN_FLIGHT_GAUGE.update(new_value);
+}

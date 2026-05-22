@@ -22,6 +22,10 @@ use hibitset::{BitSet, BitSetLike, DrainableBitSet};
 use mazze_parameters::{consensus::*, consensus_internal::*};
 use mazze_storage::{storage_db::SnapshotDbManagerTrait, StateIndex};
 use mazze_types::H256;
+use metrics::{
+    register_meter_with_group, Counter, CounterUsize, Gauge, GaugeUsize, Meter,
+    MeterTimer,
+};
 use parking_lot::Mutex;
 use primitives::{MERKLE_NULL_NODE, NULL_EPOCH};
 use std::{
@@ -30,6 +34,35 @@ use std::{
     slice::Iter,
     sync::Arc,
 };
+
+lazy_static! {
+    /// Per-phase breakdown of `on_new_block` timing. The aggregate
+    /// `consensus_on_new_block_timer` (in consensus/mod.rs) was previously
+    /// the only signal. See docs/flow-audit.md G-CN-1.
+    static ref PREACTIVATE_TIMER: Arc<dyn Meter> =
+        register_meter_with_group("timer", "consensus::preactivate_block");
+    static ref ACTIVATE_TIMER: Arc<dyn Meter> =
+        register_meter_with_group("timer", "consensus::activate_block");
+    /// Counter incremented each time the main chain changes. The "depth"
+    /// field of a reorg (number of blocks rolled back) is exposed as a
+    /// separate gauge updated on each reorg. See docs/flow-audit.md G-CC-1.
+    static ref MAIN_CHAIN_CHANGES: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "consensus",
+            "main_chain_changes",
+        );
+    static ref REORG_LAST_DEPTH: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("consensus", "reorg_last_depth");
+    /// Era transitions. Low-frequency but high-impact events. See
+    /// docs/flow-audit.md G-CC-2.
+    static ref ERA_TRANSITIONS: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("consensus", "era_transitions");
+    static ref CUR_ERA_GENESIS_HEIGHT: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group(
+            "consensus",
+            "cur_era_genesis_height",
+        );
+}
 
 // TODO: Remove this
 #[allow(dead_code)]
@@ -281,6 +314,12 @@ impl ConsensusNewBlockHandler {
 
         inner.cur_era_genesis_block_arena_index = new_era_block_arena_index;
         inner.cur_era_genesis_height = new_era_height;
+        ERA_TRANSITIONS.inc(1);
+        CUR_ERA_GENESIS_HEIGHT.update(new_era_height as usize);
+        info!(
+            "era advanced: new_era_height={}, new_era_arena_index={}",
+            new_era_height, new_era_block_arena_index
+        );
 
         let cur_era_hash = inner.arena[new_era_block_arena_index].hash.clone();
         let stable_era_arena_index =
@@ -295,6 +334,7 @@ impl ConsensusNewBlockHandler {
         inner.data_man.set_cur_consensus_era_genesis_hash(
             &cur_era_hash,
             &stable_era_hash,
+            inner.cur_era_genesis_height,
         );
         inner
             .data_man
@@ -707,7 +747,10 @@ impl ConsensusNewBlockHandler {
     fn recycle_tx_in_block(
         &self, inner: &ConsensusGraphInner, block_hash: &H256,
     ) {
-        info!("recycle_tx_in_block: block_hash={:?}", block_hash);
+        // Fires on every recycled block; at 4 bps that's ~345k log lines
+        // per day at info. Demoted to trace so the info channel stays
+        // useful for actual events.
+        trace!("recycle_tx_in_block: block_hash={:?}", block_hash);
         if let Some(block) = inner
             .data_man
             .block_by_hash(block_hash, true /* update_cache */)
@@ -1183,6 +1226,10 @@ impl ConsensusNewBlockHandler {
             inner.main_chain_metadata.push(Default::default());
             extend_main = true;
             main_changed = true;
+            // extend_main is the common "just appended one new tip" case.
+            // Count it for the rate; depth=0 distinguishes from reorgs.
+            MAIN_CHAIN_CHANGES.inc(1);
+            REORG_LAST_DEPTH.update(0);
             fork_at = inner.main_index_to_height(old_main_chain_len)
         } else {
             let lca = inner.lca(last, me);
@@ -1226,6 +1273,19 @@ impl ConsensusNewBlockHandler {
                 // The new subtree is heavier, update main chain
                 let fork_main_index = inner.height_to_main_index(fork_at);
                 assert!(fork_main_index < inner.main_chain.len());
+                // Reorg depth = how many blocks we are rolling back from the
+                // previous main chain tip. A 1-block "reorg" is the normal
+                // case for extend_main; a deep reorg is a warning sign.
+                let reorg_depth =
+                    inner.main_chain.len().saturating_sub(fork_main_index);
+                MAIN_CHAIN_CHANGES.inc(1);
+                REORG_LAST_DEPTH.update(reorg_depth);
+                if reorg_depth > 1 {
+                    info!(
+                        "main chain reorg at height {}: rolling back {} blocks",
+                        fork_at, reorg_depth
+                    );
+                }
                 for discarded_idx in inner.main_chain.split_off(fork_main_index)
                 {
                     // Reset the epoch_number of the discarded fork
@@ -1442,6 +1502,7 @@ impl ConsensusNewBlockHandler {
                 inner.data_man.set_cur_consensus_era_genesis_hash(
                     genesis_hash,
                     stable_hash,
+                    inner.cur_era_genesis_height,
                 );
                 inner.initial_stable_future = None;
                 debug!(
@@ -1622,6 +1683,7 @@ impl ConsensusNewBlockHandler {
                     state_at = state_availability_boundary.lower_bound + 1;
                 }
             }
+            inner.data_man.sample_state_availability_metrics();
 
             // Apply transactions in the determined total order
             while state_at < to_state_pos {
@@ -1718,6 +1780,7 @@ impl ConsensusNewBlockHandler {
                 // already filled field. We do not run
                 // preactivate_block() on them.
                 let block_status = if inner.arena[me].era_block != NULL {
+                    let _t = MeterTimer::time_func(PREACTIVATE_TIMER.as_ref());
                     self.preactivate_block(inner, me)
                 } else {
                     if inner.arena[me].data.partial_invalid {
@@ -1756,6 +1819,7 @@ impl ConsensusNewBlockHandler {
                             me, inner.arena[me].hash
                         );
                     }
+                    let _t = MeterTimer::time_func(ACTIVATE_TIMER.as_ref());
                     self.activate_block(inner, me, meter, &mut queue);
                 }
                 // Now we are going to check all invalid blocks in the delay
@@ -1876,6 +1940,7 @@ impl ConsensusNewBlockHandler {
                     .push(inner.arena[inner.main_chain[main_index]].hash);
             }
         }
+        self.data_man.sample_state_availability_metrics();
 
         if inner.main_chain.len() < DEFERRED_STATE_EPOCH_COUNT as usize {
             return;

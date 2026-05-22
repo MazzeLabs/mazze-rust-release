@@ -1,0 +1,3 @@
+[submodule "crates/mazzecore/eth-vm/tests/fixtures/ethereum_tests"]
+	path = crates/mazzecore/eth-vm/tests/fixtures/ethereum_tests
+	url = https://github.com/ethereum/tests

@@ -133,9 +133,16 @@ impl Default for MdbxConfig {
     }
 }
 
+/// Selects the *hot* state-DB backend. ParityDB is the cold-tier
+/// reference (history, snapshots) — it does *not* appear here.
+/// See [`docs/storage-architecture.md`](../../../docs/storage-architecture.md).
 #[derive(Debug, Clone)]
 pub enum StateDbBackend {
+    /// Memory-mapped MDBX (recommended; RAM-speed reads for revm).
     Mdbx(MdbxConfig),
+    /// Fallback during rollout — ParityDB hosts the hot state too.
+    /// Slated for removal once Mdbx is verified in production.
+    ParityDb,
 }
 
 impl Default for StateDbBackend {
@@ -239,10 +246,7 @@ pub use self::{
         state_proof::StateProof,
         storage_db::{
             kvdb_paritydb::KvdbParitydb,
-            kvdb_sqlite::{KvdbSqlite, KvdbSqliteStatements},
             snapshot_db_manager_paritydb::SnapshotDbManagerParitydb,
-            snapshot_db_manager_sqlite::SnapshotDbManagerSqlite,
-            sqlite::SqliteConnection,
         },
     },
     replicated_state::ReplicatedState,

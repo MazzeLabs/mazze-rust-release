@@ -46,6 +46,35 @@ set_kv() {
   fi
 }
 
+SECRETS_FILE="$SCRIPT_DIR/hydra.secrets.toml"
+ensure_stratum_secret() {
+  if [[ ! -f "$SECRETS_FILE" ]]; then
+    echo "Generating $SECRETS_FILE (first-run stratum secret)..." >&2
+    local generated
+    if command -v openssl >/dev/null 2>&1; then
+      generated="$(openssl rand -hex 32)"
+    else
+      generated="$(head -c 32 /dev/urandom | xxd -p -c 64)"
+    fi
+    umask 077
+    cat > "$SECRETS_FILE" <<EOF
+# Auto-generated per-deployment secrets. Do not commit.
+# See run/hydra.secrets.toml.example for the format and rotation guidance.
+stratum_secret = "$generated"
+EOF
+    chmod 600 "$SECRETS_FILE"
+  fi
+  STRATUM_SECRET="$(grep -E '^[[:space:]]*stratum_secret[[:space:]]*=' "$SECRETS_FILE" \
+    | head -n1 \
+    | sed -E 's/^[[:space:]]*stratum_secret[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/')"
+  if [[ -z "$STRATUM_SECRET" ]]; then
+    echo "Error: stratum_secret missing or unparseable in $SECRETS_FILE" >&2
+    exit 1
+  fi
+}
+ensure_stratum_secret
+set_kv "stratum_secret" "\"$STRATUM_SECRET\""
+
 set_kv "bootnodes" "\"\""
 set_kv "node_type" "\"full\""
 set_kv "public_address" "\"127.0.0.1\""

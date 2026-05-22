@@ -206,7 +206,13 @@ impl BlockGenerator {
         }
     }
 
-    // TODO: should not hold and pass write lock to consensus.
+    // TODO(G-MN-4 in docs/flow-audit.md): assemble_new_block_impl holds the
+    // ConsensusGraphInner write lock from line 226 below through the entire
+    // assembly path. At 4 bps this is occasionally observable as consensus
+    // worker stalls. The right fix is to restructure so the lock is only
+    // held for the brief data extraction (parent/referees/blame), with the
+    // rest of assembly working off a snapshot. Tracked as long-term because
+    // it requires touching choose_correct_parent + a chain of helpers.
     fn assemble_new_block_impl(
         &self, mut parent_hash: H256, mut referees: Vec<H256>,
         mut blame_info: StateBlameInfo, block_gas_limit: U256,

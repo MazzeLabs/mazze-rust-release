@@ -16,9 +16,21 @@ use crate::{
         Error, ErrorKind, ProtocolConfiguration, SYNC_PROTO_V1, SYNC_PROTO_V4,
     },
 };
+use lazy_static::lazy_static;
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_types::H256;
-use metrics::MeterTimer;
+use metrics::{register_meter_with_group, Meter, MeterTimer};
+
+lazy_static! {
+    /// Bumped when a peer is dropped for exceeding the per-peer tx
+    /// submission cap (either catch-up or normal-phase). See
+    /// docs/security-audit.md finding H-3.
+    static ref TXPOOL_REJECTED_PER_PEER_CAP: std::sync::Arc<dyn Meter> =
+        register_meter_with_group(
+            "txpool",
+            "rejected_per_peer_cap_total"
+        );
+}
 use network::service::ProtocolVersion;
 use primitives::{transaction::TxPropagateId, TransactionWithSignature};
 use priority_send_queue::SendQueuePriority;
@@ -57,11 +69,15 @@ impl Handleable for Transactions {
         let peer_info = ctx.manager.syn.get_peer_info(&ctx.node_id)?;
         let should_disconnect = {
             let mut peer_info = peer_info.write();
+            // Always tally the cumulative submission count so the cap
+            // applies in both catch-up and normal phases. See
+            // docs/security-audit.md finding H-3.
+            peer_info.received_transaction_count += transactions.len();
             if peer_info
                 .notified_capabilities
                 .contains(DynamicCapability::NormalPhase(false))
             {
-                peer_info.received_transaction_count += transactions.len();
+                // Catch-up phase: tighter historical cap.
                 peer_info.received_transaction_count
                     > ctx
                         .manager
@@ -69,11 +85,19 @@ impl Handleable for Transactions {
                         .max_trans_count_received_in_catch_up
                         as usize
             } else {
-                false
+                // Normal phase: per-peer cumulative cap. Past this
+                // the peer is disconnected; the metric below ticks.
+                peer_info.received_transaction_count
+                    > ctx
+                        .manager
+                        .protocol_config
+                        .max_trans_count_per_peer_normal
+                        as usize
             }
         };
 
         if should_disconnect {
+            TXPOOL_REJECTED_PER_PEER_CAP.mark(1);
             bail!(ErrorKind::TooManyTrans);
         }
 

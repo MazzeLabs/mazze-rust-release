@@ -8,6 +8,7 @@ use crate::{
     registry::{DEFAULT_GROUPING_REGISTRY, DEFAULT_REGISTRY},
 };
 use lazy_static::lazy_static;
+use log::warn;
 use parking_lot::{Mutex, RwLock};
 use std::{
     collections::HashMap,
@@ -45,6 +46,26 @@ pub trait Meter: Send + Sync {
 struct NoopMeter;
 impl Meter for NoopMeter {}
 
+/// Soft cap for the meter registry. All current callers register from static
+/// string literals so the registry is intrinsically bounded by source code,
+/// but if a future regression registers dynamic names (e.g. per-peer or
+/// per-contract) we want to see it in the logs before it OOMs the node.
+const METER_REGISTRY_SOFT_CAP: usize = 5000;
+
+fn warn_if_registry_growing(current_size: usize, name: &str) {
+    if current_size == METER_REGISTRY_SOFT_CAP
+        || (current_size > METER_REGISTRY_SOFT_CAP
+            && current_size.is_power_of_two())
+    {
+        warn!(
+            "metrics registry size = {} (soft cap {}); latest meter: {}. \
+             If this keeps growing, a caller is likely registering meters \
+             with dynamic names.",
+            current_size, METER_REGISTRY_SOFT_CAP, name
+        );
+    }
+}
+
 pub fn register_meter(name: &str) -> Arc<dyn Meter> {
     if !is_enabled() {
         return Arc::new(NoopMeter);
@@ -54,7 +75,9 @@ pub fn register_meter(name: &str) -> Arc<dyn Meter> {
     DEFAULT_REGISTRY
         .write()
         .register(name.into(), meter.clone());
-    ARBITER.meters.lock().insert(name.into(), meter.clone());
+    let mut meters = ARBITER.meters.lock();
+    meters.insert(name.into(), meter.clone());
+    warn_if_registry_growing(meters.len(), name);
 
     meter
 }
@@ -77,7 +100,8 @@ pub fn register_meter_with_group(group: &str, name: &str) -> Arc<dyn Meter> {
 
     let mut meters = ARBITER.meters.lock();
     assert_eq!(meters.contains_key(&full_meter_name), false);
-    meters.insert(full_meter_name, meter.clone());
+    meters.insert(full_meter_name.clone(), meter.clone());
+    warn_if_registry_growing(meters.len(), &full_meter_name);
 
     meter
 }

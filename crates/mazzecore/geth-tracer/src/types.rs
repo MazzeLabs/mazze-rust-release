@@ -36,8 +36,9 @@ use alloy_rpc_types_trace::geth::{
 use mazze_types::{Space, H256};
 use mazze_vm_types::CallType as MazzeCallType;
 use primitives::{block::BlockHeight, BlockNumber};
+use revm::bytecode::{opcode, OpCode};
 use revm::interpreter::{
-    opcode, CallContext, CallScheme, CreateScheme, InstructionResult, OpCode,
+    CallInputs, CallScheme, CreateScheme, InstructionResult,
 };
 use std::collections::VecDeque;
 
@@ -84,8 +85,12 @@ pub struct CallTrace {
     pub gas_limit: u64,
     /// The status of the trace's call
     pub status: InstructionResult,
-    /// call context of the runtime
-    pub call_context: Option<Box<CallContext>>,
+    /// call context of the runtime.
+    ///
+    /// revm 40 removed `CallContext`; the equivalent information is
+    /// carried by `CallInputs`. This field is currently always `None` in
+    /// the codebase (nothing populates it). Kept for API stability.
+    pub call_context: Option<Box<CallInputs>>,
     /// Opcode-level execution steps
     pub steps: Vec<CallTraceStep>,
 }
@@ -301,6 +306,12 @@ impl CallTraceNode {
                     address: Some(self.execution_address()),
                     topics: Some(log.topics().to_vec()),
                     data: Some(log.data.clone()),
+                    // alloy-rpc-types-trace 2.0 added these fields; we
+                    // don't currently track per-log positions in the
+                    // tracer so leave them None for parity with the prior
+                    // serialised output.
+                    position: None,
+                    index: None,
                 })
                 .collect();
         }
@@ -390,6 +401,11 @@ impl From<CreateScheme> for CallKind {
         match create {
             CreateScheme::Create => Self::Create,
             CreateScheme::Create2 { .. } => Self::Create2,
+            // revm 40 added CreateScheme::Custom { address } for arbitrary
+            // create-address schemes (e.g. system contracts, EIP-7702).
+            // Mazze eSpace doesn't emit Custom — fall back to Create
+            // semantics for trace categorisation.
+            CreateScheme::Custom { .. } => Self::Create,
         }
     }
 }
@@ -480,7 +496,9 @@ impl CallTraceStep {
             error: self.as_error(),
             gas: self.gas_remaining,
             gas_cost: self.gas_cost,
-            op: self.op.to_string(),
+            // alloy-rpc-types-trace 2.0 changed StructLog.op from String
+            // to Cow<'static, str>.
+            op: std::borrow::Cow::Owned(self.op.to_string()),
             pc: self.pc as u64,
             refund_counter: (self.gas_refund_counter > 0)
                 .then_some(self.gas_refund_counter),

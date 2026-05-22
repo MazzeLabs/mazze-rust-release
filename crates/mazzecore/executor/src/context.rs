@@ -7,13 +7,12 @@ use crate::{
     executive::contract_address,
     executive_observer::TracerTrait,
     internal_contract::{
-        block_hash_slot, epoch_hash_slot, suicide as suicide_impl,
-        InternalRefContext,
+        block_hash_slot, suicide as suicide_impl, InternalRefContext,
     },
     machine::Machine,
     return_if,
     stack::{CallStackInfo, FrameLocal, RuntimeRes},
-    state::State,
+    state::{CleanupMode, State},
     substate::Substate,
 };
 use mazze_bytes::Bytes;
@@ -116,14 +115,10 @@ impl<'a> Context<'a> {
     }
 
     fn blockhash_from_env(&self, number: &U256) -> H256 {
-        if self.space == Space::Ethereum {
-            return if U256::from(self.env().epoch_height) == number + 1 {
-                self.env().last_hash.clone()
-            } else {
-                H256::default()
-            };
-        }
-
+        // OriginContext is reachable only from native-space frames; eSpace
+        // routes through mazze-eth-vm (revm) and consults its own
+        // MazzeDatabase::block_hash adapter.
+        debug_assert_eq!(self.space, Space::Native);
         // In Mazze, we only maintain the block hash of the previous block.
         // For other block numbers, it always returns zero.
         if U256::from(self.env().number) == number + 1 {
@@ -138,22 +133,14 @@ impl<'a> Context<'a> {
 
         let number = number.as_u64();
 
-        let state_res = match self.space {
-            Space::Native => {
-                return_if!(number > self.env.number);
-                return_if!(number
-                    .checked_add(65536)
-                    .map_or(false, |n| n <= self.env.number));
-                self.state.get_system_storage(&block_hash_slot(number))?
-            }
-            Space::Ethereum => {
-                return_if!(number > self.env.epoch_height);
-                return_if!(number
-                    .checked_add(65536)
-                    .map_or(false, |n| n <= self.env.epoch_height));
-                self.state.get_system_storage(&epoch_hash_slot(number))?
-            }
-        };
+        // Native-only after Phase 5: eSpace handles its own BLOCKHASH in
+        // mazze-eth-vm's MazzeDatabase adapter.
+        debug_assert_eq!(self.space, Space::Native);
+        return_if!(number > self.env.number);
+        return_if!(number
+            .checked_add(65536)
+            .map_or(false, |n| n <= self.env.number));
+        let state_res = self.state.get_system_storage(&block_hash_slot(number))?;
 
         Ok(BigEndianHash::from_uint(&state_res))
     }
@@ -558,6 +545,148 @@ impl<'a> ContextTrait for Context<'a> {
 
     fn blockhash_source(&self) -> vm::BlockHashSource {
         BlockHashSource::State
+    }
+
+    // -----------------------------------------------------------------
+    // By-address state access.
+    //
+    // The Parity-derived custom interpreter never calls these — its
+    // `Context` is pinned to `origin.address` via `storage_at` etc. revm
+    // needs to read/write state at arbitrary addresses (it manages the
+    // call stack itself), so these methods give the eth-vm adapter direct
+    // access to State for whatever address revm is currently executing.
+    //
+    // See crates/mazzecore/eth-vm/src/database.rs and src/lib.rs.
+    // -----------------------------------------------------------------
+
+    fn storage_at_address(
+        &self, address: &Address, key: &[u8],
+    ) -> vm::Result<U256> {
+        let receiver = AddressWithSpace {
+            address: *address,
+            space: self.space,
+        };
+        self.state
+            .storage_at(&receiver, &key.to_vec())
+            .map_err(Into::into)
+    }
+
+    fn set_storage_at_address(
+        &mut self, address: &Address, key: Vec<u8>, value: U256,
+    ) -> vm::Result<()> {
+        if self.is_static_or_reentrancy() {
+            return Err(vm::Error::MutableCallInStaticContext);
+        }
+        let receiver = AddressWithSpace {
+            address: *address,
+            space: self.space,
+        };
+        // For eSpace, the storage owner is always Address::zero() — there
+        // is no Mazze storage-collateral attribution for EVM contracts.
+        // For Native space the owner is the active storage_owner. This
+        // mirrors the existing logic in `Context::set_storage`.
+        let owner = if self.space == Space::Ethereum {
+            Address::zero()
+        } else {
+            self.origin.storage_owner
+        };
+        self.state
+            .set_storage(&receiver, key, value, owner, &mut self.substate)
+            .map_err(Into::into)
+    }
+
+    fn nonce_of(&self, address: &Address) -> vm::Result<U256> {
+        let addr = AddressWithSpace {
+            address: *address,
+            space: self.space,
+        };
+        self.state.nonce(&addr).map_err(Into::into)
+    }
+
+    fn set_balance(
+        &mut self, address: &Address, value: U256,
+    ) -> vm::Result<()> {
+        let addr = AddressWithSpace {
+            address: *address,
+            space: self.space,
+        };
+        // revm gives us absolute balances after a transaction; we
+        // translate to add/sub from the current balance to satisfy
+        // Mazze State's delta-based API.
+        let current = self.state.balance(&addr)?;
+        if value > current {
+            let delta = value - current;
+            self.state
+                .add_balance(&addr, &delta, CleanupMode::NoEmpty)
+                .map_err(Into::into)
+        } else if value < current {
+            let delta = current - value;
+            let mut cleanup = CleanupMode::NoEmpty;
+            self.state
+                .sub_balance(&addr, &delta, &mut cleanup)
+                .map_err(Into::into)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn set_nonce(&mut self, address: &Address, value: U256) -> vm::Result<()> {
+        let addr = AddressWithSpace {
+            address: *address,
+            space: self.space,
+        };
+        self.state.set_nonce(&addr, &value).map_err(Into::into)
+    }
+
+    fn set_code(&mut self, address: &Address, code: Vec<u8>) -> vm::Result<()> {
+        let addr = AddressWithSpace {
+            address: *address,
+            space: self.space,
+        };
+        // eSpace contracts have no Mazze storage owner; pass zero.
+        let owner = if self.space == Space::Ethereum {
+            Address::zero()
+        } else {
+            self.origin.storage_owner
+        };
+        self.state.init_code(&addr, code, owner).map_err(Into::into)
+    }
+
+    fn log_for_address(
+        &mut self, address: &Address, topics: Vec<H256>, data: &[u8],
+    ) -> vm::Result<()> {
+        use primitives::log_entry::LogEntry;
+        if self.is_static_or_reentrancy() {
+            return Err(vm::Error::MutableCallInStaticContext);
+        }
+        self.tracer.log(address, &topics, data);
+        self.substate.logs.push(LogEntry {
+            address: *address,
+            topics,
+            data: data.to_vec(),
+            space: self.space,
+        });
+        Ok(())
+    }
+
+    fn suicide_for_address(
+        &mut self, contract: &Address, refund: &Address,
+    ) -> vm::Result<()> {
+        // revm has already moved the contract's balance to `refund` in its
+        // EvmState diff (and the eth-vm adapter writes both the source's
+        // zeroed balance and the destination's bumped balance). All we
+        // need to do here is register the suicide so the executor's
+        // post-tx cleanup (pre_checked_executive.rs ~431) removes the
+        // dead account from state.
+        let contract_aws = contract.with_space(self.space);
+        let refund_aws = refund.with_space(self.space);
+        // Trace the kill for parity with the custom interpreter's path.
+        // The balance is already zero in state by this point because the
+        // adapter applied the diff first, so we trace zero — the actual
+        // transfer was already traced as a balance-set event implicitly.
+        let _ = refund_aws;
+        self.substate.suicides.insert(contract_aws);
+        Ok(())
     }
 }
 

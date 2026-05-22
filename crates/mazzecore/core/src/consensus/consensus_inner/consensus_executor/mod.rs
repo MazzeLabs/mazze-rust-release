@@ -36,8 +36,8 @@ use mazze_types::{
     Space, H160, H256, KECCAK_EMPTY_BLOOM, U256, U512,
 };
 use metrics::{
-    register_meter_with_group, register_timer_with_group, Meter, MeterTimer,
-    ScopeTimer, Timer,
+    register_meter_with_group, register_timer_with_group, Counter, CounterUsize,
+    Meter, MeterTimer, ScopeTimer, Timer,
 };
 use primitives::{
     compute_block_number, receipt::BlockReceipts, Block, BlockHeader,
@@ -88,6 +88,38 @@ lazy_static! {
         register_meter_with_group("system_metrics", "good_tps");
     static ref CONSENSUS_STATE_COMMIT_TIMER: Arc<dyn Timer> =
         register_timer_with_group("timer", "consensus::state_commit");
+    /// Executor's optimistic-execution path uses `try_write()` on the
+    /// consensus inner lock. A miss means the consensus thread was holding
+    /// the write lock when the executor had nothing else to do — usually
+    /// fine, but if these spike during a lag it indicates contention.
+    /// See docs/flow-audit.md G-ST-5.
+    static ref OPTIMISTIC_EXEC_LOCK_MISSES: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "executor",
+            "optimistic_lock_misses",
+        );
+    /// Number of epoch blocks that received zero base reward
+    /// (`no_reward` flag was set during preactivation). Tracks how much
+    /// hashpower the network is throwing away on partial-invalid or
+    /// non-rewarded blocks.
+    static ref REWARDS_BLOCKS_NO_REWARD: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("rewards", "blocks_no_reward");
+    /// Number of epoch blocks whose reward was non-trivially reduced by
+    /// outlier penalty (>50% of base reward burned). High counts indicate
+    /// hashpower fragmentation or adaptive-DAG conditions.
+    /// See docs/flow-audit.md G-MN-3.
+    static ref REWARDS_BLOCKS_HEAVY_OUTLIER_PENALTY: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "rewards",
+            "blocks_heavy_outlier_penalty",
+        );
+    /// Number of epoch blocks whose reward was zero because their PoW
+    /// quality was below the epoch difficulty.
+    static ref REWARDS_BLOCKS_LOW_POW: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "rewards",
+            "blocks_low_pow_quality",
+        );
 }
 
 const STATE_INIT_RETRIES: usize = 8;
@@ -141,9 +173,21 @@ pub struct EpochExecutionTask {
     epoch_block_hashes: Vec<H256>,
     start_block_number: u64,
     reward_info: Option<RewardExecutionInfo>,
-    // TODO:
-    //  on_local_main should be computed at the beginning of the
-    //  epoch execution, not to be set from task.
+    // INVARIANT (G-ST-4 in docs/flow-audit.md):
+    // `on_local_main` is set by the consensus thread at task-enqueue time
+    // and is **not** re-checked inside the executor thread. This is safe
+    // today because:
+    //   1. The consensus thread is the sole writer of `main_chain`;
+    //   2. Once a task is enqueued, the executor sees a snapshot of the
+    //      chain state through `epoch_block_hashes` and `reward_info`;
+    //   3. If the main chain reorgs after enqueue, the executor still
+    //      processes this task and a subsequent task corrects the state.
+    // The ideal fix is to derive `on_local_main` from `inner.main_chain`
+    // at execution time, but doing so requires re-acquiring the consensus
+    // lock from inside the executor, which would re-introduce the
+    // contention the executor was designed to avoid. Until that lock is
+    // split, this remains a producer-side invariant rather than an
+    // executor-side check.
     on_local_main: bool,
     force_recompute: bool,
 }
@@ -238,21 +282,23 @@ impl ConsensusExecutor {
                         Err(TryRecvError::Empty) => {
                             // The channel is empty, so we try to optimistically
                             // get later epochs to execute.
-                            consensus_inner
-                                .try_write()
-                                .and_then(|mut inner| {
-                                    executor_thread
-                                        .get_optimistic_execution_task(
-                                            &mut *inner,
-                                        )
-                                })
-                                .map(|task| {
-                                    debug!(
-                                        "Get optimistic_execution_task {:?}",
-                                        task
-                                    );
-                                    ExecutionTask::ExecuteEpoch(task)
-                                })
+                            match consensus_inner.try_write() {
+                                Some(mut inner) => executor_thread
+                                    .get_optimistic_execution_task(
+                                        &mut *inner,
+                                    )
+                                    .map(|task| {
+                                        debug!(
+                                            "Get optimistic_execution_task {:?}",
+                                            task
+                                        );
+                                        ExecutionTask::ExecuteEpoch(task)
+                                    }),
+                                None => {
+                                    OPTIMISTIC_EXEC_LOCK_MISSES.inc(1);
+                                    None
+                                }
+                            }
                         }
                         Err(TryRecvError::Disconnected) => {
                             info!("Channel disconnected, stop thread");
@@ -434,6 +480,7 @@ impl ConsensusExecutor {
             }
             inner.get_main_block_arena_index(opt_height)
         };
+        inner.data_man.sample_state_availability_metrics();
 
         // `on_local_main` is set to `true` because when we later skip its
         // execution on main chain, we will not notify tx pool, so we
@@ -1316,6 +1363,7 @@ impl ConsensusExecutionHandler {
             let no_reward = reward_info.epoch_block_no_reward[enum_idx];
 
             if no_reward {
+                REWARDS_BLOCKS_NO_REWARD.inc(1);
                 epoch_block_total_rewards.push(U256::from(0));
                 if debug_record.is_some() {
                     let debug_out = debug_record.as_mut().unwrap();
@@ -1334,6 +1382,7 @@ impl ConsensusExecutionHandler {
                 let mut reward = if pow_quality >= *epoch_difficulty {
                     base_reward_per_block
                 } else {
+                    REWARDS_BLOCKS_LOW_POW.inc(1);
                     debug!(
                         "Block {} pow_quality {} is less than epoch_difficulty {}!",
                         block.hash(), pow_quality, epoch_difficulty
@@ -1366,6 +1415,21 @@ impl ConsensusExecutionHandler {
                     // Lint.ThenChange(consensus/mod.rs#OUTLIER_PENALTY_1)
 
                     debug_assert!(reward > outlier_penalty);
+                    // Flag heavy outlier penalty (>50% of base reward).
+                    // At 4 bps with normal DAG structure this should be
+                    // rare; sustained occurrence means the network is
+                    // burning a lot of issued reward.
+                    if outlier_penalty * U512::from(2) > reward {
+                        REWARDS_BLOCKS_HEAVY_OUTLIER_PENALTY.inc(1);
+                        info!(
+                            "block {} heavy outlier-penalty: base={}, \
+                             penalty={}, final={}",
+                            block.hash(),
+                            base_reward_per_block,
+                            outlier_penalty,
+                            reward - outlier_penalty,
+                        );
+                    }
                     reward -= outlier_penalty;
 
                     if debug_record.is_some() {

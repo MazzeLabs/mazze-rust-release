@@ -14,9 +14,8 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity Ethereum.  If not, see <http://www.gnu.org/licenses/>.
 
-use crypto::{
-    self, publickey::Error as CryptoPublicKeyError, Error as EthCryptoError,
-};
+use crate::crypto::{self, Error as EthCryptoError};
+use crate::mazzekey::Error as CryptoPublicKeyError;
 use mazzekey::{self, DerivationError, Error as EthKeyError};
 use std::{fmt, io::Error as IoError};
 
@@ -133,8 +132,7 @@ impl From<DerivationError> for Error {
     }
 }
 
-impl From<CryptoPublicKeyError> for Error {
-    fn from(err: CryptoPublicKeyError) -> Self {
-        Error::Custom(err.into())
-    }
-}
+// `CryptoPublicKeyError` aliases `mazzekey::Error` (same as `EthKeyError`),
+// so a dedicated `From` impl would conflict with `From<EthKeyError>` above.
+// The `CryptoPublicKey` variant is kept on `Error` for binary-compat
+// callers but is no longer produced by a `From` conversion.

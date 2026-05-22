@@ -41,7 +41,8 @@ use super::{
 use mazze_types::{Space, H160};
 
 use alloy_primitives::{Address, Bytes, U256};
-use revm::interpreter::{opcode, InstructionResult, InterpreterResult, OpCode};
+use revm::bytecode::{opcode, OpCode};
+use revm::interpreter::{InstructionResult, InterpreterResult};
 
 use mazze_executor::machine::Machine;
 
@@ -268,7 +269,10 @@ impl TracingInspector {
                 kind,
                 data: input_data,
                 value,
-                status: InstructionResult::Continue,
+                status: // revm 40 removed the `Continue` variant. `Stop` is the lowest-numbered
+            // success code and serves as the "not yet errored" baseline that
+            // `Continue` used to represent for a fresh trace step.
+            InstructionResult::Stop,
                 caller,
                 maybe_precompile,
                 gas_limit,
@@ -407,7 +411,10 @@ impl TracingInspector {
             // fields will be populated end of call
             gas_cost: 0,
             storage_change,
-            status: InstructionResult::Continue,
+            status: // revm 40 removed the `Continue` variant. `Stop` is the lowest-numbered
+            // success code and serves as the "not yet errored" baseline that
+            // `Continue` used to represent for a fresh trace step.
+            InstructionResult::Stop,
         });
     }
 

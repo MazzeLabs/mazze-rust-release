@@ -61,6 +61,20 @@ pub struct SnapshotProgress {
     pub available_snapshot_count: U64,
     /// Whether the node currently has at least one snapshot to serve.
     pub serving: bool,
+    /// G-NET-1 — Oldest locally available snapshot epoch. Lets a peer
+    /// (or an aggregating dashboard) reason about this node's
+    /// retention floor: if every connected peer reports an
+    /// `earliest_snapshot_epoch_number` above some height H, fresh
+    /// joiners targeting snapshots below H will fall back to genesis
+    /// replay. See docs/flow-audit.md §5.8 + G-NET-1.
+    pub earliest_snapshot_epoch_number: U64,
+    /// G-NET-1 — Whether this node retains the snapshot immediately
+    /// *before* each stable checkpoint (the pre-era-rollover grace
+    /// generation). With this `true` (the recommended default) a
+    /// fresh joiner connecting right after an era rollover can still
+    /// bootstrap through this peer. See
+    /// docs/checkpoint-snapshot-lifecycle.md §6.
+    pub keeps_pre_stable_snapshot: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

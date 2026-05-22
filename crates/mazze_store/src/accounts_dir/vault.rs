@@ -22,7 +22,7 @@ use super::{
 use crate::json;
 use crate::Error;
 use crate::SafeAccount;
-use crypto::Keccak256;
+use crate::crypto::Keccak256;
 use parking_lot::Mutex;
 use std::{
     fs, io,

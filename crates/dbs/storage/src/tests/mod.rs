@@ -7,8 +7,9 @@ pub use snapshot::FakeSnapshotMptDb;
 
 #[cfg(test)]
 mod proofs;
-#[cfg(test)]
-mod sharded_iter_merger;
+// sharded_iter_merger removed — the sharded iterator design is
+// SQLite-specific (a workaround for SQLite's lack of parallel writers).
+// ParityDB and MDBX support concurrent writes natively.
 #[cfg(test)]
 mod state;
 

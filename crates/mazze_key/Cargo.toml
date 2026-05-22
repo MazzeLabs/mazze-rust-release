@@ -8,8 +8,17 @@ edition = "2021"
 [dependencies]
 mazze-types = { path = "../mazze_types" }
 edit-distance = "2.0"
-parity-crypto = "0.9.0"
-parity-secp256k1 = { git = "https://github.com/paritytech/rust-secp256k1" }
+# M-4 migration: maintained RustCrypto replacements for the
+# (now removed) `parity-crypto 0.9.0` dep. Same algorithms — ECIES
+# (HMAC-SHA256 + AES-128-CTR + SHA-256) and BIP32 (HMAC-SHA512)
+# produce byte-identical output (validated by `ecies_shared` and the
+# BIP32 test vectors in `mazze_key`).
+aes = "0.8"
+ctr = "0.9"
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2.5"
+secp256k1 = { version = "0.20", features = ["recovery", "rand"] }
 lazy_static = "1.4"
 log = "0.4"
 parity-wordlist = "1.3"
@@ -18,7 +27,7 @@ rand = "0.7"
 rustc-hex = "2.1"
 serde = "1.0"
 serde_derive = "1.0"
-tiny-keccak = "1.4"
+tiny-keccak = { version = "2", features = ["keccak"] }
 zeroize = "1.0.0"
 malloc_size_of_derive = {path = "../util/malloc_size_of_derive" }
 malloc_size_of = {path = "../util/malloc_size_of" }

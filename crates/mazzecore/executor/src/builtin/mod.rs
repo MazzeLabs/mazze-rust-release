@@ -21,9 +21,11 @@
 //! Standard built-in contracts.
 
 mod blake2f;
-mod ethereum_trusted_setup_points;
 mod executable;
-mod kzg_point_evaluations;
+// KZG point-evaluation precompile is now provided by revm in the eSpace VM
+// (see crates/mazzecore/eth-vm/). Native space no longer ships KZG. The
+// previous Mazze KZG module was tied to c-kzg 1.x which conflicted with
+// revm 40+'s c-kzg 2.x at the native-library link layer.
 
 pub use executable::BuiltinExec;
 
@@ -39,7 +41,8 @@ use mazze_bytes::BytesRef;
 use mazze_types::{Space, H256, U256};
 use mazzekey::{public_to_address, recover as ec_recover, Address, Signature};
 use num::{BigUint, One, Zero};
-use parity_crypto::digest;
+use ripemd::Ripemd160 as RipemdHasher;
+use sha2::{Digest as Sha2Digest, Sha256 as Sha256Hasher};
 
 use blake2f::compress;
 
@@ -287,7 +290,6 @@ pub fn builtin_factory(name: &str) -> Box<dyn Impl> {
         "alt_bn128_mul" => Box::new(Bn128MulImpl) as Box<dyn Impl>,
         "alt_bn128_pairing" => Box::new(Bn128PairingImpl) as Box<dyn Impl>,
         "blake2_f" => Box::new(Blake2FImpl) as Box<dyn Impl>,
-        "kzg_point_eval" => Box::new(KzgPointEval) as Box<dyn Impl>,
         _ => panic!("invalid builtin name: {}", name),
     }
 }
@@ -336,10 +338,6 @@ struct Bn128PairingImpl;
 #[allow(dead_code)]
 struct Blake2FImpl;
 
-#[derive(Debug)]
-#[allow(dead_code)]
-struct KzgPointEval;
-
 impl Impl for Identity {
     fn execute(
         &self, input: &[u8], output: &mut BytesRef,
@@ -387,8 +385,8 @@ impl Impl for Sha256 {
     fn execute(
         &self, input: &[u8], output: &mut BytesRef,
     ) -> Result<(), Error> {
-        let d = digest::sha256(input);
-        output.write(0, &*d);
+        let d = Sha256Hasher::digest(input);
+        output.write(0, &d);
         Ok(())
     }
 }
@@ -397,7 +395,7 @@ impl Impl for Ripemd160 {
     fn execute(
         &self, input: &[u8], output: &mut BytesRef,
     ) -> Result<(), Error> {
-        let hash = digest::ripemd160(input);
+        let hash = RipemdHasher::digest(input);
         output.write(0, &[0; 12][..]);
         output.write(12, &hash);
         Ok(())
@@ -786,15 +784,6 @@ impl Impl for Blake2FImpl {
     }
 }
 
-impl Impl for KzgPointEval {
-    fn execute(
-        &self, input: &[u8], output: &mut BytesRef,
-    ) -> Result<(), Error> {
-        kzg_point_evaluations::run(input)?;
-        output.write(0, &kzg_point_evaluations::RETURN_VALUE[..]);
-        Ok(())
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::{

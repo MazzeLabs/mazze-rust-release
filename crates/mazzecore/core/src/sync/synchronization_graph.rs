@@ -5,7 +5,7 @@
 use std::{
     cmp::max,
     collections::{BinaryHeap, HashMap, HashSet, VecDeque},
-    mem, panic,
+    mem,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -34,7 +34,7 @@ use primitives::{
 };
 
 use crate::{
-    block_data_manager::{BlockDataManager, BlockStatus},
+    block_data_manager::{BlockDataManager, BlockStatus, LocalBlockInfo},
     channel::Channel,
     consensus::SharedConsensusGraph,
     error::{BlockError, Error, ErrorKind},
@@ -62,7 +62,23 @@ lazy_static! {
             "sync_graph",
             "not_ready_frontier_size"
         );
+    // DoS guard counters. See docs/security-audit.md finding H-2.
+    static ref SYNC_GRAPH_REJECTED_OVER_CAP: Arc<dyn Meter> =
+        register_meter_with_group(
+            "sync_graph",
+            "orphan_inserts_rejected_over_cap_total"
+        );
 }
+
+/// Hard cap on the sync-graph arena. New `insert_block_header` calls
+/// past this threshold are rejected with `BlockHeaderInsertionResult::Invalid`
+/// so a single misbehaving peer can't blow up the node's memory.
+///
+/// The realistic working set (a normal era's worth of headers plus a
+/// few orphans) is well under this number — see era_epoch_count =
+/// 20 000 in `docs/chain-model.md`. Tuned conservatively to give legit
+/// catch-up plenty of headroom. See docs/security-audit.md finding H-2.
+const SYNC_GRAPH_ARENA_HARD_CAP: usize = 200_000;
 
 const NULL: usize = !0;
 const BLOCK_INVALID: u8 = 0;
@@ -992,6 +1008,14 @@ impl SynchronizationGraph {
 
         // It receives `BLOCK_GRAPH_READY` blocks in order and handles them in
         // `ConsensusGraph`
+        //
+        // KNOWN THROUGHPUT CEILING (G-CN-3 in docs/flow-audit.md):
+        // This is the single OS thread that drives `ConsensusGraph`. Every
+        // block flows through it serially. At sustained block rates above
+        // ~10 bps with realistic outlier_barrier sizes, this thread is the
+        // bottleneck. Parallelisation requires splitting `ConsensusGraphInner`
+        // into per-shard arenas with topological-merge handoff; out of scope
+        // for this audit but tracked as the next architectural lever.
         thread::Builder::new()
             .name("Consensus Worker".into())
             .spawn(move || {
@@ -1023,7 +1047,21 @@ impl SynchronizationGraph {
                         match maybe_item {
                             Ok(hash) => if !reverse_map.contains_key(&hash) {
                                 debug!("Worker thread receive: block = {}", hash);
-                                let header = data_man.block_header_by_hash(&hash).expect("Header must exist before sending to the consensus worker!");
+                                let header = match data_man.block_header_by_hash(&hash) {
+                                    Some(h) => h,
+                                    None => {
+                                        // Should never happen — the sender is
+                                        // expected to persist the header before
+                                        // notifying. Log and skip rather than
+                                        // crash the consensus worker thread.
+                                        error!(
+                                            "consensus worker: missing header for {}, skipping",
+                                            hash
+                                        );
+                                        consensus_unprocessed_count.fetch_sub(1, Ordering::SeqCst);
+                                        continue 'inner;
+                                    }
+                                };
 
                                 let mut cnt: usize = 0;
                                 let parent_hash = header.parent_hash();
@@ -1056,13 +1094,42 @@ impl SynchronizationGraph {
                     }
                     if let Some((_, hash)) = priority_queue.pop() {
                         CONSENSUS_WORKER_QUEUE.dequeue(1);
-                        let successors = reverse_map.remove(&hash).unwrap();
+                        let successors = match reverse_map.remove(&hash) {
+                            Some(s) => s,
+                            None => {
+                                error!(
+                                    "consensus worker: reverse_map inconsistency for {}; skipping successors",
+                                    hash
+                                );
+                                Vec::new()
+                            }
+                        };
                         for succ in successors {
-                            let cnt_tuple = counter_map.get_mut(&succ).unwrap();
-                            *cnt_tuple -= 1;
-                            if *cnt_tuple == 0 {
+                            let remaining = match counter_map.get_mut(&succ) {
+                                Some(c) => {
+                                    *c -= 1;
+                                    *c
+                                }
+                                None => {
+                                    error!(
+                                        "consensus worker: counter_map inconsistency for successor {}; skipping",
+                                        succ
+                                    );
+                                    continue;
+                                }
+                            };
+                            if remaining == 0 {
                                 counter_map.remove(&succ);
-                                let header_succ = data_man.block_header_by_hash(&succ).expect("Header must exist before sending to the consensus worker!");
+                                let header_succ = match data_man.block_header_by_hash(&succ) {
+                                    Some(h) => h,
+                                    None => {
+                                        error!(
+                                            "consensus worker: missing header for successor {}, dropping from queue",
+                                            succ
+                                        );
+                                        continue;
+                                    }
+                                };
                                 let parent_succ = header_succ.parent_hash();
                                 let epoch_number = consensus.get_block_epoch_number(parent_succ).unwrap_or(0);
                                 priority_queue.push((epoch_number, succ));
@@ -1125,19 +1192,39 @@ impl SynchronizationGraph {
         // Recover the initial sequence number in consensus graph
         // based on the sequence number of genesis block in db.
         let genesis_hash = self.data_man.get_cur_consensus_era_genesis_hash();
-        let genesis_local_info =
-            self.data_man.local_block_info_by_hash(&genesis_hash);
-        if genesis_local_info.is_none() {
-            // Local info of genesis block must exist.
-            panic!(
-                "failed to get local block info from db for genesis[{}]",
-                genesis_hash
-            );
-        }
-        let genesis_seq_num = genesis_local_info.unwrap().get_seq_num();
-        self.consensus.set_initial_sequence_number(genesis_seq_num);
         let genesis_header =
-            self.data_man.block_header_by_hash(&genesis_hash).unwrap();
+            match self.data_man.block_header_by_hash(&genesis_hash) {
+                Some(header) => header,
+                None => {
+                    error!(
+                        "failed to recover DAG from db: missing era-genesis header [{}]",
+                        genesis_hash
+                    );
+                    return;
+                }
+            };
+        let genesis_seq_num =
+            match self.data_man.local_block_info_by_hash(&genesis_hash) {
+                Some(info) => info.get_seq_num(),
+                None => {
+                    let fallback_seq_num = genesis_header.height();
+                    warn!(
+                        "missing local block info for era genesis [{}], fallback seq_num={} (from height)",
+                        genesis_hash,
+                        fallback_seq_num
+                    );
+                    self.data_man.insert_local_block_info(
+                        &genesis_hash,
+                        LocalBlockInfo::new(
+                            BlockStatus::Valid,
+                            fallback_seq_num,
+                            self.data_man.get_instance_id(),
+                        ),
+                    );
+                    fallback_seq_num
+                }
+            };
+        self.consensus.set_initial_sequence_number(genesis_seq_num);
         debug!(
             "Get current genesis_block hash={:?}, height={}, seq_num={}",
             genesis_hash,
@@ -1415,6 +1502,31 @@ impl SynchronizationGraph {
             // Ignore received headers when we are downloading block bodies.
             return (BlockHeaderInsertionResult::TemporarySkipped, Vec::new());
         }
+        // DoS guard: bound the in-memory arena to prevent a misbehaving
+        // peer from filling RAM with unresolvable orphan headers. The
+        // cap fires only when **not** in catch-up — during catch-up
+        // (cold-start replay, snapshot-sync, archive-mode header
+        // ingest) the arena legitimately grows past the cap until the
+        // first era checkpoint clears it via `try_clear_old_era_blocks`.
+        //
+        // Threat model recap: the H-2 DoS attacker we're guarding
+        // against is "peer floods orphans on an already-synced node",
+        // which is structurally distinct from "operator-supervised
+        // catch-up". See `docs/security-audit.md` finding H-2 and
+        // `docs/chain-model.md` §3 (catch-up bypass).
+        if !self.verification_config.catch_up_mode()
+            && inner.arena.len() >= SYNC_GRAPH_ARENA_HARD_CAP
+        {
+            SYNC_GRAPH_REJECTED_OVER_CAP.mark(1);
+            warn!(
+                "Rejecting header {} — sync-graph arena at cap ({}/{}) \
+                 outside catch-up. Likely a peer flooding orphans.",
+                header.hash(),
+                inner.arena.len(),
+                SYNC_GRAPH_ARENA_HARD_CAP
+            );
+            return (BlockHeaderInsertionResult::Invalid, Vec::new());
+        }
         let hash = header.hash();
 
         let (invalid, local_info_opt) = self.data_man.verified_invalid(&hash);
@@ -1422,10 +1534,30 @@ impl SynchronizationGraph {
             return (BlockHeaderInsertionResult::Invalid, Vec::new());
         }
 
-        let block_seed_hash = self
+        // Resolve the RandomX seed for this block's epoch. If the
+        // lookup misses (non-genesis epoch, seed not in DB), we
+        // **reject** the block rather than fall back to a zero seed
+        // — a zero seed bypasses PoW verification in `verify_pow`,
+        // which would silently accept invalid blocks. See
+        // docs/security-audit.md finding H-1.
+        let block_seed_hash = match self
             .data_man
             .db_manager
-            .get_current_seed_hash(header.height());
+            .try_get_current_seed_hash(header.height())
+        {
+            Some(h) => h,
+            None => {
+                warn!(
+                    "Rejecting block {}: seed lookup missed at height {} (DB inconsistency or attacker-supplied block from future epoch)",
+                    header.hash(),
+                    header.height()
+                );
+                return (
+                    BlockHeaderInsertionResult::Invalid,
+                    Vec::new(),
+                );
+            }
+        };
 
         if let Some(info) = local_info_opt {
             // If the block is ordered before current era genesis or it has
@@ -1468,11 +1600,17 @@ impl SynchronizationGraph {
             );
         }
 
-        // skip check for consortium currently
+        // PoW bypass C/D — every silent skip is now counter-instrumented.
+        // See docs/chain-model.md §3 and the `pow_metrics` module in
+        // crates/mazzecore/core/src/verification.rs.
         debug!("is_consortium={:?}", self.is_consortium());
         let verification_passed = if need_to_verify {
-            self.is_consortium()
-                || !(self.parent_or_referees_invalid(header)
+            if self.is_consortium() {
+                crate::verification::pow_metrics::SKIPPED_CONSORTIUM
+                    .mark(1);
+                true
+            } else {
+                !(self.parent_or_referees_invalid(header)
                     || self
                         .verification_config
                         .verify_header_params(
@@ -1488,8 +1626,23 @@ impl SynchronizationGraph {
                             Err(e)
                         })
                         .is_err())
+            }
         } else {
-            if !bench_mode && !self.is_consortium() {
+            if bench_mode {
+                // Locally-mined block in bench mode — we accept it
+                // without verifying. WARN-level because a *production*
+                // node hitting this path means somebody flipped
+                // bench_mode by mistake.
+                warn!(
+                    "PoW verification bypassed: bench_mode accepting locally-mined block {:?} without re-checking nonce",
+                    header.hash()
+                );
+                crate::verification::pow_metrics::BENCH_MODE_FAILURE
+                    .mark(1);
+            } else if self.is_consortium() {
+                crate::verification::pow_metrics::SKIPPED_CONSORTIUM
+                    .mark(1);
+            } else {
                 info!(
                     "sync graph verify_pow called for block: {:?}",
                     header.hash()

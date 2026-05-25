@@ -3,7 +3,7 @@
 # The command line parameter `--full`, `--full-fast`, `--archive`, or `--light` will overwrite this parameter.
 #
 
-bootnodes = "mazzenode://7f77fd4a5188e4c923ff96b608f6bcd10b58e0e13ca8de58d4b3f85a8afabac5b4196fbad0024c9e7ad12b21c6a76eec7ce155cc5af415537ee9ce919ffc4ff2@37.27.99.214:55555,mazzenode://4f7ca04b7bfc846c9a893f209a5ccceae7ea2f22e198de0dd0ea6c9581d238679d5559039c8bce27d8cb40ade1cf6fc7f3d19d9cacd1cd67ab1d967bbbcdf486@138.201.206.108:55555,mazzenode://5c2204bd824deed0a16972bf5900ec4c48e859cc89852e04ee02c84943782fed3167be205857cdeedd36d1ff1ea66d9b2f6629bec8cb82c159fa9b91becfe628@37.27.134.37:55555,mazzenode://6d74e898b57e705a251631ac4d238695d311d5bf1175790449003b1b39985018b27b715c433f647981ff200ba976b0c4239d92b33e1958b546b03728e8be0551@37.27.134.141:55555"
+bootnodes = "mazzenode://0f578b6df4c6344a9de17e04874d0be04a7d6f3c2007f5285be4beac62f87382f183360fb30a168c6a85329c8f980c0dc0058aa6e49783423a0d08f5892adac0@37.27.134.36:55555,mazzenode://3dfca23feb506508a56fd89dd757c2aa2bc9f6d8dc8ca1273c57f66ba226256d9380c82f152c15bb8c82efe8f3539fe19b4f1a9a48272eb166285a2709a955e2@37.27.134.37:55555,mazzenode://ae4e57ed5d58a3177948e30f01ebca0a2f0f8aba91125205edb6f7496d0d468e2b119019f9aaba498deac5d8452f4f0d31bcc2de9c078f8f27f94bf12ec83c96@37.27.99.214:55555,mazzenode://42e269f57fbc7624197f4386ffbf0a6f457627602272a0c172846d69c23720426429f12c5e3b271f63e125223db2c5bc52bea0b24048c8d84f33a56f7e8fabc2@138.201.206.108:55555,mazzenode://dd56b389171bf1263bad76333d1e8f7f596a1e3ceff98838c39fb7f76cef43df42d4d05c943e53f29a894ceebb3d2a5e957471fbea4f278e311b89039aec8f30@37.27.134.141:55555"
 
 node_type = "archive"
 
@@ -65,7 +65,7 @@ mining_type = "stratum"
 
 # Listen address for stratum
 
-stratum_listen_address = "0.0.0.0"
+stratum_listen_address = "127.0.0.1"
 
 # Port for stratum.
 #
@@ -109,7 +109,7 @@ log_level = "info"
 # If not set, the process will try to find out the public IP with best effort, and use `tcp_port` as public port.
 # However, it's HIGHLY RECOMMENDED to set the value manually, especially for machines with IP translated by NAT.
 #
-public_address = "5.12.37.188"
+# public_address = "x.x.x.x"  # set per host at deploy time; auto-detected if unset
 
 # `tcp_port` is the TCP port that the process listens for P2P messages. The default is 55555.
 #
@@ -613,4 +613,4 @@ pos_reference_enable_height = 1
 
 # genesis_secrets="genesis_secrets.toml"
 
-execute_genesis = false
+execute_genesis = true

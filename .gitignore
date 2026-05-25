@@ -88,8 +88,8 @@ perf.data.old
 *.heap
 
 # Crash dumps
-core
-core.*
+/core
+/core.*
 
 # Backup / patch / merge leftovers
 *.bak

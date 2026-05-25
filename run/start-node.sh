@@ -64,11 +64,13 @@ if grep -q '^\s*log_conf\s*=' "$TEMP_CONF"; then
 else
   printf '\nlog_conf = "%s"\n' "$ABS_LOG_CONF" >> "$TEMP_CONF"
 fi
-if grep -q '^\s*stratum_secret\s*=' "$TEMP_CONF"; then
-  sed -i "s#^\s*stratum_secret\s*=.*#stratum_secret = \"$STRATUM_SECRET\"#" "$TEMP_CONF"
-else
-  printf '\nstratum_secret = "%s"\n' "$STRATUM_SECRET" >> "$TEMP_CONF"
-fi
+# NOTE: We intentionally do NOT inject stratum_secret into the node config.
+# The stratum server uses keccak(miner_sent) == node_secret, so node and miner
+# cannot share the same literal value. Instead the node runs stratum with no
+# secret (auth disabled) bound to 127.0.0.1 (see stratum_listen_address in
+# hydra.toml); the co-located miner connects over localhost only. The miner
+# still keeps its own stratum_secret entry (start-miner.sh) since the binary
+# requires the field to be present.
 has_chain_data() {
   local base="$1"
   if compgen -G "$base/blockchain_db/*" > /dev/null; then

@@ -382,6 +382,16 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
             return SyncPhaseType::CatchUpFillBlockBodyPhase;
         }
         let epoch_to_sync = sync_handler.graph.consensus.get_to_sync_epoch_id();
+        // Fresh-network bootstrap: the true genesis has no prior checkpoint to
+        // state-sync. On a from-genesis launch every peer is also at genesis and
+        // cannot serve a snapshot, so checkpoint sync would block forever. We
+        // already have the genesis state locally, so mark it and proceed; this
+        // only triggers when epoch_to_sync == true genesis (never on an
+        // established chain whose to-sync checkpoint is past genesis).
+        if epoch_to_sync == sync_handler.graph.data_man.true_genesis.hash() {
+            self.has_state.store(true, AtomicOrdering::SeqCst);
+            return SyncPhaseType::CatchUpFillBlockBodyPhase;
+        }
         let current_era_genesis = sync_handler
             .graph
             .data_man
@@ -438,6 +448,17 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
             .data_man
             .get_cur_consensus_era_genesis_hash();
         let epoch_to_sync = sync_handler.graph.consensus.get_to_sync_epoch_id();
+
+        // Fresh-network bootstrap: nothing to checkpoint-sync at the true
+        // genesis (see CatchUpCheckpointPhase::next). Skip straight to body sync.
+        if epoch_to_sync == sync_handler.graph.data_man.true_genesis.hash() {
+            info!(
+                "CatchUpCheckpointPhase: at true genesis, skipping checkpoint \
+                 state sync and proceeding from genesis"
+            );
+            self.has_state.store(true, AtomicOrdering::SeqCst);
+            return;
+        }
 
         if let Some(commitment) =
             load_checkpoint_state_if_available(sync_handler, &epoch_to_sync)

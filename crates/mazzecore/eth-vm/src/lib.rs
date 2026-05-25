@@ -416,7 +416,12 @@ fn map_execution_result(
                 Output::Call(bytes) => bytes.to_vec(),
                 Output::Create(bytes, _addr) => bytes.to_vec(),
             };
-            let return_data = ReturnData::new(data, 0, 0);
+            // ReturnData is a (mem, offset, size) view; size MUST be the byte
+            // length, not 0. With size 0 the data derefs to an empty slice,
+            // which breaks eth_call return values and (for top-level CREATE)
+            // fed the executor's create-finalization an empty body.
+            let len = data.len();
+            let return_data = ReturnData::new(data, 0, len);
             Ok(GasLeft::NeedsReturn {
                 gas_left,
                 data: return_data,
@@ -426,7 +431,11 @@ fn map_execution_result(
         ExecutionResult::Revert { gas, output, .. } => {
             let used = gas.tx_gas_used();
             let gas_left = U256::from(gas_limit.saturating_sub(used));
-            let return_data = ReturnData::new(output.to_vec(), 0, 0);
+            // size MUST be the byte length (see Success branch); the revert
+            // payload carries the Solidity error/revert reason back to callers.
+            let out = output.to_vec();
+            let out_len = out.len();
+            let return_data = ReturnData::new(out, 0, out_len);
             // REVERT: return data flows back to the caller but state is
             // rolled back. revm has already rolled back state changes for
             // the reverted frame; our state diff above contains the

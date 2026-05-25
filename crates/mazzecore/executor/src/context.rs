@@ -424,6 +424,19 @@ impl<'a> ContextTrait for Context<'a> {
 
         self.insert_create_address_to_substate();
 
+        // eSpace (Space::Ethereum) executes entirely inside revm (mazze-eth-vm).
+        // revm already charges the code-deposit gas and enforces EIP-170/3860
+        // limits, and the eth-vm adapter writes the deployed runtime into Mazze
+        // state via `apply_create_output`/`apply_state_diff`. Running the legacy
+        // deposit path here would (a) double-charge the deposit gas and (b)
+        // re-`init_code` the contract from the frame's return-data channel —
+        // which clobbers the already-deployed code (and previously wiped it
+        // entirely, leaving `eth_getCode` empty). So for eSpace creates we only
+        // register the create address above and return the gas unchanged.
+        if self.space == Space::Ethereum {
+            return Ok(*gas);
+        }
+
         let create_data_gas = self.spec.create_data_gas
             * match self.space {
                 Space::Native => 1,

@@ -359,6 +359,20 @@ impl SnapshotChunkSync {
         self.inner.read().status
     }
 
+    /// Height of the snapshot whose chunks have been fully imported and
+    /// verified, taken from `RelatedData.snapshot_info.height`. Returns
+    /// `None` if no manifest has been processed yet OR the manifest
+    /// path never populated `related_data` (legacy fallback). Used by
+    /// `CatchUpCheckpointPhase` to re-anchor the consensus era genesis
+    /// at the snapshot block after `restore_execution_state` runs.
+    pub fn completed_snapshot_height(&self) -> Option<u64> {
+        self.inner
+            .read()
+            .related_data
+            .as_ref()
+            .map(|r| r.snapshot_info.height)
+    }
+
     /// V5 entry point. If `has_trusted_checkpoint()` is set on the
     /// local node AND the wire payload carries pre-computed
     /// `RelatedData`, hand the pre-computed bundle into the manifest

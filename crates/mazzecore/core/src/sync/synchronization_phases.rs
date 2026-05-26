@@ -552,6 +552,45 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
         if self.state_sync.status() == Status::Completed {
             self.state_sync.restore_execution_state(sync_handler);
             *sync_handler.synced_epoch_id.lock() = Some(epoch_to_sync);
+
+            // Re-anchor the consensus graph on the verified snapshot
+            // block. Without this, `cur_consensus_era_genesis_hash`
+            // still points at the true genesis (height 0), so
+            // CatchUpSyncBlockPhase mis-derives its sync horizon and
+            // `latest_epoch` stays at 0 forever — peers' new blocks
+            // get gossiped in but never accepted because they're far
+            // above what consensus thinks is its frontier. During
+            // fast-sync bootstrap the snapshot block plays BOTH
+            // roles (era genesis = deferred-state origin, AND era
+            // stable = checkpoint-monotonicity floor) because there
+            // is no later stable elected yet; they separate naturally
+            // once the chain advances past the next stable election.
+            // The C.3 monotonicity gate in
+            // `BlockDataManager::insert_checkpoint_hashes_to_db`
+            // accepts this because snapshot height (>0) is strictly
+            // greater than the previous true-genesis height (0).
+            if let Some(snapshot_height) =
+                self.state_sync.completed_snapshot_height()
+            {
+                sync_handler.graph.data_man.set_cur_consensus_era_genesis_hash(
+                    &epoch_to_sync,
+                    &epoch_to_sync,
+                    snapshot_height,
+                );
+                sync_handler.graph.consensus.reset();
+                info!(
+                    "fast-sync bootstrap: consensus re-anchored at \
+                     snapshot block height={} hash={:?}",
+                    snapshot_height, epoch_to_sync,
+                );
+            } else {
+                warn!(
+                    "fast-sync bootstrap: snapshot height unavailable \
+                     in state_sync; consensus stays anchored at old \
+                     genesis (chain will not advance until restart)"
+                );
+            }
+
             SyncPhaseType::CatchUpFillBlockBodyPhase
         } else {
             self.phase_type()

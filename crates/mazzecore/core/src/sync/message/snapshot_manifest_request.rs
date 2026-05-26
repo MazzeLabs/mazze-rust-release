@@ -10,14 +10,12 @@ use crate::{
     },
     sync::{
         message::{
-            msgid, Context, DynamicCapability, Handleable, KeyContainer,
-            EpochBlockHashes, PreComputedRelatedData, SnapshotManifestResponse,
-            SnapshotManifestResponseV4, SnapshotManifestResponseV5,
+            msgid, Context, DynamicCapability, EpochBlockHashes, Handleable,
+            KeyContainer, PreComputedRelatedData, SnapshotManifestResponse,
         },
         request_manager::{AsAny, Request},
         state::storage::{RangedManifest, SnapshotSyncCandidate},
-        Error, ProtocolConfiguration, SYNC_PROTO_V1, SYNC_PROTO_V4,
-        SYNC_PROTO_V5,
+        Error, ProtocolConfiguration, SYNC_PROTO_V1,
     },
 };
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
@@ -42,25 +40,14 @@ pub struct SnapshotManifestRequest {
 
 build_msg_with_request_id_impl! {
     SnapshotManifestRequest, msgid::GET_SNAPSHOT_MANIFEST,
-    "SnapshotManifestRequest", SYNC_PROTO_V1, SYNC_PROTO_V5
+    "SnapshotManifestRequest", SYNC_PROTO_V1, SYNC_PROTO_V1
 }
 
 impl Handleable for SnapshotManifestRequest {
     fn handle(self, ctx: &Context) -> Result<(), Error> {
-        let peer_supports_v4 = matches!(
-            ctx.manager.syn.get_peer_version(&ctx.node_id),
-            Ok(version) if version >= SYNC_PROTO_V4
-        );
-        let peer_supports_v5 = matches!(
-            ctx.manager.syn.get_peer_version(&ctx.node_id),
-            Ok(version) if version >= SYNC_PROTO_V5
-        );
         info!(
-            "SnapshotManifestRequest from peer={:?}: peer_version={:?}, supports_v4={}, supports_v5={}, is_initial={}",
+            "SnapshotManifestRequest from peer={:?}: is_initial={}",
             ctx.node_id,
-            ctx.manager.syn.get_peer_version(&ctx.node_id),
-            peer_supports_v4,
-            peer_supports_v5,
             self.is_initial_request(),
         );
         // TODO Handle the case where we cannot serve the snapshot
@@ -77,96 +64,95 @@ impl Handleable for SnapshotManifestRequest {
                 m
             }
             _ => {
-                // Return an empty response to indicate that we cannot serve the
-                // state
-                let response = SnapshotManifestResponse {
-                    request_id: self.request_id,
-                    ..Default::default()
-                };
-                if peer_supports_v5 {
-                    ctx.send_response(
-                        &SnapshotManifestResponseV5::from_legacy_with_extras(
-                            response,
-                            PreComputedRelatedData::default(),
-                        ),
-                    )?;
-                } else if peer_supports_v4 {
-                    ctx.send_response(
-                        &SnapshotManifestResponseV4::from_legacy(response),
-                    )?;
-                } else {
-                    ctx.send_response(&response)?;
-                }
+                // Empty response — server can't serve this snapshot.
+                // Client sees an all-zero merkle_root and fails loud at
+                // chunk verification, never silently accepts state.
+                let mut response = SnapshotManifestResponse::default();
+                response.request_id = self.request_id;
+                ctx.send_response(&response)?;
                 return Ok(());
             }
         };
-        let response = if self.is_initial_request() {
-            let (state_root_vec, receipt_blame_vec, bloom_blame_vec) =
-                self.get_blame_states(ctx).unwrap_or_default();
-            let block_receipts =
-                self.get_block_receipts(ctx).unwrap_or_default();
 
-            debug!("handle SnapshotManifestRequest {:?}", self,);
-            SnapshotManifestResponse {
-                request_id: self.request_id,
-                manifest,
-                snapshot_merkle_root,
-                state_root_vec,
-                receipt_blame_vec,
-                bloom_blame_vec,
-                block_receipts,
-            }
+        // Build the legacy field block (state_root_vec / blame vecs /
+        // block_receipts / merkle_root) used by both validation paths.
+        let (state_root_vec, receipt_blame_vec, bloom_blame_vec) =
+            if self.is_initial_request() {
+                self.get_blame_states(ctx).unwrap_or_default()
+            } else {
+                Default::default()
+            };
+        let block_receipts = if self.is_initial_request() {
+            self.get_block_receipts(ctx).unwrap_or_default()
         } else {
-            SnapshotManifestResponse {
-                request_id: self.request_id,
-                manifest,
-                snapshot_merkle_root: Default::default(),
-                state_root_vec: Default::default(),
-                receipt_blame_vec: Default::default(),
-                bloom_blame_vec: Default::default(),
-                block_receipts: Default::default(),
-            }
+            Default::default()
+        };
+        let snapshot_merkle_root = if self.is_initial_request() {
+            snapshot_merkle_root
+        } else {
+            Default::default()
         };
 
-        if peer_supports_v5 && self.is_initial_request() {
-            // V5: ship the pre-computed RelatedData so the (fresh,
-            // trusted-checkpoint) client can bypass the consensus-
-            // derived validation walks. Falls back to V4 on the
-            // server side if any lookup is missing — keeps old V4
-            // peers fully functional and gives a V5 peer with a
-            // misconfigured anchor a clean failure path.
-            // See docs/fast-sync-design.md §5.13.
-            match self.build_pre_computed_related_data(ctx, &response) {
-                Some(pre_computed) => {
-                    ctx.send_response(
-                        &SnapshotManifestResponseV5::from_legacy_with_extras(
-                            response,
-                            pre_computed,
-                        ),
-                    )
-                }
-                None => {
+        // Always ship the pre-computed RelatedData on the initial
+        // request — this is what lets a fresh trusted-checkpoint joiner
+        // bypass the consensus-derived validation walks. On
+        // range-continuation manifests it stays at Default (the client
+        // doesn't re-validate on continuation).
+        let pre_computed = if self.is_initial_request() {
+            // Build a legacy-shape response on the stack so the V5
+            // producer can read it the same way it did in the
+            // multi-version era. The on-wire response below copies
+            // these fields into the canonical struct directly.
+            let legacy = LegacyResponseSnapshot {
+                request_id: self.request_id,
+                manifest: manifest.clone(),
+                snapshot_merkle_root,
+                state_root_vec: state_root_vec.clone(),
+                receipt_blame_vec: receipt_blame_vec.clone(),
+                bloom_blame_vec: bloom_blame_vec.clone(),
+                block_receipts: block_receipts.clone(),
+            };
+            self.build_pre_computed_related_data(ctx, &legacy)
+                .unwrap_or_else(|| {
                     debug!(
                         "V5 producer: could not build PreComputedRelatedData \
-                         for snapshot {:?}; falling back to V4 shape",
+                         for snapshot {:?}; shipping default (client fails \
+                         loud at chunk verification if anchor is wrong)",
                         self.snapshot_to_sync.get_snapshot_epoch_id(),
                     );
-                    ctx.send_response(
-                        &SnapshotManifestResponseV5::from_legacy_with_extras(
-                            response,
-                            PreComputedRelatedData::default(),
-                        ),
-                    )
-                }
-            }
-        } else if peer_supports_v4 {
-            ctx.send_response(&SnapshotManifestResponseV4::from_legacy(
-                response,
-            ))
+                    PreComputedRelatedData::default()
+                })
         } else {
-            ctx.send_response(&response)
-        }
+            PreComputedRelatedData::default()
+        };
+
+        let response = SnapshotManifestResponse {
+            request_id: self.request_id,
+            protocol_version: 1,
+            manifest,
+            state_root_vec,
+            receipt_blame_vec,
+            bloom_blame_vec,
+            block_receipts,
+            snapshot_merkle_root,
+            pre_computed,
+        };
+        ctx.send_response(&response)
     }
+}
+
+/// Thin shim used only by `build_pre_computed_related_data` — that
+/// helper was written against the legacy field set, so we hand it a
+/// struct with the same shape rather than re-fitting it to the new
+/// canonical struct (which also carries `pre_computed`).
+pub(crate) struct LegacyResponseSnapshot {
+    pub request_id: u64,
+    pub manifest: RangedManifest,
+    pub snapshot_merkle_root: primitives::MerkleHash,
+    pub state_root_vec: Vec<StateRoot>,
+    pub receipt_blame_vec: Vec<H256>,
+    pub bloom_blame_vec: Vec<H256>,
+    pub block_receipts: Vec<BlockExecutionResult>,
 }
 
 impl SnapshotManifestRequest {
@@ -194,7 +180,7 @@ impl SnapshotManifestRequest {
     /// a V5 client WITH trusted-checkpoint fails loud on the empty
     /// merkle_root vs chunks check). See docs/fast-sync-design.md §5.13.
     fn build_pre_computed_related_data(
-        &self, ctx: &Context, response: &SnapshotManifestResponse,
+        &self, ctx: &Context, response: &LegacyResponseSnapshot,
     ) -> Option<PreComputedRelatedData> {
         let snapshot_epoch_id =
             *self.snapshot_to_sync.get_snapshot_epoch_id();

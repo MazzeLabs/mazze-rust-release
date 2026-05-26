@@ -6,11 +6,11 @@ use crate::{
     message::{Message, RequestId},
     sync::{
         message::{
-            Context, EpochHashes, GetBlockHashesResponse,
-            GetBlockHashesResponseV4, Handleable, Key, KeyContainer,
+            Context, EpochHashes, GetBlockHashesResponse, Handleable, Key,
+            KeyContainer,
         },
         request_manager::{AsAny, Request},
-        Error, ProtocolConfiguration, SYNC_PROTO_V4,
+        Error, ProtocolConfiguration,
     },
 };
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
@@ -65,10 +65,6 @@ impl Request for GetBlockHashesByEpoch {
 
 impl Handleable for GetBlockHashesByEpoch {
     fn handle(self, ctx: &Context) -> Result<(), Error> {
-        let peer_supports_v4 = matches!(
-            ctx.manager.syn.get_peer_version(&ctx.node_id),
-            Ok(version) if version >= SYNC_PROTO_V4
-        );
         let epoch_hashes = self
             .epochs
             .iter()
@@ -80,26 +76,12 @@ impl Handleable for GetBlockHashesByEpoch {
                     .map(|hashes| (epoch, hashes))
             })
             .filter_map(Result::ok)
+            .map(|(epoch, hashes)| EpochHashes { epoch, hashes })
             .collect::<Vec<_>>();
 
-        if peer_supports_v4 {
-            ctx.send_response(&GetBlockHashesResponseV4 {
-                request_id: self.request_id,
-                epoch_hashes: epoch_hashes
-                    .into_iter()
-                    .map(|(epoch, hashes)| EpochHashes { epoch, hashes })
-                    .collect(),
-            })
-        } else {
-            let hashes =
-                epoch_hashes.into_iter().fold(vec![], |mut res, (_, sub)| {
-                    res.extend(sub);
-                    res
-                });
-            ctx.send_response(&GetBlockHashesResponse {
-                request_id: self.request_id,
-                hashes,
-            })
-        }
+        ctx.send_response(&GetBlockHashesResponse {
+            request_id: self.request_id,
+            epoch_hashes,
+        })
     }
 }

@@ -13,7 +13,7 @@ use crate::{
             Handleable, Key, KeyContainer,
         },
         request_manager::{AsAny, Request},
-        Error, ErrorKind, ProtocolConfiguration, SYNC_PROTO_V1, SYNC_PROTO_V4, SYNC_PROTO_V5,
+        Error, ErrorKind, ProtocolConfiguration, SYNC_PROTO_V1,
     },
 };
 use lazy_static::lazy_static;
@@ -332,7 +332,7 @@ impl AsAny for GetTransactions {
     }
 }
 
-mark_msg_version_bound!(GetTransactions, SYNC_PROTO_V1, SYNC_PROTO_V5);
+mark_msg_version_bound!(GetTransactions, SYNC_PROTO_V1, SYNC_PROTO_V1);
 impl Message for GetTransactions {
     fn msg_id(&self) -> MsgId {
         msgid::GET_TRANSACTIONS
@@ -503,7 +503,7 @@ impl AsAny for GetTransactionsFromTxHashes {
 mark_msg_version_bound!(
     GetTransactionsFromTxHashes,
     SYNC_PROTO_V1,
-    SYNC_PROTO_V4
+    SYNC_PROTO_V1
 );
 impl Message for GetTransactionsFromTxHashes {
     fn msg_id(&self) -> MsgId {

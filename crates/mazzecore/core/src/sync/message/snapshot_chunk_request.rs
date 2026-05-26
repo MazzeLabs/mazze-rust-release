@@ -10,11 +10,11 @@ use crate::{
     sync::{
         message::{
             msgid, Context, DynamicCapability, Handleable, KeyContainer,
-            SnapshotChunkResponse, SnapshotChunkResponseV4,
+            SnapshotChunkResponse,
         },
         request_manager::{AsAny, Request},
         state::storage::{Chunk, ChunkKey, SnapshotSyncCandidate},
-        Error, ErrorKind, ProtocolConfiguration, SYNC_PROTO_V1, SYNC_PROTO_V4, SYNC_PROTO_V5,
+        Error, ErrorKind, ProtocolConfiguration, SYNC_PROTO_V1,
     },
 };
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
@@ -34,7 +34,7 @@ pub struct SnapshotChunkRequest {
 
 build_msg_with_request_id_impl! {
     SnapshotChunkRequest, msgid::GET_SNAPSHOT_CHUNK,
-    "SnapshotChunkRequest", SYNC_PROTO_V1, SYNC_PROTO_V5
+    "SnapshotChunkRequest", SYNC_PROTO_V1, SYNC_PROTO_V1
 }
 
 impl SnapshotChunkRequest {
@@ -51,10 +51,6 @@ impl SnapshotChunkRequest {
 
 impl Handleable for SnapshotChunkRequest {
     fn handle(self, ctx: &Context) -> Result<(), Error> {
-        let peer_supports_v4 = matches!(
-            ctx.manager.syn.get_peer_version(&ctx.node_id),
-            Ok(version) if version >= SYNC_PROTO_V4
-        );
         let snapshot_epoch_id = match &self.snapshot_to_sync {
             SnapshotSyncCandidate::FullSync {
                 snapshot_epoch_id, ..
@@ -73,20 +69,13 @@ impl Handleable for SnapshotChunkRequest {
             Err(r) => return Err(r),
         };
 
-        if peer_supports_v4 {
-            match maybe_chunk {
-                Some(chunk) => ctx.send_response(
-                    &SnapshotChunkResponseV4::available(self.request_id, chunk),
-                ),
-                None => ctx.send_response(
-                    &SnapshotChunkResponseV4::unavailable(self.request_id),
-                ),
-            }
-        } else {
-            ctx.send_response(&SnapshotChunkResponse {
-                request_id: self.request_id,
-                chunk: maybe_chunk.unwrap_or_default(),
-            })
+        match maybe_chunk {
+            Some(chunk) => ctx.send_response(
+                &SnapshotChunkResponse::available(self.request_id, chunk),
+            ),
+            None => ctx.send_response(
+                &SnapshotChunkResponse::unavailable(self.request_id),
+            ),
         }
     }
 }

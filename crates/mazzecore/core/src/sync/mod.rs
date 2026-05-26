@@ -47,26 +47,21 @@ use network::service::ProtocolVersion;
 /// high, transit to a new protocol name for the next generation of the
 /// protocol.
 ///
-/// To update messages within the protocol, we would like to be
-/// backward-compatible as much as possible. DO NOT UPDATE directly on the
-/// message. Instead, create a new message, mark the old one for
-/// deprecation.
+/// Pre-launch single-version sync protocol. The chain isn't out yet,
+/// so we don't owe anyone wire compatibility — every sync message has
+/// exactly one canonical schema and exactly one decode path. The
+/// version-negotiation knobs are kept for surface compatibility with
+/// the `network` crate but are essentially no-ops at this point.
 ///
 /// Do NOT make this const pub.
-const SYNCHRONIZATION_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(5);
-/// Support at most this number of old versions.
-const SYNCHRONIZATION_PROTOCOL_OLD_VERSIONS_TO_SUPPORT: u8 = 2;
-/// The version to pass to Message for their lifetime declaration.
+const SYNCHRONIZATION_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(1);
+/// No old versions to support — pre-launch consolidation, see
+/// docs/fast-sync-design.md §5.14.3.
+const SYNCHRONIZATION_PROTOCOL_OLD_VERSIONS_TO_SUPPORT: u8 = 0;
+/// The single version to pass to `build_msg_impl!` /
+/// `build_msg_with_request_id_impl!` / `mark_msg_version_bound!` for
+/// every sync message's lifetime declaration.
 pub const SYNC_PROTO_V1: ProtocolVersion = ProtocolVersion(1);
-pub const SYNC_PROTO_V2: ProtocolVersion = ProtocolVersion(2);
-pub const SYNC_PROTO_V3: ProtocolVersion = ProtocolVersion(3);
-pub const SYNC_PROTO_V4: ProtocolVersion = ProtocolVersion(4);
-/// V5 adds `SnapshotManifestResponseV5` carrying pre-computed
-/// `RelatedData` (snapshot_info, parent_snapshot_info,
-/// state_root_with_aux_info, ordered_executable_epoch_blocks) so a
-/// trusted-checkpoint fast-sync client can bypass the consensus-
-/// derived validation walks. See docs/fast-sync-design.md §5.13.
-pub const SYNC_PROTO_V5: ProtocolVersion = ProtocolVersion(5);
 
 pub mod random {
     use rand;
@@ -327,7 +322,6 @@ pub mod msg_sender {
 
     pub fn metric_message(msg_id: MsgId, size: usize) {
         match msg_id {
-            msgid::STATUS_V2 => ON_STATUS_METER.mark(size),
             msgid::STATUS_V3 => ON_STATUS_METER.mark(size),
             msgid::GET_BLOCK_HEADERS_RESPONSE => {
                 GET_BLOCK_HEADER_RESPONSE_METER.mark(size);

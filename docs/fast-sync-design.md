@@ -334,6 +334,33 @@ What option 2 still needs on top of what's landed:
 
 Total: **≈ 230 LOC + tests**, all server- or client-side under `has_trusted_checkpoint()`, no consensus-affecting changes, no version-bump risk for non-fast-sync peers.
 
+### 5.14 V5 wire bump — landed, verified end-to-end through chunk import
+
+Commit `2e97af4` lands the V5 wire layer (~660 LOC). The 5-node Hetzner mesh + a local joiner with `trusted_checkpoint_height = 2048` exercised every step:
+
+1. Local: `CatchUpCheckpointPhase` fires the `SnapshotManifestRequest` with the trusted-blame anchor.
+2. Server (fleet): detects peer at `SYNC_PROTO_V5`, replies with `SnapshotManifestResponseV5` carrying `PreComputedRelatedData { snapshot_info, parent_snapshot_info, state_root_with_aux_info, blame_vec_offset, ordered_executable_epoch_blocks }`. Verified live: `merkle=0x28d56164…, height=2048, has_parent=false`.
+3. Local: V5 manifest handler bypasses `validate_blame_states` + `validate_epoch_receipts`, leans on the chunk-merkle floor.
+4. Local: downloads 3 chunks, `register_new_snapshot` fires (`SnapshotInfo { merkle_root: 0x28d56164…, parent_snapshot_height: 0, height: 2048 }`), phase transitions `CatchUpCheckpoint → CatchUpFillBlockBody → CatchUpSyncBlock`.
+
+**Key dispatcher subtlety found and fixed in the same commit:** `handle_snapshot_manifest_response_message` originally tried V4 decoding first. V5 payload is a superset (V4 fields + extra `PreComputedRelatedData` field), and `Rlp` truncates silently — so V5 traffic was being decoded into V4 structs and routed through the slow validation path. Trying V5 before V4 in the dispatcher restored the bypass.
+
+#### 5.14.1 Post-snapshot consensus-bootstrap fix
+
+Commit `2c51d9a` patches the gap that immediately follows step 4. After `restore_execution_state` lands state + receipt commitments, `cur_consensus_era_genesis_hash` was still pointing at the true genesis. `CatchUpSyncBlockPhase` therefore set its sync horizon at height 0; peer-gossiped blocks from height ~19000 onward were correctly received as `NewBlockHashes` but rejected at `on_new_block` because they were unreachable from the (wrong) era origin. Symptom: `Catch-up mode: true, latest epoch: 0 missing_bodies: 0` indefinitely; `bestEpoch` never advanced.
+
+Two-file fix:
+- `SnapshotChunkSync::completed_snapshot_height()` — exposes `RelatedData.snapshot_info.height` (the merkle-verified bundle).
+- `CatchUpCheckpointPhase::next()` at the `Status::Completed` branch — calls `set_cur_consensus_era_genesis_hash(snapshot_hash, snapshot_hash, height)` then `consensus.reset()` before transitioning. During fast-sync bootstrap the snapshot block plays both roles (era genesis = deferred-state origin AND era stable = checkpoint-monotonicity floor) until the chain advances past the next stable election. The C.3 monotonicity gate accepts this because `snapshot_height > 0 = previous_era_genesis_height`.
+
+#### 5.14.2 Open follow-up — stale-anchor graceful fallback
+
+End-to-end Normal-phase verification this session was blocked by an environmental issue: the fleet had been running ~1.5h since `trusted_checkpoint = (2048, 0xa2c486b4…)` was pinned, advancing to epoch ~19000. With `additional_maintained_snapshot_count = 2` + `keepsPreStableSnapshot`, only snapshots at heights `{18432, 16384, 14336, 12288}` are still served; snapshot at 2048 has been pruned from every fleet node. All five peers return `StateSyncCandidateResponse.supported_candidates: []`, the §5.6 anchor-locked loop never reaches `Status::Completed`, and the §5.14.1 fix's new code path doesn't fire.
+
+Two viable next moves, **not yet implemented**:
+- **Operator path**: relaunch / re-pin `trusted_checkpoint` to a currently-served snapshot height before each fast-sync run. Trivial but inflexible.
+- **Graceful-fallback path**: when the configured anchor returns empty candidates from every peer for some grace window (~10–30 s), have the candidate loop fall back to peer-discovered candidates (the existing D.2 multi-candidate enumeration with no operator constraint). The operator's role then degrades to "I trust at least one of the peer-offered snapshots vs. a known-good hash list" — which keeps the integrity floor (chunk merkle verification) and is the natural way to handle stale-but-still-bootstrap-needed cases.
+
 ### 5.4 Out of scope (separate tickets)
 
 - Tuning `EPOCH_SYNC_BATCH_SIZE` / `REQUEST_START_WAITING_TIME` for the tail catch-up after snapshot.

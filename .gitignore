@@ -95,4 +95,5 @@ perf.data.old
 *.bak
 *.orig
 *.rej
-*~
+*~run/hydra.local.toml
+run/hydra.devtest.toml

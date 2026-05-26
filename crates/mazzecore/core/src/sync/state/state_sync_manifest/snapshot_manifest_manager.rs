@@ -312,19 +312,51 @@ impl SnapshotManifestManager {
     )> {
         let mut state_blame_vec = vec![];
 
-        // these two header must exist in disk, it's safe to unwrap
-        let snapshot_block_header = ctx
+        // Normally these headers exist locally because we header-synced
+        // past the snapshot before entering this phase. Under the
+        // fast-sync trusted-checkpoint path (docs/fast-sync-design.md)
+        // the joining node deliberately skips that header sync, so the
+        // lookups return None. Don't panic — log + return None so the
+        // sync layer falls through to its existing
+        // SNAPSHOT-SYNC FALLBACK error path instead of crashing the
+        // node. (Wiring a clean trusted-checkpoint completion requires
+        // the snapshot transport to carry chain-prefix headers; that's
+        // tracked separately.)
+        let snapshot_block_header = match ctx
             .manager
             .graph
             .data_man
             .block_header_by_hash(snapshot_epoch_id)
-            .expect("block header must exist for snapshot to sync");
-        let trusted_blame_block = ctx
+        {
+            Some(h) => h,
+            None => {
+                warn!(
+                    "validate_blame_states: missing local header for \
+                     snapshot_epoch_id={:?}. Under trusted-checkpoint \
+                     fast-sync this is expected; the current revision \
+                     cannot complete the snapshot verification without \
+                     chain-prefix headers — falling through.",
+                    snapshot_epoch_id
+                );
+                return None;
+            }
+        };
+        let trusted_blame_block = match ctx
             .manager
             .graph
             .data_man
             .block_header_by_hash(trusted_blame_block)
-            .expect("trusted_blame_block header must exist");
+        {
+            Some(h) => h,
+            None => {
+                warn!(
+                    "validate_blame_states: missing local header for \
+                     trusted_blame_block={:?}. Same caveat as above.",
+                    trusted_blame_block
+                );
+                return None;
+            }
+        };
 
         // check snapshot position in `out_state_blame_vec`
         let offset = (trusted_blame_block.height()

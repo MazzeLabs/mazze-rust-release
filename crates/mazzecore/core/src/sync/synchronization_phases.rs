@@ -324,6 +324,15 @@ impl SynchronizationPhaseTrait for CatchUpSyncBlockHeaderPhase {
             median_epoch
         );
         if self.graph.consensus.catch_up_completed(median_epoch) {
+            // Fast-sync: under operator-configured trusted checkpoint
+            // we deliberately don't ingest peer headers (the seed
+            // bypass defers them as TemporarySkipped), so the terminal-
+            // share check would never succeed. Transition directly to
+            // CatchUpCheckpoint so the snapshot download can begin.
+            // See docs/fast-sync-design.md.
+            if self.graph.consensus.trusted_checkpoint().is_some() {
+                return SyncPhaseType::CatchUpCheckpoint;
+            }
             if normal_peers_share_known_terminal(&self.syn, &self.graph) {
                 return SyncPhaseType::CatchUpCheckpoint;
             }
@@ -477,6 +486,45 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
                 *sync_handler.synced_epoch_id.lock() = Some(epoch_to_sync);
             }
             return;
+        }
+
+        // Fast-sync anchor pre-fetch (docs/fast-sync-design.md §5.6):
+        // when the operator has configured a trusted checkpoint AND
+        // the snapshot/blame anchor headers are not yet in our local
+        // graph, fire a targeted `GetBlockHeaders` for both hashes
+        // BEFORE issuing the manifest request. The sync-graph's
+        // seed-lookup gate accepts these two hashes with a zero seed
+        // (they're operator-vouched), so subsequent manifest-response
+        // validation in `snapshot_manifest_manager::validate_blame_states`
+        // will find them locally and proceed.
+        if let Some((_, snapshot_hash, blame_hash)) =
+            sync_handler.graph.consensus.trusted_checkpoint_anchors()
+        {
+            let mut to_fetch = Vec::new();
+            if !sync_handler.graph.contains_block_header(&snapshot_hash) {
+                to_fetch.push(snapshot_hash);
+            }
+            if !sync_handler.graph.contains_block_header(&blame_hash) {
+                to_fetch.push(blame_hash);
+            }
+            if !to_fetch.is_empty() {
+                info!(
+                    "CatchUpCheckpointPhase: fast-sync anchor pre-fetch \
+                     of {} header(s) (snapshot={:?} blame={:?})",
+                    to_fetch.len(),
+                    snapshot_hash,
+                    blame_hash,
+                );
+                sync_handler.request_block_headers(
+                    io,
+                    None,        // any peer
+                    to_fetch,
+                    true,        // ignore_db
+                );
+                // Stay in this phase; the next `next()` tick re-enters
+                // start() once the headers have landed in the graph.
+                return;
+            }
         }
 
         self.state_sync.update_status(

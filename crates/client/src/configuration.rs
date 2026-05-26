@@ -316,6 +316,10 @@ build_config! {
         (strict_tx_index_gc, (bool), true)
         (sync_state_starting_epoch, (Option<u64>), None)
         (sync_state_epoch_gap, (Option<u64>), None)
+        (trusted_checkpoint_height, (Option<u64>), None)
+        (trusted_checkpoint_hash, (Option<String>), None)
+        (trusted_blame_height, (Option<u64>), None)
+        (trusted_blame_hash, (Option<String>), None)
         (target_difficulties_cache_size_in_count, (usize), DEFAULT_TARGET_DIFFICULTIES_CACHE_SIZE_IN_COUNT)
 
         // General/Unclassified section.
@@ -768,6 +772,28 @@ impl Configuration {
             get_logs_filter_max_limit: self.raw_conf.get_logs_filter_max_limit,
             sync_state_starting_epoch: self.raw_conf.sync_state_starting_epoch,
             sync_state_epoch_gap: self.raw_conf.sync_state_epoch_gap,
+            trusted_checkpoint_height: self.raw_conf.trusted_checkpoint_height,
+            trusted_checkpoint_hash: self
+                .raw_conf
+                .trusted_checkpoint_hash
+                .as_ref()
+                .map(|s| {
+                    let stripped = s.strip_prefix("0x").unwrap_or(s);
+                    H256::from_str(stripped).expect(
+                        "trusted_checkpoint_hash: expected 32-byte hex (with or without 0x prefix)",
+                    )
+                }),
+            trusted_blame_height: self.raw_conf.trusted_blame_height,
+            trusted_blame_hash: self
+                .raw_conf
+                .trusted_blame_hash
+                .as_ref()
+                .map(|s| {
+                    let stripped = s.strip_prefix("0x").unwrap_or(s);
+                    H256::from_str(stripped).expect(
+                        "trusted_blame_hash: expected 32-byte hex (with or without 0x prefix)",
+                    )
+                }),
         };
         match self.raw_conf.node_type {
             Some(NodeType::Archive) => {

@@ -86,6 +86,17 @@ pub trait ConsensusGraphTrait: Send + Sync {
 
     fn get_to_sync_epoch_id(&self) -> EpochId;
 
+    /// Returns the operator-configured trusted-checkpoint pair when set.
+    /// `(height, hash)` is the anchor that fast-sync uses to skip the
+    /// pre-anchor header history. See docs/fast-sync-design.md.
+    fn trusted_checkpoint(&self) -> Option<(u64, H256)> { None }
+
+    /// Returns `(snapshot_height, snapshot_hash, blame_hash)` when a
+    /// complete trusted checkpoint is configured. Used by the seed-
+    /// lookup gate to accept the two operator-vouched anchor headers
+    /// without a real seed.
+    fn trusted_checkpoint_anchors(&self) -> Option<(u64, H256, H256)> { None }
+
     fn get_trusted_blame_block(&self, stable_hash: &H256) -> Option<H256>;
 
     fn set_initial_sequence_number(&self, initial_sn: u64);

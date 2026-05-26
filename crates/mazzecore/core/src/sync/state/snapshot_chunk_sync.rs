@@ -784,12 +784,28 @@ impl SnapshotChunkSync {
             // offer us a newer snapshot. `set_active_candidate` walks
             // these newest-first, so a successful sync to a newer
             // epoch costs less catch-up afterward.
-            let height = sync_handler
+            // Fast-sync exception: under an operator-configured trusted
+            // checkpoint we have NO local header for `epoch_to_sync` (it
+            // IS the anchor we're syncing to). Fall back to the
+            // operator-supplied height in that case; otherwise preserve
+            // the "checkpoint must have header" invariant.
+            let height = match sync_handler
                 .graph
                 .data_man
                 .block_header_by_hash(&epoch_to_sync)
-                .expect("Syncing checkpoint should have available header")
-                .height();
+            {
+                Some(h) => h.height(),
+                None => sync_handler
+                    .graph
+                    .consensus
+                    .trusted_checkpoint()
+                    .filter(|(_, hash)| *hash == epoch_to_sync)
+                    .map(|(h, _)| h)
+                    .expect(
+                        "Syncing checkpoint should have available header \
+                         or trusted-checkpoint height matching epoch_to_sync",
+                    ),
+            };
             let mut candidates = vec![SnapshotSyncCandidate::FullSync {
                 height,
                 snapshot_epoch_id: epoch_to_sync,

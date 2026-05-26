@@ -3446,6 +3446,13 @@ impl ConsensusGraphInner {
             .unwrap_or_default()
     }
 
+    /// Height of the current era's stable checkpoint. `0` for a fresh
+    /// node that has not advanced past genesis. Used by the outer
+    /// `ConsensusGraph` to gate the trusted-checkpoint fast-sync path.
+    pub fn cur_era_stable_height(&self) -> u64 {
+        self.cur_era_stable_height
+    }
+
     /// Return the latest height that a snapshot should be available.
     fn latest_snapshot_height(&self) -> u64 {
         let snapshot_epoch_count =

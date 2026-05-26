@@ -153,6 +153,40 @@ pub struct ConsensusConfig {
     /// The number of extra epochs that we want to keep
     /// states/receipts/transactions.
     pub sync_state_epoch_gap: Option<u64>,
+
+    /// Operator-provided trusted checkpoint for fast joining. When ALL
+    /// four fields are set AND the local node is fresh
+    /// (cur_era_stable_height == 0), the sync layer jumps directly to
+    /// `CatchUpCheckpoint` with this anchor — it downloads the snapshot
+    /// at `trusted_checkpoint_hash` from peers instead of linear-syncing
+    /// headers from genesis. The protocol additionally needs a "blame
+    /// anchor" — a block at least a few hundred epochs ABOVE the
+    /// snapshot — so the responding peer can return blame info that
+    /// proves the snapshot's state root. See docs/fast-sync-design.md.
+    ///
+    /// Trust model: the operator is asserting that BOTH (height, hash)
+    /// pairs are canonical. Wrong hash → snapshot verification fails →
+    /// sync refuses to proceed (loud failure, never silent corruption).
+    pub trusted_checkpoint_height: Option<u64>,
+    pub trusted_checkpoint_hash: Option<H256>,
+    pub trusted_blame_height: Option<u64>,
+    pub trusted_blame_hash: Option<H256>,
+}
+
+impl ConsensusConfig {
+    /// True iff all four trusted-checkpoint fields are configured.
+    pub fn has_trusted_checkpoint(&self) -> bool {
+        self.trusted_checkpoint_height.is_some()
+            && self.trusted_checkpoint_hash.is_some()
+            && self.trusted_blame_height.is_some()
+            && self.trusted_blame_hash.is_some()
+    }
+
+    /// The blame-anchor hash, if a complete trusted checkpoint is
+    /// configured. Used by `get_trusted_blame_block_for_snapshot`.
+    pub fn trusted_blame_anchor(&self) -> Option<H256> {
+        self.trusted_blame_hash
+    }
 }
 
 #[derive(Debug)]
@@ -2333,18 +2367,74 @@ impl ConsensusGraphTrait for ConsensusGraph {
         )));
     }
 
-    /// Find a trusted blame block for snapshot full sync
+    /// Find a trusted blame block for snapshot full sync.
+    ///
+    /// Fast-sync: under operator-configured trusted checkpoint, the
+    /// local node has no chain data yet and the inner lookup would
+    /// return `None`. The protocol's server side walks the chain DOWN
+    /// from `trusted_blame_block` to the snapshot collecting state
+    /// roots, so the blame anchor must sit *above* the snapshot. We
+    /// return the operator-provided `trusted_blame_hash` (a known-good
+    /// post-snapshot block). Wrong hash → snapshot/state-root
+    /// verification fails → sync refuses to proceed (loud failure).
+    /// See docs/fast-sync-design.md.
     fn get_trusted_blame_block_for_snapshot(
         &self, snapshot_epoch_id: &EpochId,
     ) -> Option<H256> {
+        if self.inner.read().cur_era_stable_height() == 0 {
+            if let Some((_, trusted_snapshot_hash)) = self.trusted_checkpoint() {
+                if *snapshot_epoch_id == trusted_snapshot_hash {
+                    return self.config.trusted_blame_anchor();
+                }
+            }
+        }
         self.inner
             .read()
             .get_trusted_blame_block_for_snapshot(snapshot_epoch_id)
     }
 
-    /// Return the epoch that we are going to sync the state
+    /// Return the epoch that we are going to sync the state.
+    ///
+    /// Fast-sync: when an operator-provided `trusted_checkpoint_hash` is
+    /// configured AND the local node is fresh (no era-stable history yet),
+    /// return the trusted hash directly so the catch-up FSM jumps straight
+    /// to `CatchUpCheckpoint` with that anchor — bypassing a linear header
+    /// sync from genesis. The snapshot download itself still verifies the
+    /// state-root chain, so a wrong hash fails loudly in chunk verification
+    /// rather than silently corrupting state. See docs/fast-sync-design.md.
     fn get_to_sync_epoch_id(&self) -> EpochId {
-        self.inner.read().get_to_sync_epoch_id()
+        let inner = self.inner.read();
+        if self.config.has_trusted_checkpoint()
+            && inner.cur_era_stable_height() == 0
+        {
+            if let Some(hash) = self.config.trusted_checkpoint_hash {
+                return hash;
+            }
+        }
+        inner.get_to_sync_epoch_id()
+    }
+
+    fn trusted_checkpoint(&self) -> Option<(u64, H256)> {
+        match (
+            self.config.trusted_checkpoint_height,
+            self.config.trusted_checkpoint_hash,
+        ) {
+            (Some(h), Some(hash)) => Some((h, hash)),
+            _ => None,
+        }
+    }
+
+    fn trusted_checkpoint_anchors(&self) -> Option<(u64, H256, H256)> {
+        match (
+            self.config.trusted_checkpoint_height,
+            self.config.trusted_checkpoint_hash,
+            self.config.trusted_blame_hash,
+        ) {
+            (Some(h), Some(snapshot), Some(blame)) => {
+                Some((h, snapshot, blame))
+            }
+            _ => None,
+        }
     }
 
     /// Find a trusted blame block for checkpoint
@@ -2438,6 +2528,19 @@ impl ConsensusGraphTrait for ConsensusGraph {
     /// Check if we have downloaded all the headers to find the lowest needed
     /// checkpoint. We can enter `CatchUpCheckpoint` if it's true.
     fn catch_up_completed(&self, peer_median_epoch: u64) -> bool {
+        // Fast-sync short-circuit: when an operator-provided trusted
+        // checkpoint is configured AND this node is fresh (no era stable
+        // history yet), we skip the usual "do we have headers to the
+        // snapshot target?" gate. `get_to_sync_epoch_id()` returns the
+        // trusted hash; we don't have that block in local data_man yet
+        // (so block_height_by_hash would panic), and we deliberately
+        // *want* CatchUpCheckpoint to run with no local prefix — it will
+        // pull the snapshot from a peer. See docs/fast-sync-design.md.
+        if self.config.has_trusted_checkpoint()
+            && self.inner.read().cur_era_stable_height() == 0
+        {
+            return true;
+        }
         let epoch_to_sync = self.get_to_sync_epoch_id();
         let sync_target_height = self
             .data_man

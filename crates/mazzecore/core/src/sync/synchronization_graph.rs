@@ -1497,6 +1497,45 @@ impl SynchronizationGraph {
     ) -> (BlockHeaderInsertionResult, Vec<H256>) {
         let _timer = MeterTimer::time_func(SYNC_INSERT_HEADER.as_ref());
         self.statistics.inc_sync_graph_inserted_header_count();
+
+        // Fast-sync trusted anchor bypass. Operator-vouched headers
+        // arriving via `CatchUpCheckpointPhase::start()`'s pre-fetch
+        // must reach `data_man` so `validate_blame_states` can find
+        // them, but during `CatchUpCheckpoint` the normal
+        // `locked_for_catchup` gate immediately short-circuits this
+        // function. We also don't want the standard graph-insertion
+        // path to fire dependency requests for the missing chain
+        // prefix. Persist directly and return `TemporarySkipped` so
+        // the response-handler treats the header as a no-op for
+        // downstream graph/dep logic. PoW is intentionally not
+        // re-checked: the trust input is the operator's hash, and
+        // we verify the hash matches what was configured before
+        // accepting. See docs/fast-sync-design.md §5.6.
+        if persistent {
+            if let Some((_, snapshot_hash, blame_hash)) =
+                self.consensus.trusted_checkpoint_anchors()
+            {
+                let h = header.hash();
+                if h == snapshot_hash || h == blame_hash {
+                    self.data_man.insert_block_header(
+                        h,
+                        Arc::new(header.clone()),
+                        true,
+                    );
+                    debug!(
+                        "Fast-sync: persisted trusted anchor header \
+                         hash={:?} height={}",
+                        h,
+                        header.height(),
+                    );
+                    return (
+                        BlockHeaderInsertionResult::TemporarySkipped,
+                        Vec::new(),
+                    );
+                }
+            }
+        }
+
         let inner = &mut *self.inner.write();
         if inner.locked_for_catchup {
             // Ignore received headers when we are downloading block bodies.
@@ -1540,6 +1579,18 @@ impl SynchronizationGraph {
         // — a zero seed bypasses PoW verification in `verify_pow`,
         // which would silently accept invalid blocks. See
         // docs/security-audit.md finding H-1.
+        //
+        // Fast-sync exception: when an operator-configured trusted
+        // checkpoint is set, headers below that height are pre-anchor
+        // history. Under the trusted-checkpoint model the operator has
+        // asserted the chain up to the anchor; we cannot have seeds
+        // for those heights yet (we never executed those blocks), so
+        // the seed-missed rejection would block legitimate pre-anchor
+        // headers that a peer might still send. Fall through with a
+        // zero seed — `verify_pow` independently bypasses PoW in
+        // catch-up mode (verification.rs:371), so this does NOT widen
+        // the H-1 attack surface beyond what catch-up already allows.
+        // See docs/fast-sync-design.md.
         let block_seed_hash = match self
             .data_man
             .db_manager
@@ -1547,15 +1598,44 @@ impl SynchronizationGraph {
         {
             Some(h) => h,
             None => {
-                warn!(
-                    "Rejecting block {}: seed lookup missed at height {} (DB inconsistency or attacker-supplied block from future epoch)",
-                    header.hash(),
-                    header.height()
-                );
-                return (
-                    BlockHeaderInsertionResult::Invalid,
-                    Vec::new(),
-                );
+                let trusted_anchor =
+                    self.consensus.trusted_checkpoint_anchors();
+                if let Some((trusted_h, snapshot_hash, blame_hash)) =
+                    trusted_anchor
+                {
+                    let hash = header.hash();
+                    if hash == snapshot_hash || hash == blame_hash {
+                        // The two operator-supplied anchor headers.
+                        // Accept with zero seed (PoW is already skipped
+                        // in catch-up mode); these must be in the local
+                        // graph for snapshot validation to find them.
+                        H256::zero()
+                    } else if header.height() < trusted_h {
+                        // Pre-anchor header under trusted-checkpoint
+                        // mode: accept with zero seed.
+                        H256::zero()
+                    } else {
+                        // Post-anchor header that isn't an anchor
+                        // itself: we can't validate it yet (we haven't
+                        // even downloaded the snapshot). Defer with
+                        // `TemporarySkipped` so the peer stays
+                        // connected.
+                        return (
+                            BlockHeaderInsertionResult::TemporarySkipped,
+                            Vec::new(),
+                        );
+                    }
+                } else {
+                    warn!(
+                        "Rejecting block {}: seed lookup missed at height {} (DB inconsistency or attacker-supplied block from future epoch)",
+                        header.hash(),
+                        header.height()
+                    );
+                    return (
+                        BlockHeaderInsertionResult::Invalid,
+                        Vec::new(),
+                    );
+                }
             }
         };
 

@@ -10,7 +10,7 @@ use crate::{
         },
         request_manager::{AsAny, Request},
         state::storage::SnapshotSyncCandidate,
-        Error, ProtocolConfiguration, SYNC_PROTO_V1, SYNC_PROTO_V4,
+        Error, ProtocolConfiguration, SYNC_PROTO_V1, SYNC_PROTO_V5,
     },
 };
 use lazy_static::lazy_static;
@@ -43,7 +43,7 @@ pub struct StateSyncCandidateRequest {
 
 build_msg_with_request_id_impl! {
     StateSyncCandidateRequest, msgid::STATE_SYNC_CANDIDATE_REQUEST,
-    "StateSyncCandidateRequest", SYNC_PROTO_V1, SYNC_PROTO_V4
+    "StateSyncCandidateRequest", SYNC_PROTO_V1, SYNC_PROTO_V5
 }
 
 impl Handleable for StateSyncCandidateRequest {

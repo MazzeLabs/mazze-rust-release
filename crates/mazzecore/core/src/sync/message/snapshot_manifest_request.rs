@@ -11,11 +11,13 @@ use crate::{
     sync::{
         message::{
             msgid, Context, DynamicCapability, Handleable, KeyContainer,
-            SnapshotManifestResponse, SnapshotManifestResponseV4,
+            EpochBlockHashes, PreComputedRelatedData, SnapshotManifestResponse,
+            SnapshotManifestResponseV4, SnapshotManifestResponseV5,
         },
         request_manager::{AsAny, Request},
         state::storage::{RangedManifest, SnapshotSyncCandidate},
         Error, ProtocolConfiguration, SYNC_PROTO_V1, SYNC_PROTO_V4,
+        SYNC_PROTO_V5,
     },
 };
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
@@ -40,7 +42,7 @@ pub struct SnapshotManifestRequest {
 
 build_msg_with_request_id_impl! {
     SnapshotManifestRequest, msgid::GET_SNAPSHOT_MANIFEST,
-    "SnapshotManifestRequest", SYNC_PROTO_V1, SYNC_PROTO_V4
+    "SnapshotManifestRequest", SYNC_PROTO_V1, SYNC_PROTO_V5
 }
 
 impl Handleable for SnapshotManifestRequest {
@@ -48,6 +50,18 @@ impl Handleable for SnapshotManifestRequest {
         let peer_supports_v4 = matches!(
             ctx.manager.syn.get_peer_version(&ctx.node_id),
             Ok(version) if version >= SYNC_PROTO_V4
+        );
+        let peer_supports_v5 = matches!(
+            ctx.manager.syn.get_peer_version(&ctx.node_id),
+            Ok(version) if version >= SYNC_PROTO_V5
+        );
+        info!(
+            "SnapshotManifestRequest from peer={:?}: peer_version={:?}, supports_v4={}, supports_v5={}, is_initial={}",
+            ctx.node_id,
+            ctx.manager.syn.get_peer_version(&ctx.node_id),
+            peer_supports_v4,
+            peer_supports_v5,
+            self.is_initial_request(),
         );
         // TODO Handle the case where we cannot serve the snapshot
         let snapshot_merkle_root;
@@ -69,7 +83,14 @@ impl Handleable for SnapshotManifestRequest {
                     request_id: self.request_id,
                     ..Default::default()
                 };
-                if peer_supports_v4 {
+                if peer_supports_v5 {
+                    ctx.send_response(
+                        &SnapshotManifestResponseV5::from_legacy_with_extras(
+                            response,
+                            PreComputedRelatedData::default(),
+                        ),
+                    )?;
+                } else if peer_supports_v4 {
                     ctx.send_response(
                         &SnapshotManifestResponseV4::from_legacy(response),
                     )?;
@@ -106,7 +127,39 @@ impl Handleable for SnapshotManifestRequest {
                 block_receipts: Default::default(),
             }
         };
-        if peer_supports_v4 {
+
+        if peer_supports_v5 && self.is_initial_request() {
+            // V5: ship the pre-computed RelatedData so the (fresh,
+            // trusted-checkpoint) client can bypass the consensus-
+            // derived validation walks. Falls back to V4 on the
+            // server side if any lookup is missing — keeps old V4
+            // peers fully functional and gives a V5 peer with a
+            // misconfigured anchor a clean failure path.
+            // See docs/fast-sync-design.md §5.13.
+            match self.build_pre_computed_related_data(ctx, &response) {
+                Some(pre_computed) => {
+                    ctx.send_response(
+                        &SnapshotManifestResponseV5::from_legacy_with_extras(
+                            response,
+                            pre_computed,
+                        ),
+                    )
+                }
+                None => {
+                    debug!(
+                        "V5 producer: could not build PreComputedRelatedData \
+                         for snapshot {:?}; falling back to V4 shape",
+                        self.snapshot_to_sync.get_snapshot_epoch_id(),
+                    );
+                    ctx.send_response(
+                        &SnapshotManifestResponseV5::from_legacy_with_extras(
+                            response,
+                            PreComputedRelatedData::default(),
+                        ),
+                    )
+                }
+            }
+        } else if peer_supports_v4 {
             ctx.send_response(&SnapshotManifestResponseV4::from_legacy(
                 response,
             ))
@@ -131,6 +184,106 @@ impl SnapshotManifestRequest {
 
     pub fn is_initial_request(&self) -> bool {
         self.trusted_blame_block.is_some()
+    }
+
+    /// V5 producer: assemble the `PreComputedRelatedData` payload from
+    /// the server's local consensus + storage state. Returns `None`
+    /// when any required field can't be looked up (in which case the
+    /// caller ships an empty payload — a V5 client without
+    /// trusted-checkpoint mode then falls back to V4 validation, and
+    /// a V5 client WITH trusted-checkpoint fails loud on the empty
+    /// merkle_root vs chunks check). See docs/fast-sync-design.md §5.13.
+    fn build_pre_computed_related_data(
+        &self, ctx: &Context, response: &SnapshotManifestResponse,
+    ) -> Option<PreComputedRelatedData> {
+        let snapshot_epoch_id =
+            *self.snapshot_to_sync.get_snapshot_epoch_id();
+        let trusted_blame_hash = self.trusted_blame_block?;
+
+        let data_man = &ctx.manager.graph.data_man;
+        let storage_manager =
+            data_man.storage_manager.get_storage_manager();
+
+        // 1) SnapshotInfo for the requested snapshot.
+        let snapshot_info =
+            storage_manager.get_snapshot_info_at_epoch(&snapshot_epoch_id)?;
+
+        // 2) Parent SnapshotInfo (length-0 vec means "no parent").
+        let parent_snapshot_info_vec =
+            if snapshot_info.parent_snapshot_epoch_id
+                == primitives::NULL_EPOCH
+            {
+                Vec::new()
+            } else {
+                match storage_manager.get_snapshot_info_at_epoch(
+                    &snapshot_info.parent_snapshot_epoch_id,
+                ) {
+                    Some(p) => vec![p],
+                    None => Vec::new(),
+                }
+            };
+
+        // 3) StateRootWithAuxInfo for the snapshot. The V4
+        //    validate_blame_states derives this from state_root_vec[
+        //    offset] + a walk; the server has it directly via the
+        //    epoch-execution commitment for `trusted_blame_block`'s
+        //    deferred chain. Same source the V4 validator ends up at.
+        let trusted_blame_header =
+            data_man.block_header_by_hash(&trusted_blame_hash)?;
+        let snapshot_header =
+            data_man.block_header_by_hash(&snapshot_epoch_id)?;
+        let mut deferred = trusted_blame_hash;
+        for _ in 0..DEFERRED_STATE_EPOCH_COUNT {
+            let h = data_man.block_header_by_hash(&deferred)?;
+            deferred = *h.parent_hash();
+        }
+        let commitment =
+            data_man.get_epoch_execution_commitment_with_db(&deferred)?;
+        let state_root_with_aux_info = commitment.state_root_with_aux_info;
+
+        // 4) blame_vec_offset — same calc the V4 client does.
+        let offset = trusted_blame_header
+            .height()
+            .checked_sub(
+                snapshot_header.height() + DEFERRED_STATE_EPOCH_COUNT as u64,
+            )?;
+        // Sanity: keep ourselves bounded by what's actually in
+        // state_root_vec so the client can index safely.
+        if (offset as usize) >= response.state_root_vec.len() {
+            return None;
+        }
+
+        // 5) ordered_executable_epoch_blocks for REWARD_EPOCH_COUNT
+        //    epochs walking back from the snapshot. Replaces the
+        //    fresh client's consensus.get_block_hashes_by_epoch call.
+        let mut ordered_executable_epoch_blocks = Vec::new();
+        let mut epoch_hash = snapshot_epoch_id;
+        for _ in 0..REWARD_EPOCH_COUNT {
+            let header = data_man.block_header_by_hash(&epoch_hash)?;
+            let blocks = ctx
+                .manager
+                .graph
+                .consensus
+                .get_block_hashes_by_epoch(EpochNumber::Number(
+                    header.height(),
+                ))
+                .ok()?;
+            ordered_executable_epoch_blocks.push(EpochBlockHashes {
+                hashes: blocks,
+            });
+            if header.height() == 0 {
+                break;
+            }
+            epoch_hash = *header.parent_hash();
+        }
+
+        Some(PreComputedRelatedData {
+            snapshot_info,
+            parent_snapshot_info: parent_snapshot_info_vec,
+            state_root_with_aux_info,
+            blame_vec_offset: offset,
+            ordered_executable_epoch_blocks,
+        })
     }
 
     /// This function returns the receipts of REWARD_EPOCH_COUNT epochs

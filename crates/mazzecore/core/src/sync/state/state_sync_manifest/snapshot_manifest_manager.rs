@@ -107,6 +107,212 @@ impl SnapshotManifestManager {
         }
     }
 
+    /// V5 fast-sync entry point. Skips the local consensus-derived
+    /// validation walks (`validate_blame_states` +
+    /// `validate_epoch_receipts`) and constructs `RelatedData`
+    /// directly from the server-supplied `PreComputedRelatedData`.
+    /// The snapshot's cryptographic integrity is still verified via
+    /// `manifest.validate(&snapshot_info.merkle_root)` against the
+    /// downloaded chunks — a lying server fails loudly there, never
+    /// silently corrupts state. See docs/fast-sync-design.md §5.13.
+    pub fn handle_snapshot_manifest_response_v5(
+        &mut self, ctx: &Context, response: SnapshotManifestResponse,
+        pre_computed: super::super::super::message::PreComputedRelatedData,
+        request: &SnapshotManifestRequest,
+    ) -> Result<Option<RelatedData>, Error> {
+        match self.handle_snapshot_manifest_response_v5_impl(
+            ctx,
+            response,
+            pre_computed,
+            request,
+        ) {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                self.note_failure(&ctx.node_id);
+                Err(e)
+            }
+        }
+    }
+
+    fn handle_snapshot_manifest_response_v5_impl(
+        &mut self, ctx: &Context, response: SnapshotManifestResponse,
+        pre_computed: super::super::super::message::PreComputedRelatedData,
+        request: &SnapshotManifestRequest,
+    ) -> Result<Option<RelatedData>, Error> {
+        // Standard candidate match guard (mirrors the V4 impl).
+        if request.snapshot_to_sync != self.snapshot_candidate {
+            info!(
+                "V5 manifest for stale candidate; current={:?} requested={:?}",
+                self.snapshot_candidate, request.snapshot_to_sync,
+            );
+            return Ok(None);
+        }
+        info!(
+            "Snapshot manifest V5 received, checkpoint={:?}, chunk_boundaries.len()={}, \
+             pre_computed.merkle={:?}, pre_computed.height={}, has_parent={}",
+            self.snapshot_candidate,
+            response.manifest.chunk_boundaries.len(),
+            pre_computed.snapshot_info.merkle_root,
+            pre_computed.snapshot_info.height,
+            !pre_computed.parent_snapshot_info.is_empty(),
+        );
+
+        if !request.is_initial_request() {
+            // V5 only adds value on the initial manifest (the one that
+            // would have run validate_blame_states + validate_epoch_receipts).
+            // For later range-continuation manifests, defer to the V4 path.
+            return self.handle_snapshot_manifest_response_impl(
+                ctx, response, request,
+            );
+        }
+        if !self.chunk_boundaries.is_empty() {
+            bail!(ErrorKind::InvalidSnapshotManifest(
+                "Initial manifest is not expected".into(),
+            ));
+        }
+
+        let snapshot_info = pre_computed.snapshot_info;
+        let parent_snapshot_info: Option<
+            mazze_storage::storage_db::SnapshotInfo,
+        > = pre_computed.parent_snapshot_info.into_iter().next();
+        let blame_vec_offset = pre_computed.blame_vec_offset as usize;
+
+        // Cryptographic safety floor: the chunks the manifest points
+        // at must hash to the same merkle_root the server claims.
+        // A lying server fails here (or fails the per-chunk merkle
+        // proof later) — wrong configured hash fails the same way.
+        if let Err(e) = response.manifest.validate(&snapshot_info.merkle_root)
+        {
+            warn!(
+                "V5 manifest: chunk-proof validation against server-supplied \
+                 merkle_root={:?} FAILED — {:?}. This is the operator's loud
+                 failure mode for a wrong trusted_checkpoint_hash, a wrong
+                 trusted_snapshot_bundle, or a Byzantine server. Re-sync
+                 from another peer.",
+                snapshot_info.merkle_root, e
+            );
+            self.resync_manifest(ctx);
+            bail!(ErrorKind::InvalidSnapshotManifest(
+                "V5: chunk proofs do not match server-supplied merkle_root \
+                 (operator trusted_checkpoint anchor likely wrong, or \
+                 server is Byzantine)"
+                    .into(),
+            ));
+        }
+
+        // Reconstruct the per-epoch receipts list. V4's
+        // `validate_epoch_receipts` builds this by walking the chain
+        // via `consensus.get_block_hashes_by_epoch` (which a fresh
+        // fast-sync joiner can't do). V5 ships the block-hash lists
+        // directly so the client just zips them with the on-wire
+        // block_receipts and computes the merkle-root check inline.
+        let mut epoch_receipts = Vec::new();
+        let mut receipts_vec_offset = 0usize;
+        let mut epoch_hash = *self.snapshot_candidate.get_snapshot_epoch_id();
+        for (idx, ordered_blocks_wrap) in pre_computed
+            .ordered_executable_epoch_blocks
+            .iter()
+            .enumerate()
+        {
+            let ordered_blocks = &ordered_blocks_wrap.hashes;
+            let mut this_epoch_receipts = Vec::new();
+            for i in 0..ordered_blocks.len() {
+                match response.block_receipts.get(receipts_vec_offset + i) {
+                    Some(br) => {
+                        this_epoch_receipts.push(br.block_receipts.clone())
+                    }
+                    None => {
+                        warn!(
+                            "V5: block_receipts vector too short at offset {}",
+                            receipts_vec_offset + i,
+                        );
+                        self.resync_manifest(ctx);
+                        bail!(ErrorKind::InvalidSnapshotManifest(
+                            "V5: block_receipts shorter than \
+                             ordered_executable_epoch_blocks asks"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+            // Same blame-vector integrity check the V4 path does, but
+            // against the server's pre-supplied blame_vec_offset.
+            let receipt_root =
+                compute_receipts_root(&this_epoch_receipts);
+            let logs_bloom_hash =
+                primitives::BlockHeaderBuilder::compute_block_logs_bloom_hash(
+                    &this_epoch_receipts,
+                );
+            let ridx = blame_vec_offset + idx;
+            if response.receipt_blame_vec.get(ridx)
+                != Some(&receipt_root)
+                || response.bloom_blame_vec.get(ridx)
+                    != Some(&logs_bloom_hash)
+            {
+                warn!(
+                    "V5: receipts/blooms root mismatch at idx={} (snapshot \
+                     epoch={:?}). Re-sync.",
+                    ridx, epoch_hash,
+                );
+                self.resync_manifest(ctx);
+                bail!(ErrorKind::InvalidSnapshotManifest(
+                    "V5: receipts/blooms blame-root mismatch".into(),
+                ));
+            }
+            for (i, hash) in ordered_blocks.iter().enumerate() {
+                epoch_receipts.push((
+                    *hash,
+                    epoch_hash,
+                    response.block_receipts[receipts_vec_offset + i]
+                        .block_receipts
+                        .clone(),
+                ));
+            }
+            receipts_vec_offset += ordered_blocks.len();
+            // Walk back via the pre-supplied epoch-block lists; we
+            // don't need parent_hash because successive
+            // ordered_executable_epoch_blocks entries already encode
+            // the back-walk (server produces them by walking).
+            // Update epoch_hash to the head of the next epoch in the
+            // list (the first hash, which is also the pivot).
+            if let Some(next_epoch_blocks) =
+                pre_computed.ordered_executable_epoch_blocks.get(idx + 1)
+            {
+                if let Some(h) = next_epoch_blocks.hashes.last() {
+                    epoch_hash = *h;
+                }
+            }
+        }
+
+        self.related_data = Some(RelatedData {
+            true_state_root_by_blame_info: pre_computed
+                .state_root_with_aux_info,
+            blame_vec_offset,
+            receipt_blame_vec: response.receipt_blame_vec,
+            bloom_blame_vec: response.bloom_blame_vec,
+            epoch_receipts,
+            snapshot_info,
+            parent_snapshot_info,
+        });
+
+        // Accumulate chunk descriptors from the manifest payload — same
+        // bookkeeping the V4 path does after validation succeeds. The
+        // first element is `start_key` and overlaps with the previous
+        // manifest (none, since we're the initial).
+        self.chunk_boundaries
+            .extend_from_slice(&response.manifest.chunk_boundaries);
+        self.chunk_boundary_proofs
+            .extend_from_slice(&response.manifest.chunk_boundary_proofs);
+        self.chunk_hashes
+            .extend_from_slice(&response.manifest.chunk_hashes);
+        if response.manifest.next.is_none() {
+            Ok(self.related_data.clone())
+        } else {
+            self.request_manifest(ctx.io, ctx.manager, response.manifest.next);
+            Ok(None)
+        }
+    }
+
     fn handle_snapshot_manifest_response_impl(
         &mut self, ctx: &Context, response: SnapshotManifestResponse,
         request: &SnapshotManifestRequest,

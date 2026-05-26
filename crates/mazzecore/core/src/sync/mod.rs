@@ -53,7 +53,7 @@ use network::service::ProtocolVersion;
 /// deprecation.
 ///
 /// Do NOT make this const pub.
-const SYNCHRONIZATION_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(4);
+const SYNCHRONIZATION_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(5);
 /// Support at most this number of old versions.
 const SYNCHRONIZATION_PROTOCOL_OLD_VERSIONS_TO_SUPPORT: u8 = 2;
 /// The version to pass to Message for their lifetime declaration.
@@ -61,6 +61,12 @@ pub const SYNC_PROTO_V1: ProtocolVersion = ProtocolVersion(1);
 pub const SYNC_PROTO_V2: ProtocolVersion = ProtocolVersion(2);
 pub const SYNC_PROTO_V3: ProtocolVersion = ProtocolVersion(3);
 pub const SYNC_PROTO_V4: ProtocolVersion = ProtocolVersion(4);
+/// V5 adds `SnapshotManifestResponseV5` carrying pre-computed
+/// `RelatedData` (snapshot_info, parent_snapshot_info,
+/// state_root_with_aux_info, ordered_executable_epoch_blocks) so a
+/// trusted-checkpoint fast-sync client can bypass the consensus-
+/// derived validation walks. See docs/fast-sync-design.md §5.13.
+pub const SYNC_PROTO_V5: ProtocolVersion = ProtocolVersion(5);
 
 pub mod random {
     use rand;

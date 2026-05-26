@@ -60,7 +60,8 @@ pub use self::{
     snapshot_chunk_response::{SnapshotChunkResponse, SnapshotChunkResponseV4},
     snapshot_manifest_request::SnapshotManifestRequest,
     snapshot_manifest_response::{
-        SnapshotManifestResponse, SnapshotManifestResponseV4,
+        EpochBlockHashes, PreComputedRelatedData, SnapshotManifestResponse,
+        SnapshotManifestResponseV4, SnapshotManifestResponseV5,
     },
     state_sync_candidate_request::StateSyncCandidateRequest,
     state_sync_candidate_response::StateSyncCandidateResponse,

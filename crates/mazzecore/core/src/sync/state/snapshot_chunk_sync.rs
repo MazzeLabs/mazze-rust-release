@@ -359,6 +359,59 @@ impl SnapshotChunkSync {
         self.inner.read().status
     }
 
+    /// V5 entry point. If `has_trusted_checkpoint()` is set on the
+    /// local node AND the wire payload carries pre-computed
+    /// `RelatedData`, hand the pre-computed bundle into the manifest
+    /// manager so it skips the local consensus-derived validation
+    /// walks (see snapshot_manifest_manager.rs). Otherwise fall back
+    /// to the V4 behaviour. See docs/fast-sync-design.md §5.13.
+    pub fn handle_snapshot_manifest_response_v5(
+        &self, ctx: &Context, response: SnapshotManifestResponse,
+        pre_computed: super::super::message::PreComputedRelatedData,
+        request: &SnapshotManifestRequest,
+    ) -> Result<(), Error> {
+        let inner = &mut *self.inner.write();
+        if !matches!(inner.status, Status::DownloadingManifest(_)) {
+            info!("Snapshot manifest V5 received, but mismatch with current status {:?}", inner.status);
+            return Ok(());
+        };
+        if let Some(manifest_manager) = &mut inner.manifest_manager {
+            let r = manifest_manager
+                .handle_snapshot_manifest_response_v5(
+                    ctx,
+                    response,
+                    pre_computed,
+                    request,
+                )?;
+            if let Some(related_data) = r {
+                inner.status = Status::DownloadingChunks(Instant::now());
+                inner.chunk_manager = Some(SnapshotChunkManager::new_and_start(
+                    ctx,
+                    manifest_manager.snapshot_candidate.clone(),
+                    related_data.snapshot_info.clone(),
+                    related_data.parent_snapshot_info.clone(),
+                    manifest_manager.chunk_boundaries.clone(),
+                    manifest_manager.chunk_boundary_proofs.clone(),
+                    manifest_manager.chunk_hashes.clone(),
+                    manifest_manager.active_peers.clone(),
+                    self.config.chunk_config(),
+                    related_data
+                        .true_state_root_by_blame_info
+                        .state_root
+                        .delta_root,
+                )?);
+                inner.related_data = Some(related_data);
+            }
+            debug!("sync state V5 progress: {:?}", *inner);
+        } else {
+            error!("manifest manager is None in status {:?}", inner.status);
+        }
+        if matches!(inner.status, Status::DownloadingChunks(_)) {
+            inner.manifest_manager = None;
+        }
+        Ok(())
+    }
+
     pub fn handle_snapshot_manifest_response(
         &self, ctx: &Context, response: SnapshotManifestResponse,
         request: &SnapshotManifestRequest,

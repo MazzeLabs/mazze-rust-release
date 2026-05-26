@@ -20,6 +20,12 @@ version.txt
 run/*.toml.backup
 run/blockchain_data
 run/blockchain_data_dev
+run/blockchain_data_local/
+run/blockchain_data_*/
+# Per-run dev-test blockchain data directory.
+run/bcd_devtest/
+# Local-only operator config (per-host override; never committed).
+run/hydra.local.toml
 
 # Per-deployment generated configs (start-node{,-dev,-miner}.sh write these
 # from run/hydra.toml at launch — they contain absolute paths and the live

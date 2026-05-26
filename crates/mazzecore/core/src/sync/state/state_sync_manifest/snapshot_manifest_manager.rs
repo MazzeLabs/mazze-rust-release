@@ -594,14 +594,33 @@ impl SnapshotManifestManager {
                 .data_man
                 .block_header_by_hash(&epoch_hash)
                 .expect("block header must exist");
-            let ordered_executable_epoch_blocks = ctx
-                .manager
-                .graph
-                .consensus
-                .get_block_hashes_by_epoch(EpochNumber::Number(
-                    block_header.height(),
-                ))
-                .expect("ordered executable epoch blocks must exist");
+            // Fast-sync caveat (docs/fast-sync-design.md §5.6 / §5.12):
+            // `get_block_hashes_by_epoch` requires the consensus engine
+            // to have processed (and executed) the epoch. Under
+            // trusted-checkpoint fast-sync we directly persist the
+            // chain-prefix headers but deliberately skip consensus
+            // execution, so this lookup returns Err. Fail gracefully
+            // (return None) instead of panicking; the snapshot sync
+            // falls through to the existing FALLBACK path. The proper
+            // completion is option (2) — ship `RelatedData` + receipts
+            // inline on the wire (V5) so the client doesn't need a
+            // locally-executed consensus to verify.
+            let ordered_executable_epoch_blocks =
+                match ctx.manager.graph.consensus.get_block_hashes_by_epoch(
+                    EpochNumber::Number(block_header.height()),
+                ) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!(
+                            "validate_epoch_receipts: get_block_hashes_by_epoch \
+                             failed for height {} (err={:?}); falling through \
+                             — expected under trusted-checkpoint fast-sync.",
+                            block_header.height(),
+                            e,
+                        );
+                        return None;
+                    }
+                };
             let mut epoch_receipts = Vec::new();
             for i in 0..ordered_executable_epoch_blocks.len() {
                 if let Some(block_receipt) =

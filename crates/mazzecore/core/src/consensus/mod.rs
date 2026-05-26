@@ -2424,14 +2424,15 @@ impl ConsensusGraphTrait for ConsensusGraph {
         }
     }
 
-    fn trusted_checkpoint_anchors(&self) -> Option<(u64, H256, H256)> {
+    fn trusted_checkpoint_anchors(&self) -> Option<(u64, H256, u64, H256)> {
         match (
             self.config.trusted_checkpoint_height,
             self.config.trusted_checkpoint_hash,
+            self.config.trusted_blame_height,
             self.config.trusted_blame_hash,
         ) {
-            (Some(h), Some(snapshot), Some(blame)) => {
-                Some((h, snapshot, blame))
+            (Some(sh), Some(snapshot), Some(bh), Some(blame)) => {
+                Some((sh, snapshot, bh, blame))
             }
             _ => None,
         }

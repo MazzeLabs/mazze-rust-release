@@ -1147,6 +1147,22 @@ impl SynchronizationProtocolHandler {
         );
     }
 
+    /// Fast-sync helper. Bypasses the `request_epochs` discovery loop
+    /// (which advances against `my_best_epoch` and is unsuited to
+    /// pre-anchor prefix prefetch) and asks one peer directly for the
+    /// hashes at a given set of epoch numbers. Used only by the
+    /// trusted-checkpoint fast-sync path in
+    /// `CatchUpCheckpointPhase::prefetch_chain_prefix`.
+    pub fn request_epoch_hashes_for_prefetch(
+        &self, io: &dyn NetworkContext, epochs: Vec<u64>,
+    ) {
+        if epochs.is_empty() {
+            return;
+        }
+        self.request_manager
+            .request_epoch_hashes(io, None, epochs, None);
+    }
+
     pub fn request_block_headers(
         &self, io: &dyn NetworkContext, peer: Option<NodeId>,
         mut header_hashes: Vec<H256>, ignore_db: bool,

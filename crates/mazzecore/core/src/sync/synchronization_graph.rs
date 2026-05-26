@@ -1512,21 +1512,31 @@ impl SynchronizationGraph {
         // we verify the hash matches what was configured before
         // accepting. See docs/fast-sync-design.md §5.6.
         if persistent {
-            if let Some((_, snapshot_hash, blame_hash)) =
+            if let Some((_, _, blame_height, _)) =
                 self.consensus.trusted_checkpoint_anchors()
             {
-                let h = header.hash();
-                if h == snapshot_hash || h == blame_hash {
+                // Fast-sync chain-prefix persistence. The
+                // `CatchUpCheckpointPhase::prefetch_chain_prefix` walk
+                // batch-requests every header from
+                // `snapshot - 2*snapshot_epoch_count` up to
+                // `blame_height` so the downstream
+                // `validate_blame_states` / `validate_epoch_receipts`
+                // / `get_parent_epochs_for` walks find their parents
+                // locally. We accept any header at-or-below
+                // `blame_height` (the trust-anchor ceiling) and
+                // persist it directly, bypassing both the
+                // `locked_for_catchup` gate and the orphan-not-ready
+                // dance. PoW is intentionally not re-checked: catch-up
+                // mode already skips PoW (verification.rs:371) and the
+                // operator's hash is the trust input — the snapshot
+                // chunks are still cryptographically verified against
+                // the snapshot_merkle_root downstream.
+                if header.height() <= blame_height {
+                    let h = header.hash();
                     self.data_man.insert_block_header(
                         h,
                         Arc::new(header.clone()),
                         true,
-                    );
-                    debug!(
-                        "Fast-sync: persisted trusted anchor header \
-                         hash={:?} height={}",
-                        h,
-                        header.height(),
                     );
                     return (
                         BlockHeaderInsertionResult::TemporarySkipped,
@@ -1600,7 +1610,7 @@ impl SynchronizationGraph {
             None => {
                 let trusted_anchor =
                     self.consensus.trusted_checkpoint_anchors();
-                if let Some((trusted_h, snapshot_hash, blame_hash)) =
+                if let Some((trusted_h, snapshot_hash, _, blame_hash)) =
                     trusted_anchor
                 {
                     let hash = header.hash();

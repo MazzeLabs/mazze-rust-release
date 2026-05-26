@@ -280,11 +280,59 @@ Estimated true scope: **400–600 LOC** across `sync/message/snapshot_manifest_r
 | Peer-friendly `TemporarySkipped` for post-anchor headers | ✅ |
 | Anchor-header pre-fetch in `CatchUpCheckpointPhase::start()` | ✅ |
 | **Direct-persist bypass for anchor headers under `locked_for_catchup`** | ✅ (session 3) |
-| Graceful (no-panic) failure in `validate_blame_states` when local headers missing | ✅ |
-| `validate_blame_states` chain-walk loop accepting trusted-checkpoint mode | ❌ (next session) |
-| `validate_epoch_receipts` ditto | ❌ |
-| Wire V5 protocol carrying `RelatedData` payload | ❌ |
+| **Chain-prefix prefetch (batched epoch-hash walk)** | ✅ (session 4) |
+| **Broad direct-persist bypass for chain-prefix headers** | ✅ (session 4) |
+| Graceful (no-panic) failure in `validate_blame_states` + `validate_epoch_receipts` when local consensus context missing | ✅ (session 4) |
+| `validate_blame_states` chain-walk loop succeeds with operator-configured anchors | ✅ (session 4 — confirmed satisfied with `blame_height ≥ snapshot + 2053`) |
+| `validate_epoch_receipts` accepts trusted-checkpoint mode | ❌ (consensus-engine dep — see §5.12) |
+| Wire V5 protocol carrying `RelatedData` payload | ❌ (recommended path) |
 | End-to-end snapshot completion under trusted-checkpoint | ❌ |
+
+### 5.11 Session-4 findings — chain-prefix prefetch (option 1 from §5.6)
+
+Implemented the batched chain-prefix walk in `CatchUpCheckpointPhase::next()`:
+
+- On each FSM tick, walks blame_hash via parent_hash downward in `data_man`, finds the first missing parent, fires a `request_epoch_hashes_for_prefetch` for the next batch of 30 epoch numbers. The response handler chains automatically into `request_block_headers`, headers arrive, and a broadened bypass at the top of `insert_block_header` direct-persists them to `data_man` (skipping `locked_for_catchup`, skipping the orphan/not-ready dance, skipping consensus-graph insertion).
+- Walks from `blame_height - 1` down to `snapshot_height - 2 * snapshot_epoch_count` (≈ 6760 headers for the live testnet's current chain depth), fully populating `data_man` for the heights `validate_blame_states` walks.
+- Verified live: the parent-walk loop in `validate_blame_states` (which previously panicked at `:396`) now succeeds; the indexing math at `:555` also succeeds after the next session-4 fix below.
+
+Surfaced a **new anchor constraint**: the protocol's response-indexing math at `snapshot_manifest_manager.rs:555` is `state_root_vec[offset - snapshot_blame_plus_depth]` where `snapshot_blame_plus_depth = snapshot_epoch_count = 2048`. So **`blame_height` must be ≥ `snapshot_height + snapshot_epoch_count + DEFERRED_STATE_EPOCH_COUNT` = `snapshot_height + 2053`**. The doc's operator-instruction "blame anchor a few hundred epochs above the snapshot" was wrong. Updated `hydra.local.toml` example accordingly.
+
+### 5.12 The remaining hard blocker — consensus-engine dependency in `validate_epoch_receipts`
+
+After the chain-prefix prefetch and the corrected anchor constraint, the snapshot-manifest validation **advances through both the parent-walk (`:396`) and the indexing math (`:555`)**, but panics at the next layer:
+
+```text
+crates/mazzecore/core/src/sync/state/state_sync_manifest/snapshot_manifest_manager.rs:604
+  let ordered_executable_epoch_blocks = ctx.manager.graph.consensus
+      .get_block_hashes_by_epoch(EpochNumber::Number(block_header.height()))
+      .expect("ordered executable epoch blocks must exist");
+```
+
+`get_block_hashes_by_epoch` requires the **consensus engine** to have processed (and produced an executable-epoch ordering for) the queried height. Under trusted-checkpoint fast-sync we deliberately put headers into `data_man` *without* feeding them through `propagate_header_graph_status` and consensus execution — the whole point is to skip the cost. So this lookup returns `Err(EpochNotFound)`, and the `.expect` panics.
+
+Session-4 patched this to a graceful `return None` (consistent with our earlier no-panic policy at `:316-321`), so the node no longer crashes — it instead drops into the existing `SNAPSHOT-SYNC FALLBACK → legacy genesis replay` path.
+
+**Why patching this layer too doesn't close the gap:**
+
+To make `validate_epoch_receipts` succeed under trusted-checkpoint, the operator would also have to supply (or the server would have to ship) the epoch-receipts and the `ordered_executable_epoch_blocks` mapping for `REWARD_EPOCH_COUNT (= 12)` epochs around the snapshot. Even then, the construction of `SnapshotInfo.main_chain_parts` (which is `Vec<EpochId>` of length `snapshot_epoch_count = 2048`) further requires `data_man.get_parent_epochs_for()` — another consensus-derived walk. Each layer assumes consensus has executed; client-side patches per-layer keep revealing the next.
+
+### 5.13 Conclusion — option 1 is structurally bounded; option 2 (V5 wire) is the right path
+
+This session **confirmed empirically** what the option 1 description warned about: even with the chain prefix and the direct-persist bypass, every downstream validation layer reaches back for consensus state that doesn't (and shouldn't) exist on a fresh trusted-checkpoint joiner. The locally-completable scope of option 1 ends at the consensus-engine dependency in `validate_epoch_receipts`.
+
+**Option 2 stays the right architectural answer.** The server has all of: the snapshot's chain prefix, the receipts, the `SnapshotInfo`, the `StateRootWithAuxInfo`, and the `ordered_executable_epoch_blocks` for each epoch in the relevant window. It just doesn't ship them. A V5 wire bump carries that pre-computed `RelatedData` to the client; the client (under trusted-checkpoint) validates against `merkle_root` cryptographically against the chunks and bypasses every consensus-derived walk. This is the design where the operator's trusted hash IS the trust input and the wire response IS the verification surface.
+
+The session-4 scaffolding is **not wasted work for option 2**: the config plumbing, the FSM-transition shortcuts, the seed-bypass, the direct-persist (for the anchor block headers — still needed so the merkle root binds the snapshot to its anchor), and the graceful no-panic policy are all reusable.
+
+What option 2 still needs on top of what's landed:
+- `SnapshotManifestResponseV5` field additions for `SnapshotInfo`, `parent_snapshot_info`, `StateRootWithAuxInfo`, and `Vec<Vec<H256>>` of `ordered_executable_epoch_blocks` for the REWARD_EPOCH_COUNT-window. (≈ 30 LOC.)
+- Server-side: when responding to V5 requests, compute these fields (they're what `validate_blame_states` and `validate_epoch_receipts` would compute, so the logic is already there; just refactor it into a server-side producer and call it from the manifest handler). (≈ 100 LOC.)
+- Client-side: when V5 received under trusted-checkpoint, populate `RelatedData` from the wire payload and skip both `validate_blame_states` and `validate_epoch_receipts` entirely (cryptographic verification of chunks against `merkle_root` remains as the safety floor). (≈ 50 LOC.)
+- Version negotiation (`SYNC_PROTO_V5`) + wrong-hash negative test (chunk merkle mismatch → fail loud). (≈ 50 LOC + tests.)
+- Fleet rollout via `/tmp/relaunch.sh` (well-proven by now).
+
+Total: **≈ 230 LOC + tests**, all server- or client-side under `has_trusted_checkpoint()`, no consensus-affecting changes, no version-bump risk for non-fast-sync peers.
 
 ### 5.4 Out of scope (separate tickets)
 

@@ -363,6 +363,14 @@ pub struct CatchUpCheckpointPhase {
     /// Is `true` if we have the state locally and do not need to sync
     /// checkpoints. Only set when the phase starts.
     has_state: AtomicBool,
+
+    /// Fast-sync chain-prefix walk state. Tracks the lowest epoch we've
+    /// already requested via `request_epoch_hashes` during the chain-
+    /// prefix prefetch (driven each tick by `prefetch_chain_prefix`).
+    /// `u64::MAX` means "not yet started" so the first tick computes
+    /// the right starting point from blame_height.
+    /// See docs/fast-sync-design.md §5.6 option 1.
+    fast_sync_next_request_epoch: Mutex<u64>,
 }
 
 impl CatchUpCheckpointPhase {
@@ -370,7 +378,97 @@ impl CatchUpCheckpointPhase {
         CatchUpCheckpointPhase {
             state_sync,
             has_state: AtomicBool::new(false),
+            fast_sync_next_request_epoch: Mutex::new(u64::MAX),
         }
+    }
+
+    /// Walk blame_hash down via parent_hash, return true iff every
+    /// header from `lowest_required_height` to blame inclusive is
+    /// present in `data_man`. Stops walking at the first miss.
+    fn chain_prefix_complete(
+        &self,
+        sync_handler: &SynchronizationProtocolHandler,
+        blame_hash: H256,
+        lowest_required_height: u64,
+    ) -> bool {
+        let data_man = &sync_handler.graph.data_man;
+        let mut cursor = blame_hash;
+        loop {
+            let h = match data_man.block_header_by_hash(&cursor) {
+                Some(h) => h,
+                None => return false,
+            };
+            if h.height() <= lowest_required_height {
+                return true;
+            }
+            cursor = *h.parent_hash();
+        }
+    }
+
+    /// Drives the chain-prefix walk. Each tick, while the prefix is
+    /// not yet complete, request the next batch of epoch hashes from
+    /// peers; the existing response handler then auto-fires
+    /// `request_block_headers` for each hash, and those headers
+    /// reach `data_man` via the trusted-anchor direct-persist bypass
+    /// in `synchronization_graph.rs::insert_block_header`.
+    fn prefetch_chain_prefix(
+        &self,
+        io: &dyn NetworkContext,
+        sync_handler: &SynchronizationProtocolHandler,
+    ) -> bool {
+        let (snapshot_height, _snapshot_hash, blame_height, blame_hash) =
+            match sync_handler.graph.consensus.trusted_checkpoint_anchors() {
+                Some(a) => a,
+                None => return true, // not in fast-sync; nothing to do
+            };
+        // `validate_blame_states` later walks parents from blame down
+        // to snapshot and ALSO calls `get_parent_epochs_for(snapshot, N)`
+        // and grandparent walks. Pre-fetch enough of the chain prefix
+        // to cover both: from `snapshot - 2 * snapshot_epoch_count` up
+        // to `blame`. The first ~12 below the snapshot are also needed
+        // by `validate_epoch_receipts`. The range `[lowest..=blame]`
+        // covers everything the downstream validation needs locally.
+        let snapshot_epoch_count = sync_handler
+            .graph
+            .data_man
+            .get_snapshot_epoch_count() as u64;
+        let lowest_required_height = snapshot_height
+            .saturating_sub(snapshot_epoch_count.saturating_mul(2));
+
+        if self.chain_prefix_complete(
+            sync_handler,
+            blame_hash,
+            lowest_required_height,
+        ) {
+            return true;
+        }
+
+        // Request one batch per tick (default 30 epochs); the response
+        // handler chains into `request_block_headers` automatically.
+        const BATCH_SIZE: u64 = 30;
+        let mut next = self.fast_sync_next_request_epoch.lock();
+        if *next == u64::MAX {
+            // First tick: start one batch below the blame height.
+            *next = blame_height.saturating_sub(1);
+        }
+        if *next < lowest_required_height {
+            // We've already requested everything; just waiting for
+            // headers to arrive (or a previous request was lost — the
+            // request_manager has its own retry).
+            return false;
+        }
+        let to = *next;
+        let from = to.saturating_sub(BATCH_SIZE - 1).max(lowest_required_height);
+        let epochs: Vec<u64> = (from..=to).collect();
+        info!(
+            "Fast-sync: prefetching chain-prefix epochs [{}..={}] ({} headers)",
+            from,
+            to,
+            epochs.len(),
+        );
+        sync_handler.request_epoch_hashes_for_prefetch(io, epochs);
+        *next = from.saturating_sub(1);
+        false
     }
 }
 
@@ -401,6 +499,27 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
             self.has_state.store(true, AtomicOrdering::SeqCst);
             return SyncPhaseType::CatchUpFillBlockBodyPhase;
         }
+
+        // Fast-sync chain-prefix prefetch (option 1, docs/fast-sync-design.md
+        // §5.6). When the operator has configured a trusted checkpoint, the
+        // local node has no chain history below the anchors. `validate_blame_states`
+        // and adjacent functions walk parent_hash from the blame block down
+        // through ~2*snapshot_epoch_count epochs (and `.expect()` the headers
+        // to exist), so before letting `update_status` fire we drive a batched
+        // walk that fetches the prefix into `data_man` via the direct-persist
+        // bypass in `synchronization_graph.rs::insert_block_header`. While the
+        // prefix is incomplete, skip `update_status` and stay in this phase;
+        // next tick re-checks.
+        if sync_handler
+            .graph
+            .consensus
+            .trusted_checkpoint_anchors()
+            .is_some()
+            && !self.prefetch_chain_prefix(io, sync_handler)
+        {
+            return self.phase_type();
+        }
+
         let current_era_genesis = sync_handler
             .graph
             .data_man
@@ -497,7 +616,7 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
         // (they're operator-vouched), so subsequent manifest-response
         // validation in `snapshot_manifest_manager::validate_blame_states`
         // will find them locally and proceed.
-        if let Some((_, snapshot_hash, blame_hash)) =
+        if let Some((_, snapshot_hash, _, blame_hash)) =
             sync_handler.graph.consensus.trusted_checkpoint_anchors()
         {
             let mut to_fetch = Vec::new();

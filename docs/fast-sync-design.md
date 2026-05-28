@@ -368,6 +368,72 @@ Two viable next moves, **not yet implemented**:
 - Pruning paritydb WAL on the fleet: m1 was carrying 102k log files (533 MB → 384 MB during compaction). Compaction looks to be lagging behind writes; worth a separate ticket on storage health.
 - Filesystem-level `mdbx_copy`/snapshot tooling for the operator who actually wants to seed a node from another node's disk (the "Option B from yesterday's session" workflow).
 
+### 5.15 Fleet-stability findings — steady-state at 4 blocks/sec (session 6)
+
+Landed this session: protocol consolidation to a single `SYNC_PROTO_V1`
+(`4db5cc1`), the full-fast OOM + seed-miss-wedge fixes (`54c0724`), and a
+clean fleet relaunch on the fixed binary that **collapsed a 3-way fork**
+back to one chain (verified: identical block hashes at ep500/1000/1200
+across m1/m2/m3/m6). Those are durable wins.
+
+What surfaced as the remaining, **systemic** issues — none a single bug,
+all worth dedicated tickets (do NOT chase on the live fleet ad-hoc):
+
+1. **Block rate vs single-node throughput.** `TARGET_AVERAGE_BLOCK_GENERATION_PERIOD = 250000` µs
+   ([parameters/src/lib.rs](../crates/mazzecore/parameters/src/lib.rs#L202))
+   targets **0.25 s blocks (4/sec)**, and difficulty auto-adjusts to keep
+   that (settles at `INITIAL_DIFFICULTY = 5` given fleet hashrate — *not*
+   test-mode pinning; `mode="dev"` is off). Keeping 4/sec is a product
+   decision; the cost is that a node must *execute + verify* ≥4 blocks/sec
+   to stay synced. Catch-up itself is fast (~14 epoch/s, PoW bypassed in
+   `catch_up_mode`), so raw execution is not the limit — the pressure is
+   **steady-state Normal-phase verification** and sync completeness.
+
+2. **RandomX verify path inefficiencies** ([pow/cache.rs](../crates/mazzecore/core/src/pow/cache.rs#L58)):
+   (a) `update_context` takes a **write lock unconditionally** before
+   checking if the seed changed — serializes every PoW op though the seed
+   only changes per 2048-epoch boundary; should be a read-lock fast path.
+   (b) RandomX runs in **light mode** (`RandomXContext::new(seed, false)`),
+   ~10× slower per-hash than full-dataset. Both raise steady-state verify
+   cost. (Profiling note: m6 the tip-producer has spare CPU; the network
+   **event loop** is its top CPU consumer, not execution/verify.)
+
+3. **Sync-protocol stall behind a graph hole.** A behind node (m1) froze
+   at epoch 1329 — `CatchUpSyncBlock`, `missing_bodies: 0`,
+   `check_not_ready_frontier` spinning, **idle CPU** (not throughput-bound).
+   It was requesting epoch hashes at the **tip** (`[24465..24496]`) instead
+   of filling the `1330+` gap, so consensus could never advance past the
+   hole. Epoch-sync targeting + graph-hole recovery need hardening; with
+   only **1 peer** connected it could not self-heal.
+
+4. **Premature-Normal config (still live in fleet `hydra.toml`):**
+   `dev_allow_phase_change_without_peer = true` + `min_phase_change_normal_peer_count = 0`
+   let a node declare **Normal at a stale height** when it momentarily has
+   no normal-phase peers ([synchronization_phases.rs:841](../crates/mazzecore/core/src/sync/synchronization_phases.rs#L841)).
+   On a multi-node fleet this should be `false` / `>=2` so a node actually
+   catches up to its peers before going Normal (and so it can't mine a
+   stale branch). This compounded the apparent "lag/fork".
+
+5. **Small-mesh peering fragility.** Each node holds only 2–4 peers;
+   restarts + the operations above repeatedly dropped nodes to 1 peer,
+   which is where stalls (#3) become unrecoverable. Heavy manual churn
+   (relaunch, rolling miner swap, m5 wipe, m3 restart) degraded the mesh.
+
+6. **Deploy tooling clobbers live state.** Ad-hoc deploys that rsync the
+   working-tree `run/hydra.toml` overwrite a node's live `bootnodes` /
+   `mining_author` with stale committed values (this broke the m5
+   fast-sync join with stale bootnode IDs). Fix: ad-hoc deploy scripts
+   must preserve/re-pin live `bootnodes`+`mining_author`, or exclude
+   `run/hydra.toml` from their rsync.
+
+**Root-cause chain:** 0.25 s blocks → followers/restarted nodes must keep
+up at 4/sec → on this hardware + with #2/#3/#4 they fall behind/stall →
+thin mesh (#5) makes stalls unrecoverable → before `54c0724` this
+manifested as wedge/OOM/fork. The fixes made it *safe* (no crash/fork),
+but **converging every node at the tip at 4/sec is the open systemic
+work** (parallel/faster verify, sync-completeness + epoch-sync targeting,
+peer-count robustness, and the premature-Normal config flip).
+
 ## 6. References
 
 - [chain-model.md](chain-model.md) — block structure, PoW bypass semantics.

@@ -120,6 +120,14 @@ pub trait ConsensusGraphTrait: Send + Sync {
 
     fn catch_up_completed(&self, peer_median_epoch: u64) -> bool;
 
+    /// Number of epochs enqueued for execution but not yet executed.
+    /// The sync layer throttles block downloads when this grows too
+    /// large, so a node catching up can't pile unexecuted epochs (each
+    /// pinning `Arc<Block>`s) into memory faster than the single
+    /// execution thread can drain them. See the download↔execution
+    /// backpressure fix.
+    fn pending_execution_count(&self) -> usize;
+
     fn enter_normal_phase(&self);
     fn leave_normal_phase(&self);
     fn reset(&self);

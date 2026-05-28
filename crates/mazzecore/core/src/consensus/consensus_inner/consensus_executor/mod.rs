@@ -10,7 +10,7 @@ use std::{
     convert::From,
     fmt::{Debug, Formatter},
     sync::{
-        atomic::{AtomicBool, Ordering::Relaxed},
+        atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed},
         mpsc::{channel, RecvError, Sender, TryRecvError},
         Arc,
     },
@@ -226,6 +226,18 @@ pub struct ConsensusExecutor {
     /// The sender to send tasks to be executed by `self.thread`
     sender: Mutex<Sender<ExecutionTask>>,
 
+    /// Depth of the execution backlog: the number of `ExecuteEpoch`
+    /// tasks that have been `enqueue_epoch`'d but not yet pulled off the
+    /// channel by the worker. The channel itself is unbounded, and each
+    /// queued task pins a reward-window of `Arc<Block>`s, so during
+    /// catch-up (where block download can vastly outrun single-threaded
+    /// execution) this backlog is what balloons memory to OOM. The sync
+    /// layer reads this via `pending_execution_count()` to throttle
+    /// downloads — see the download↔execution backpressure fix.
+    /// Optimistic tasks the worker generates itself are NOT counted (they
+    /// never sit in the channel).
+    pending_exec: AtomicUsize,
+
     /// The state indicating whether the thread should be stopped
     stopped: AtomicBool,
 
@@ -257,6 +269,7 @@ impl ConsensusExecutor {
         let executor_raw = ConsensusExecutor {
             thread: Mutex::new(None),
             sender: Mutex::new(sender),
+            pending_exec: AtomicUsize::new(0),
             stopped: AtomicBool::new(false),
             handler: handler.clone(),
             consensus_graph_bench_mode: bench_mode,
@@ -278,7 +291,9 @@ impl ConsensusExecutor {
                     // Consensus Inner lock, if we wait on
                     // inner lock here we may get deadlock.
                     match receiver.try_recv() {
-                        Ok(task) => Some(task),
+                        // `true` = pulled off the channel (counts against
+                        // `pending_exec`); optimistic tasks use `false`.
+                        Ok(task) => Some((task, true)),
                         Err(TryRecvError::Empty) => {
                             // The channel is empty, so we try to optimistically
                             // get later epochs to execute.
@@ -292,7 +307,10 @@ impl ConsensusExecutor {
                                             "Get optimistic_execution_task {:?}",
                                             task
                                         );
-                                        ExecutionTask::ExecuteEpoch(task)
+                                        (
+                                            ExecutionTask::ExecuteEpoch(task),
+                                            false,
+                                        )
                                     }),
                                 None => {
                                     OPTIMISTIC_EXEC_LOCK_MISSES.inc(1);
@@ -306,8 +324,8 @@ impl ConsensusExecutor {
                         }
                     }
                 };
-                let task = match maybe_task {
-                    Some(task) => task,
+                let (task, from_channel) = match maybe_task {
+                    Some(pair) => pair,
                     None => {
                         //  Even optimistic tasks are all finished, so we block
                         // and wait for  new execution
@@ -317,7 +335,7 @@ impl ConsensusExecutor {
                         // case, so this waiting will
                         // not prevent new optimistic tasks from being executed.
                         match receiver.recv() {
-                            Ok(task) => task,
+                            Ok(task) => (task, true),
                             Err(RecvError) => {
                                 info!("Channel receive error, stop thread");
                                 break;
@@ -325,6 +343,16 @@ impl ConsensusExecutor {
                         }
                     }
                 };
+                // Drain the backlog gauge for channel-sourced ExecuteEpoch
+                // tasks (the ones `enqueue_epoch` counted). Optimistic and
+                // GetResult/Stop tasks never incremented it.
+                if from_channel {
+                    if let ExecutionTask::ExecuteEpoch(_) = &task {
+                        executor_thread
+                            .pending_exec
+                            .fetch_sub(1, Relaxed);
+                    }
+                }
                 if !executor_thread.handle_execution_work(task) {
                     // `task` is `Stop`, so just stop.
                     break;
@@ -722,13 +750,30 @@ impl ConsensusExecutor {
     /// holding inner lock.
     pub fn enqueue_epoch(&self, task: EpochExecutionTask) -> bool {
         if !self.consensus_graph_bench_mode {
-            self.sender
+            // Count the task before it enters the unbounded channel; roll
+            // back if the send fails so the gauge can't drift upward.
+            self.pending_exec.fetch_add(1, Relaxed);
+            let ok = self
+                .sender
                 .lock()
                 .send(ExecutionTask::ExecuteEpoch(task))
-                .is_ok()
+                .is_ok();
+            if !ok {
+                self.pending_exec.fetch_sub(1, Relaxed);
+            }
+            ok
         } else {
             true
         }
+    }
+
+    /// Number of `ExecuteEpoch` tasks waiting in the execution channel
+    /// (enqueued but not yet pulled by the worker). The sync layer uses
+    /// this to throttle block downloads so the backlog — and the
+    /// `Arc<Block>`s each task pins — can't grow without bound during
+    /// catch-up. See the download↔execution backpressure fix.
+    pub fn pending_execution_count(&self) -> usize {
+        self.pending_exec.load(Relaxed)
     }
 
     /// Execute the epoch synchronously.

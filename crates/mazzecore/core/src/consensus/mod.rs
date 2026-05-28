@@ -2577,6 +2577,10 @@ impl ConsensusGraphTrait for ConsensusGraph {
         true
     }
 
+    fn pending_execution_count(&self) -> usize {
+        self.executor.pending_execution_count()
+    }
+
     fn enter_normal_phase(&self) {
         self.ready_for_mining.store(true, Ordering::SeqCst);
         self.update_best_info(true);

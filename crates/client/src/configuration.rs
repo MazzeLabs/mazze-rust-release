@@ -233,6 +233,12 @@ build_config! {
         (max_outgoing_peers_archive, (Option<usize>), None)
         (max_peers_tx_propagation, (usize), 128)
         (max_unprocessed_block_size_mb, (usize), (128))
+        // Download↔execution backpressure: pause epoch discovery during
+        // catch-up once this many epochs are enqueued-but-unexecuted in
+        // the consensus executor. Bounds the Arc<Block>s pinned by the
+        // (otherwise unbounded) execution queue so a fast downloader can't
+        // OOM the node. 0 disables the throttle.
+        (max_pending_execution_epochs, (usize), (5000))
         (min_peers_tx_propagation, (usize), 8)
         (min_phase_change_normal_peer_count, (usize), 3)
         (received_tx_index_maintain_timeout_ms, (u64), 300_000)
@@ -1033,6 +1039,9 @@ impl Configuration {
                 .raw_conf
                 .max_unprocessed_block_size_mb
                 * 1_000_000,
+            max_pending_execution_epochs: self
+                .raw_conf
+                .max_pending_execution_epochs,
             sync_expire_block_timeout: Duration::from_secs(
                 self.raw_conf.sync_expire_block_timeout_s,
             ),

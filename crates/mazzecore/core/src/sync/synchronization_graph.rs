@@ -68,6 +68,16 @@ lazy_static! {
             "sync_graph",
             "orphan_inserts_rejected_over_cap_total"
         );
+    // Forward headers deferred (not rejected) because our execution has
+    // fallen behind their RandomX-seed epoch. A climbing rate here means a
+    // node is catching up across a >1-RandomX-epoch gap. See the seed-miss
+    // handling in `insert_block_header` and the "falling behind shouldn't be
+    // fatal" fix.
+    static ref SYNC_GRAPH_SEED_DEFERRED: Arc<dyn Meter> =
+        register_meter_with_group(
+            "sync_graph",
+            "forward_headers_seed_deferred_total"
+        );
 }
 
 /// Hard cap on the sync-graph arena. New `insert_block_header` calls
@@ -1635,11 +1645,43 @@ impl SynchronizationGraph {
                             Vec::new(),
                         );
                     }
+                } else if header.height()
+                    > self.consensus.best_epoch_number()
+                {
+                    // "Falling behind shouldn't be fatal." The seed for
+                    // this block's RandomX epoch lives ~RANDOMX_EPOCH_LENGTH
+                    // blocks below it and is only available once we've
+                    // EXECUTED that far. A node whose execution has fallen
+                    // more than one RandomX epoch behind the header tip
+                    // (e.g. after an OOM/restart, or a slow peer) therefore
+                    // can't yet resolve the seed for legitimate forward
+                    // headers. Previously we marked such a header `Invalid`
+                    // and the caller dropped the peer — which both wedged
+                    // catch-up (every forward header rejected) and tore
+                    // down the very peers we needed to catch up from.
+                    //
+                    // Since this header is strictly ahead of our best epoch
+                    // it is plausibly canonical chain we simply haven't
+                    // executed up to yet, so DEFER it (`TemporarySkipped`)
+                    // instead of rejecting: the peer stays connected and the
+                    // header is re-tried once execution advances enough to
+                    // provide the seed. This does NOT accept the block (no
+                    // zero-seed PoW bypass) and memory stays bounded by
+                    // `SYNC_GRAPH_ARENA_HARD_CAP`, so it doesn't widen the
+                    // H-1 surface. A seed-miss at-or-below our best epoch is
+                    // the genuinely-anomalous case (DB inconsistency or a
+                    // back-dated attacker block) and stays `Invalid` below.
+                    SYNC_GRAPH_SEED_DEFERRED.mark(1);
+                    return (
+                        BlockHeaderInsertionResult::TemporarySkipped,
+                        Vec::new(),
+                    );
                 } else {
                     warn!(
-                        "Rejecting block {}: seed lookup missed at height {} (DB inconsistency or attacker-supplied block from future epoch)",
+                        "Rejecting block {}: seed lookup missed at height {} at-or-below best epoch {} (DB inconsistency or back-dated attacker block)",
                         header.hash(),
-                        header.height()
+                        header.height(),
+                        self.consensus.best_epoch_number(),
                     );
                     return (
                         BlockHeaderInsertionResult::Invalid,

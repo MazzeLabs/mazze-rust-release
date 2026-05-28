@@ -494,6 +494,7 @@ pub struct ProtocolConfiguration {
     pub max_allowed_timeout_in_observing_period: u64,
     pub demote_peer_for_timeout: bool,
     pub max_unprocessed_block_size: usize,
+    pub max_pending_execution_epochs: usize,
     pub max_chunk_number_in_manifest: usize,
     pub allow_phase_change_without_peer: bool,
     pub min_phase_change_normal_peer_count: usize,
@@ -1017,6 +1018,25 @@ impl SynchronizationProtocolHandler {
     }
 
     pub fn request_epochs(&self, io: &dyn NetworkContext) {
+        // Download↔execution backpressure. The consensus executor's epoch
+        // queue is unbounded and each entry pins a reward-window of
+        // Arc<Block>s; during catch-up a fast downloader (esp. the
+        // full-fast profile) feeds it far faster than the single execution
+        // thread drains it, ballooning memory to OOM. If execution is
+        // already this far behind, stop pulling more of the chain into
+        // memory and let it drain first. `0` disables the throttle.
+        let exec_cap = self.protocol_config.max_pending_execution_epochs;
+        if exec_cap != 0 {
+            let backlog = self.graph.consensus.pending_execution_count();
+            if backlog >= exec_cap {
+                debug!(
+                    "request_epochs throttled: execution backlog {} >= cap {}",
+                    backlog, exec_cap
+                );
+                return;
+            }
+        }
+
         // make sure only one thread can request new epochs at a time
         let mut latest_requested = self.latest_epoch_requested.lock();
 

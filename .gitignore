@@ -103,3 +103,8 @@ perf.data.old
 *.rej
 *~run/hydra.local.toml
 run/hydra.devtest.toml
+
+# Fleet ops tooling (rsync/relaunch/swap/diag scripts + their logs).
+# Contains hardcoded fleet SSH credentials (relaunch.sh) and sources .env —
+# MUST never be committed. Lives in-repo only so it survives a /tmp wipe.
+fleet-ops/

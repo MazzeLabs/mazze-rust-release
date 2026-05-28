@@ -426,13 +426,48 @@ all worth dedicated tickets (do NOT chase on the live fleet ad-hoc):
    must preserve/re-pin live `bootnodes`+`mining_author`, or exclude
    `run/hydra.toml` from their rsync.
 
+7. **Blacklisting removed entirely (was: `AlreadyThrottled` → 7-day ban, a
+   miner-prone footgun). FIXED.**
+   `handle_error` ([synchronization_protocol_handler.rs:799](../crates/mazzecore/core/src/sync/synchronization_protocol_handler.rs#L799))
+   maps `ErrorKind::AlreadyThrottled` to `UpdateNodeOperation::Remove`,
+   which used to call `node_database::set_blacklisted` — a **7-day** ban
+   persisted to `net_config/blacklisted_nodes.json`. A node has per-peer
+   message throttling (token buckets); the **highest-message-rate peer is
+   a miner** (broadcasting blocks at 4/sec + serving requests), so a busy
+   honest miner could blow a peer's bucket, keep sending, trip
+   `AlreadyThrottled`, and get **banned across the fleet for a week** →
+   peers drop toward 1 → the #5 cascade. By contrast `InvalidBlock` is
+   only a `Failure`/demote (line 759), so the seed-wedge was *not* the
+   blacklister — throttling was. This was also the most coherent
+   explanation for the **pre-relaunch fork**: nodes likely 7-day-banned
+   each other during the wedge era → partitioned → forked → the relaunch's
+   `net_config` wipe cleared the bans → fork collapsed (unprovable now —
+   files were wiped).
+
+   **Fix landed (this session):** blacklisting is **disabled by design**
+   for a permissionless network. In [node_database.rs](../crates/network/src/node_database.rs),
+   `set_blacklisted` now only soft-demotes via `note_failure` (NO ban, NO
+   removal from the node table) and `evaluate_blacklisted` always returns
+   `false`, so an honest peer — including a just-joined low-difficulty
+   miner — can always (re)connect. The `blacklisted_nodes` table is left
+   inert (never populated) for on-disk compatibility. Rationale: a
+   coordinated set of nodes must not be able to permanently exclude an
+   honest peer; the soft, self-healing reputation signal (`note_failure` →
+   demotion) still throttles/deprioritizes a genuinely misbehaving peer
+   without locking it out. The `Remove`/`Demotion` ops in `handle_error`
+   are retained — they now degrade to demotion rather than a hard ban.
+
 **Root-cause chain:** 0.25 s blocks → followers/restarted nodes must keep
 up at 4/sec → on this hardware + with #2/#3/#4 they fall behind/stall →
-thin mesh (#5) makes stalls unrecoverable → before `54c0724` this
-manifested as wedge/OOM/fork. The fixes made it *safe* (no crash/fork),
-but **converging every node at the tip at 4/sec is the open systemic
-work** (parallel/faster verify, sync-completeness + epoch-sync targeting,
-peer-count robustness, and the premature-Normal config flip).
+thin mesh (#5) makes stalls unrecoverable → and #7 (throttle→7-day-ban,
+miner-prone) plausibly turned partitions into the persistent **fork**
+(banned peers couldn't reconnect for a week; the relaunch's `net_config`
+wipe cleared the bans, which is why the fork collapsed). #7 is now fixed
+(blacklisting removed). Before `54c0724` this manifested as
+wedge/OOM/fork. The fixes made it *safe* (no crash/fork), but
+**converging every node at the tip at 4/sec is the open systemic work**
+(parallel/faster verify, sync-completeness + epoch-sync targeting, and
+peer-count robustness + the premature-Normal config flip).
 
 ## 6. References
 

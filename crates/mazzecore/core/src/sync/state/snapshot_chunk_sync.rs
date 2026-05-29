@@ -152,6 +152,50 @@ fn enumerate_forward_candidates(
     alternatives
 }
 
+/// Build the snapshot-sync candidate list for one `start_sync` round.
+///
+/// **Trusted-checkpoint (fast-sync) mode** — when one or more anchors are
+/// configured, propose those KNOWN anchors directly, newest-first. Their
+/// hashes come from config/baked-in defaults, so NO local header chain is
+/// needed (a fresh joiner has none). This is what lets a fast-sync joiner
+/// recover when its newest configured anchor has been pruned fleet-wide:
+/// it falls through to the next-newest configured era checkpoint that a
+/// peer still serves. Replaces the header-chain `enumerate_forward_candidates`
+/// walk, which returns nothing for a header-less joiner (§5.16).
+///
+/// **Normal mode** (a full node that fell behind, with a real header
+/// chain) — keep the original behaviour: the primary `epoch_to_sync` plus
+/// the header-derived forward alternatives (D.2).
+fn enumerate_sync_candidates(
+    sync_handler: &SynchronizationProtocolHandler, epoch_to_sync: &EpochId,
+    primary_height: u64,
+) -> Vec<SnapshotSyncCandidate> {
+    let trusted =
+        sync_handler.graph.consensus.trusted_checkpoint_candidates();
+    if !trusted.is_empty() {
+        // Already newest-first; hashes are known so no header chain needed.
+        return trusted
+            .into_iter()
+            .map(|(height, snapshot_epoch_id)| {
+                SnapshotSyncCandidate::FullSync {
+                    height,
+                    snapshot_epoch_id,
+                }
+            })
+            .collect();
+    }
+    let mut candidates = vec![SnapshotSyncCandidate::FullSync {
+        height: primary_height,
+        snapshot_epoch_id: *epoch_to_sync,
+    }];
+    candidates.extend(enumerate_forward_candidates(
+        sync_handler,
+        epoch_to_sync,
+        primary_height,
+    ));
+    candidates
+}
+
 /// D.2 — Loud, structured operator-facing log explaining why
 /// snapshot-sync is about to genesis-replay. One line, parseable.
 fn log_terminal_fallback(
@@ -594,18 +638,12 @@ impl SnapshotChunkSync {
                     .data_man
                     .block_height_by_hash(&epoch_to_sync)
                     .unwrap_or(0);
-                let mut candidates =
-                    vec![SnapshotSyncCandidate::FullSync {
-                        height: primary_height,
-                        snapshot_epoch_id: epoch_to_sync,
-                    }];
-                let forward = enumerate_forward_candidates(
+                let candidates = enumerate_sync_candidates(
                     sync_handler,
                     &epoch_to_sync,
                     primary_height,
                 );
-                let forward_count = forward.len();
-                candidates.extend(forward);
+                let forward_count = candidates.len().saturating_sub(1);
                 let peers = PeerFilter::new(
                     msgid::STATE_SYNC_CANDIDATE_REQUEST,
                 )
@@ -841,26 +879,22 @@ impl SnapshotChunkSync {
                          or trusted-checkpoint height matching epoch_to_sync",
                     ),
             };
-            let mut candidates = vec![SnapshotSyncCandidate::FullSync {
-                height,
-                snapshot_epoch_id: epoch_to_sync,
-            }];
-            let forward = enumerate_forward_candidates(
+            let candidates = enumerate_sync_candidates(
                 sync_handler,
                 &epoch_to_sync,
                 height,
             );
-            if !forward.is_empty() {
-                debug!(
-                    "D.2: enumerated {} forward snapshot-aligned candidates \
-                     (window={}, snapshot_epoch_count={}) on top of primary {:?}",
-                    forward.len(),
-                    D2_FORWARD_CANDIDATE_WINDOW,
-                    sync_handler.graph.data_man.get_snapshot_epoch_count(),
-                    epoch_to_sync,
-                );
-            }
-            candidates.extend(forward);
+            debug!(
+                "snapshot-sync: proposing {} candidate(s) for era_genesis={:?} \
+                 (trusted-checkpoint mode={})",
+                candidates.len(),
+                current_era_genesis,
+                !sync_handler
+                    .graph
+                    .consensus
+                    .trusted_checkpoint_candidates()
+                    .is_empty(),
+            );
             inner.start_sync(current_era_genesis, candidates, io, sync_handler)
         }
         debug!("sync state status after updating: {:?}", *inner);

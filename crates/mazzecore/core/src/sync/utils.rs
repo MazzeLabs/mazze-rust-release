@@ -240,6 +240,7 @@ pub fn initialize_synchronization_graph_with_data_manager(
             trusted_checkpoint_hash: None,
             trusted_blame_height: None,
             trusted_blame_hash: None,
+            trusted_checkpoints: Vec::new(),
         },
         txpool.clone(),
         statistics.clone(),

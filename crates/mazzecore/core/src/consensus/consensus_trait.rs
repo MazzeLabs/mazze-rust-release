@@ -100,6 +100,13 @@ pub trait ConsensusGraphTrait: Send + Sync {
         None
     }
 
+    /// All configured fast-sync anchors as `(checkpoint_height,
+    /// checkpoint_hash)`, sorted newest-first. The catch-up FSM proposes
+    /// every one as a snapshot-sync candidate and syncs the newest a peer
+    /// still serves, so a single stale anchor can't wedge the join.
+    /// See docs/fast-sync-design.md §5.16.
+    fn trusted_checkpoint_candidates(&self) -> Vec<(u64, H256)> { Vec::new() }
+
     fn get_trusted_blame_block(&self, stable_hash: &H256) -> Option<H256>;
 
     fn set_initial_sequence_number(&self, initial_sn: u64);

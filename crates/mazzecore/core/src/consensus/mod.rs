@@ -115,6 +115,19 @@ pub struct PhantomBlock {
     pub traces: Vec<TransactionExecTraces>,
 }
 
+/// One operator-vouched (or baked-in) fast-sync anchor: a snapshot
+/// checkpoint plus the blame block above it that proves the snapshot's
+/// state root. `checkpoint_height` MUST be an era boundary (a multiple of
+/// `era_epoch_count`) — those are the consensus-final checkpoints that
+/// serving nodes retain long-term (see docs/fast-sync-design.md §5.16).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrustedCheckpoint {
+    pub checkpoint_height: u64,
+    pub checkpoint_hash: H256,
+    pub blame_height: u64,
+    pub blame_hash: H256,
+}
+
 #[derive(Clone)]
 pub struct ConsensusConfig {
     /// Chain id configs.
@@ -167,25 +180,44 @@ pub struct ConsensusConfig {
     /// Trust model: the operator is asserting that BOTH (height, hash)
     /// pairs are canonical. Wrong hash → snapshot verification fails →
     /// sync refuses to proceed (loud failure, never silent corruption).
+    ///
+    /// These four legacy scalars express a SINGLE anchor. They are folded
+    /// into `trusted_checkpoints` at config-build time; prefer that list.
     pub trusted_checkpoint_height: Option<u64>,
     pub trusted_checkpoint_hash: Option<H256>,
     pub trusted_blame_height: Option<u64>,
     pub trusted_blame_hash: Option<H256>,
+
+    /// The full set of known-good fast-sync anchors, sorted **newest
+    /// first** (descending `checkpoint_height`). Assembled at config-build
+    /// time from the legacy scalars above + the `trusted_checkpoints`
+    /// config list + any baked-in defaults for this chain. The catch-up
+    /// FSM proposes ALL of them as candidates and syncs the newest one a
+    /// peer still serves — so a single stale anchor no longer wedges the
+    /// join. See docs/fast-sync-design.md §5.16.
+    pub trusted_checkpoints: Vec<TrustedCheckpoint>,
 }
 
 impl ConsensusConfig {
-    /// True iff all four trusted-checkpoint fields are configured.
+    /// True iff at least one fast-sync anchor is configured.
     pub fn has_trusted_checkpoint(&self) -> bool {
-        self.trusted_checkpoint_height.is_some()
-            && self.trusted_checkpoint_hash.is_some()
-            && self.trusted_blame_height.is_some()
-            && self.trusted_blame_hash.is_some()
+        !self.trusted_checkpoints.is_empty()
     }
 
-    /// The blame-anchor hash, if a complete trusted checkpoint is
-    /// configured. Used by `get_trusted_blame_block_for_snapshot`.
-    pub fn trusted_blame_anchor(&self) -> Option<H256> {
-        self.trusted_blame_hash
+    /// The newest configured anchor (`trusted_checkpoints` is kept sorted
+    /// newest-first). This is the "primary" anchor used to seed the
+    /// catch-up FSM and drive the chain-prefix prefetch.
+    pub fn newest_trusted_checkpoint(&self) -> Option<&TrustedCheckpoint> {
+        self.trusted_checkpoints.first()
+    }
+
+    /// Find a configured anchor by its snapshot (checkpoint) hash.
+    pub fn trusted_checkpoint_by_hash(
+        &self, checkpoint_hash: &H256,
+    ) -> Option<&TrustedCheckpoint> {
+        self.trusted_checkpoints
+            .iter()
+            .find(|c| c.checkpoint_hash == *checkpoint_hash)
     }
 }
 
@@ -2382,10 +2414,14 @@ impl ConsensusGraphTrait for ConsensusGraph {
         &self, snapshot_epoch_id: &EpochId,
     ) -> Option<H256> {
         if self.inner.read().cur_era_stable_height() == 0 {
-            if let Some((_, trusted_snapshot_hash)) = self.trusted_checkpoint() {
-                if *snapshot_epoch_id == trusted_snapshot_hash {
-                    return self.config.trusted_blame_anchor();
-                }
+            // Fast-sync: resolve the blame anchor for ANY configured
+            // checkpoint by its snapshot hash, so the FSM can sync
+            // whichever candidate a peer still serves (not only the
+            // newest/primary one). See docs/fast-sync-design.md §5.16.
+            if let Some(cp) =
+                self.config.trusted_checkpoint_by_hash(snapshot_epoch_id)
+            {
+                return Some(cp.blame_hash);
             }
         }
         self.inner
@@ -2404,38 +2440,41 @@ impl ConsensusGraphTrait for ConsensusGraph {
     /// rather than silently corrupting state. See docs/fast-sync-design.md.
     fn get_to_sync_epoch_id(&self) -> EpochId {
         let inner = self.inner.read();
-        if self.config.has_trusted_checkpoint()
-            && inner.cur_era_stable_height() == 0
-        {
-            if let Some(hash) = self.config.trusted_checkpoint_hash {
-                return hash;
+        if inner.cur_era_stable_height() == 0 {
+            // Seed the FSM with the newest configured anchor; the
+            // candidate enumeration then proposes ALL of them and the
+            // newest peer-served one wins.
+            if let Some(cp) = self.config.newest_trusted_checkpoint() {
+                return cp.checkpoint_hash;
             }
         }
         inner.get_to_sync_epoch_id()
     }
 
     fn trusted_checkpoint(&self) -> Option<(u64, H256)> {
-        match (
-            self.config.trusted_checkpoint_height,
-            self.config.trusted_checkpoint_hash,
-        ) {
-            (Some(h), Some(hash)) => Some((h, hash)),
-            _ => None,
-        }
+        self.config
+            .newest_trusted_checkpoint()
+            .map(|cp| (cp.checkpoint_height, cp.checkpoint_hash))
     }
 
     fn trusted_checkpoint_anchors(&self) -> Option<(u64, H256, u64, H256)> {
-        match (
-            self.config.trusted_checkpoint_height,
-            self.config.trusted_checkpoint_hash,
-            self.config.trusted_blame_height,
-            self.config.trusted_blame_hash,
-        ) {
-            (Some(sh), Some(snapshot), Some(bh), Some(blame)) => {
-                Some((sh, snapshot, bh, blame))
-            }
-            _ => None,
-        }
+        self.config.newest_trusted_checkpoint().map(|cp| {
+            (
+                cp.checkpoint_height,
+                cp.checkpoint_hash,
+                cp.blame_height,
+                cp.blame_hash,
+            )
+        })
+    }
+
+    fn trusted_checkpoint_candidates(&self) -> Vec<(u64, H256)> {
+        // Already sorted newest-first at config-build time.
+        self.config
+            .trusted_checkpoints
+            .iter()
+            .map(|cp| (cp.checkpoint_height, cp.checkpoint_hash))
+            .collect()
     }
 
     /// Find a trusted blame block for checkpoint

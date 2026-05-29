@@ -469,6 +469,100 @@ wedge/OOM/fork. The fixes made it *safe* (no crash/fork), but
 (parallel/faster verify, sync-completeness + epoch-sync targeting, and
 peer-count robustness + the premature-Normal config flip).
 
+### 5.16 Era-checkpoint fast-sync anchors — root-cause fix for stale anchors (session 7)
+
+This supersedes the §5.14.2 "graceful-fallback" plan, which would have
+patched the *symptom* (a pruned anchor) rather than the *cause* (we were
+pinning the wrong kind of snapshot).
+
+**The reframing.** The chain has two cadences:
+`SNAPSHOT_EPOCHS_CAPACITY = 2000` (state snapshots) and
+`ERA_DEFAULT_EPOCH_COUNT = 20000` (eras = 10 snapshots). An **era
+boundary** (a multiple of 20000) is a *consensus-final* checkpoint — the
+chain can't reorg before the stable era genesis — AND it's the snapshot
+that serving nodes retain long-term via the `StableCheckpoint` policy
+([storage_manager.rs `extra_snapshots_to_keep_predicate`](../crates/dbs/storage/src/impls/storage_manager/storage_manager.rs#L1802)).
+A mid-era 2000-snapshot, by contrast, lives only in the short sliding
+window (`additional_maintained_snapshot_count`, default 2) and is pruned
+fleet-wide within minutes at 4 blocks/sec. The §5.14.2 incident pinned a
+mid-era snapshot (height ~2048) — *that* is why every peer returned empty
+candidates. Pinning an **era checkpoint** is both the durable (non-stale)
+and the higher-trust choice.
+
+**Why not the forward-walk "trust-preserving" fallback?** A fresh
+trusted-checkpoint joiner can't cryptographically bind a *fresh* snapshot
+to its anchor by walking headers forward: verifying RandomX PoW needs the
+seed, which is derived from the **executed** epoch set at the prior
+`RANDOMX_EPOCH_LENGTH` boundary, and the joiner only has executed state at
+the anchor. So forward PoW verification is impossible under fast-sync — a
+header walk would rest on peer quorum anyway, at the cost of ~16k header
+fetches. Era checkpoints sidestep this entirely: the hashes are *known*
+(operator-pinned or baked-in), so the integrity floor stays the chunk↔
+`merkle_root` proof and the trust is the operator's/binary's assertion —
+no peer can substitute a bogus snapshot.
+
+**What landed:**
+
+1. **Era-boundary validation (step 1).** `Configuration::parse` →
+   `assemble_trusted_checkpoints` rejects any anchor whose
+   `checkpoint_height` is not a multiple of `era_epoch_count`, with an
+   actionable error naming the nearest valid heights. Also enforces
+   all-or-nothing on the four legacy scalars and `blame_height >
+   checkpoint_height`. ([configuration.rs](../crates/client/src/configuration.rs))
+
+2. **Retention verified (step 2, code-level).** With the default
+   `provide_more_snapshot_for_sync = [StableCheckpoint, EpochNearestMultipleOf(2000)]`
+   a serving node retains the current stable era genesis checkpoint and
+   (via `keep_era_genesis_snapshot`) the previous one — roughly two era
+   checkpoints, ≈ up to 40k epochs of headroom vs. ~minutes for a mid-era
+   snapshot. **Caveat:** within era 0 (chain height < 20000) there is *no*
+   era checkpoint yet, so only churning mid-era snapshots exist — fast-sync
+   before the first era boundary is inherently best-effort. (Live-fleet
+   confirmation via the `mazze_getStatus` `snapshots`/`era` fields is
+   pending operator authorization for the read-only SSH probe.)
+
+3. **Multi-anchor list + candidate enumeration (step 3).**
+   `ConsensusConfig` now holds `Vec<TrustedCheckpoint>` (sorted
+   newest-first), assembled from the legacy scalars + a new
+   `trusted_checkpoints` config list + per-chain baked-in defaults
+   (`baked_in_trusted_checkpoints`, an empty stub today — a frequently
+   relaunched dev fleet changes genesis each relaunch, so baked-in hashes
+   belong to a long-lived/mainnet build; use the config list on the
+   fleet). The catch-up FSM proposes **all** known anchors as
+   snapshot-sync candidates, newest-first
+   ([`enumerate_sync_candidates`](../crates/mazzecore/core/src/sync/state/snapshot_chunk_sync.rs)),
+   and the existing `StateSyncCandidateManager` syncs the newest one a peer
+   still serves. Because the V5 wire bump (§5.14) already bypasses
+   `validate_blame_states`/`validate_epoch_receipts`, selection needs no
+   local header chain — the known hashes are sufficient. So listing the
+   current + previous era checkpoints means a stale newest anchor simply
+   falls through to the next, with zero trust degradation.
+
+   `get_trusted_blame_block_for_snapshot` resolves the blame anchor for
+   *any* listed checkpoint by hash (not just the primary), and the
+   seed-bypass / chain-prefix direct-persist
+   ([synchronization_graph.rs](../crates/mazzecore/core/src/sync/synchronization_graph.rs#L1544))
+   accept every listed anchor's headers because all are at-or-below the
+   newest anchor's height ceiling — no change needed there.
+
+**Operator usage** (fleet `hydra.toml`): list the two most recent era
+checkpoints instead of a single mid-era snapshot, e.g.
+
+```toml
+# "checkpoint_height:checkpoint_hash:blame_height:blame_hash", comma-separated.
+trusted_checkpoints = "40000:0x<era2_snapshot>:40120:0x<era2_blame>,20000:0x<era1_snapshot>:20120:0x<era1_blame>"
+```
+
+The four legacy `trusted_checkpoint_*` scalars still work and fold into
+this list as a single entry.
+
+**Still open:** populate `baked_in_trusted_checkpoints` for a long-lived
+network; live-fleet end-to-end verification (needs the chain past the
+first era boundary AND the read-only RPC probe authorized); and the
+retained-window is still finite — a baked-in checkpoint must be recent
+enough (within ~1–2 eras of tip) to still be served, or archive nodes
+must be configured to retain a sparse permanent set.
+
 ## 6. References
 
 - [chain-model.md](chain-model.md) — block structure, PoW bypass semantics.

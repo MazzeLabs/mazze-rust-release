@@ -205,8 +205,29 @@ pub mod pow {
     // previous initial difficulty: 20_000_000_000;
     pub const INITIAL_DIFFICULTY: u64 = 5;
 
-    // The amount of epochs to use for switching mining seed hash
-    pub const RANDOMX_EPOCH_LENGTH: u64 = 2048;
+    // The amount of epochs between RandomX seed rotations.
+    //
+    // Aligned to `ERA_DEFAULT_EPOCH_COUNT` so the seed rotates on the same
+    // boundary as the era / stable checkpoint / snapshot cadence. Rationale:
+    //   1) One time granularity across the whole chain (finality, retention,
+    //      snapshots, fast-sync targets, seed rotation) — the "epoch" and
+    //      "RandomX epoch" concepts collapse into one.
+    //   2) Eliminates the async catch-up wedge at mid-era sub-boundaries.
+    //      Header ingest and consensus ordering are decoupled queues; when
+    //      ingest crosses a seed boundary and consensus hasn't ordered the
+    //      pivot at the previous boundary yet, the seed can't be derived
+    //      and ingest wedges (observed live on m3/m5 at height 8191 with
+    //      the 2048 cadence). Making the boundary era-wide gives ordering
+    //      ~10× more tolerance — under normal load the race can't happen.
+    //   3) Lower miner overhead (1 dataset rebuild / ~83 min vs ~1 / 8.5 min
+    //      at 4 blocks/s) — the 2 GB RandomX dataset only regenerates on
+    //      rotation.
+    //   4) Anti-ASIC posture stays strong. Monero (the reference RandomX
+    //      implementation) rotates every ~68 h; Mazze at era-based cadence
+    //      is still ~50× more aggressive than that.
+    // See docs/internal/current-state.md and docs/internal/storage-v2-design.md.
+    pub const RANDOMX_EPOCH_LENGTH: u64 =
+        crate::consensus::ERA_DEFAULT_EPOCH_COUNT;
 }
 
 pub mod tx_pool {

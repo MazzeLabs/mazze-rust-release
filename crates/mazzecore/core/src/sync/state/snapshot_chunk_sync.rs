@@ -766,13 +766,27 @@ impl SnapshotChunkSync {
                         }
                     }
                 }
-                Status::DownloadingManifest(_) => {
+                Status::DownloadingManifest(since) => {
+                    let stalled =
+                        since.elapsed() > self.config.candidate_stall_deadline;
                     if inner
                         .manifest_manager
                         .as_ref()
                         .expect("always set in DownloadingManifest")
                         .is_inactive()
+                        || stalled
                     {
+                        if stalled {
+                            warn!(
+                                "snapshot-sync: manifest download for {:?} made no \
+                                 progress in {:?}; abandoning this candidate and \
+                                 trying the next one (stall recovery).",
+                                epoch_to_sync, self.config.candidate_stall_deadline,
+                            );
+                            // Count against the retry budget so repeated stalls
+                            // eventually trip the last-ditch canvass / fallback.
+                            inner.manifest_attempts += 1;
+                        }
                         // The current candidate fails, so try to choose the
                         // next one.
                         inner.status = Status::StartCandidateSync;
@@ -780,12 +794,29 @@ impl SnapshotChunkSync {
                     }
                 }
                 Status::DownloadingChunks(_) => {
-                    if inner
+                    let chunk = inner
                         .chunk_manager
                         .as_ref()
-                        .expect("always set in DownloadingChunks")
-                        .is_inactive()
-                    {
+                        .expect("always set in DownloadingChunks");
+                    // A chunk download wedges with peers still attached when a
+                    // peer serves the manifest but not the chunks, or when
+                    // `finalize_restoration` keeps failing for this snapshot
+                    // (the m5 17h stall: 0/0/6, 1 peer). `is_inactive` only
+                    // catches peers-empty; `is_stalled` catches no-progress.
+                    let stalled =
+                        chunk.is_stalled(self.config.candidate_stall_deadline);
+                    if chunk.is_inactive() || stalled {
+                        if stalled {
+                            warn!(
+                                "snapshot-sync: chunk download for {:?} made no \
+                                 progress in {:?} ({:?}); abandoning this candidate \
+                                 and trying the next one (stall recovery).",
+                                epoch_to_sync,
+                                self.config.candidate_stall_deadline,
+                                chunk,
+                            );
+                            inner.manifest_attempts += 1;
+                        }
                         // The current candidate fails, so try to choose the
                         // next one.
                         inner.status = Status::StartCandidateSync;
@@ -924,6 +955,11 @@ pub struct StateSyncConfiguration {
     pub chunk_request_timeout: Duration,
     pub manifest_request_timeout: Duration,
     pub max_downloading_manifest_attempts: usize,
+    /// No-progress deadline after which a manifest/chunk download is
+    /// considered wedged and the candidate is abandoned (so the FSM tries
+    /// the next one instead of spinning forever — the m5 17h-stall fix).
+    /// See docs/fast-sync-design.md §5.18.
+    pub candidate_stall_deadline: Duration,
 }
 
 impl StateSyncConfiguration {

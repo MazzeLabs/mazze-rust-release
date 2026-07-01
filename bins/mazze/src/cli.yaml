@@ -203,6 +203,8 @@ args:
         long: full
     - full-fast:
         long: full-fast
+    - mining:
+        long: mining
 subcommands:
     - account:
         about: Manage accounts

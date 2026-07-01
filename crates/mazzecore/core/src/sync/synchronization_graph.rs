@@ -96,6 +96,11 @@ const BLOCK_HEADER_ONLY: u8 = 1;
 const BLOCK_HEADER_GRAPH_READY: u8 = 2;
 const BLOCK_GRAPH_READY: u8 = 3;
 
+/// §5.18 — last time (unix seconds) the frontier-stuck diagnostic logged,
+/// so it fires at most every ~30s rather than every tick.
+static STUCK_FRONTIER_DIAG_LAST_SECS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 #[derive(Copy, Clone)]
 pub struct SyncGraphConfig {
     pub future_block_buffer_capacity: usize,
@@ -624,6 +629,83 @@ impl SynchronizationGraphInner {
     fn new_to_be_block_graph_ready(&mut self, index: usize) -> bool {
         self.new_to_be_graph_ready(index, BLOCK_GRAPH_READY)
             && self.arena[index].block_ready
+    }
+
+    /// §5.18 diagnostic — explain why a not-ready frontier block cannot be
+    /// promoted to `BLOCK_GRAPH_READY`: which parent/referee is blocking and
+    /// in what state, plus whether its body is present. Read-only; mirrors
+    /// `new_to_be_graph_ready`'s checks. Used to pin the graph-promotion
+    /// deadlock observed on wedged archive nodes (a block stuck not-ready
+    /// with `missing_bodies == 0`). See docs/fast-sync-design.md §5.18.
+    fn diagnose_frontier_stuck(&self, index: usize) -> String {
+        let node = &self.arena[index];
+        let hash = node.block_header.hash();
+        let height = node.block_header.height();
+        let genesis_hash = self.data_man.get_cur_consensus_era_genesis_hash();
+        let genesis_seq_num = self
+            .data_man
+            .local_block_info_by_hash(&genesis_hash)
+            .map(|i| i.get_seq_num())
+            .unwrap_or(0);
+        let mut blockers: Vec<String> = Vec::new();
+
+        if node.parent == NULL {
+            let ph = node.block_header.parent_hash();
+            if !node.parent_reclaimed
+                && !self.is_graph_ready_in_db(ph, genesis_seq_num)
+            {
+                blockers.push(format!(
+                    "parent {:?} ABSENT (not in arena, not graph-ready-in-db)",
+                    ph
+                ));
+            }
+        } else if self.arena[node.parent].graph_status < BLOCK_GRAPH_READY {
+            blockers.push(format!(
+                "parent idx={} {:?} status={}",
+                node.parent,
+                self.arena[node.parent].block_header.hash(),
+                self.arena[node.parent].graph_status,
+            ));
+        }
+
+        let mut in_mem = HashSet::new();
+        for &r in &node.referees {
+            in_mem.insert(self.arena[r].block_header.hash());
+            if self.arena[r].graph_status < BLOCK_GRAPH_READY {
+                blockers.push(format!(
+                    "referee idx={} {:?} status={}",
+                    r,
+                    self.arena[r].block_header.hash(),
+                    self.arena[r].graph_status,
+                ));
+            }
+        }
+        for rh in node.block_header.referee_hashes() {
+            if !in_mem.contains(rh)
+                && !self.is_graph_ready_in_db(rh, genesis_seq_num)
+            {
+                blockers.push(format!("referee {:?} ABSENT", rh));
+            }
+        }
+
+        if !node.block_ready {
+            blockers.push("block_ready=false (body missing/unverified)".into());
+        }
+
+        format!(
+            "frontier-diag block={:?} height={} status={} block_ready={} \
+             blockers=[{}]",
+            hash,
+            height,
+            node.graph_status,
+            node.block_ready,
+            if blockers.is_empty() {
+                "NONE — promotable now (transient, or a promotion logic gap)"
+                    .into()
+            } else {
+                blockers.join(" | ")
+            },
+        )
     }
 
     // Get parent (height, timestamp, gas_limit, difficulty)
@@ -1404,6 +1486,26 @@ impl SynchronizationGraph {
                 inner.arena[index].last_update_timestamp = now;
                 debug!("BlockIndex {} parent_index {} hash {:?} is header graph ready", index,
                            inner.arena[index].parent, inner.arena[index].block_header.hash());
+
+                // §5.19 body-request-targeting fix: register the block in
+                // `block_to_fill_set` so `request_block_bodies` will fetch
+                // its body. Otherwise the set is only snapshotted once, in
+                // `CatchUpFillBlockBodyPhase::start` (from
+                // `consensus.get_blocks_needing_bodies()`), and blocks that
+                // reach HEADER_GRAPH_READY *after* that snapshot — e.g. via
+                // the frontier-rescue-fetched-header path, or after any
+                // seed-defer reconciliation — are never enqueued for body
+                // fetch. Their `block_ready` stays `false` forever, so
+                // `check_not_ready_frontier` cannot promote them past
+                // status=2 (BLOCK_HEADER_GRAPH_READY), and consensus wedges
+                // at the pivot below (observed live on m1: frontier-diag
+                // pinned the block at height 17525, status=2,
+                // block_ready=false, `missing_bodies: 0`). The remove-on-
+                // body-arrival paths at lines 920 / 2158 keep it bounded.
+                if !inner.arena[index].block_ready {
+                    let h = inner.arena[index].block_header.hash();
+                    inner.block_to_fill_set.insert(h);
+                }
 
                 let r = inner.verify_header_graph_ready_block(index);
 
@@ -2346,6 +2448,40 @@ impl SynchronizationGraph {
             // `CatchUpFillBlockBodyPhase`.
             return;
         }
+
+        // §5.18 diagnostic (read-only, rate-limited to ~30s): dump WHY the
+        // not-ready frontier blocks can't promote. On a healthy node the
+        // sampled blocks turn over each time; on a WEDGED node the SAME
+        // block + same blocker recurs every 30s — pinning the deadlock from
+        // logs without an instrumented build.
+        {
+            use std::sync::atomic::Ordering as AtOrd;
+            let now_secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let last = STUCK_FRONTIER_DIAG_LAST_SECS.load(AtOrd::Relaxed);
+            if now_secs.saturating_sub(last) >= 30 {
+                STUCK_FRONTIER_DIAG_LAST_SECS.store(now_secs, AtOrd::Relaxed);
+                let frontier: Vec<usize> = inner
+                    .not_ready_blocks_frontier
+                    .get_frontier()
+                    .iter()
+                    .copied()
+                    .collect();
+                if !frontier.is_empty() {
+                    warn!(
+                        "§5.18 frontier-diag: {} not-ready frontier block(s); \
+                         sampling up to 5 (same block recurring => wedged):",
+                        frontier.len()
+                    );
+                    for b in frontier.iter().take(5) {
+                        warn!("  {}", inner.diagnose_frontier_stuck(*b));
+                    }
+                }
+            }
+        }
+
         // Iterate over generic not_ready frontier instead of obsolete PoS frontier.
         let frontier_snapshot: Vec<usize> = inner
             .not_ready_blocks_frontier

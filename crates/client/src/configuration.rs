@@ -66,7 +66,6 @@ const FULL_FAST_MIN_CHUNK_SIZE_BYTES: u64 = 1_024 * 1_024;
 const FULL_FAST_MIN_OPEN_SNAPSHOTS: u16 = 16;
 const FULL_FAST_MIN_OPEN_MPTS: u32 = 16;
 const FULL_FAST_MIN_PARITYDB_OPEN_FILES: u32 = 1024;
-const FULL_FAST_MIN_SNAPSHOT_COUNT: u32 = 2;
 const DEFAULT_SERVING_SNAPSHOT_COUNT: u32 = 2;
 
 // usage:
@@ -247,6 +246,11 @@ build_config! {
         (snapshot_candidate_request_timeout_ms, (u64), 10_000)
         (snapshot_chunk_request_timeout_ms, (u64), 30_000)
         (snapshot_manifest_request_timeout_ms, (u64), 30_000)
+        // No-progress deadline (ms) after which a wedged manifest/chunk
+        // download abandons its candidate and tries the next. Generous so a
+        // healthy-but-slow download is never falsely abandoned; far below the
+        // 17h wedge it replaces. See docs/fast-sync-design.md §5.18.
+        (snapshot_candidate_stall_deadline_ms, (u64), 180_000)
         (sync_expire_block_timeout_s, (u64), 7200)
         (throttling_conf, (Option<String>), None)
         (timeout_observing_period_s, (u64), 600)
@@ -446,7 +450,10 @@ impl Configuration {
 
         if matches.is_present("archive") {
             config.raw_conf.node_type = Some(NodeType::Archive);
-        } else if matches.is_present("full-fast") {
+        } else if matches.is_present("mining")
+            || matches.is_present("full-fast")
+        {
+            // `--mining` is the preferred flag; `--full-fast` is the alias.
             config.raw_conf.node_type = Some(NodeType::FullFast);
         } else if matches.is_present("full") {
             config.raw_conf.node_type = Some(NodeType::Full);
@@ -565,7 +572,7 @@ impl Configuration {
             self.apply_snapshot_serving_defaults();
         }
         if matches!(node_type, NodeType::FullFast) {
-            self.apply_full_fast_profile();
+            self.apply_mining_profile();
         }
     }
 
@@ -593,10 +600,18 @@ impl Configuration {
         }
     }
 
-    fn apply_full_fast_profile(&mut self) {
+    /// The lean **mining-node** profile (node type `mining` / legacy
+    /// `full-fast`). Goal: get a miner producing valid blocks at the tip as
+    /// fast as possible, then retain the **bare minimum** — just enough
+    /// recent state to compute the deferred root and mine. A miner is a
+    /// snapshot *consumer*, not a *source*: it does not retain or serve
+    /// extra snapshots (that's left to `full`/`archive` nodes), which keeps
+    /// its disk footprint and I/O small. See docs/fast-sync-design.md §5.18.
+    fn apply_mining_profile(&mut self) {
         let raw = &mut self.raw_conf;
         let snapshot_epoch_count = raw.snapshot_epoch_count as u64;
 
+        // --- Fast-sync DOWNLOAD tuning (reach the tip quickly) ---
         raw.request_block_with_public = true;
         raw.max_outgoing_peers =
             raw.max_outgoing_peers.max(FULL_FAST_MIN_OUTGOING_PEERS);
@@ -616,9 +631,6 @@ impl Configuration {
             .max(FULL_FAST_MIN_OPEN_SNAPSHOTS);
         raw.storage_max_open_mpt_count =
             raw.storage_max_open_mpt_count.max(FULL_FAST_MIN_OPEN_MPTS);
-        raw.additional_maintained_snapshot_count = raw
-            .additional_maintained_snapshot_count
-            .max(FULL_FAST_MIN_SNAPSHOT_COUNT);
         raw.paritydb_max_open_files = Some(
             raw.paritydb_max_open_files
                 .unwrap_or_default()
@@ -629,6 +641,15 @@ impl Configuration {
                 .unwrap_or_default()
                 .max(snapshot_epoch_count),
         );
+
+        // --- Lean retention (mine, don't serve/archive) ---
+        // Override the snapshot-serving defaults that ran earlier in
+        // `apply_snapshot_serving_defaults`: keep NO extra snapshots beyond
+        // the minimum the node needs for its own state, and don't retain
+        // any for serving peers. `keep_snapshot_before_stable_checkpoint`
+        // (default true) still preserves execution continuity (D.3).
+        raw.additional_maintained_snapshot_count = 0;
+        raw.provide_more_snapshot_for_sync = Vec::new();
     }
 
     fn network_id(&self) -> u64 {
@@ -1184,6 +1205,9 @@ impl Configuration {
             max_downloading_manifest_attempts: self
                 .raw_conf
                 .max_downloading_manifest_attempts,
+            candidate_stall_deadline: Duration::from_millis(
+                self.raw_conf.snapshot_candidate_stall_deadline_ms,
+            ),
         }
     }
 

@@ -8,6 +8,16 @@ use crate::NodeType;
 fn parses_full_fast_profile() {
     assert_eq!("full-fast".parse::<NodeType>().unwrap(), NodeType::FullFast);
     assert_eq!("full_fast".parse::<NodeType>().unwrap(), NodeType::FullFast);
+    // `mining` is the preferred alias for the same lean profile.
+    assert_eq!("mining".parse::<NodeType>().unwrap(), NodeType::FullFast);
+    assert_eq!(
+        "mining-node".parse::<NodeType>().unwrap(),
+        NodeType::FullFast
+    );
+    assert_eq!(
+        "mining_node".parse::<NodeType>().unwrap(),
+        NodeType::FullFast
+    );
 }
 
 #[test]

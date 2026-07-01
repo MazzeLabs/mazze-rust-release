@@ -75,6 +75,12 @@ pub struct SnapshotChunkManager {
     downloading_chunks: HashMap<ChunkKey, DownloadingChunkStatus>,
     downloading_attempts: HashMap<ChunkKey, usize>,
     num_downloaded: usize,
+    /// Wall-clock of the last forward progress (a chunk accepted into the
+    /// restorer). Used to detect a wedged download — e.g. the manifest
+    /// peer no longer serves the chunks, or `finalize_restoration` keeps
+    /// failing — so the FSM can abandon this candidate instead of spinning
+    /// forever. Reset on every accepted chunk. See docs/fast-sync-design.md.
+    last_progress: Instant,
     config: SnapshotChunkConfig,
     /// D.1 — Manifest-committed `keccak256(rlp(chunk))` per `ChunkKey`.
     /// Populated at construction from the aggregated manifest
@@ -157,6 +163,7 @@ impl SnapshotChunkManager {
             downloading_chunks: Default::default(),
             downloading_attempts: Default::default(),
             num_downloaded: 0,
+            last_progress: Instant::now(),
             config,
             expected_chunk_hashes,
             restorer,
@@ -221,6 +228,9 @@ impl SnapshotChunkManager {
         }
 
         self.num_downloaded += 1;
+        // Forward progress — reset the stall timer so a healthy (even if
+        // slow) download is never falsely abandoned.
+        self.last_progress = Instant::now();
 
         if !self.restorer.append(chunk_key.clone(), chunk) {
             // Phase E — restorer rejected the chunk (invalid keys /
@@ -334,6 +344,15 @@ impl SnapshotChunkManager {
 
     pub fn is_inactive(&self) -> bool {
         self.active_peers.is_empty()
+    }
+
+    /// True if the download has made no forward progress (no chunk
+    /// accepted) within `deadline`. Catches a wedged candidate that still
+    /// has a nominal active peer — e.g. a peer that served the manifest but
+    /// not the chunks, or a snapshot whose `finalize_restoration` keeps
+    /// failing — which `is_inactive` (peers-empty) would never detect.
+    pub fn is_stalled(&self, deadline: Duration) -> bool {
+        self.last_progress.elapsed() > deadline
     }
 
     pub fn set_active_peers(&mut self, new_active_peers: HashSet<NodeId>) {

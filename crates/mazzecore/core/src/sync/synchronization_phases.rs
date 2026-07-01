@@ -10,7 +10,7 @@ use crate::{
         synchronization_state::SynchronizationState,
         SharedSynchronizationGraph,
     },
-    ConsensusGraph,
+    ConsensusGraph, NodeType,
 };
 use mazze_internal_common::{
     EpochExecutionCommitment, StateAvailabilityBoundary,
@@ -812,16 +812,32 @@ impl SynchronizationPhaseTrait for CatchUpFillBlockBodyPhase {
     }
 }
 
+/// How long `best_epoch_number` may stay flat, while we are meaningfully
+/// behind the peer median, before we conclude block-sync is wedged
+/// (an unrecoverable not-ready-frontier / graph-promotion deadlock — see
+/// docs/fast-sync-design.md §5.18) and escape to checkpoint fast-sync.
+/// Generous so a legitimately slow (but progressing) catch-up never trips
+/// it; far below the multi-hour wedges it replaces.
+const CATCH_UP_BLOCK_STUCK_ESCAPE_DEADLINE: time::Duration =
+    time::Duration::from_secs(600);
+
 pub struct CatchUpSyncBlockPhase {
     pub syn: Arc<SynchronizationState>,
     pub graph: SharedSynchronizationGraph,
+    /// `(last_observed_best_epoch, time_of_last_forward_progress)`, used to
+    /// detect a wedged block-sync and escape to fast-sync.
+    stuck_tracker: Mutex<(u64, Instant)>,
 }
 
 impl CatchUpSyncBlockPhase {
     pub fn new(
         syn: Arc<SynchronizationState>, graph: SharedSynchronizationGraph,
     ) -> Self {
-        CatchUpSyncBlockPhase { syn, graph }
+        CatchUpSyncBlockPhase {
+            syn,
+            graph,
+            stuck_tracker: Mutex::new((0, Instant::now())),
+        }
     }
 }
 
@@ -851,16 +867,73 @@ impl SynchronizationPhaseTrait for CatchUpSyncBlockPhase {
         };
         // Use the median normal-peer epoch as a conservative exit signal.
         // Normal sync will return to catch-up if the node falls behind again.
-        if self.graph.consensus.best_epoch_number()
-            + CATCH_UP_EPOCH_LAG_THRESHOLD
-            >= median_epoch
-        {
+        let best_epoch = self.graph.consensus.best_epoch_number();
+        if best_epoch + CATCH_UP_EPOCH_LAG_THRESHOLD >= median_epoch {
             if normal_peers_share_known_terminal(&self.syn, &self.graph) {
                 sync_handler.graph.consensus.enter_normal_phase();
                 return SyncPhaseType::Normal;
             }
             sync_handler.request_missing_terminals(io);
+            return self.phase_type();
         }
+
+        // Wedge escape (§5.18). We are meaningfully behind the peer median.
+        // If `best_epoch` makes NO forward progress for the deadline, block
+        // sync is deadlocked (a not-ready frontier whose dependencies the
+        // node can neither promote nor fetch — observed live on the archive
+        // nodes). Rather than spin forever, fall back to checkpoint
+        // fast-sync — BUT only when a fast-sync target actually exists
+        // (a configured/baked era checkpoint), otherwise we'd thrash
+        // CatchUpSyncBlock<->CatchUpCheckpoint with nothing to sync to.
+        {
+            let mut tracker = self.stuck_tracker.lock();
+            if best_epoch > tracker.0 {
+                *tracker = (best_epoch, Instant::now());
+            } else if tracker.1.elapsed()
+                > CATCH_UP_BLOCK_STUCK_ESCAPE_DEADLINE
+                // Archive nodes must NEVER escape to fast-sync: their
+                // contract is to keep ALL history, so skipping ahead to a
+                // snapshot would violate it. An archive recovers only by
+                // back-filling the gap block-by-block (the peers HAVE the
+                // data); the graph-promotion deadlock is the bug to fix for
+                // them, not to route around. full/mining DON'T keep full
+                // history, so escaping to a recent snapshot is correct.
+                // See docs/fast-sync-design.md §5.18.
+                && sync_handler.node_type() != NodeType::Archive
+                && !sync_handler
+                    .graph
+                    .consensus
+                    .trusted_checkpoint_candidates()
+                    .is_empty()
+            {
+                warn!(
+                    "CatchUpSyncBlock WEDGED: best_epoch stuck at {} for {:?} \
+                     while peer median is {} (behind by {}). Block-sync graph \
+                     can't advance; escaping to CatchUpCheckpoint fast-sync. \
+                     See docs/fast-sync-design.md §5.18.",
+                    best_epoch,
+                    tracker.1.elapsed(),
+                    median_epoch,
+                    median_epoch.saturating_sub(best_epoch),
+                );
+                // Reset so we give the re-entered checkpoint sync a full
+                // deadline before any further escape.
+                *tracker = (best_epoch, Instant::now());
+                return SyncPhaseType::CatchUpCheckpoint;
+            }
+        }
+
+        // Body-sync unification (§5.20): keep draining `block_to_fill_set`
+        // on every phase tick (1s via CHECK_CATCH_UP_MODE_TIMER). The
+        // 500ms CHECK_REQUEST_TIMER also drains it, so combined we get
+        // 2–3 dispatches per second — enough to keep the max_inflight
+        // window (400, or 64 under backpressure) refilled at production
+        // rates. Without this, a node stayed in CatchUpSyncBlock forever
+        // if its median_peer_epoch outran its best_epoch by more than
+        // CATCH_UP_EPOCH_LAG_THRESHOLD (observed live on m1: epoch stuck
+        // at 1199, missing_bodies climbing 12k → 22k over 20 min while
+        // the log emitted only `request_block_headers: []`).
+        sync_handler.request_block_bodies(io);
 
         self.phase_type()
     }
@@ -876,6 +949,12 @@ impl SynchronizationPhaseTrait for CatchUpSyncBlockPhase {
             (cur_era_genesis_height, Instant::now(), 0, 0);
 
         sync_handler.request_epochs(io);
+        // Body-sync unification (§5.20): CatchUpSyncBlock now also drives
+        // body-fetch, subsuming the responsibility that used to belong
+        // exclusively to CatchUpFillBlockBodyPhase. Without this, a node
+        // entering CatchUpSyncBlock under backpressure would fetch only
+        // headers and never drain `block_to_fill_set`, wedging consensus.
+        sync_handler.request_block_bodies(io);
     }
 }
 

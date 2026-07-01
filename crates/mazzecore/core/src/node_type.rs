@@ -54,7 +54,11 @@ impl FromStr for NodeType {
         let node_type = match s {
             "archive" => Self::Archive,
             "full" => Self::Full,
-            "full-fast" | "full_fast" => Self::FullFast,
+            // `mining`/`mining-node` is the preferred name for the lean
+            // fast-sync miner profile; `full-fast` is kept as an alias.
+            // All map to the same wire-compatible (full-tier) node type.
+            "full-fast" | "full_fast" | "mining" | "mining-node"
+            | "mining_node" => Self::FullFast,
             "light" => Self::Light,
             _ => Self::Unknown,
         };

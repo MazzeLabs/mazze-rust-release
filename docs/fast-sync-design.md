@@ -489,17 +489,28 @@ mid-era snapshot (height ~2048) — *that* is why every peer returned empty
 candidates. Pinning an **era checkpoint** is both the durable (non-stale)
 and the higher-trust choice.
 
-**Why not the forward-walk "trust-preserving" fallback?** A fresh
-trusted-checkpoint joiner can't cryptographically bind a *fresh* snapshot
-to its anchor by walking headers forward: verifying RandomX PoW needs the
-seed, which is derived from the **executed** epoch set at the prior
-`RANDOMX_EPOCH_LENGTH` boundary, and the joiner only has executed state at
-the anchor. So forward PoW verification is impossible under fast-sync — a
-header walk would rest on peer quorum anyway, at the cost of ~16k header
-fetches. Era checkpoints sidestep this entirely: the hashes are *known*
-(operator-pinned or baked-in), so the integrity floor stays the chunk↔
-`merkle_root` proof and the trust is the operator's/binary's assertion —
-no peer can substitute a bogus snapshot.
+Era checkpoints give a *known-hash* anchor: the integrity floor stays the
+chunk↔`merkle_root` proof and the trust is the operator's/binary's
+assertion — no peer can substitute a bogus snapshot. After syncing the
+anchor, the node executes forward to the tip, which trustlessly verifies
+everything above the checkpoint (the catch-up tail is that verification,
+not wasted work).
+
+> **Correction (supersedes an earlier draft of this section).** A prior
+> version claimed a fresh joiner "can't verify RandomX PoW forward because
+> the seed is derived from *executed state*." That is **wrong**. The seed
+> for RandomX epoch *N* is the **pivot block hash** of the *ordered* epoch
+> set at `(N-1)·RANDOMX_EPOCH_LENGTH`
+> ([db_manager.rs `try_get_current_seed_hash`](../crates/mazzecore/core/src/block_data_manager/db_manager.rs#L657)),
+> and that epoch set is a **consensus DAG-ordering** product
+> ([`persist_epoch_set_hashes`](../crates/mazzecore/core/src/consensus/consensus_inner/mod.rs#L725)
+> → `get_ordered_executable_epoch_blocks`), written on the new-block
+> ordering path — **not** an execution/state product. So forward PoW
+> verification is *possible*: order the forward header DAG (headers only,
+> no bodies, no state) to learn each epoch's pivot, which yields the next
+> RandomX epoch's seed, and so on rolling to the tip. This unlocks a
+> trustless way to sync a *fresher* snapshot and shrink the catch-up tail
+> — see §5.17.
 
 **What landed:**
 
@@ -557,11 +568,233 @@ The four legacy `trusted_checkpoint_*` scalars still work and fold into
 this list as a single entry.
 
 **Still open:** populate `baked_in_trusted_checkpoints` for a long-lived
-network; live-fleet end-to-end verification (needs the chain past the
-first era boundary AND the read-only RPC probe authorized); and the
-retained-window is still finite — a baked-in checkpoint must be recent
-enough (within ~1–2 eras of tip) to still be served, or archive nodes
-must be configured to retain a sparse permanent set.
+network; and the retained-window is still finite — a baked-in checkpoint
+must be recent enough (within ~1–2 eras of tip) to still be served, or
+archive nodes must be configured to retain a sparse permanent set.
+(Era advancement was confirmed live — eras form every 20000 epochs,
+trailing the tip by ~2–3 eras; see §5.18. End-to-end fast-sync to Normal
+on the fleet is still blocked by config/operational issues diagnosed in
+§5.18, not by this code.)
+
+### 5.17 Forward-verify fast-sync — trustless minimal-tail join (design, session 7)
+
+**Goal.** Get a new miner producing valid blocks *as soon as possible*
+without trusting peers and without replaying from genesis. The
+era-checkpoint approach (§5.16) is trustless but leaves a catch-up tail of
+up to one era (~20000 epochs of execution) between the anchor snapshot and
+the tip. Forward-verify shrinks that tail toward zero while keeping the
+"trust only a known hash" property.
+
+**The enabling fact (verified, see the §5.16 correction).** Consensus
+*ordering* in Mazze is **state-independent**: pivot selection, GHAST
+adaptive weight, the timer chain, and epoch block-set assignment are all
+computed from block **headers** (difficulty/PoW weight, parent/referee
+edges, height, timer fields) — never from execution output. Execution is
+strictly *downstream* of ordering and lagged by `DEFERRED_STATE_EPOCH_COUNT`.
+And the RandomX seed for epoch *N* is the pivot hash of the *ordered* epoch
+set at `(N-1)·RANDOMX_EPOCH_LENGTH`. Therefore a node can **roll seeds
+forward**: order the next batch of headers → learn its pivots → derive the
+next RandomX epoch's seed → order the next batch … up to the tip — using
+**headers only**, no bodies and no state.
+
+**The architecture.**
+
+1. **Anchor.** Start from a trusted era checkpoint (baked-in or the
+   §5.16 `trusted_checkpoints` list). Obtain the *ordered epoch sets*
+   (pivots) for the RandomX-epoch window just below the anchor so the
+   first forward seed is computable — either from the snapshot bundle's
+   consensus metadata, or by ordering the existing §5.11 chain-prefix.
+2. **Forward header-verify walk.** Header-sync forward from the anchor and
+   feed headers into consensus ordering, rolling seeds as above. **This is
+   the existing `CatchUpSyncBlockHeader` machinery** (`request_epochs` →
+   `request_block_headers` → `insert_block_header` → `on_new_block`
+   ordering), bootstrapped from the anchor instead of genesis and stopping
+   at a fresh near-tip snapshot height rather than syncing all bodies.
+3. **Pick the freshest served snapshot.** From the now-PoW-verified header
+   chain, choose the newest snapshot-aligned height a peer still serves;
+   its hash is *known from our own verified chain* (the pivot at that
+   height), so candidate selection needs no peer trust and no quorum.
+4. **Download + bind.** Fetch that snapshot, check chunks against its
+   `merkle_root`, and confirm it is the pivot on the verified chain.
+5. **Short tail.** Execute only from the fresh snapshot to the tip for tip
+   state, then go Normal and mine.
+
+Net effect: the cost moves from "*execute* up to one era" (≈14 epoch/s) to
+"*order* the headers of up to one era (cheap, header-only) + execute a
+short tail." Trust stays "a known anchor hash," not peer quorum.
+
+**CRITICAL correctness constraint — PoW MUST be enforced on the walk.**
+The forward-verify walk **must not** run under the existing
+`catch_up_mode` PoW bypass ([verification.rs `verify_pow`](../crates/mazzecore/core/src/verification.rs#L365)).
+That bypass exists for genesis replay of *locally trusted* data; here the
+forward headers come from *untrusted peers*. `insert()` computes PoW
+quality only to classify `is_heavy`/`is_timer` (for weights) — it does not
+*reject* bad PoW — so ordering under the bypass would happily order an
+attacker's free-to-forge chain (an eclipsed joiner would adopt it). The
+walk must therefore run **full header verification with the rolled seeds**:
+RandomX PoW meets the *claimed* difficulty AND the claimed difficulty
+matches the difficulty-adjustment rule AND the `adaptive`/`heavy` flags are
+correct AND timestamp bounds hold — all header-derivable. With real PoW
+enforced, forging the walk needs majority hashpower (standard SPV-grade
+security, now chained to the operator/binary anchor).
+
+**Trust model.** Equivalent to a light client anchored at a known
+checkpoint: trust one known hash (baked-in or operator-pinned era
+checkpoint), then PoW-verify the heaviest header chain forward. No peer
+quorum, no peer can substitute a bogus snapshot, and the final state is
+chunk↔`merkle_root` verified and pinned to the verified pivot chain.
+
+**Open questions / build risks (to settle before implementation):**
+- **Seed bootstrap at the anchor.** Confirm the cleanest source of the
+  pivots/epoch sets for the RandomX window just below the anchor (snapshot
+  bundle metadata vs. ordering the §5.11 prefix). The V5
+  `PreComputedRelatedData` already ships `ordered_executable_epoch_blocks`
+  for a window — check it covers a full `RANDOMX_EPOCH_LENGTH`.
+- **Difficulty-adjustment verification forward.** Confirm the adjustment
+  algorithm is fully header-derivable from the verified prefix (it should
+  be — it uses past block times/difficulties) and wire it into the walk.
+- **`adaptive`/`heavy` flag verification.** `insert()` trusts the header's
+  `adaptive()` flag; full verification must recompute and check it (this is
+  what normal non-catch-up header verification does — reuse it).
+- **Memory/DoS bound** on the forward header arena during the walk (the
+  existing H-2 orphan-cap guard is relaxed during catch-up; the walk needs
+  its own bound).
+- **Cost crossover.** Header-order one era vs. execute one era — measure
+  the real speedup before committing; if execution catch-up is already fast
+  enough (per the §5.15 throughput work), the simpler era-checkpoint path
+  may suffice.
+
+This section is a **design, not yet implemented**; the §5.16 era-checkpoint
+list remains the shipped, trustless baseline that forward-verify optimizes.
+
+### 5.18 Live fleet findings, chunk-stall recovery, and the mining-node profile (session 7)
+
+A read-only live measurement of the fleet (`fleet-ops/measure-fleet.sh`,
+`mazze_getStatus` on every node) clarified the real state and corrected an
+earlier mistaken assumption about era timing.
+
+**Era timing — corrected.** Eras **do** advance, regularly. m3's log shows
+checkpoints forming at heights 20000 → 40000 → 60000 → 80000 → 100000 →
+120000, ~80 min apart, and m6 is at era #7 (checkpoint 140000) at epoch
+~197000. So era checkpoints form every `era_epoch_count` (20000), trailing
+the tip by ~2–3 eras (the `should_move_stable_height` two-era lag + the
+timer-chain force-confirm of §5 / the 51%-resistance finality). An earlier
+note in this doc's drafting that eras "wouldn't form until ~63000 / lagged
+~43k blocks" was **wrong** — the timer chain accumulates fast enough. The
+"era stuck at 0 past epoch 50000" the operator observed was a *stalled*
+node (see m1/m5 below), not healthy behaviour. §5.16's premise holds.
+
+**Fleet health snapshot (2026-05-29).** Only the from-genesis full node
+(m6) is healthy. The two `full-fast` nodes are both failing to reach the
+tip:
+- **m5** (`full-fast`) — stuck in `CatchUpCheckpoint` for **~17 hours**.
+  Root cause: it pins `trusted_checkpoint_height = 8192`, a **mid-era**
+  snapshot (8192 = 4×2048, not a multiple of 20000) that the fleet has long
+  since pruned. It received a manifest (6 chunks) but `download = 0/0/6`
+  with the chunk count showing **all 6 already downloaded** — i.e.
+  `finalize_restoration` kept failing — and with one nominal active peer
+  remaining, `is_inactive()` never fired, so the FSM spun forever. This is
+  exactly the failure §5.16's era-boundary validation + multi-candidate
+  list prevents.
+- **m3** (`full-fast`) — no `trusted_checkpoint` configured, so it isn't
+  fast-syncing at all; it fell back to a slow *normal* header sync (at
+  ~166000 after many hours, `latestState=0` because it hasn't reached the
+  state-sync phase — expected, not corruption). Forms checkpoints fine.
+- m1/m2 (archive) are wedged at 1329 / 2949 (pre-existing).
+
+**Fix 1 — chunk-download stall recovery.** A snapshot-sync candidate could
+wedge in `DownloadingManifest`/`DownloadingChunks` with peers still
+attached (manifest served but chunks not, or a repeatedly-failing
+`finalize_restoration`), and nothing recovered it (`is_inactive()` only
+catches peers-empty). Added `SnapshotChunkManager::is_stalled(deadline)` —
+a **no-progress** timer reset on every accepted chunk (so a healthy-but-slow
+download is never falsely abandoned) — and in `update_status` a stalled (or
+inactive) manifest/chunk download now abandons the candidate, advances to
+the next via `set_active_candidate`, and counts against the manifest-retry
+budget so repeated stalls trip the existing last-ditch canvass → terminal
+fallback. New config `snapshot_candidate_stall_deadline_ms` (default
+180000). Combined with §5.16's multi-candidate list, a wedged candidate now
+falls through to the next era checkpoint instead of stalling for hours.
+
+**Fix 2 — the `mining` node profile.** `full-fast` was storage-equivalent
+to a full node and still ran `apply_snapshot_serving_defaults` — it
+*retained and served* snapshots, the opposite of a lean miner. Repurposed
+it into a proper mining profile (`apply_mining_profile`): keep the
+fast-sync download tuning, but set `additional_maintained_snapshot_count =
+0` and `provide_more_snapshot_for_sync = []` so a miner keeps only the bare
+minimum for its own tip state and does **not** serve snapshots (serving is
+left to `full`/`archive` nodes). Added `mining` / `mining-node` as the
+preferred node-type name and `--mining` CLI flag, with `full-fast` kept as
+an alias (same wire-compatible full-tier type). A mining node's
+time-to-mine is then: fast-sync download + the post-snapshot catch-up tail
+(bounded by §5.16 anchor freshness; further reducible by §5.17 or the §5.15
+verify-throughput work).
+
+**Fix 3 — escape a wedged block-sync to fast-sync (the archive bug).**
+Read-only diagnosis of the two archive nodes (frozen ~19h at epochs 1329 /
+2949 despite the chain being at ~197000) found a **consensus graph-promotion
+deadlock**, not a crash or pruning loss:
+- The frontier-dependency rescue (`rescue_missing_frontier_dependencies`)
+  **livelocked**: the same missing dependency hashes were re-requested
+  **2,748× (m1) / 7,994× (m2)** and never inserted; ~300–365k "is not
+  ready" log lines; both now frozen re-checking a single frontier block.
+- **The history is available**: m6 returns both a sub-era-genesis block
+  (epoch 1330) AND m1's exact stuck dependency `0xe136abac` (epoch ~3090)
+  over RPC. So the earlier "pruned/unservable history" hypothesis was
+  **wrong**.
+- **Connectivity is fine**: a node-id probe shows both archives are peered
+  with m6 (`0x2777…`). Yet they currently send **zero** header requests —
+  the rescue went quiet because `collect_missing_frontier_dependencies`
+  now finds nothing to fetch (deps "present" but unpromotable). So the
+  node is *passively wedged* in a not-ready-frontier tangle it can neither
+  promote nor identify a fetch for — it cannot compute its way out.
+
+The only robust escape from "nothing to request but still stuck" is to
+**abandon block-sync and fast-sync to a recent snapshot**. Implemented in
+`CatchUpSyncBlockPhase::next` ([synchronization_phases.rs](../crates/mazzecore/core/src/sync/synchronization_phases.rs)):
+when `best_epoch` makes **no forward progress for `CATCH_UP_BLOCK_STUCK_ESCAPE_DEADLINE`
+(600 s)** while meaningfully behind the peer median, transition to
+`CatchUpCheckpoint`. **Gated** on (a) `trusted_checkpoint_candidates()`
+being non-empty so a node with no fast-sync target can't thrash
+CatchUpSyncBlock↔CatchUpCheckpoint, and (b) **the node NOT being an
+`archive`**. The archive exclusion is the key per-tier distinction (the
+3-tier model — archive=never-prune+back-fill, full=moderate-prune,
+mining=bare-minimum): an archive's contract is to keep *all* history, so
+it must recover by **back-filling the gap block-by-block** (peers have the
+data — verified), never by skipping ahead to a snapshot. So the escape
+serves `full`/`mining`; for `archive` the graph-promotion deadlock must be
+*fixed at the root*, not routed around. This is otherwise the same
+unifying principle as Fix 1 and the mining profile: **any wedged catch-up
+(that isn't a full-history archive) escapes to a snapshot rather than
+freezing forever.**
+
+**Diagnostic instrumentation (read-only) to pin the deadlock root.**
+Because the archive *needs* the deadlock fixed (not escaped), `check_not_ready_frontier`
+now emits a rate-limited (~30 s) `frontier-diag` line per stuck frontier
+block via `SynchronizationGraphInner::diagnose_frontier_stuck`: it reports
+the exact blocking parent/referee (hash + `graph_status`, or ABSENT) and
+whether the body is present — mirroring `new_to_be_graph_ready`'s checks.
+On a healthy node the sampled blocks turn over; on a wedged node the SAME
+block + same blocker recurs every 30 s, pinning the cause from logs
+without an instrumented build. Deploy to a wedged archive, watch
+`frontier-diag`, then fix the specific promotion gap it reveals.
+
+This makes archive recovery a two-part action: (code) the escape above;
+(operational) configure the archives with era-checkpoint `trusted_checkpoints`
+harvested from m6 so the escape has a target, then redeploy. **Open design
+question it exposes:** an archive that escapes via fast-sync to era
+checkpoint *N* keeps full history only *forward* of *N* unless it
+back-fills the pre-*N* range (which m6 still serves block-by-block) — the
+fleet needs at least one true never-pruning archive that stays caught up,
+which it currently lacks. The *root* promotion-deadlock (why the frontier
+can't promote with deps present and `missing_bodies=0`) is still not
+pinned to the arena level; the escape routes around it rather than fixing
+it, and a dedicated graph-promotion-deadlock fix remains §5.15-item-3 work.
+
+All of the above is **local, uncommitted** pending a clear, settled path
+(the public repo is kept clean — no back-and-forth). Acting on the live
+fleet (deploying this binary, re-pinning m5/archives to era-checkpoint
+anchors, restarts) is a separate, operator-authorized step.
 
 ## 6. References
 

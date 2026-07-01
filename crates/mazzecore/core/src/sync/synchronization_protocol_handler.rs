@@ -2161,6 +2161,19 @@ impl NetworkProtocolHandler for SynchronizationProtocolHandler {
             CHECK_REQUEST_TIMER => {
                 self.remove_expired_flying_request(io);
                 self.rescue_missing_frontier_dependencies(io);
+                // Body-sync unification (§5.20): drain `block_to_fill_set`
+                // regardless of phase. In CatchUpSyncBlock with backpressure
+                // engaged (sync_consensus_block_lag >= 256), no other path
+                // was requesting bodies — request_epochs took the
+                // headers-only branch (need_requesting_blocks=false) and
+                // rescue_missing_frontier_dependencies also fetches only
+                // headers. block_to_fill_set (populated by the §5.19 fix)
+                // grew unbounded and consensus wedged because it couldn't
+                // execute without bodies. This tick (500ms) keeps bodies
+                // flowing at all times; `request_block_bodies` is a no-op
+                // when the set is empty (n_blocks_to_request == 0 → early
+                // return) so this is safe in Normal too.
+                self.request_block_bodies(io);
             }
             HEARTBEAT_TIMER => {
                 self.send_heartbeat(io);

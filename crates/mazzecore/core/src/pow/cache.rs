@@ -56,16 +56,31 @@ impl RandomXCacheBuilder {
     }
 
     fn update_context(&self, seed_hash: &H256) {
-        debug!("Updating RandomX Context for seed hash: {:?}", seed_hash);
+        // Fast path: 99% of calls arrive with an unchanged seed. Take a
+        // read lock, compare, return. This avoids the write-lock
+        // contention observed on m1 at the first era boundary
+        // (§5.21): ~79 get_vm_handler calls/sec were all serialising on
+        // the write lock even though no rebuild was needed, pinning
+        // one core at ~15 ms per call and wedging block ingestion.
+        if *self.current_seed_hash.read() == *seed_hash {
+            return;
+        }
+        // Slow path: seed appears to differ. Acquire the write lock
+        // and re-check under it — another thread may have already
+        // rotated to the same seed we want. Only log + rebuild when
+        // the value truly changes; otherwise a race between many IO
+        // workers falls out of the read fast-path together and each
+        // logs its own "Updating…" line without a real rebuild
+        // (observed in the first fix draft as ~5k/s log spam even
+        // though no context reallocation was happening).
         let mut current_hash = self.current_seed_hash.write();
         if *current_hash != *seed_hash {
-            // Create new context with the new seed hash
+            debug!(
+                "Updating RandomX Context for seed hash: {:?}",
+                seed_hash
+            );
             let new_context = Arc::new(RandomXContext::new(seed_hash, false));
-
-            // Update the context with new one
             *self.context.write() = new_context;
-
-            // Update seed hash
             *current_hash = *seed_hash;
         }
     }

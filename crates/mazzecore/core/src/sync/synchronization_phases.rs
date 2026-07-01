@@ -333,6 +333,20 @@ impl SynchronizationPhaseTrait for CatchUpSyncBlockHeaderPhase {
             if self.graph.consensus.trusted_checkpoint().is_some() {
                 return SyncPhaseType::CatchUpCheckpoint;
             }
+            // §5.22 genesis-with-peers escape: if the whole fleet is at
+            // genesis (peer_median == 0 && best_epoch == 0), the
+            // terminal-share check will never succeed because peers'
+            // `latest_block_hashes` are empty (nobody has produced yet).
+            // Without this fallback the last-to-restart node stays
+            // pinned in CatchUpSyncBlockHeader forever, blocking
+            // relaunch step 8 until timeout — observed live as m6
+            // wedging every restart. Genesis is unambiguously the
+            // shared terminal here; transition directly.
+            if median_epoch == 0
+                && self.graph.consensus.best_epoch_number() == 0
+            {
+                return SyncPhaseType::CatchUpCheckpoint;
+            }
             if normal_peers_share_known_terminal(&self.syn, &self.graph) {
                 return SyncPhaseType::CatchUpCheckpoint;
             }

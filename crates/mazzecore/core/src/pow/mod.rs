@@ -6,6 +6,7 @@ mod cache;
 
 use crate::block_data_manager::BlockDataManager;
 use cache::RandomXCacheBuilder;
+use lru_time_cache::LruCache;
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_parameters::pow::*;
@@ -18,6 +19,12 @@ use std::{
     convert::TryFrom,
     sync::Arc,
 };
+
+/// Bounded pow-hash memoization capacity (§5.21). Sized to cover ~2h of
+/// steady-state chain at ~5 blocks/s × ~15 verify-passes per header —
+/// generous headroom. Each entry is ~144 B (96 B key + 32 B value +
+/// LRU overhead), so 100k entries ≈ ~15 MB, dwarfed by state MPT pages.
+const POW_HASH_CACHE_CAPACITY: usize = 100_000;
 
 lazy_static! {
     /// Difficulty retargets are high-signal but low-frequency: emit
@@ -273,6 +280,19 @@ pub fn compute_inv_x_times_2_pow_256_floor(x: &U256) -> U256 {
 
 pub struct PowComputer {
     cache_builder: Arc<RandomXCacheBuilder>,
+    /// Memoization for `compute()`. Keyed by (input, seed_hash) where
+    /// `input = block_hash ‖ nonce_le`. The (block_hash, nonce,
+    /// seed_hash) triple deterministically produces the RandomX hash,
+    /// so repeated queries for the same header — e.g. weight
+    /// recomputation during GHAST pivot selection, catch-up graph
+    /// promotion, executor reward calculation — hit the cache instead
+    /// of re-running the ~ms-scale RandomX VM. §5.21 wedge on m1 at
+    /// the era boundary was driven by ~79 recomputes/sec for headers
+    /// that had already been hashed; with this cache the same set is
+    /// answered from memory. LruCache is Sync-safe behind the outer
+    /// RwLock (see the `unsafe impl Sync` below — RandomX bits are
+    /// unchanged; only the surrounding wrapper adds a lock).
+    pow_hash_cache: RwLock<LruCache<([u8; 64], H256), H256>>,
 }
 
 unsafe impl Send for PowComputer {}
@@ -282,6 +302,9 @@ impl PowComputer {
     pub fn new(seed_hash: H256) -> Self {
         PowComputer {
             cache_builder: RandomXCacheBuilder::new(seed_hash.into()),
+            pow_hash_cache: RwLock::new(LruCache::with_capacity(
+                POW_HASH_CACHE_CAPACITY,
+            )),
         }
     }
 
@@ -297,6 +320,15 @@ impl PowComputer {
             buf
         };
 
+        // §5.21 memoization: same (input, seed_hash) always produces
+        // the same RandomX hash; skip the VM if we've seen this
+        // header before. On m1 this collapsed ~79 recomputes/sec
+        // into cache hits, unwedging the era-boundary catchup.
+        let key = (input, *seed_hash);
+        if let Some(cached) = self.pow_hash_cache.write().get(&key) {
+            return *cached;
+        }
+
         let handle = self
             .cache_builder
             .get_vm_handler(seed_hash.as_fixed_bytes());
@@ -304,6 +336,7 @@ impl PowComputer {
         let hash_bytes = vm.hash(&input);
         let hash = H256::from_slice(&hash_bytes.as_ref());
 
+        self.pow_hash_cache.write().insert(key, hash);
         hash
     }
 

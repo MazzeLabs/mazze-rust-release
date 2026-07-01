@@ -2410,6 +2410,21 @@ impl SynchronizationGraph {
 
             // Iterating over `hash_to_arena_indices` might be more efficient
             // than iterating over `arena`.
+            // §5.24: collect the indices that transition here so we can
+            // scrub them from `not_ready_blocks_frontier`. The
+            // BLOCK_HEADER_GRAPH_READY → BLOCK_GRAPH_READY transition here
+            // bypasses `set_graph_ready`, which is the only site that
+            // maintains the frontier. Without this cleanup, the newly-ready
+            // blocks stay pinned in the frontier forever with status=3,
+            // block_ready=true — `check_not_ready_frontier` keeps sampling
+            // them every second, `set_graph_ready` never re-runs (already
+            // GRAPH_READY), and consensus stalls behind them. Observed live
+            // on m3 (mining node, post-restart): 4 frontier blocks at
+            // heights 662-665 status=3 block_ready=true, blockers=[NONE —
+            // promotable now (transient, or a promotion logic gap)] for
+            // hours; sync/consensus lag 1430 → chain frozen at epoch 664
+            // while the rest of the fleet reached epoch 47k+.
+            let mut promoted_here: Vec<usize> = Vec::new();
             let to_remove = {
                 let arena = &mut inner.arena;
                 inner
@@ -2420,6 +2435,7 @@ impl SynchronizationGraph {
                         if graph_node.graph_status == BLOCK_HEADER_GRAPH_READY {
                             graph_node.block_ready = true;
                             graph_node.graph_status = BLOCK_GRAPH_READY;
+                            promoted_here.push(*index);
                         }
                         if graph_node.graph_status != BLOCK_GRAPH_READY {
                             Some(*index)
@@ -2430,6 +2446,9 @@ impl SynchronizationGraph {
                     .collect()
             };
             inner.remove_blocks(&to_remove);
+            for idx in &promoted_here {
+                inner.not_ready_blocks_frontier.remove(idx);
+            }
 
             // Check if we skip some block bodies. It's either because they are
             // never retrieved after a long time, or they have invalid
@@ -2515,6 +2534,38 @@ impl SynchronizationGraph {
                     for b in frontier.iter().take(5) {
                         warn!("  {}", inner.diagnose_frontier_stuck(*b));
                     }
+                }
+            }
+        }
+
+        // §5.24 self-heal: sweep any stale BLOCK_GRAPH_READY entries out
+        // of the frontier before the normal promotion loop. These are
+        // left behind when `complete_filling_block_bodies` (bulk
+        // HEADER_GRAPH_READY → GRAPH_READY transition) forgets to call
+        // the frontier-remove path. Without this, `check_not_ready_frontier`
+        // keeps sampling them every tick and `set_graph_ready` never
+        // re-runs (already GRAPH_READY), leaving them permanently pinned.
+        // Applies to any node that ran through the checkpoint / fill
+        // path prior to §5.24 landing — including nodes upgraded in-
+        // place with retained DB state.
+        {
+            let stale: Vec<usize> = inner
+                .not_ready_blocks_frontier
+                .get_frontier()
+                .iter()
+                .copied()
+                .filter(|&b| {
+                    inner.arena[b].graph_status == BLOCK_GRAPH_READY
+                })
+                .collect();
+            if !stale.is_empty() {
+                debug!(
+                    "§5.24 self-heal: dropping {} stale GRAPH_READY \
+                     entries from not_ready_blocks_frontier",
+                    stale.len()
+                );
+                for idx in &stale {
+                    inner.not_ready_blocks_frontier.remove(idx);
                 }
             }
         }

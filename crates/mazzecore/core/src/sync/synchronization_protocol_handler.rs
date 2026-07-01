@@ -986,6 +986,32 @@ impl SynchronizationProtocolHandler {
 
     /// Request missing block bodies from random peers in batches.
     pub fn request_block_bodies(&self, io: &dyn NetworkContext) {
+        // §5.23 frontier-stuck body recovery. Observed live on m1
+        // archive: block 0x60b35d... at height 4242 pinned at
+        // status=BLOCK_HEADER_GRAPH_READY with block_ready=false for
+        // hours. Its hash was NEVER seen in any GetBlocks request even
+        // though peers had the body — meaning the request manager's
+        // in-flight set thought it was already flying (net_inflight_blocks
+        // entry never cleared) AND/OR the block was missing from
+        // block_to_fill_set. Both cases wedge the same way: the block
+        // is skipped by the `.difference(&in_flight_blocks)` filter
+        // below, or absent from the set entirely, so no request goes
+        // out and the frontier never promotes.
+        //
+        // Defensive fix: on every tick, look at not_ready_blocks_frontier
+        // for body-missing entries and (a) force-clear them from the
+        // request manager's in-flight set so the filter doesn't skip
+        // them, (b) re-insert them into block_to_fill_set idempotently.
+        // The regular fetch pipeline immediately below then picks them
+        // up. Idempotent under a fast path — collect_stuck returns
+        // Vec::new() when the frontier is clean or catchup-locked.
+        let stuck = self.graph.collect_stuck_frontier_bodies();
+        if !stuck.is_empty() {
+            self.request_manager
+                .remove_net_inflight_blocks(stuck.iter());
+            self.graph.reinsert_to_fill_set(&stuck);
+        }
+
         let in_flight_blocks = self.request_manager.in_flight_blocks();
         let to_request_blocks: Vec<_> = self
             .graph

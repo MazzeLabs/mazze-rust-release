@@ -2357,6 +2357,43 @@ impl SynchronizationGraph {
         missing
     }
 
+    /// §5.23 recovery: collect frontier blocks whose header is graph-ready
+    /// but body is still missing (`block_ready == false`). These are the
+    /// symptomatic stuck blocks — same hash recurring in the §5.18
+    /// frontier-diag every 30s. The caller uses this list to force-clear
+    /// the request manager's in-flight set (which may falsely think the
+    /// block was already requested) and to re-request the body.
+    pub fn collect_stuck_frontier_bodies(&self) -> Vec<H256> {
+        let inner = self.inner.read();
+        if inner.locked_for_catchup {
+            return Vec::new();
+        }
+        let mut stuck = Vec::new();
+        for &idx in inner.not_ready_blocks_frontier.get_frontier().iter() {
+            let node = &inner.arena[idx];
+            if !node.block_ready {
+                stuck.push(node.block_header.hash());
+            }
+        }
+        stuck
+    }
+
+    /// §5.23 recovery: idempotently ensure the given hashes are in
+    /// `block_to_fill_set` so `request_block_bodies` will fetch them.
+    /// The §5.19 fix already inserts here at HEADER_GRAPH_READY
+    /// transition; this defensive re-insertion covers the case where
+    /// a block reached HEADER_GRAPH_READY under a code path that
+    /// bypassed that insertion, leaving it permanently unfetched.
+    pub fn reinsert_to_fill_set(&self, hashes: &[H256]) {
+        if hashes.is_empty() {
+            return;
+        }
+        let mut inner = self.inner.write();
+        for h in hashes {
+            inner.block_to_fill_set.insert(*h);
+        }
+    }
+
     /// Construct the states along the main chain, set all
     /// `BLOCK_HEADER_GRAPH_READY` blocks as `BLOCK_GRAPH_READY` and remove all
     /// other blocks. All blocks in the future can be processed normally in

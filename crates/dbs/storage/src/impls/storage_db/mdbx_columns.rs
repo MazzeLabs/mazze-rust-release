@@ -45,35 +45,48 @@
 //!    trie walks (§6.3). (7 columns.)
 //! 4. **Consensus state** — chain metadata, snapshots, force-confirm
 //!    decisions, RandomX seed table. (5 columns.)
-//! 5. **Shielded** — Merkle frontier, root history, nullifier set,
-//!    and verifying-key material for the shielded pool. Once
-//!    [privacy-space-vs-native.md](../../../../../docs/internal/privacy-space-vs-native.md)
-//!    (Monero-in-a-space) lands these move under `Space::Shielded`
-//!    with different key prefixes — the column list here does not
-//!    presume that split. (5 columns.)
-//! 6. **Voluntary DA** — the off-consensus era-archive attestation
+//! 5. **Voluntary DA** — the off-consensus era-archive attestation
 //!    gossip records (§10 Q4). (2 columns.)
-//! 7. **Static-file coordination** (Phase 4) — tracks which block
+//! 6. **Static-file coordination** (Phase 4) — tracks which block
 //!    ranges have been offloaded from MDBX to `bodies/N-M.seg` /
 //!    `receipts/N-M.seg` / `traces/N-M.seg` cold static files and
 //!    which have been pruned outright. (2 columns.)
-//! 8. **Migration / schema** (Phase 7) — version stamp for the
+//! 7. **Migration / schema** (Phase 7) — version stamp for the
 //!    on-disk layout, resumable migration cursor for ParityDB →
 //!    MDBX, and periodic integrity checksums for corruption
 //!    recovery. (3 columns.)
-//! 9. **RPC log-query acceleration** — per-epoch bloom filters and
+//! 8. **RPC log-query acceleration** — per-epoch bloom filters and
 //!    address/topic → epoch-bitmap indices so `eth_getLogs` /
 //!    `mazze_getLogs` can skip whole epochs without opening any
 //!    receipt. (3 columns.)
-//! 10. **Executor pins** — reward window metadata making the
-//!     executor's `pending_execution_count` precise, unblocking the
-//!     bounded-channel backpressure work (§Q7a). (1 column.)
-//! 11. **Genesis / boot verification** — genesis summary written at
+//! 9. **Executor pins** — reward window metadata making the
+//!    executor's `pending_execution_count` precise, unblocking the
+//!    bounded-channel backpressure work (§Q7a). (1 column.)
+//! 10. **Genesis / boot verification** — genesis summary written at
 //!     boot so relaunches detect config drift instead of forking
 //!     silently. (1 column.)
 //!
-//! **Total: 49 columns.** MDBX env is opened with
-//! `set_max_tables(64)`, leaving ~15 slots for post-launch extensions.
+//! **Total: 44 columns.** MDBX env is opened with
+//! `set_max_tables(64)`, leaving ~20 slots for post-launch extensions.
+//!
+//! # What this catalog does NOT contain
+//!
+//! **Shielded state.** Per
+//! [privacy-space-vs-native.md](../../../../../docs/internal/privacy-space-vs-native.md)
+//! and the Monero-model in
+//! [privacy-interior-monero.md](../../../../../docs/internal/privacy-interior-monero.md),
+//! the shielded pool moves out of native and into a dedicated
+//! `Space::Shielded` execution environment with its own state
+//! machine (commitment tree, nullifier set, root history, VK
+//! storage). Its columns live in a separate catalog owned by the
+//! shielded-space crate and open on a distinct `MdbxEnv` (or a
+//! separate namespace of the same env — decided when the space
+//! lands). None of that state touches the columns declared here.
+//! Cross-space shield-in / shield-out records go through the
+//! bridge internal contract at `0x8888...` and appear in
+//! [`Column::PlainStorage`] under that address, same as any other
+//! internal contract — the bridge is native-side state, only the
+//! shielded interior is Space::Shielded.
 
 /// Every logical table the storage layer knows about. Each variant is
 /// backed by one MDBX sub-table, addressed at [`KvdbMdbx`](super::
@@ -370,48 +383,7 @@ pub enum Column {
     RandomxSeedByEpoch = 31,
 
     // ------------------------------------------------------------------
-    // 5. Shielded pool (native today; will migrate to Space::Shielded)
-    // ------------------------------------------------------------------
-
-    /// **`ShieldedFrontier`** — `level (u32 BE) → hash (32B)`.
-    ///
-    /// The 32-level Merkle-tree frontier used for note-commitment
-    /// insertion. Written on every shielded-in operation.
-    ShieldedFrontier = 32,
-
-    /// **`ShieldedRoots`** — `slot (u32 BE) → root_hash (32B)`.
-    ///
-    /// 64-slot rotating history of shielded-tree roots. Lets a
-    /// shielded-out proof reference a root up to 64 tree updates old
-    /// without requiring the exact latest root — small anonymity-set
-    /// benefit + async proof generation friendly.
-    ShieldedRoots = 33,
-
-    /// **`ShieldedNullifiers`** — `nullifier_hash (32B) → () (empty)`.
-    ///
-    /// Set-typed table: a nullifier being present means the note has
-    /// been spent. Prevents double-spend. Grows monotonically forever
-    /// (fundamental to shielded-tx semantics).
-    ShieldedNullifiers = 34,
-
-    /// **`ShieldedIndices`** — `single_key (u8) → indices (RLP)`.
-    ///
-    /// Small counter table for the shielded pool: latest `leaf_index`,
-    /// latest `root_index`, VK hash, VK length. Corresponds to the
-    /// current `shielded:leaf_index` / `shielded:root_index` /
-    /// `shielded:vk_hash` / `shielded:vk_len` keys.
-    ShieldedIndices = 35,
-
-    /// **`ShieldedVKWords`** — `word_index (u32 BE) → 32-byte word`.
-    ///
-    /// The Groth16 verifying key, chunked into 32-byte words for
-    /// storage. Streamed on first shielded-tx execution to hydrate the
-    /// prepared-VK cache in memory (`PowComputer`-analog for ZK
-    /// verification).
-    ShieldedVKWords = 36,
-
-    // ------------------------------------------------------------------
-    // 6. Voluntary data availability (§10 Q4)
+    // 5. Voluntary data availability (§10 Q4)
     // ------------------------------------------------------------------
 
     /// **`EraAttestations`** —
@@ -422,7 +394,7 @@ pub enum Column {
     /// via mempool; consumed by nodes with a `trusted_operators`
     /// client-side policy configured. Chain progression is never
     /// gated by contents of this table (per §10 Q4).
-    EraAttestations = 37,
+    EraAttestations = 32,
 
     /// **`EraArtifactRoots`** — `era_index (u64 BE) → root_hash (32B)`.
     ///
@@ -431,10 +403,10 @@ pub enum Column {
     /// by the artifact producer at era finalization; used by
     /// downloaders to verify the artifact matches what attestations
     /// point to.
-    EraArtifactRoots = 38,
+    EraArtifactRoots = 33,
 
     // ------------------------------------------------------------------
-    // 7. Static-file coordination (Phase 4)
+    // 6. Static-file coordination (Phase 4)
     // ------------------------------------------------------------------
 
     /// **`StaticFileIndex`** —
@@ -449,7 +421,7 @@ pub enum Column {
     /// One entry per column-type (bodies / receipts / traces): the
     /// descriptor lists every segment, its block range, its file
     /// path, and its content hash for verification.
-    StaticFileIndex = 39,
+    StaticFileIndex = 34,
 
     /// **`PrunedRanges`** —
     /// `(column_type (u8), block_range_start (u64 BE)) →
@@ -460,10 +432,10 @@ pub enum Column {
     /// on non-archive nodes). Consulted before returning "not found"
     /// to a query — lets us respond with a specific "pruned since
     /// epoch X" error instead of an ambiguous absence.
-    PrunedRanges = 40,
+    PrunedRanges = 35,
 
     // ------------------------------------------------------------------
-    // 8. Migration / schema (Phase 7)
+    // 7. Migration / schema (Phase 7)
     // ------------------------------------------------------------------
 
     /// **`SchemaVersion`** —
@@ -475,7 +447,7 @@ pub enum Column {
     /// version bumps monotonically; the phase-7 migration tool
     /// records the from → to bump here atomically with the actual
     /// migration commit.
-    SchemaVersion = 41,
+    SchemaVersion = 36,
 
     /// **`MigrationCheckpoint`** —
     /// `migration_id (u32 BE) →
@@ -487,7 +459,7 @@ pub enum Column {
     /// resumes from the last committed point rather than from
     /// scratch. Cleared once migration completes and the source is
     /// dropped.
-    MigrationCheckpoint = 42,
+    MigrationCheckpoint = 37,
 
     /// **`IntegrityChecksums`** —
     /// `epoch (u64 BE) → { table_bitmap (RoaringBitmap),
@@ -499,10 +471,10 @@ pub enum Column {
     /// a single 32-byte digest and stores it here. On suspected
     /// corruption, we recompute the digest and compare — a mismatch
     /// pinpoints which table diverged.
-    IntegrityChecksums = 43,
+    IntegrityChecksums = 38,
 
     // ------------------------------------------------------------------
-    // 9. RPC-derived indices (log-query acceleration)
+    // 8. RPC-derived indices (log-query acceleration)
     // ------------------------------------------------------------------
 
     /// **`EpochLogsBloom`** — `epoch (u64 BE) → Bloom (256B)`.
@@ -513,7 +485,7 @@ pub enum Column {
     /// the entire epoch can be skipped without scanning any block
     /// receipt. This is the single biggest RPC-latency lever after
     /// the flat state itself.
-    EpochLogsBloom = 44,
+    EpochLogsBloom = 39,
 
     /// **`AddressTouchedBitmap`** —
     /// `(space (1B), address (20B)) → RoaringBitmap<epoch>`.
@@ -523,7 +495,7 @@ pub enum Column {
     /// with a query's `[address in ...]` filter. Complement to
     /// [`AccountHistory`] — that tracks state changes; this tracks
     /// log emissions from the address.
-    AddressTouchedBitmap = 45,
+    AddressTouchedBitmap = 40,
 
     /// **`TopicTouchedBitmap`** —
     /// `(topic_index (u8), topic (32B)) → RoaringBitmap<epoch>`.
@@ -534,10 +506,10 @@ pub enum Column {
     /// `topic[1]`. Roaring compression makes this small; per-index
     /// separation lets the filter engine avoid cross-slot false
     /// positives.
-    TopicTouchedBitmap = 46,
+    TopicTouchedBitmap = 41,
 
     // ------------------------------------------------------------------
-    // 10. Executor pins / reward windows (Phase 2)
+    // 9. Executor pins / reward windows (Phase 2)
     // ------------------------------------------------------------------
 
     /// **`RewardWindowMetadata`** —
@@ -552,10 +524,10 @@ pub enum Column {
     ///
     /// Cleaned up as its window ages out of the deferred-execution
     /// horizon.
-    RewardWindowMetadata = 47,
+    RewardWindowMetadata = 42,
 
     // ------------------------------------------------------------------
-    // 11. Genesis / boot verification
+    // 10. Genesis / boot verification
     // ------------------------------------------------------------------
 
     /// **`GenesisMetadata`** — `single_key (u8) → GenesisSummary (RLP)`.
@@ -566,15 +538,15 @@ pub enum Column {
     /// consensus code compares its computed genesis against the
     /// stored one and refuses to open the DB if they diverge (early
     /// signal of a config drift, not a silent fork).
-    GenesisMetadata = 48,
+    GenesisMetadata = 43,
 }
 
 /// Total number of MDBX columns. Update on adding a variant.
 ///
 /// The `KvdbMdbx` env is created with `set_max_tables(64)` (see
 /// [`DEFAULT_MAX_TABLES`](super::kvdb_mdbx)); we have headroom for
-/// ~15 more logical tables before that cap becomes a concern.
-pub const NUM_COLUMNS: u32 = 49;
+/// ~20 more logical tables before that cap becomes a concern.
+pub const NUM_COLUMNS: u32 = 44;
 
 impl Column {
     /// The stable `u32` id assigned to this column. `#[repr(u32)]` on
@@ -620,11 +592,6 @@ impl Column {
         Column::StateAvailabilityBoundary,
         Column::ForceConfirmed,
         Column::RandomxSeedByEpoch,
-        Column::ShieldedFrontier,
-        Column::ShieldedRoots,
-        Column::ShieldedNullifiers,
-        Column::ShieldedIndices,
-        Column::ShieldedVKWords,
         Column::EraAttestations,
         Column::EraArtifactRoots,
         Column::StaticFileIndex,
@@ -675,11 +642,6 @@ impl Column {
             Column::StateAvailabilityBoundary => "StateAvailabilityBoundary",
             Column::ForceConfirmed => "ForceConfirmed",
             Column::RandomxSeedByEpoch => "RandomxSeedByEpoch",
-            Column::ShieldedFrontier => "ShieldedFrontier",
-            Column::ShieldedRoots => "ShieldedRoots",
-            Column::ShieldedNullifiers => "ShieldedNullifiers",
-            Column::ShieldedIndices => "ShieldedIndices",
-            Column::ShieldedVKWords => "ShieldedVKWords",
             Column::EraAttestations => "EraAttestations",
             Column::EraArtifactRoots => "EraArtifactRoots",
             Column::StaticFileIndex => "StaticFileIndex",

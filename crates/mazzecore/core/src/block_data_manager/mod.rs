@@ -248,8 +248,19 @@ impl BlockDataManager {
             config.tx_cache_index_maintain_timeout,
             worker_pool,
         );
-        let db_manager =
-            DBManager::new_from_paritydb(db, pow.clone(), true_genesis.hash());
+        // Storage Phase 2 wire-up: hand the DBManager the MDBX env
+        // opened by the storage layer (may be None on ParityDB-only
+        // dev fallback). `mazzecore::StorageManager` is a re-export
+        // alias for `StateManager` — the actual struct that owns
+        // `mdbx_env` is one indirection below (see the
+        // `get_storage_manager()` accessor). Future per-table shadow
+        // mirrors read the env from `DBManager::mdbx_env()`.
+        let db_manager = DBManager::new_from_paritydb(
+            db,
+            pow.clone(),
+            true_genesis.hash(),
+            storage_manager.get_storage_manager().mdbx_env(),
+        );
         let previous_db_progress =
             db_manager.gc_progress_from_db().unwrap_or(0);
 

@@ -245,7 +245,12 @@ pub use self::{
         snapshot_sync::{FullSyncVerifier, MptSlicer},
         state_proof::StateProof,
         storage_db::{
+            kvdb_mdbx::{KvdbMdbx, KvdbMdbxStats, MdbxEnv},
             kvdb_paritydb::KvdbParitydb,
+            mdbx_columns::{Column as MdbxColumn, NUM_COLUMNS as MDBX_NUM_COLUMNS},
+            mdbx_dual_write::{
+                DualWritePrimary, DualWriteReport, MdbxShadowMirror,
+            },
             snapshot_db_manager_paritydb::SnapshotDbManagerParitydb,
         },
     },

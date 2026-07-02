@@ -19,7 +19,9 @@ use mazze_internal_common::{
     DatabaseDecodable, DatabaseEncodable, EpochExecutionCommitment,
 };
 use mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
-use mazze_storage::{storage_db::KeyValueDbTrait, KvdbParitydb};
+use mazze_storage::{
+    storage_db::KeyValueDbTrait, KvdbParitydb, MdbxEnv,
+};
 use mazze_types::H256;
 use primitives::{Block, BlockHeader, SignedTransaction, TransactionIndex};
 use metrics::{Counter, CounterUsize};
@@ -73,11 +75,23 @@ pub struct DBManager {
     table_db: HashMap<DBTable, Box<dyn KeyValueDbTrait<ValueType = Box<[u8]>>>>,
     pow: Arc<PowComputer>,
     genesis_hash: H256,
+    /// MDBX hot-tier environment, shared with `StorageManager`. `None`
+    /// when the storage layer runs ParityDB-only (dev fallback); `Some`
+    /// once the storage rewrite starts opening its env at startup
+    /// (see `storage_manager.rs:132`).
+    ///
+    /// Phase 2 step 2 threads the handle here so future commits can
+    /// attach `MdbxShadowMirror` fields on a per-table basis without
+    /// widening every constructor again. This commit only plumbs the
+    /// value through — the field is stored but unused until the
+    /// per-table shadow mirrors land.
+    mdbx_env: Option<Arc<MdbxEnv>>,
 }
 
 impl DBManager {
     fn new_from_kvdb(
         db: Arc<SystemDB>, pow: Arc<PowComputer>, genesis_hash: H256,
+        mdbx_env: Option<Arc<MdbxEnv>>,
     ) -> Self {
         let mut table_db = HashMap::new();
 
@@ -95,13 +109,24 @@ impl DBManager {
             table_db,
             pow,
             genesis_hash,
+            mdbx_env,
         }
     }
 
     pub fn new_from_paritydb(
         db: Arc<SystemDB>, pow: Arc<PowComputer>, genesis_hash: H256,
+        mdbx_env: Option<Arc<MdbxEnv>>,
     ) -> Self {
-        Self::new_from_kvdb(db, pow, genesis_hash)
+        Self::new_from_kvdb(db, pow, genesis_hash, mdbx_env)
+    }
+
+    /// The MDBX hot-tier env attached to this manager, if the storage
+    /// layer opened one at startup. Consumers add per-table
+    /// `MdbxShadowMirror` fields on this manager and initialize them
+    /// against columns opened on this env.
+    #[allow(dead_code)]
+    pub(crate) fn mdbx_env(&self) -> Option<Arc<MdbxEnv>> {
+        self.mdbx_env.clone()
     }
 }
 

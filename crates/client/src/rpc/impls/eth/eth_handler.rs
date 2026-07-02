@@ -768,9 +768,38 @@ impl Eth for EthHandler {
             "RPC Request: eth_sendRawTransaction / eth_submitTransaction raw={:?}",
             raw,
         );
+
+        // §5.25 EIP-2718 typed-tx wire fix.
+        //
+        // MetaMask (and every other modern Ethereum wallet) sends typed
+        // txs as `type_byte || rlp_list` per EIP-2718 — the type byte
+        // is NOT wrapped in an RLP string. `TransactionWithSignature`'s
+        // Decodable impl (in `primitives/src/transaction/mod.rs`)
+        // expects the wire form to be the internal storage form, where
+        // typed txs are wrapped as an RLP byte-string (see the
+        // `Encodable` impl comment "Typed tx encoding is wrapped as an
+        // RLP string"). Handing MetaMask's `[0x02, ...]` directly to
+        // `rlp::decode` reads `0x02` as a 1-byte RLP string (single
+        // byte < 0x80 encodes as itself) and stops — the rest of the tx
+        // is lost, `decode_typed_raw(&[0x02])` fails, and the RPC
+        // returns `Invalid parameters: raw`.
+        //
+        // Fix: for external RPC input, detect the EIP-2718 typed-tx
+        // marker (first byte < 0xc0, i.e. not an RLP list header) and
+        // wrap it as an RLP string before decoding. Legacy EIP-155 txs
+        // start with an RLP list prefix (>= 0xc0) and pass through
+        // untouched. This matches the standard Ethereum RPC framing
+        // and matches what the code's internal Decodable already
+        // expects downstream.
+        let bytes = raw.into_vec();
+        let decode_input = if !bytes.is_empty() && bytes[0] < 0xc0 {
+            rlp::encode(&bytes).to_vec()
+        } else {
+            bytes
+        };
         let tx: TransactionWithSignature = invalid_params_check(
             "raw",
-            TransactionWithSignature::from_raw(&raw.into_vec()),
+            TransactionWithSignature::from_raw(&decode_input),
         )?;
 
         if tx.space() != Space::Ethereum {
@@ -780,7 +809,7 @@ impl Eth for EthHandler {
         if tx.recover_public().is_err() {
             bail!(invalid_params(
                 "tx",
-                "Can not recover pubkey for Ethereum like tx. Mazze eSpace only supports EIP-155 rather than EIP-1559 or other format transactions."
+                "Can not recover pubkey for Ethereum tx (bad signature or unsupported tx format)."
             ));
         }
 

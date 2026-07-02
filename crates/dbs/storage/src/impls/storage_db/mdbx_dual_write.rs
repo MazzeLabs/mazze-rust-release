@@ -55,6 +55,79 @@ use super::{
 };
 use crate::impls::errors::*;
 
+/// The minimal KV surface [`MdbxShadowMirror`] needs from its primary
+/// backend during the shadow phase of a migration.
+///
+/// Implemented for [`KvdbMdbx`] (so tests can exercise the whole
+/// dual-write module using two MDBX instances without pulling
+/// ParityDB into the test path) and, in Phase 2, for
+/// [`KvdbParitydb`](super::kvdb_paritydb::KvdbParitydb) (so a real
+/// ParityDB column can act as the primary during a table swap).
+///
+/// The trait deliberately doesn't inherit from the existing
+/// `KeyValueDbTrait` / `KeyValueDbTraitRead` / `KeyValueDbIterableTrait`
+/// family — those carry generic wrapping / lifetime machinery that
+/// makes them awkward to hold as a trait object or to blanket-impl on
+/// a new backend. Four small methods, all bytes-in / owned-bytes-out,
+/// no lifetime dance.
+///
+/// **Ownership**: the primary is passed by value into
+/// [`MdbxShadowMirror::new`] and lives as long as the mirror. Backends
+/// that are cheap to `Clone` (both `KvdbMdbx` and `KvdbParitydb` share
+/// an `Arc<Env>` under the hood) satisfy this without churn.
+///
+/// **Thread safety**: implementations must be `Send + Sync` because
+/// the mirror is used across the executor + async-persistence +
+/// parity-auditor threads. Both existing backends already meet this
+/// bound.
+pub trait DualWritePrimary: Send + Sync {
+    /// Upsert a single key. Overwrites any prior value.
+    fn dw_put(&self, k: &[u8], v: &[u8]) -> Result<()>;
+
+    /// Remove a key. Silent no-op if the key is absent — matches
+    /// [`KeyValueDbTrait::delete`](crate::storage_db::key_value_db::
+    /// KeyValueDbTrait::delete).
+    fn dw_delete(&self, k: &[u8]) -> Result<()>;
+
+    /// Look up a key. Returns `Ok(None)` if the key isn't present.
+    fn dw_get(&self, k: &[u8]) -> Result<Option<Box<[u8]>>>;
+
+    /// Snapshot-consistent range scan over `[lower_incl, upper_excl)`.
+    /// Results in ascending key order. `upper_excl = None` iterates
+    /// to the end of the column. Materialized into a `Vec` — same
+    /// contract as [`KvdbMdbx::iter_range_owned`].
+    ///
+    /// Consumed by [`MdbxShadowMirror::verify_parity`], which walks
+    /// both backends in full and classifies divergences. This is not
+    /// intended for hot-path reads.
+    fn dw_iter_range(
+        &self, lower_incl: &[u8], upper_excl: Option<&[u8]>,
+    ) -> Result<Vec<(Box<[u8]>, Box<[u8]>)>>;
+}
+
+impl DualWritePrimary for KvdbMdbx {
+    fn dw_put(&self, k: &[u8], v: &[u8]) -> Result<()> {
+        use crate::storage_db::key_value_db::KeyValueDbTrait;
+        self.put(k, v).map(|_| ())
+    }
+
+    fn dw_delete(&self, k: &[u8]) -> Result<()> {
+        use crate::storage_db::key_value_db::KeyValueDbTrait;
+        self.delete(k).map(|_| ())
+    }
+
+    fn dw_get(&self, k: &[u8]) -> Result<Option<Box<[u8]>>> {
+        use crate::storage_db::key_value_db::KeyValueDbTraitRead;
+        self.get(k)
+    }
+
+    fn dw_iter_range(
+        &self, lower_incl: &[u8], upper_excl: Option<&[u8]>,
+    ) -> Result<Vec<(Box<[u8]>, Box<[u8]>)>> {
+        self.iter_range_owned(lower_incl, upper_excl)
+    }
+}
+
 /// One-shot divergence report between a primary KV table and its
 /// [`KvdbMdbx`] shadow, emitted by
 /// [`MdbxShadowMirror::verify_parity`].
@@ -101,26 +174,22 @@ impl DualWriteReport {
 /// shadow; reads answer from the primary; [`Self::verify_parity`]
 /// audits both sides against each other.
 ///
+/// Generic over `P: DualWritePrimary` so the same struct can wrap
+/// either a `KvdbMdbx` (unit tests) or a `KvdbParitydb` (Phase 2 real
+/// swap) as its primary side. The shadow is always [`KvdbMdbx`].
+///
 /// See module-level doc for the migration flow this enables.
-pub struct MdbxShadowMirror {
-    primary: KvdbMdbx,
+pub struct MdbxShadowMirror<P: DualWritePrimary> {
+    primary: P,
     shadow: KvdbMdbx,
     column: Column,
 }
 
-impl MdbxShadowMirror {
-    /// Construct a mirror from an owned pair of MDBX handles and the
-    /// [`Column`] identity used to name the audit reports.
-    ///
-    /// **Phase 2 note**: the primary slot will move to a generic
-    /// [`DualWritePrimary`] trait; the KvdbParitydb variant of that
-    /// trait will let this same struct wrap the current ParityDB
-    /// column at each write site. The MDBX-typed signature here is a
-    /// Phase-1 stand-in that lets the whole file be unit-tested
-    /// without pulling ParityDB into the test path.
-    pub fn new(
-        primary: KvdbMdbx, shadow: KvdbMdbx, column: Column,
-    ) -> Self {
+impl<P: DualWritePrimary> MdbxShadowMirror<P> {
+    /// Construct a mirror from a primary handle (any
+    /// [`DualWritePrimary`] impl), an MDBX shadow column, and the
+    /// [`Column`] identity used to name audit reports.
+    pub fn new(primary: P, shadow: KvdbMdbx, column: Column) -> Self {
         Self { primary, shadow, column }
     }
 
@@ -136,7 +205,7 @@ impl MdbxShadowMirror {
     /// only a signal that the shadow needs repair before cutover.
     pub fn put(&self, k: &[u8], v: &[u8]) -> Result<()> {
         use crate::storage_db::key_value_db::KeyValueDbTrait;
-        self.primary.put(k, v)?;
+        self.primary.dw_put(k, v)?;
         self.shadow.put(k, v)?;
         Ok(())
     }
@@ -144,7 +213,7 @@ impl MdbxShadowMirror {
     /// Mirror a delete to both backends.
     pub fn delete(&self, k: &[u8]) -> Result<()> {
         use crate::storage_db::key_value_db::KeyValueDbTrait;
-        self.primary.delete(k)?;
+        self.primary.dw_delete(k)?;
         self.shadow.delete(k)?;
         Ok(())
     }
@@ -155,14 +224,13 @@ impl MdbxShadowMirror {
     /// keeps shadow throughput near what the executor will see
     /// post-cutover.
     pub fn write_batch(&self, ops: &[BatchOp]) -> Result<()> {
-        use crate::storage_db::key_value_db::KeyValueDbTrait;
         for op in ops {
             match op {
                 BatchOp::Put(k, v) => {
-                    self.primary.put(k, v)?;
+                    self.primary.dw_put(k, v)?;
                 }
                 BatchOp::Delete(k) => {
-                    self.primary.delete(k)?;
+                    self.primary.dw_delete(k)?;
                 }
             }
         }
@@ -173,8 +241,7 @@ impl MdbxShadowMirror {
     /// Read via the primary. During the shadow phase this is the
     /// only path — the shadow is write-only until cutover.
     pub fn get(&self, k: &[u8]) -> Result<Option<Box<[u8]>>> {
-        use crate::storage_db::key_value_db::KeyValueDbTraitRead;
-        self.primary.get(k)
+        self.primary.dw_get(k)
     }
 
     /// Walk both backends in full and produce a
@@ -183,13 +250,14 @@ impl MdbxShadowMirror {
     /// **Memory**: this materializes both column contents into `Vec`s
     /// so it's not something to call on the hot path. Intended for
     /// era-boundary audits and manual dev-tools RPC checks. The
-    /// underlying `KvdbMdbx::iter_range_owned` is snapshot-consistent
-    /// per backend but the two snapshots aren't atomic against each
+    /// underlying `dw_iter_range` /
+    /// [`KvdbMdbx::iter_range_owned`] are snapshot-consistent per
+    /// backend but the two snapshots aren't atomic against each
     /// other — take the report during a quiescent window (e.g.
     /// immediately after execution commit, before the next epoch's
     /// mutations).
     pub fn verify_parity(&self) -> Result<DualWriteReport> {
-        let primary = self.primary.iter_range_owned(b"", None)?;
+        let primary = self.primary.dw_iter_range(b"", None)?;
         let shadow = self.shadow.iter_range_owned(b"", None)?;
 
         // Both are already ascending by key (guaranteed by
@@ -251,8 +319,10 @@ impl MdbxShadowMirror {
     }
 
     /// Test-only escape hatch for injecting into the primary side.
+    /// Returns a reference of the generic primary type — callers can
+    /// use its concrete trait impls directly.
     #[cfg(test)]
-    pub(crate) fn primary_for_test(&self) -> &KvdbMdbx {
+    pub(crate) fn primary_for_test(&self) -> &P {
         &self.primary
     }
 }
@@ -266,7 +336,11 @@ mod tests {
 
     fn make_mirror(
         column: Column,
-    ) -> (tempdir::TempDir, tempdir::TempDir, MdbxShadowMirror) {
+    ) -> (
+        tempdir::TempDir,
+        tempdir::TempDir,
+        MdbxShadowMirror<KvdbMdbx>,
+    ) {
         let dir_a = tempdir::TempDir::new("mdbx_dw_primary").unwrap();
         let dir_b = tempdir::TempDir::new("mdbx_dw_shadow").unwrap();
         let primary = KvdbMdbx::with_column(
@@ -452,7 +526,20 @@ mod tests {
     #[test]
     fn is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<MdbxShadowMirror>();
-        assert_send_sync::<Arc<MdbxShadowMirror>>();
+        assert_send_sync::<MdbxShadowMirror<KvdbMdbx>>();
+        assert_send_sync::<Arc<MdbxShadowMirror<KvdbMdbx>>>();
+    }
+
+    /// The `DualWritePrimary` trait is object-safe enough for the
+    /// mirror to be constructed from a `Box<dyn DualWritePrimary>`
+    /// (Phase 2 uses this to inject a KvdbParitydb primary at
+    /// runtime without knowing its concrete type at the call site).
+    ///
+    /// If the trait ever grows a generic method or a `Self`-returning
+    /// method, this test fails at compile time — a load-bearing
+    /// property for the migration story.
+    #[test]
+    fn primary_trait_is_object_safe() {
+        fn _needs_dyn(_: Box<dyn DualWritePrimary>) {}
     }
 }

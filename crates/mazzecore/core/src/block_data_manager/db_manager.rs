@@ -20,7 +20,8 @@ use mazze_internal_common::{
 };
 use mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
 use mazze_storage::{
-    storage_db::KeyValueDbTrait, KvdbParitydb, MdbxEnv,
+    storage_db::KeyValueDbTrait, KvdbMdbx, KvdbParitydb, MdbxColumn, MdbxEnv,
+    MdbxShadowMirror,
 };
 use mazze_types::H256;
 use primitives::{Block, BlockHeader, SignedTransaction, TransactionIndex};
@@ -79,19 +80,32 @@ pub struct DBManager {
     /// when the storage layer runs ParityDB-only (dev fallback); `Some`
     /// once the storage rewrite starts opening its env at startup
     /// (see `storage_manager.rs:132`).
-    ///
-    /// Phase 2 step 2 threads the handle here so future commits can
-    /// attach `MdbxShadowMirror` fields on a per-table basis without
-    /// widening every constructor again. This commit only plumbs the
-    /// value through — the field is stored but unused until the
-    /// per-table shadow mirrors land.
     mdbx_env: Option<Arc<MdbxEnv>>,
+    /// Storage Phase 2 opt-in: when the operator turns on
+    /// `enable_mdbx_shadow_hash_by_number` in `hydra.toml` AND the
+    /// storage layer has opened an MDBX env, we construct this shadow
+    /// mirror over the `HashByBlockNumber` column. Every subsequent
+    /// `insert_hash_by_block_number_to_db` / removal is routed through
+    /// the mirror, which writes to BOTH the current ParityDB column
+    /// (unchanged behavior for readers) AND an MDBX shadow column.
+    /// `MdbxShadowMirror::verify_parity` (called at era boundaries or
+    /// via a dev-tools RPC) walks both sides and reports divergence.
+    ///
+    /// `None` = shadow disabled (either the flag is off or MDBX is
+    /// unavailable): the write path falls through to the plain
+    /// `table_db` for `HashByBlockNumber`, byte-for-byte the same as
+    /// before Phase 2. This lets the flag be flipped without a code
+    /// change and rolled back cleanly if the mirror ever shows a
+    /// pathological divergence.
+    mdbx_shadow_hash_by_number:
+        Option<Arc<MdbxShadowMirror<KvdbParitydb>>>,
 }
 
 impl DBManager {
     fn new_from_kvdb(
         db: Arc<SystemDB>, pow: Arc<PowComputer>, genesis_hash: H256,
         mdbx_env: Option<Arc<MdbxEnv>>,
+        enable_mdbx_shadow_hash_by_number: bool,
     ) -> Self {
         let mut table_db = HashMap::new();
 
@@ -105,19 +119,56 @@ impl DBManager {
                     as Box<dyn KeyValueDbTrait<ValueType = Box<[u8]>>>,
             );
         }
+
+        // Optional shadow mirror on HashByBlockNumber. Both the
+        // primary (a KvdbParitydb over the same paritydb column
+        // `table_db[HashByBlockNumber]` writes to) and the shadow
+        // (a KvdbMdbx over the MDBX column `MdbxColumn::HashByNumber`)
+        // are constructed here; the mirror routes writes to both
+        // sides atomically-ish (see `MdbxShadowMirror::put` for
+        // the atomicity note). Requires the operator to opt in
+        // AND the storage layer to have opened an MDBX env.
+        let mdbx_shadow_hash_by_number =
+            match (mdbx_env.as_ref(), enable_mdbx_shadow_hash_by_number) {
+                (Some(env), true) => {
+                    let primary_pdb = KvdbParitydb {
+                        kvdb: db.key_value(),
+                        col: crate::db::COL_HASH_BY_BLOCK_NUMBER,
+                    };
+                    let shadow_mdbx = KvdbMdbx::with_column(
+                        Arc::clone(env),
+                        MdbxColumn::HashByNumber.id(),
+                    );
+                    Some(Arc::new(MdbxShadowMirror::new(
+                        primary_pdb,
+                        shadow_mdbx,
+                        MdbxColumn::HashByNumber,
+                    )))
+                }
+                _ => None,
+            };
+
         Self {
             table_db,
             pow,
             genesis_hash,
             mdbx_env,
+            mdbx_shadow_hash_by_number,
         }
     }
 
     pub fn new_from_paritydb(
         db: Arc<SystemDB>, pow: Arc<PowComputer>, genesis_hash: H256,
         mdbx_env: Option<Arc<MdbxEnv>>,
+        enable_mdbx_shadow_hash_by_number: bool,
     ) -> Self {
-        Self::new_from_kvdb(db, pow, genesis_hash, mdbx_env)
+        Self::new_from_kvdb(
+            db,
+            pow,
+            genesis_hash,
+            mdbx_env,
+            enable_mdbx_shadow_hash_by_number,
+        )
     }
 
     /// The MDBX hot-tier env attached to this manager, if the storage
@@ -127,6 +178,17 @@ impl DBManager {
     #[allow(dead_code)]
     pub(crate) fn mdbx_env(&self) -> Option<Arc<MdbxEnv>> {
         self.mdbx_env.clone()
+    }
+
+    /// The `HashByBlockNumber` shadow mirror, if the operator opted in
+    /// and MDBX is available. Exposed for the parity-audit RPC / era-
+    /// boundary auditor that will call
+    /// [`MdbxShadowMirror::verify_parity`].
+    #[allow(dead_code)]
+    pub(crate) fn mdbx_shadow_hash_by_number(
+        &self,
+    ) -> Option<Arc<MdbxShadowMirror<KvdbParitydb>>> {
+        self.mdbx_shadow_hash_by_number.clone()
     }
 }
 
@@ -539,6 +601,33 @@ impl DBManager {
     /// The functions below are private utils used by the DBManager to access
     /// database
     fn insert_to_db(&self, table: DBTable, db_key: &[u8], value: Vec<u8>) {
+        // Storage Phase 2 shadow route: if the operator has enabled
+        // MDBX shadow-mirroring for this table, route the write
+        // through the mirror. The mirror wraps the SAME ParityDB
+        // column that `table_db[table]` would have written to, so
+        // there's no double-write on the primary side; the mirror
+        // just also flushes to the MDBX shadow column atomically.
+        // Falls through to the plain path on mirror error so a
+        // shadow-side hiccup doesn't drop primary writes.
+        if let DBTable::HashByBlockNumber = table {
+            if let Some(mirror) = &self.mdbx_shadow_hash_by_number {
+                match mirror.put(db_key, &value) {
+                    Ok(()) => return,
+                    Err(e) => {
+                        DB_WRITE_FAILURES.inc(1);
+                        error!(
+                            "mdbx-shadow put failed for {:?} key_len={}: \
+                             {:?}. Falling back to primary-only write",
+                            table,
+                            db_key.len(),
+                            e
+                        );
+                        // Fall through to the normal path so the
+                        // primary still lands the write.
+                    }
+                }
+            }
+        }
         if let Err(e) =
             self.table_db.get(&table).unwrap().put(db_key, &value)
         {
@@ -561,6 +650,25 @@ impl DBManager {
     }
 
     fn remove_from_db(&self, table: DBTable, db_key: &[u8]) {
+        // Shadow-mirror route (see `insert_to_db` for rationale).
+        if let DBTable::HashByBlockNumber = table {
+            if let Some(mirror) = &self.mdbx_shadow_hash_by_number {
+                match mirror.delete(db_key) {
+                    Ok(()) => return,
+                    Err(e) => {
+                        DB_WRITE_FAILURES.inc(1);
+                        error!(
+                            "mdbx-shadow delete failed for {:?} \
+                             key_len={}: {:?}. Falling back to \
+                             primary-only delete",
+                            table,
+                            db_key.len(),
+                            e
+                        );
+                    }
+                }
+            }
+        }
         self.table_db
             .get(&table)
             .unwrap()

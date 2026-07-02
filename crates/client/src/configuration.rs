@@ -348,6 +348,14 @@ build_config! {
         (max_trans_count_per_peer_normal, (Option<u64>), None)
         (persist_tx_index, (bool), false)
         (persist_block_number_index, (bool), true)
+        // Storage Phase 2 opt-in. Off by default; turn on selectively
+        // to shadow-mirror `HashByBlockNumber` writes to an MDBX
+        // column so a later `MdbxShadowMirror::verify_parity` pass can
+        // prove the backends agree before Phase 3 flips reads over.
+        // No effect when the storage layer runs ParityDB-only (dev
+        // fallback) — the mirror is only constructed when MDBX is
+        // available at startup.
+        (enable_mdbx_shadow_hash_by_number, (bool), false)
         (print_memory_usage_period_s, (Option<u64>), None)
         (target_block_gas_limit, (u64), DEFAULT_TARGET_BLOCK_GAS_LIMIT)
         (executive_trace, (bool), false)
@@ -1248,6 +1256,9 @@ impl Configuration {
                 * self.raw_conf.era_epoch_count as f64)
                 as usize,
             strict_tx_index_gc: self.raw_conf.strict_tx_index_gc,
+            enable_mdbx_shadow_hash_by_number: self
+                .raw_conf
+                .enable_mdbx_shadow_hash_by_number,
         };
 
         // By default, we do not keep the block data for additional period,

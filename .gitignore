@@ -108,3 +108,4 @@ run/hydra.devtest.toml
 # Contains hardcoded fleet SSH credentials (relaunch.sh) and sources .env —
 # MUST never be committed. Lives in-repo only so it survives a /tmp wipe.
 fleet-ops/
+docs/internal

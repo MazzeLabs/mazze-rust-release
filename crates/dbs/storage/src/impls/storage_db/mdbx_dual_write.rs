@@ -128,6 +128,57 @@ impl DualWritePrimary for KvdbMdbx {
     }
 }
 
+impl DualWritePrimary for super::kvdb_paritydb::KvdbParitydb {
+    fn dw_put(&self, k: &[u8], v: &[u8]) -> Result<()> {
+        use crate::storage_db::key_value_db::KeyValueDbTrait;
+        self.put(k, v).map(|_| ())
+    }
+
+    fn dw_delete(&self, k: &[u8]) -> Result<()> {
+        use crate::storage_db::key_value_db::KeyValueDbTrait;
+        self.delete(k).map(|_| ())
+    }
+
+    fn dw_get(&self, k: &[u8]) -> Result<Option<Box<[u8]>>> {
+        use crate::storage_db::key_value_db::KeyValueDbTraitRead;
+        self.get(k)
+    }
+
+    fn dw_iter_range(
+        &self, lower_incl: &[u8], upper_excl: Option<&[u8]>,
+    ) -> Result<Vec<(Box<[u8]>, Box<[u8]>)>> {
+        // paritydb's boxed `iter(col)` walks the entire column. We
+        // filter by `[lower_incl, upper_excl)` in-line, then sort by
+        // key to match [`KvdbMdbx::iter_range_owned`]'s ascending
+        // contract. paritydb's on-disk order isn't guaranteed to
+        // match MDBX's B+tree order across all builds, so the
+        // explicit sort at the end keeps the two backends
+        // parity-comparable by simply zipping their outputs.
+        //
+        // Materialised into `Vec` for the same reason as the MDBX
+        // variant: verify_parity is not a hot-path caller, and a
+        // streaming iterator would require self-referential lifetime
+        // management here (the paritydb iterator borrows from
+        // `Arc<dyn KeyValueStore>` and can't easily be handed back
+        // through a plain `Vec` API). Bounded by the column's
+        // populated key count — deliberate for the audit path.
+        let mut out: Vec<(Box<[u8]>, Box<[u8]>)> = Vec::new();
+        for (k, v) in self.kvdb.iter(self.col) {
+            if k.as_ref() < lower_incl {
+                continue;
+            }
+            if let Some(upper) = upper_excl {
+                if k.as_ref() >= upper {
+                    continue;
+                }
+            }
+            out.push((k, v));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+}
+
 /// One-shot divergence report between a primary KV table and its
 /// [`KvdbMdbx`] shadow, emitted by
 /// [`MdbxShadowMirror::verify_parity`].
@@ -541,5 +592,149 @@ mod tests {
     #[test]
     fn primary_trait_is_object_safe() {
         fn _needs_dyn(_: Box<dyn DualWritePrimary>) {}
+    }
+
+    // ------------------------------------------------------------------
+    // Integration: KvdbParitydb primary + KvdbMdbx shadow
+    // ------------------------------------------------------------------
+    //
+    // These tests prove the migration story end-to-end: a real
+    // ParityDB column acts as the primary, an MDBX column as the
+    // shadow, and `verify_parity` reports zero divergence after a
+    // mixed workload. Phase 2 step 2 wires this pattern into the
+    // actual `BlockDataManager` write sites for `HashByNumber`.
+
+    use crate::impls::storage_db::kvdb_paritydb::KvdbParitydb;
+    use ::db::{open_database, paritydb_settings, ParityDbOpenConfig};
+
+    /// Open a fresh ParityDB env at `path` with a single column and
+    /// return a `KvdbParitydb` handle bound to column 0. Mirrors the
+    /// `open_database` + `paritydb_settings` pair used everywhere
+    /// else in the crate — the on-disk layout the test exercises is
+    /// exactly what production ships.
+    fn open_paritydb(path: &std::path::Path) -> KvdbParitydb {
+        let cfg = ParityDbOpenConfig {
+            columns: 1,
+            compression: None,
+            disable_wal: true, // faster tempdir cleanup, safe for tests
+            stats: false,
+        };
+        let settings =
+            paritydb_settings(path.to_path_buf(), &cfg).unwrap();
+        let sys_db = open_database(&settings).unwrap();
+        // SystemDB wraps `Arc<dyn KeyValueStore>` internally; hand
+        // that out via `.key_value()` for KvdbParitydb.
+        KvdbParitydb { kvdb: sys_db.key_value(), col: 0 }
+    }
+
+    /// ParityDB primary + MDBX shadow, empty. Parity report says
+    /// matched. Proves the trait impl for KvdbParitydb correctly
+    /// reports zero entries when the column is empty.
+    #[test]
+    fn paritydb_primary_empty_matches() {
+        let paritydb_dir =
+            tempdir::TempDir::new("dw_pdb_empty").unwrap();
+        let mdbx_dir =
+            tempdir::TempDir::new("dw_mdbx_empty").unwrap();
+        let primary = open_paritydb(paritydb_dir.path());
+        let shadow = KvdbMdbx::with_column(
+            MdbxEnv::open(mdbx_dir.path()).unwrap(),
+            0,
+        );
+        let mirror = MdbxShadowMirror::new(
+            primary,
+            shadow,
+            Column::HashByNumber,
+        );
+        let report = mirror.verify_parity().unwrap();
+        assert!(report.is_matched());
+        assert_eq!(report.primary_count, 0);
+        assert_eq!(report.shadow_count, 0);
+    }
+
+    /// ParityDB primary + MDBX shadow, mixed workload. Every mutation
+    /// goes through the mirror; both backends stay in sync; the
+    /// final parity report is matched. This is the end-to-end proof
+    /// that Phase 2 can safely start swapping tables.
+    #[test]
+    fn paritydb_primary_steady_state_matches() {
+        let paritydb_dir =
+            tempdir::TempDir::new("dw_pdb_steady").unwrap();
+        let mdbx_dir =
+            tempdir::TempDir::new("dw_mdbx_steady").unwrap();
+        let primary = open_paritydb(paritydb_dir.path());
+        let shadow = KvdbMdbx::with_column(
+            MdbxEnv::open(mdbx_dir.path()).unwrap(),
+            0,
+        );
+        let mirror = MdbxShadowMirror::new(
+            primary,
+            shadow,
+            Column::HashByNumber,
+        );
+
+        // Same 40-put / 10-overwrite / 5-delete shape as the pure-
+        // MDBX steady_state test, so failures narrow to "paritydb
+        // impl broken" not "workload broken".
+        for i in 0u64..40 {
+            mirror
+                .put(&i.to_be_bytes(), format!("v{}", i).as_bytes())
+                .unwrap();
+        }
+        for i in 0u64..10 {
+            mirror
+                .put(
+                    &i.to_be_bytes(),
+                    format!("v{}-overwritten", i).as_bytes(),
+                )
+                .unwrap();
+        }
+        for i in 30u64..35 {
+            mirror.delete(&i.to_be_bytes()).unwrap();
+        }
+
+        let report = mirror.verify_parity().unwrap();
+        assert!(report.is_matched(), "report: {:?}", report);
+        assert_eq!(report.primary_count, 35);
+        assert_eq!(report.shadow_count, 35);
+    }
+
+    /// ParityDB primary + MDBX shadow: bypass the mirror on the
+    /// primary side (direct paritydb write) and confirm
+    /// `verify_parity` classifies it as `missing_in_shadow`. Proves
+    /// the classification logic works against the paritydb iterator
+    /// output the same as against MDBX's iter_range_owned.
+    #[test]
+    fn paritydb_primary_divergence_is_reported() {
+        use crate::storage_db::key_value_db::KeyValueDbTrait;
+
+        let paritydb_dir =
+            tempdir::TempDir::new("dw_pdb_diverge").unwrap();
+        let mdbx_dir =
+            tempdir::TempDir::new("dw_mdbx_diverge").unwrap();
+        let primary = open_paritydb(paritydb_dir.path());
+        let shadow = KvdbMdbx::with_column(
+            MdbxEnv::open(mdbx_dir.path()).unwrap(),
+            0,
+        );
+        let mirror = MdbxShadowMirror::new(
+            primary,
+            shadow,
+            Column::HashByNumber,
+        );
+
+        // Two matching pairs.
+        mirror.put(b"a", b"1").unwrap();
+        mirror.put(b"b", b"2").unwrap();
+
+        // Bypass — write to paritydb primary directly.
+        mirror.primary_for_test().put(b"orphan", b"lonely").unwrap();
+
+        let report = mirror.verify_parity().unwrap();
+        assert!(!report.is_matched());
+        assert_eq!(report.missing_in_shadow.len(), 1);
+        assert_eq!(&*report.missing_in_shadow[0], &b"orphan"[..]);
+        assert_eq!(report.extra_in_shadow.len(), 0);
+        assert_eq!(report.value_mismatches.len(), 0);
     }
 }

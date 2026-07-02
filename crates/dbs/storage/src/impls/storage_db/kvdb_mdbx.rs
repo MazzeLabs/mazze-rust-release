@@ -36,13 +36,76 @@ use super::super::{
     errors::*,
 };
 use error_chain::bail;
+use lazy_static::lazy_static;
 use libmdbx::{Database, NoWriteMap, TableFlags, WriteFlags};
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
+use metrics::{
+    register_meter_with_group, Counter, CounterUsize, Meter, MeterTimer,
+};
 use std::{
     any::Any,
     path::Path,
     sync::{Arc, Mutex},
 };
+
+// ---- Metrics ---------------------------------------------------------
+//
+// Six exported gauges/counters for the MDBX hot-tier backend. All under
+// the `storage` group so operators see them alongside snapshot / delta
+// MPT metrics. Post Phase 1 → Phase 2 wiring, these are the numbers
+// that tell us whether the executor is actually pushing writes through
+// the batched path (`batch_commit_timer` should dominate,
+// `put_calls_total` should stay near zero on a healthy hot loop).
+lazy_static! {
+    /// Latency histogram of a single `write_batch` commit. Records
+    /// per-call wall time so we can spot pathological rw_txn stalls
+    /// (MDBX serializes rw_txns globally — long tail here means
+    /// contention with another writer or a fsync backup).
+    static ref MDBX_BATCH_COMMIT_TIMER: Arc<dyn Meter> =
+        register_meter_with_group(
+            "timer",
+            "storage::mdbx::batch_commit",
+        );
+    /// Number of ops (put + delete) submitted to `write_batch` — sum
+    /// gives total mutations routed through the batched path.
+    static ref MDBX_BATCH_OPS_TOTAL: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "storage",
+            "mdbx::batch_ops_total",
+        );
+    /// Latency of an `iter_range_owned` call (open txn + open table +
+    /// cursor walk + materialize). Tail here tells us when a caller is
+    /// materializing an over-large range and should be pushed toward
+    /// the streaming variant when it lands in Phase 2.
+    static ref MDBX_RANGE_SCAN_TIMER: Arc<dyn Meter> =
+        register_meter_with_group(
+            "timer",
+            "storage::mdbx::range_scan",
+        );
+    /// Number of rows returned by `iter_range_owned` cumulatively.
+    /// Combined with the timer this gives us rows/sec throughput.
+    static ref MDBX_RANGE_SCAN_ROWS: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "storage",
+            "mdbx::range_scan_rows",
+        );
+    /// Individual `put` calls — the unbatched slow path. On a healthy
+    /// steady-state executor this should stay near zero; a rising
+    /// counter is the signal that some code path is going through the
+    /// per-op txn instead of `write_batch`.
+    static ref MDBX_PUT_CALLS: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "storage",
+            "mdbx::put_calls_total",
+        );
+    /// Individual `get` calls. Read-path activity is the dominant
+    /// signal for MDBX — the hot tier's win is fast, lock-free reads.
+    static ref MDBX_GET_CALLS: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "storage",
+            "mdbx::get_calls_total",
+        );
+}
 
 /// Map size used when the caller does not specify one. Derived from
 /// [`crate::impls::defaults::DEFAULT_MDBX_MAP_SIZE_MB`] (64 GB by default).
@@ -143,6 +206,7 @@ impl KvdbMdbx {
 
 impl KeyValueDbTraitRead for KvdbMdbx {
     fn get(&self, key: &[u8]) -> Result<Option<Box<[u8]>>> {
+        MDBX_GET_CALLS.inc(1);
         let txn = self.env.db.begin_ro_txn().map_err(map_mdbx_error)?;
         let table = match txn.open_table(Some(&col_table_name(self.col))) {
             Ok(t) => t,
@@ -194,6 +258,9 @@ impl KvdbMdbx {
         if ops.is_empty() {
             return Ok(());
         }
+        let _timer =
+            MeterTimer::time_func(MDBX_BATCH_COMMIT_TIMER.as_ref());
+        MDBX_BATCH_OPS_TOTAL.inc(ops.len());
         let txn =
             self.env.db.begin_rw_txn().map_err(map_mdbx_error)?;
         let table = txn
@@ -242,6 +309,8 @@ impl KvdbMdbx {
     pub fn iter_range_owned(
         &self, lower_bound_incl: &[u8], upper_bound_excl: Option<&[u8]>,
     ) -> Result<Vec<(Box<[u8]>, Box<[u8]>)>> {
+        let _timer =
+            MeterTimer::time_func(MDBX_RANGE_SCAN_TIMER.as_ref());
         let txn = self.env.db.begin_ro_txn().map_err(map_mdbx_error)?;
         let table = match txn.open_table(Some(&col_table_name(self.col))) {
             Ok(t) => t,
@@ -265,6 +334,7 @@ impl KvdbMdbx {
                 v.into_boxed_slice(),
             ));
         }
+        MDBX_RANGE_SCAN_ROWS.inc(out.len());
         Ok(out)
     }
 }
@@ -291,6 +361,7 @@ impl KeyValueDbTrait for KvdbMdbx {
     fn put(
         &self, key: &[u8], value: &[u8],
     ) -> Result<Option<Option<Box<[u8]>>>> {
+        MDBX_PUT_CALLS.inc(1);
         let txn = self.env.db.begin_rw_txn().map_err(map_mdbx_error)?;
         let table = txn
             .create_table(Some(&col_table_name(self.col)), TableFlags::default())

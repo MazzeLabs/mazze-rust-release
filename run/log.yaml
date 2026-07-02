@@ -5,10 +5,14 @@ appenders:
     kind: console
     encoder:
         pattern: "{d} {h({l}):5.5} {T:<20.20} mazzecore - {m:10.20000}{n}"
+    # Only info+ reaches stdout. start-node.sh redirects stdout to
+    # logs/mazze-node.log with a shell `>>` (unbounded, NOT managed by
+    # log4rs). Keeping this at debug is what let that file grow to 145 GB
+    # in ~2h and wedged a node on jbd2 journal I/O. info keeps it small.
     filters:
       -
         kind: "threshold"
-        level: "debug"
+        level: "info"
 
 
   logfile:
@@ -17,15 +21,18 @@ appenders:
     encoder:
         pattern: "{d} {h({l}):5.5} {T:<20.20} mazzecore - {m:.20000}{n}"
 
+    # Hard size cap: active file rolls at 500 MB, keep 10 gzipped archives.
+    # Bounds the log4rs log at ~500 MB live + ~10 compressed archives
+    # regardless of uptime or verbosity.
     policy:
       kind: compound
       trigger:
         kind: size
-        limit: 2000 mb
+        limit: 500 mb
       roller:
         kind: fixed_window
         pattern: "logs/archive/mazze.{}.gz"
-        count: 50
+        count: 10
 
 root:
     level: info
@@ -33,19 +40,24 @@ root:
         - stdout
         - logfile
 
-# We can set log level for crates individually
+# Per-crate levels. Lowered debug -> info: at debug these crates emit a
+# firehose (every "new block received", "transaction", "on_message",
+# "Recovered header", "BlockIndex", "check_not_ready_frontier") — tens of
+# GB/hour. info keeps the operational lines (Current phase, Catch-up mode,
+# latest epoch / missing_bodies, Computed PoW hash) without the flood.
+# Bump an individual crate back to debug only for targeted debugging.
 loggers:
     network:
-        level: debug
+        level: info
     mazzecore:
-        level: debug
+        level: info
     rpc:
-        level: debug
+        level: info
     blockgen:
-        level: debug
+        level: info
     client:
-        level: debug
+        level: info
     mazze_storage:
-        level: debug
+        level: info
     mazze_statedb:
-        level: debug
+        level: info

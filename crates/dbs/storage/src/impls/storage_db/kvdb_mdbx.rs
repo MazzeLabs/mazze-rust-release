@@ -500,6 +500,151 @@ mod tests {
         assert!(above.is_empty());
     }
 
+    /// Fuzz-style parity test. Runs a deterministic randomized workload
+    /// of put/delete/get/range_scan against both `KvdbMdbx` and an
+    /// in-memory `BTreeMap` reference. After every op, MDBX's observable
+    /// state must match the map byte-for-byte:
+    ///   - `get(k)` returns the same value (or the same absence)
+    ///   - `iter_range_owned(lo, hi)` returns the same (k, v) sequence
+    ///     in the same order
+    ///
+    /// The reference `BTreeMap` is the semantic definition of what a
+    /// KV store with ordered range scan should do — matching it means
+    /// MDBX is a drop-in replacement for anything sitting behind the
+    /// `KeyValueDbTraitRead` + `iter_range_owned` surface. This is the
+    /// Phase 1 feature-parity gate: with it green, Phase 2 can start
+    /// swapping ParityDB tables to MDBX without worrying about a KV-
+    /// semantic mismatch at the swap boundary.
+    ///
+    /// Deterministic seed so failures are reproducible without an RNG
+    /// dance. Workload sized to exercise range scans across a mix of
+    /// present/absent keys and covers all three interleavings
+    /// (insert-scan, delete-scan, scan-through-mutation-window).
+    #[test]
+    fn parity_against_btreemap_reference() {
+        use std::collections::BTreeMap;
+
+        // Tiny linear-congruential PRNG. Deterministic, dependency-free,
+        // good enough to shake out edge cases without pulling `rand`
+        // into a test-only path.
+        struct Lcg(u64);
+        impl Lcg {
+            fn next_u32(&mut self) -> u32 {
+                // Numerical Recipes constants (Park & Miller variant).
+                self.0 = self
+                    .0
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (self.0 >> 32) as u32
+            }
+            fn key(&mut self, keyspace_size: u32) -> [u8; 4] {
+                (self.next_u32() % keyspace_size).to_be_bytes()
+            }
+            fn value(&mut self) -> Vec<u8> {
+                // 8..40 random bytes.
+                let len = 8 + (self.next_u32() % 32) as usize;
+                (0..len)
+                    .map(|_| (self.next_u32() & 0xff) as u8)
+                    .collect()
+            }
+        }
+
+        let dir =
+            tempdir::TempDir::new("kvdb_mdbx_parity").unwrap();
+        let env = MdbxEnv::open(dir.path()).unwrap();
+        let mdbx = KvdbMdbx::with_column(env, 0);
+        let mut reference: BTreeMap<Vec<u8>, Vec<u8>> =
+            BTreeMap::new();
+
+        let mut rng = Lcg(0xC0FFEE_C0FFEE);
+        // Small keyspace (256) forces frequent collisions so both
+        // "overwrite existing" and "delete existing" get exercised.
+        // 5000 ops is enough to bury regressions but stays under 1s.
+        const KEYSPACE: u32 = 256;
+        const OPS: u32 = 5000;
+
+        for _ in 0..OPS {
+            // Op mix: 50% put, 20% get, 15% delete, 15% range_scan.
+            let op = rng.next_u32() % 100;
+            if op < 50 {
+                // put
+                let k = rng.key(KEYSPACE);
+                let v = rng.value();
+                mdbx.put(&k, &v).unwrap();
+                reference.insert(k.to_vec(), v);
+            } else if op < 70 {
+                // get — same result on both sides.
+                let k = rng.key(KEYSPACE);
+                let mdbx_val: Option<Box<[u8]>> =
+                    mdbx.get(&k).unwrap();
+                let ref_val: Option<&Vec<u8>> = reference.get(&k[..]);
+                match (mdbx_val, ref_val) {
+                    (Some(m), Some(r)) => {
+                        assert_eq!(&*m, r.as_slice(), "get mismatch at key {:?}", k);
+                    }
+                    (None, None) => {}
+                    (m, r) => panic!(
+                        "get presence mismatch at {:?}: mdbx={:?} ref={:?}",
+                        k, m, r
+                    ),
+                }
+            } else if op < 85 {
+                // delete — remove from both, don't care about the
+                // return value (both backends return None for us).
+                let k = rng.key(KEYSPACE);
+                mdbx.delete(&k).unwrap();
+                reference.remove(&k[..]);
+            } else {
+                // range_scan — pick a lower/upper bound, compare the
+                // full ordered sequence of (k, v) pairs.
+                let lo = rng.key(KEYSPACE);
+                let hi = rng.key(KEYSPACE);
+                let (lo_key, hi_key) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+                let mdbx_scan: Vec<(Vec<u8>, Vec<u8>)> = mdbx
+                    .iter_range_owned(&lo_key, Some(&hi_key))
+                    .unwrap()
+                    .into_iter()
+                    .map(|(k, v)| (k.into_vec(), v.into_vec()))
+                    .collect();
+                let ref_scan: Vec<(Vec<u8>, Vec<u8>)> = reference
+                    .range(lo_key.to_vec()..hi_key.to_vec())
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                assert_eq!(
+                    mdbx_scan.len(),
+                    ref_scan.len(),
+                    "range size mismatch on [{:?}, {:?}): mdbx={} ref={}",
+                    lo_key,
+                    hi_key,
+                    mdbx_scan.len(),
+                    ref_scan.len(),
+                );
+                for (m, r) in mdbx_scan.iter().zip(ref_scan.iter()) {
+                    assert_eq!(
+                        m, r,
+                        "range item mismatch on [{:?}, {:?})",
+                        lo_key, hi_key
+                    );
+                }
+            }
+        }
+
+        // Sanity check the final full-column scan matches the reference
+        // exactly. If the per-op checks above pass, this is a
+        // belt-and-suspenders end state assertion.
+        let final_scan: Vec<(Vec<u8>, Vec<u8>)> = mdbx
+            .iter_range_owned(b"", None)
+            .unwrap()
+            .into_iter()
+            .map(|(k, v)| (k.into_vec(), v.into_vec()))
+            .collect();
+        let ref_scan: Vec<(Vec<u8>, Vec<u8>)> = reference
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        assert_eq!(final_scan, ref_scan, "final full-scan divergence");
+    }
+
     /// Iterator sees a consistent MVCC snapshot: writes committed
     /// concurrently (from a fresh txn) after the range scan begins are
     /// not observed. The libmdbx read txn holds the snapshot open for

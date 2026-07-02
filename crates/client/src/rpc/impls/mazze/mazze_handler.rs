@@ -6,9 +6,10 @@ use crate::rpc::{
     error_codes::{internal_error_msg, invalid_params_msg},
     types::{
         call_request::rpc_call_request_network,
-        errors::check_rpc_address_network, MazzeFeeHistory, RpcAddress,
-        SponsorInfo, StatOnGasLoad, StorageCollateralInfo, TokenSupplyInfo,
-        WrapTransaction, U64 as HexU64,
+        errors::check_rpc_address_network, MazzeFeeHistory,
+        MdbxShadowParityReport, RpcAddress, SponsorInfo, StatOnGasLoad,
+        StorageCollateralInfo, TokenSupplyInfo, WrapTransaction,
+        U64 as HexU64,
     },
 };
 use blockgen::BlockGenerator;
@@ -1853,6 +1854,28 @@ impl RpcImpl {
         self.get_transactions(&blocks, main, epoch_number.as_u64())
     }
 
+    fn mdbx_shadow_verify_parity(
+        &self,
+    ) -> JsonRpcResult<Option<MdbxShadowParityReport>> {
+        debug!("debug_mdbxShadowVerifyParity");
+        let data_man = self.consensus.get_data_manager();
+        let Some(mirror) =
+            data_man.db_manager.mdbx_shadow_hash_by_number()
+        else {
+            // Flag off or MDBX unavailable — return None so the
+            // operator dashboard can distinguish "no mirror" from
+            // "matched" cleanly.
+            return Ok(None);
+        };
+        let report = mirror.verify_parity().map_err(|e| {
+            internal_error_msg(&format!(
+                "mdbx shadow verify_parity failed: {:?}",
+                e
+            ))
+        })?;
+        Ok(Some(MdbxShadowParityReport::from_storage_report(report)))
+    }
+
     fn transactions_by_block(
         &self, block_hash: H256,
     ) -> JsonRpcResult<Vec<WrapTransaction>> {
@@ -2279,6 +2302,7 @@ impl LocalRpc for LocalRpcImpl {
             fn sign_transaction(&self, tx: SendTxRequest, password: Option<String>) -> JsonRpcResult<String>;
             fn transactions_by_epoch(&self, epoch_number: U64) -> JsonRpcResult<Vec<WrapTransaction>>;
             fn transactions_by_block(&self, block_hash: H256) -> JsonRpcResult<Vec<WrapTransaction>>;
+            fn mdbx_shadow_verify_parity(&self) -> JsonRpcResult<Option<MdbxShadowParityReport>>;
         }
     }
 }

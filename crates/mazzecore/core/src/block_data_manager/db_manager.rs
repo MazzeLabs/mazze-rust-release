@@ -181,11 +181,10 @@ impl DBManager {
     }
 
     /// The `HashByBlockNumber` shadow mirror, if the operator opted in
-    /// and MDBX is available. Exposed for the parity-audit RPC / era-
-    /// boundary auditor that will call
-    /// [`MdbxShadowMirror::verify_parity`].
-    #[allow(dead_code)]
-    pub(crate) fn mdbx_shadow_hash_by_number(
+    /// and MDBX is available. Exposed for the parity-audit RPC
+    /// (`debug_mdbxShadowVerifyParity`) and the era-boundary auditor,
+    /// which call [`MdbxShadowMirror::verify_parity`].
+    pub fn mdbx_shadow_hash_by_number(
         &self,
     ) -> Option<Arc<MdbxShadowMirror<KvdbParitydb>>> {
         self.mdbx_shadow_hash_by_number.clone()

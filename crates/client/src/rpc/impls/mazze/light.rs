@@ -41,7 +41,8 @@ use crate::{
             CheckBalanceAgainstTransactionResponse, ConsensusGraphStates,
             EpochNumber, EstimateGasAndCollateralResponse, FeeHistory,
             Log as RpcLog, MazzeFeeHistory, MazzeRpcLogFilter,
-            Receipt as RpcReceipt, RewardInfo as RpcRewardInfo, RpcAddress,
+            MdbxShadowParityReport, Receipt as RpcReceipt,
+            RewardInfo as RpcRewardInfo, RpcAddress,
             SendTxRequest, SponsorInfo, StatOnGasLoad, Status as RpcStatus,
             StorageCollateralInfo, SyncGraphStates, TokenSupplyInfo,
             Transaction as RpcTransaction, WrapTransaction, U64 as HexU64,
@@ -1202,5 +1203,6 @@ impl LocalRpc for DebugRpcImpl {
         fn sync_graph_state(&self) -> JsonRpcResult<SyncGraphStates>;
         fn transactions_by_epoch(&self, epoch_number: U64) -> JsonRpcResult<Vec<WrapTransaction>>;
         fn transactions_by_block(&self, block_hash: H256) -> JsonRpcResult<Vec<WrapTransaction>>;
+        fn mdbx_shadow_verify_parity(&self) -> JsonRpcResult<Option<MdbxShadowParityReport>>;
     }
 }

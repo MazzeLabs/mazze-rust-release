@@ -133,16 +133,16 @@ pub trait LocalRpc {
         &self, block_hash: H256,
     ) -> JsonRpcResult<Vec<WrapTransaction>>;
 
-    /// Walk both sides of the `HashByBlockNumber` shadow mirror
-    /// (Storage Phase 2) and return a divergence report. Returns
-    /// `Ok(None)` when the mirror isn't installed — either
-    /// `enable_mdbx_shadow_hash_by_number` is off in `hydra.toml`
-    /// or the storage layer has no MDBX env open. Meant for an
-    /// operator dashboard / era-boundary audit; not on the hot
-    /// path — `verify_parity` materializes both columns into
-    /// `Vec`s for the comparison.
+    /// Walk both sides of every active MDBX shadow mirror (Storage
+    /// Phase 2) and return one divergence report per shadowed
+    /// `DBTable`. Returns an empty vec when no mirror is installed
+    /// — either every `enable_mdbx_shadow_*` flag is off in
+    /// `hydra.toml` or the storage layer has no MDBX env open.
+    /// Meant for an operator dashboard / era-boundary audit; not on
+    /// the hot path — every `verify_parity` call materializes both
+    /// columns into `Vec`s for the comparison.
     #[rpc(name = "debug_mdbxShadowVerifyParity")]
     fn mdbx_shadow_verify_parity(
         &self,
-    ) -> JsonRpcResult<Option<MdbxShadowParityReport>>;
+    ) -> JsonRpcResult<Vec<MdbxShadowParityReport>>;
 }

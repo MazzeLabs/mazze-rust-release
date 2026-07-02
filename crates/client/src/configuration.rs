@@ -356,6 +356,11 @@ build_config! {
         // fallback) — the mirror is only constructed when MDBX is
         // available at startup.
         (enable_mdbx_shadow_hash_by_number, (bool), false)
+        // Storage Phase 2 sibling flag. Same shadow-then-cutover
+        // semantics for the `Transactions` column (mapped to
+        // `MdbxColumn::TxIndex`). Independent — a full-node can
+        // stage its table swaps one at a time.
+        (enable_mdbx_shadow_tx_index, (bool), false)
         (print_memory_usage_period_s, (Option<u64>), None)
         (target_block_gas_limit, (u64), DEFAULT_TARGET_BLOCK_GAS_LIMIT)
         (executive_trace, (bool), false)
@@ -1259,6 +1264,9 @@ impl Configuration {
             enable_mdbx_shadow_hash_by_number: self
                 .raw_conf
                 .enable_mdbx_shadow_hash_by_number,
+            enable_mdbx_shadow_tx_index: self
+                .raw_conf
+                .enable_mdbx_shadow_tx_index,
         };
 
         // By default, we do not keep the block data for additional period,

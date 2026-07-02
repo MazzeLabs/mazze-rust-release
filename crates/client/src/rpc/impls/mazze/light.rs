@@ -1203,6 +1203,6 @@ impl LocalRpc for DebugRpcImpl {
         fn sync_graph_state(&self) -> JsonRpcResult<SyncGraphStates>;
         fn transactions_by_epoch(&self, epoch_number: U64) -> JsonRpcResult<Vec<WrapTransaction>>;
         fn transactions_by_block(&self, block_hash: H256) -> JsonRpcResult<Vec<WrapTransaction>>;
-        fn mdbx_shadow_verify_parity(&self) -> JsonRpcResult<Option<MdbxShadowParityReport>>;
+        fn mdbx_shadow_verify_parity(&self) -> JsonRpcResult<Vec<MdbxShadowParityReport>>;
     }
 }

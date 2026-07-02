@@ -1856,24 +1856,35 @@ impl RpcImpl {
 
     fn mdbx_shadow_verify_parity(
         &self,
-    ) -> JsonRpcResult<Option<MdbxShadowParityReport>> {
+    ) -> JsonRpcResult<Vec<MdbxShadowParityReport>> {
         debug!("debug_mdbxShadowVerifyParity");
         let data_man = self.consensus.get_data_manager();
-        let Some(mirror) =
-            data_man.db_manager.mdbx_shadow_hash_by_number()
-        else {
-            // Flag off or MDBX unavailable — return None so the
-            // operator dashboard can distinguish "no mirror" from
-            // "matched" cleanly.
-            return Ok(None);
-        };
-        let report = mirror.verify_parity().map_err(|e| {
-            internal_error_msg(&format!(
-                "mdbx shadow verify_parity failed: {:?}",
-                e
-            ))
-        })?;
-        Ok(Some(MdbxShadowParityReport::from_storage_report(report)))
+        let mirrors = data_man.db_manager.mdbx_shadow_mirrors();
+        if mirrors.is_empty() {
+            // No shadow flags on / MDBX unavailable — return an
+            // empty vec so the operator dashboard can distinguish
+            // "no mirror" from "one report with is_matched=true".
+            return Ok(Vec::new());
+        }
+        // Sort by MdbxColumn name for a stable RPC response — the
+        // HashMap iteration order is unspecified and dashboards
+        // want a deterministic table order.
+        let mut reports: Vec<MdbxShadowParityReport> = mirrors
+            .into_iter()
+            .map(|(_table, mirror)| {
+                mirror.verify_parity().map(
+                    MdbxShadowParityReport::from_storage_report,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                internal_error_msg(&format!(
+                    "mdbx shadow verify_parity failed: {:?}",
+                    e
+                ))
+            })?;
+        reports.sort_by(|a, b| a.table.cmp(&b.table));
+        Ok(reports)
     }
 
     fn transactions_by_block(
@@ -2302,7 +2313,7 @@ impl LocalRpc for LocalRpcImpl {
             fn sign_transaction(&self, tx: SendTxRequest, password: Option<String>) -> JsonRpcResult<String>;
             fn transactions_by_epoch(&self, epoch_number: U64) -> JsonRpcResult<Vec<WrapTransaction>>;
             fn transactions_by_block(&self, block_hash: H256) -> JsonRpcResult<Vec<WrapTransaction>>;
-            fn mdbx_shadow_verify_parity(&self) -> JsonRpcResult<Option<MdbxShadowParityReport>>;
+            fn mdbx_shadow_verify_parity(&self) -> JsonRpcResult<Vec<MdbxShadowParityReport>>;
         }
     }
 }

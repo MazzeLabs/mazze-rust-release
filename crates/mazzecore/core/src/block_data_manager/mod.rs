@@ -34,7 +34,8 @@ pub mod db_gc_manager;
 pub mod db_manager;
 pub mod tx_data_manager;
 use crate::block_data_manager::{
-    db_manager::DBManager, tx_data_manager::TransactionDataManager,
+    db_manager::{DBManager, MdbxShadowFlags},
+    tx_data_manager::TransactionDataManager,
 };
 pub use block_data_types::*;
 use db_gc_manager::GCProgress;
@@ -260,7 +261,11 @@ impl BlockDataManager {
             pow.clone(),
             true_genesis.hash(),
             storage_manager.get_storage_manager().mdbx_env(),
-            config.enable_mdbx_shadow_hash_by_number,
+            MdbxShadowFlags {
+                hash_by_block_number: config
+                    .enable_mdbx_shadow_hash_by_number,
+                tx_index: config.enable_mdbx_shadow_tx_index,
+            },
         );
         let previous_db_progress =
             db_manager.gc_progress_from_db().unwrap_or(0);
@@ -1952,6 +1957,12 @@ pub struct DataManagerConfiguration {
     /// (ParityDB-only dev fallback), the flag has no effect and the
     /// mirror is not constructed.
     pub enable_mdbx_shadow_hash_by_number: bool,
+    /// Storage Phase 2 opt-in for the `Transactions` column (aka
+    /// `MdbxColumn::TxIndex`). Same shadow-then-cutover semantics as
+    /// `enable_mdbx_shadow_hash_by_number`. Independent flag so
+    /// operators can stage table swaps one at a time; leaving one on
+    /// doesn't force the other. Default `false`.
+    pub enable_mdbx_shadow_tx_index: bool,
 }
 
 impl MallocSizeOf for DataManagerConfiguration {
@@ -1980,6 +1991,7 @@ impl DataManagerConfiguration {
             checkpoint_gc_time_in_epoch_count: 1,
             strict_tx_index_gc: true,
             enable_mdbx_shadow_hash_by_number: false,
+            enable_mdbx_shadow_tx_index: false,
         }
     }
 }

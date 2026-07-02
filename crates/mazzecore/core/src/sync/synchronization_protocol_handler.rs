@@ -1009,6 +1009,18 @@ impl SynchronizationProtocolHandler {
         if !stuck.is_empty() {
             self.request_manager
                 .remove_net_inflight_blocks(stuck.iter());
+            // §5.26: §5.23 cleared only NET_INFLIGHT_BLOCKS, but the gate
+            // that actually suppresses re-requests is the regular
+            // GET_BLOCKS in-flight set read by `in_flight_blocks()` below
+            // and retained-against by `GetBlocks::with_inflight`. A hash
+            // orphaned there (request dropped/emptied without `on_removed`
+            // firing) is filtered out of `to_request_blocks` forever, so no
+            // GetBlocks ever goes out and the frontier never promotes.
+            // Force-clear it here too so the `.difference` below includes
+            // the stuck block. Observed live on m6: 3 body-missing frontier
+            // blocks, 0 outgoing GetBlocks, missing_bodies frozen at 35398,
+            // chain wedged at epoch 13017 while the fleet reached 52k+.
+            self.request_manager.remove_inflight_blocks(stuck.iter());
             self.graph.reinsert_to_fill_set(&stuck);
         }
 

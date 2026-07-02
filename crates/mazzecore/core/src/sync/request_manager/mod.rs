@@ -1080,6 +1080,34 @@ impl RequestManager {
             net_inflight_blocks.remove(&Key::Hash(*block_hash));
         }
     }
+
+    /// §5.26: force-clear hashes from the REGULAR `GET_BLOCKS` in-flight
+    /// set. This is the set `in_flight_blocks()` reads and that
+    /// `GetBlocks::with_inflight` retains against — i.e. the actual gate
+    /// that decides whether a body request goes out. Entries here are
+    /// normally removed only by `on_removed` (response received / request
+    /// timed out). A hash orphaned here (key inserted by `with_inflight`
+    /// but the request dropped/emptied without `on_removed` ever firing)
+    /// is permanently excluded from re-request: `request_block_bodies`'s
+    /// `.difference(&in_flight_blocks)` skips it, and `with_inflight`
+    /// strips it from any new request. §5.23's recovery cleared only the
+    /// SEPARATE `NET_INFLIGHT_BLOCKS` bucket, so a body-missing frontier
+    /// block stuck here never got re-requested — observed live on m6
+    /// (full): 3 blocks at heights 13011-13017 status=BLOCK_HEADER_GRAPH_
+    /// READY block_ready=false, 0 outgoing GetBlocks, missing_bodies pinned
+    /// at 35398, frontier re-sampled every second forever. Clearing the
+    /// GET_BLOCKS key lets the next `.difference()` include the block and a
+    /// GetBlocks finally goes out. Only ever called for frontier blocks
+    /// already wedged with block_ready==false, so a double-request is
+    /// harmless (peer responds, `on_removed` clears both sets).
+    pub fn remove_inflight_blocks<'a, I: Iterator<Item = &'a H256>>(
+        &self, blocks: I,
+    ) {
+        let mut inflight_blocks = self.inflight_keys.write(msgid::GET_BLOCKS);
+        for block_hash in blocks {
+            inflight_blocks.remove(&Key::Hash(*block_hash));
+        }
+    }
 }
 
 /// Return block hashes in `request` if it's requesting blocks.

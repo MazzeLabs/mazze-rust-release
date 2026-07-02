@@ -642,13 +642,31 @@ impl Configuration {
                 .max(snapshot_epoch_count),
         );
 
-        // --- Lean retention (mine, don't serve/archive) ---
-        // Override the snapshot-serving defaults that ran earlier in
-        // `apply_snapshot_serving_defaults`: keep NO extra snapshots beyond
-        // the minimum the node needs for its own state, and don't retain
-        // any for serving peers. `keep_snapshot_before_stable_checkpoint`
-        // (default true) still preserves execution continuity (D.3).
-        raw.additional_maintained_snapshot_count = 0;
+        // --- Lean retention, floored at the RandomX seed window (DD-1) ---
+        // A miner prunes aggressively (it's a snapshot consumer, not a
+        // source) but it MUST retain enough history to validate blocks
+        // right after a RandomX era boundary. The seed for a block at
+        // epoch height H is the block at the START of the PREVIOUS RandomX
+        // era: seed_height = (H / RANDOMX_EPOCH_LENGTH - 1) *
+        // RANDOMX_EPOCH_LENGTH — see
+        // block_data_manager::try_get_current_seed_hash. Worst case, a
+        // block just before the next boundary, that seed sits nearly TWO
+        // full eras back. Retained state depth below `confirmed` is
+        // `additional_maintained_snapshot_count * snapshot_epoch_count`
+        // (storage_manager::maintain_state_confirmed), so keep the SMALLEST
+        // snapshot count that still covers 2 eras. Below that floor the
+        // seed lookup misses, the seed falls back to zero, and every block
+        // after the next rotation fails validation (security-audit H-1) —
+        // observed live as miners wedging once their retention window
+        // slipped under the previous era boundary (e.g. epoch > ~22048 with
+        // the old ~2k window). This supersedes the earlier lean `= 0`,
+        // which retained only back to the stable checkpoint (~1 era) — one
+        // era short. `snapshot_epoch_count` was already clamped to >= 1 era
+        // in `apply_snapshot_serving_defaults`, so this resolves to 2.
+        let two_era_seed_window = 2 * RANDOMX_EPOCH_LENGTH;
+        let stride = snapshot_epoch_count.max(1);
+        raw.additional_maintained_snapshot_count =
+            ((two_era_seed_window + stride - 1) / stride) as u32;
         raw.provide_more_snapshot_for_sync = Vec::new();
     }
 

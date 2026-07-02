@@ -157,7 +157,68 @@ impl KeyValueDbTraitRead for KvdbMdbx {
     }
 }
 
+/// One entry in a batched write. `Put(k, v)` upserts; `Delete(k)`
+/// removes (silently succeeds if the key is absent — matches
+/// [`KeyValueDbTrait::delete`] semantics).
+pub enum BatchOp<'a> {
+    Put(&'a [u8], &'a [u8]),
+    Delete(&'a [u8]),
+}
+
 impl KvdbMdbx {
+    /// Apply a batch of writes inside a single MDBX `rw_txn`.
+    ///
+    /// The whole batch commits atomically — either every op lands or
+    /// none of them do (on error, the txn is dropped). Compared to
+    /// looping over [`KeyValueDbTrait::put`] this collapses N `rw_txn`
+    /// begin/commit round-trips into one, which matters because MDBX
+    /// serializes rw_txns globally: a state-commit that flushes 10k
+    /// modified accounts one-put-at-a-time contends with itself all
+    /// the way through, while the batched form takes the write lock
+    /// once. In-tree consumer will be the executor's
+    /// `apply_changes_to_storage` in
+    /// `crates/dbs/statedb/src/lib.rs` — Phase 2 wiring.
+    ///
+    /// **Empty batch**: no-op, returns `Ok(())` without opening a txn.
+    /// Cheap sanity check for callers that build a batch from a filter
+    /// / iterator without knowing whether it will emit anything.
+    ///
+    /// **Ordering**: MDBX applies puts and deletes in the order given.
+    /// If a caller submits `[Put(k, v1), Put(k, v2)]` the resulting
+    /// stored value is `v2`. `[Put(k, v), Delete(k)]` leaves `k`
+    /// absent. This matches the semantics of the batched transaction
+    /// path (`KvdbMdbxTransaction::commit`) but is exposed as a
+    /// single method for callers that don't need a hold-and-commit
+    /// transaction object.
+    pub fn write_batch(&self, ops: &[BatchOp]) -> Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let txn =
+            self.env.db.begin_rw_txn().map_err(map_mdbx_error)?;
+        let table = txn
+            .create_table(
+                Some(&col_table_name(self.col)),
+                TableFlags::default(),
+            )
+            .map_err(map_mdbx_error)?;
+        for op in ops {
+            match op {
+                BatchOp::Put(k, v) => {
+                    txn.put(&table, k, v, WriteFlags::empty())
+                        .map_err(map_mdbx_error)?;
+                }
+                BatchOp::Delete(k) => {
+                    let _ = txn
+                        .del(&table, k, None)
+                        .map_err(map_mdbx_error)?;
+                }
+            }
+        }
+        txn.commit().map_err(map_mdbx_error)?;
+        Ok(())
+    }
+
     /// Snapshot-consistent range scan. Reads a fresh MVCC snapshot at
     /// call time and returns every `(key, value)` pair in
     /// `[lower_bound_incl, upper_bound_excl)` in ascending key order.
@@ -498,6 +559,106 @@ mod tests {
         let above: Vec<(Box<[u8]>, Box<[u8]>)> =
             col0.iter_range_owned(b"zeta", None).unwrap();
         assert!(above.is_empty());
+    }
+
+    /// `write_batch`: empty batch is a no-op that returns `Ok(())`
+    /// without touching the DB. Verifies the callers-with-empty-filter
+    /// case doesn't accidentally create a spurious txn.
+    #[test]
+    fn write_batch_empty_is_noop() {
+        let dir =
+            tempdir::TempDir::new("kvdb_mdbx_batch_empty").unwrap();
+        let env = MdbxEnv::open(dir.path()).unwrap();
+        let col0 = KvdbMdbx::with_column(env, 0);
+        // Populate one value to prove the empty batch doesn't disturb it.
+        col0.put(b"unrelated", b"kept").unwrap();
+        col0.write_batch(&[]).unwrap();
+        assert_eq!(
+            col0.get(b"unrelated").unwrap().as_deref(),
+            Some(&b"kept"[..])
+        );
+    }
+
+    /// `write_batch`: a mix of puts and deletes applies in order and
+    /// atomically. In particular:
+    ///   - later writes to the same key win (`[Put(k, v1), Put(k, v2)]`
+    ///     → stored `v2`),
+    ///   - a delete after a put erases (`[Put(k, v), Delete(k)]` → k
+    ///     absent),
+    ///   - a put after a delete resurrects (`[Delete(k), Put(k, v)]`
+    ///     → stored `v`).
+    #[test]
+    fn write_batch_ordering() {
+        let dir =
+            tempdir::TempDir::new("kvdb_mdbx_batch_order").unwrap();
+        let env = MdbxEnv::open(dir.path()).unwrap();
+        let col0 = KvdbMdbx::with_column(env, 0);
+
+        col0.put(b"pre-existing", b"prev").unwrap();
+
+        col0.write_batch(&[
+            BatchOp::Put(b"a", b"1"),
+            BatchOp::Put(b"a", b"2"),
+            BatchOp::Put(b"b", b"one"),
+            BatchOp::Delete(b"b"),
+            BatchOp::Delete(b"c"), // absent — silent success
+            BatchOp::Delete(b"pre-existing"),
+            BatchOp::Put(b"pre-existing", b"resurrected"),
+        ])
+        .unwrap();
+
+        assert_eq!(col0.get(b"a").unwrap().as_deref(), Some(&b"2"[..]));
+        assert!(col0.get(b"b").unwrap().is_none());
+        assert!(col0.get(b"c").unwrap().is_none());
+        assert_eq!(
+            col0.get(b"pre-existing").unwrap().as_deref(),
+            Some(&b"resurrected"[..])
+        );
+    }
+
+    /// `write_batch`: many puts in one call produce the same final
+    /// state as the same puts issued one-by-one. This is the operational
+    /// substitution the executor will make in Phase 2 — flush thousands
+    /// of state modifications per epoch in a single MDBX txn instead of
+    /// one txn per key — so the equivalence must be exact.
+    #[test]
+    fn write_batch_matches_individual_puts() {
+        let dir_a = tempdir::TempDir::new("mdbx_ind").unwrap();
+        let dir_b = tempdir::TempDir::new("mdbx_bat").unwrap();
+        let ind = KvdbMdbx::with_column(
+            MdbxEnv::open(dir_a.path()).unwrap(),
+            0,
+        );
+        let bat = KvdbMdbx::with_column(
+            MdbxEnv::open(dir_b.path()).unwrap(),
+            0,
+        );
+
+        // Same 200-key workload driven two ways.
+        let keys: Vec<[u8; 4]> =
+            (0u32..200).map(|i| i.to_be_bytes()).collect();
+        let values: Vec<Vec<u8>> = (0u32..200)
+            .map(|i| format!("val-{}", i).into_bytes())
+            .collect();
+
+        for (k, v) in keys.iter().zip(values.iter()) {
+            ind.put(k, v).unwrap();
+        }
+
+        let ops: Vec<BatchOp> = keys
+            .iter()
+            .zip(values.iter())
+            .map(|(k, v)| BatchOp::Put(k.as_slice(), v.as_slice()))
+            .collect();
+        bat.write_batch(&ops).unwrap();
+
+        // Full-column scans must be identical.
+        let scan_ind = ind.iter_range_owned(b"", None).unwrap();
+        let scan_bat = bat.iter_range_owned(b"", None).unwrap();
+        assert_eq!(
+            scan_ind, scan_bat,
+            "batched writes produced a different final state than individual puts"
+        );
     }
 
     /// Fuzz-style parity test. Runs a deterministic randomized workload

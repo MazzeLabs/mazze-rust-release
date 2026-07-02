@@ -1470,6 +1470,67 @@ impl StorageManager {
                 }
             }
         }
+        // §D.3 prevention — protect the ancestor chain of every surviving
+        // snapshot from pruning. Aggressive retention (full-fast keeps the
+        // bare minimum) could otherwise remove a pre-stable parent while its
+        // child survives, breaking the snapshot delta chain. That orphan is
+        // harmless while the node runs but trips the D.3 startup invariant on
+        // the next restart — observed live crashing the mining leader and
+        // halting the chain. Here we walk up from each surviving snapshot and
+        // drop any ancestor that pruning slated for removal. Pure filtering:
+        // it only ever RETAINS more snapshots, never removes additional ones,
+        // so it cannot make the delta chain worse. The D.3 self-heal in
+        // `load`/startup is the backstop for any orphan predating this fix.
+        {
+            let removing: HashSet<EpochId> = old_main_snapshots_to_remove
+                .iter()
+                .chain(non_main_snapshots_to_remove.iter())
+                .cloned()
+                .collect();
+            let current_snapshots = self.current_snapshots.read();
+            let parent_of: HashMap<EpochId, EpochId> = current_snapshots
+                .iter()
+                .map(|s| {
+                    (
+                        s.get_snapshot_epoch_id().clone(),
+                        s.parent_snapshot_epoch_id.clone(),
+                    )
+                })
+                .collect();
+            let mut protected = HashSet::new();
+            for s in current_snapshots.iter() {
+                if removing.contains(s.get_snapshot_epoch_id()) {
+                    continue; // being removed; not a survivor to protect for
+                }
+                // Walk the full ancestor chain so protection is transitive.
+                let mut p = s.parent_snapshot_epoch_id.clone();
+                while p != NULL_EPOCH {
+                    if removing.contains(&p) {
+                        protected.insert(p.clone());
+                    }
+                    match parent_of.get(&p) {
+                        Some(next) => p = next.clone(),
+                        None => break,
+                    }
+                }
+            }
+            drop(current_snapshots);
+            if !protected.is_empty() {
+                warn!(
+                    "D.3 prevention: retaining {} ancestor snapshot(s) that \
+                     pruning would have orphaned (keeps the delta chain intact \
+                     across restart)",
+                    protected.len()
+                );
+                old_main_snapshots_to_remove
+                    .retain(|e| !protected.contains(e));
+                non_main_snapshots_to_remove
+                    .retain(|e| !protected.contains(e));
+                old_main_snapshot_infos_to_remove
+                    .retain(|e| !protected.contains(e));
+            }
+        }
+
         if !non_main_snapshots_to_remove.is_empty()
             || !old_main_snapshots_to_remove.is_empty()
         {
@@ -1746,34 +1807,51 @@ impl StorageManager {
         // Refuse to start instead of crashing later with an opaque
         // executor error. Operator action is in the bail message.
         // See `docs/checkpoint-snapshot-lifecycle.md` Phase D.3.
+        // §D.3 self-heal — auto-repair instead of refusing to start. A
+        // snapshot whose parent is missing has a broken delta chain (the
+        // executor can't apply forward epochs without the parent's state).
+        // Rather than `bail!` and wedge the node on every subsequent restart,
+        // delete the orphan (and, transitively, any child that depended on
+        // it) and continue — the missing state is rebuilt via catch-up
+        // replay. Iterating in ascending height order means removing an
+        // orphan from `snapshot_info_map` immediately flags its child on a
+        // later iteration (the child's parent is now gone from the map), so
+        // cascades resolve in a single pass. This is exactly the "delete the
+        // orphan snapshot" operator recovery the old bail message documented,
+        // done automatically. Root cause of the orphan is aggressive snapshot
+        // pruning removing a pre-stable parent while a child is retained (see
+        // the parent-protection guard in
+        // `maintain_snapshots_main_chain_confirmed`); this heal is the safety
+        // net. Observed live: a full-fast node that pruned a pre-stable parent
+        // while running crashed on its next restart, taking down the mining
+        // leader and halting the chain.
+        let mut healed_orphans = HashSet::new();
         for snapshot_info in snapshots.iter() {
             let parent_id = &snapshot_info.parent_snapshot_epoch_id;
             if *parent_id != NULL_EPOCH
                 && snapshot_info_map.get(parent_id).is_none()
             {
-                let snapshot_id = snapshot_info.get_snapshot_epoch_id();
-                let height = snapshot_info.height;
-                let msg = format!(
-                    "D.3 startup invariant violated: retained snapshot {:?} \
-                     (height {}) has parent {:?} which is missing from the \
-                     snapshot info map. The delta chain is broken — the \
-                     executor cannot apply forward epochs without the \
-                     parent snapshot's state. Likely cause: a previous \
-                     run with `keep_snapshot_before_stable_checkpoint = \
-                     false` (in hydra.toml) pruned the pre-stable parent. \
-                     Operator action: either (a) set \
-                     `keep_snapshot_before_stable_checkpoint = true` AND \
-                     re-bootstrap by deleting `storage_db/snapshot/` and \
-                     re-syncing from peers; or (b) accept the corruption \
-                     and delete the orphan snapshot at {:?} from \
-                     `storage_db/snapshot/` to let the node continue \
-                     without it (catch-up replay will be longer). \
-                     Refusing to start.",
-                    snapshot_id, height, parent_id, snapshot_id,
+                let snapshot_id =
+                    snapshot_info.get_snapshot_epoch_id().clone();
+                warn!(
+                    "D.3 self-heal: retained snapshot {:?} (height {}) has \
+                     missing parent {:?}; deleting the orphan and continuing \
+                     (catch-up replay will be longer). Likely cause: \
+                     aggressive snapshot pruning removed the pre-stable \
+                     parent while the child was still retained.",
+                    snapshot_id, snapshot_info.height, parent_id,
                 );
-                error!("{}", msg);
-                bail!(ErrorKind::Msg(msg));
+                snapshot_info_map.remove(&snapshot_id)?;
+                self.snapshot_manager
+                    .get_snapshot_db_manager()
+                    .destroy_snapshot(&snapshot_id)?;
+                healed_orphans.insert(snapshot_id);
             }
+        }
+        if !healed_orphans.is_empty() {
+            snapshots.retain(|s| {
+                !healed_orphans.contains(s.get_snapshot_epoch_id())
+            });
         }
 
         let current_snapshots = &mut *self.current_snapshots.write();

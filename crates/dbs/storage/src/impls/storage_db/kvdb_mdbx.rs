@@ -161,6 +161,35 @@ fn map_mdbx_error(e: libmdbx::Error) -> Error {
     Error::from(ErrorKind::Msg(format!("mdbx: {}", e)))
 }
 
+/// Snapshot of storage occupancy for one MDBX column. All fields are
+/// numeric so they can be pushed straight into a Prometheus gauge or
+/// a status-endpoint response. Returned by [`KvdbMdbx::stats`].
+///
+/// The three page classes (branch / leaf / overflow) sum to the total
+/// stored bytes at `page_size` granularity. `overflow_pages` growing
+/// disproportionately is the early sign that value sizes are pushing
+/// past what fits in a single leaf page — useful signal for revisiting
+/// the encoding (see storage-design §3.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvdbMdbxStats {
+    /// Fixed page size (usually 4 KiB); the same for every column.
+    pub page_size_bytes: u32,
+    /// B-tree height. Small integer; grows logarithmically with
+    /// `entries`.
+    pub btree_depth: u32,
+    /// Internal (non-leaf) pages.
+    pub branch_pages: usize,
+    /// Leaf pages — where the actual key/value data lives.
+    pub leaf_pages: usize,
+    /// Overflow pages, used for values that don't fit in a single leaf.
+    pub overflow_pages: usize,
+    /// Number of stored key/value entries in this column.
+    pub entries: usize,
+    /// Bytes actually occupied on disk by this column (all page
+    /// classes combined).
+    pub bytes_used: u64,
+}
+
 /// Table name for a numeric column ID.
 fn col_table_name(col: u32) -> String { format!("col-{}", col) }
 
@@ -254,6 +283,47 @@ impl KvdbMdbx {
     /// path (`KvdbMdbxTransaction::commit`) but is exposed as a
     /// single method for callers that don't need a hold-and-commit
     /// transaction object.
+    /// Snapshot storage occupancy for this column. Wraps
+    /// `libmdbx::Transaction::table_stat` on a fresh read txn so the
+    /// caller gets a MVCC-consistent view without holding any lock
+    /// after the call returns.
+    ///
+    /// A column that has never been written to has no sub-table on
+    /// disk yet — we return a zero-filled `KvdbMdbxStats` instead of
+    /// bubbling `libmdbx::Error::NotFound`, so operator dashboards can
+    /// poll every declared column without racing against first-write
+    /// creation.
+    pub fn stats(&self) -> Result<KvdbMdbxStats> {
+        let txn = self.env.db.begin_ro_txn().map_err(map_mdbx_error)?;
+        let table = match txn.open_table(Some(&col_table_name(self.col)))
+        {
+            Ok(t) => t,
+            Err(libmdbx::Error::NotFound) => {
+                return Ok(KvdbMdbxStats {
+                    page_size_bytes: 0,
+                    btree_depth: 0,
+                    branch_pages: 0,
+                    leaf_pages: 0,
+                    overflow_pages: 0,
+                    entries: 0,
+                    bytes_used: 0,
+                });
+            }
+            Err(e) => return Err(map_mdbx_error(e)),
+        };
+        let stat =
+            txn.table_stat(&table).map_err(map_mdbx_error)?;
+        Ok(KvdbMdbxStats {
+            page_size_bytes: stat.page_size(),
+            btree_depth: stat.depth(),
+            branch_pages: stat.branch_pages(),
+            leaf_pages: stat.leaf_pages(),
+            overflow_pages: stat.overflow_pages(),
+            entries: stat.entries(),
+            bytes_used: stat.total_size(),
+        })
+    }
+
     pub fn write_batch(&self, ops: &[BatchOp]) -> Result<()> {
         if ops.is_empty() {
             return Ok(());
@@ -630,6 +700,60 @@ mod tests {
         let above: Vec<(Box<[u8]>, Box<[u8]>)> =
             col0.iter_range_owned(b"zeta", None).unwrap();
         assert!(above.is_empty());
+    }
+
+    /// `stats()` returns zeros on a never-written column and grows
+    /// after writes. Verifies the operator-dashboard contract: probing
+    /// a fresh column doesn't race against sub-table creation, and
+    /// occupancy fields actually reflect the write volume.
+    #[test]
+    fn stats_zero_before_writes_grow_after() {
+        let dir = tempdir::TempDir::new("kvdb_mdbx_stats").unwrap();
+        let env = MdbxEnv::open(dir.path()).unwrap();
+        let col0 = KvdbMdbx::with_column(env, 0);
+
+        // Column never written: zeros, no error.
+        let before = col0.stats().unwrap();
+        assert_eq!(before.entries, 0);
+        assert_eq!(before.leaf_pages, 0);
+        assert_eq!(before.bytes_used, 0);
+
+        // Ingest a batch — 300 keys with meaningful payload so leaf
+        // pages get allocated. We build the (k, v) buffers first and
+        // then borrow into BatchOp so the ops live for the batch call
+        // (BatchOp holds slices).
+        let owned: Vec<(Vec<u8>, Vec<u8>)> = (0u32..300)
+            .map(|i| {
+                (
+                    i.to_be_bytes().to_vec(),
+                    format!("payload-{}-with-some-body", i).into_bytes(),
+                )
+            })
+            .collect();
+        let ops: Vec<BatchOp> = owned
+            .iter()
+            .map(|(k, v)| BatchOp::Put(k.as_slice(), v.as_slice()))
+            .collect();
+        col0.write_batch(&ops).unwrap();
+
+        let after = col0.stats().unwrap();
+        assert_eq!(after.entries, 300);
+        assert!(
+            after.page_size_bytes >= 4096,
+            "page size should be at least 4 KiB, got {}",
+            after.page_size_bytes
+        );
+        assert!(
+            after.leaf_pages >= 1,
+            "at least one leaf page should be allocated for 300 entries"
+        );
+        assert!(after.bytes_used > 0);
+        // Sanity: bytes_used = (branch + leaf + overflow) * page_size.
+        let expected_bytes = (after.branch_pages
+            + after.leaf_pages
+            + after.overflow_pages) as u64
+            * after.page_size_bytes as u64;
+        assert_eq!(after.bytes_used, expected_bytes);
     }
 
     /// `write_batch`: empty batch is a no-op that returns `Ok(())`

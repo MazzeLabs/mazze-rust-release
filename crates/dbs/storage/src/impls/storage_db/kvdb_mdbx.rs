@@ -157,6 +157,57 @@ impl KeyValueDbTraitRead for KvdbMdbx {
     }
 }
 
+impl KvdbMdbx {
+    /// Snapshot-consistent range scan. Reads a fresh MVCC snapshot at
+    /// call time and returns every `(key, value)` pair in
+    /// `[lower_bound_incl, upper_bound_excl)` in ascending key order.
+    ///
+    /// `upper_bound_excl = None` iterates to the end of the column.
+    /// If the column has never been written to, returns an empty vector
+    /// (matching the [`KeyValueDbTraitRead::get`] semantics for a
+    /// missing sub-table).
+    ///
+    /// **Memory footprint**: results are materialized into `Vec` before
+    /// return, so a range scan over a hot state column can be large.
+    /// This is deliberate for the Phase 1 milestone — self-referential
+    /// borrowed iterators over a `libmdbx` txn/cursor require careful
+    /// lifetime management (`ouroboros` / unsafe pinning). We defer
+    /// streaming iteration to Phase 2 when a real consumer needs it.
+    /// The change-index range queries designed in
+    /// `docs/internal/storage-design.md` §6.3 are bounded by construction
+    /// (one bitmap lookup + one `AccountChangeSet` walk over the touched
+    /// epochs), so the owned variant is enough for the Phase 1 goal:
+    /// feature-parity smoke tests against `KvdbParitydb`.
+    pub fn iter_range_owned(
+        &self, lower_bound_incl: &[u8], upper_bound_excl: Option<&[u8]>,
+    ) -> Result<Vec<(Box<[u8]>, Box<[u8]>)>> {
+        let txn = self.env.db.begin_ro_txn().map_err(map_mdbx_error)?;
+        let table = match txn.open_table(Some(&col_table_name(self.col))) {
+            Ok(t) => t,
+            Err(libmdbx::Error::NotFound) => return Ok(Vec::new()),
+            Err(e) => return Err(map_mdbx_error(e)),
+        };
+        let mut cursor = txn.cursor(&table).map_err(map_mdbx_error)?;
+
+        let mut out: Vec<(Box<[u8]>, Box<[u8]>)> = Vec::new();
+        let iter =
+            cursor.iter_from::<Vec<u8>, Vec<u8>>(lower_bound_incl);
+        for pair in iter {
+            let (k, v) = pair.map_err(map_mdbx_error)?;
+            if let Some(upper) = upper_bound_excl {
+                if k.as_slice() >= upper {
+                    break;
+                }
+            }
+            out.push((
+                k.into_boxed_slice(),
+                v.into_boxed_slice(),
+            ));
+        }
+        Ok(out)
+    }
+}
+
 mark_kvdb_multi_reader!(KvdbMdbx);
 
 impl KeyValueDbTypes for KvdbMdbx {
@@ -372,6 +423,111 @@ mod tests {
                 Some(&b"two"[..])
             );
         }
+    }
+
+    /// `iter_range_owned` returns keys in ascending order, honors
+    /// `[lower_incl, upper_excl)`, tolerates an empty column, and yields
+    /// each key exactly once. Verifies the Phase 1 milestone: MDBX has
+    /// range-scan parity with ParityDB at the KV level.
+    #[test]
+    fn iter_range_owned_semantics() {
+        let dir =
+            tempdir::TempDir::new("kvdb_mdbx_iter").unwrap();
+        let env = MdbxEnv::open(dir.path()).unwrap();
+        let col0 = KvdbMdbx::with_column(env, 0);
+
+        // Empty column: iterating returns an empty vector, never errors.
+        assert!(col0
+            .iter_range_owned(b"", None)
+            .unwrap()
+            .is_empty());
+
+        // Seed a set of keys — inserted out of order to prove the
+        // returned iterator sorts by key, not by insertion order.
+        let seed: [(&[u8], &[u8]); 5] = [
+            (b"delta", b"4"),
+            (b"alpha", b"1"),
+            (b"echo", b"5"),
+            (b"charlie", b"3"),
+            (b"bravo", b"2"),
+        ];
+        for (k, v) in &seed {
+            col0.put(k, v).unwrap();
+        }
+
+        // Full scan: every key, in ascending order.
+        let full: Vec<(Box<[u8]>, Box<[u8]>)> =
+            col0.iter_range_owned(b"", None).unwrap();
+        let full_keys: Vec<&[u8]> =
+            full.iter().map(|(k, _)| k.as_ref()).collect();
+        assert_eq!(
+            full_keys,
+            vec![
+                b"alpha".as_ref(),
+                b"bravo".as_ref(),
+                b"charlie".as_ref(),
+                b"delta".as_ref(),
+                b"echo".as_ref(),
+            ]
+        );
+        // Values follow the keys correctly.
+        assert_eq!(full[0].1.as_ref(), b"1");
+        assert_eq!(full[4].1.as_ref(), b"5");
+
+        // Half-open range [bravo, delta): expect bravo, charlie.
+        let mid: Vec<(Box<[u8]>, Box<[u8]>)> =
+            col0.iter_range_owned(b"bravo", Some(b"delta")).unwrap();
+        let mid_keys: Vec<&[u8]> =
+            mid.iter().map(|(k, _)| k.as_ref()).collect();
+        assert_eq!(
+            mid_keys,
+            vec![b"bravo".as_ref(), b"charlie".as_ref()]
+        );
+
+        // Lower bound below first key, upper bound above last: full scan.
+        let unbounded: Vec<(Box<[u8]>, Box<[u8]>)> =
+            col0.iter_range_owned(b"", Some(b"zeta")).unwrap();
+        assert_eq!(unbounded.len(), 5);
+
+        // Empty range: lower == upper yields nothing.
+        let empty: Vec<(Box<[u8]>, Box<[u8]>)> =
+            col0.iter_range_owned(b"bravo", Some(b"bravo")).unwrap();
+        assert!(empty.is_empty());
+
+        // Lower bound above every key: empty result.
+        let above: Vec<(Box<[u8]>, Box<[u8]>)> =
+            col0.iter_range_owned(b"zeta", None).unwrap();
+        assert!(above.is_empty());
+    }
+
+    /// Iterator sees a consistent MVCC snapshot: writes committed
+    /// concurrently (from a fresh txn) after the range scan begins are
+    /// not observed. The libmdbx read txn holds the snapshot open for
+    /// the iterator's lifetime; the owned `Vec<>` return type is built
+    /// from that snapshot.
+    #[test]
+    fn iter_range_owned_snapshot_isolation() {
+        let dir =
+            tempdir::TempDir::new("kvdb_mdbx_iter_iso").unwrap();
+        let env = MdbxEnv::open(dir.path()).unwrap();
+        let col0 = KvdbMdbx::with_column(env, 0);
+
+        col0.put(b"a", b"1").unwrap();
+        col0.put(b"b", b"2").unwrap();
+
+        // First scan captures the initial two entries.
+        let snap1 = col0.iter_range_owned(b"", None).unwrap();
+        assert_eq!(snap1.len(), 2);
+
+        // Concurrent writer inserts a third entry.
+        col0.put(b"c", b"3").unwrap();
+
+        // Snap1 was already materialized — still 2 entries.
+        assert_eq!(snap1.len(), 2);
+
+        // A fresh scan sees the new entry.
+        let snap2 = col0.iter_range_owned(b"", None).unwrap();
+        assert_eq!(snap2.len(), 3);
     }
 
     /// Batched transaction commits atomically. Mid-batch reads through

@@ -85,6 +85,50 @@ pub struct MdbxShadowFlags {
     pub tx_index: bool,
 }
 
+/// Per-table shadow-mirror metrics registered under the
+/// `mdbx_shadow.<table_name>` group. Split by op (put / delete) and
+/// outcome (ok / fail) so operator dashboards can:
+///   - confirm the mirror is actually being exercised (put_ok / delete_ok
+///     climb as the executor commits epochs), and
+///   - alert on any nonzero fail counter (a divergence signal that
+///     precedes what `verify_parity` would eventually report).
+///
+/// Registered once per mirror at construction; cheap `Arc<dyn Counter>`
+/// clones are stamped into the `MirrorEntry` alongside the mirror.
+struct MirrorMetrics {
+    put_ok: Arc<dyn Counter<usize>>,
+    put_fail: Arc<dyn Counter<usize>>,
+    delete_ok: Arc<dyn Counter<usize>>,
+    delete_fail: Arc<dyn Counter<usize>>,
+}
+
+impl MirrorMetrics {
+    fn new(table_name: &str) -> Self {
+        let group = format!("mdbx_shadow.{}", table_name);
+        Self {
+            put_ok: CounterUsize::register_with_group(&group, "put_ok"),
+            put_fail: CounterUsize::register_with_group(&group, "put_fail"),
+            delete_ok: CounterUsize::register_with_group(
+                &group,
+                "delete_ok",
+            ),
+            delete_fail: CounterUsize::register_with_group(
+                &group,
+                "delete_fail",
+            ),
+        }
+    }
+}
+
+/// One shadowed table's live state: the [`MdbxShadowMirror`] doing
+/// the dual write plus the four counters we bump alongside every op.
+/// Kept together so `insert_to_db` / `remove_from_db` take one map
+/// lookup instead of two.
+struct MirrorEntry {
+    mirror: Arc<MdbxShadowMirror<KvdbParitydb>>,
+    metrics: MirrorMetrics,
+}
+
 pub struct DBManager {
     table_db: HashMap<DBTable, Box<dyn KeyValueDbTrait<ValueType = Box<[u8]>>>>,
     pow: Arc<PowComputer>,
@@ -108,8 +152,7 @@ pub struct DBManager {
     /// plain `table_db`, byte-for-byte the same as before Phase 2.
     /// This lets each flag be flipped independently and rolled back
     /// cleanly if a mirror shows pathological divergence.
-    mdbx_shadow_mirrors:
-        HashMap<DBTable, Arc<MdbxShadowMirror<KvdbParitydb>>>,
+    mdbx_shadow_mirrors: HashMap<DBTable, MirrorEntry>,
 }
 
 impl DBManager {
@@ -157,7 +200,7 @@ impl DBManager {
     fn build_shadow_mirrors(
         db: &Arc<SystemDB>, mdbx_env: Option<&Arc<MdbxEnv>>,
         flags: MdbxShadowFlags,
-    ) -> HashMap<DBTable, Arc<MdbxShadowMirror<KvdbParitydb>>> {
+    ) -> HashMap<DBTable, MirrorEntry> {
         let mut mirrors = HashMap::new();
         let env = match mdbx_env {
             Some(e) => e,
@@ -165,25 +208,31 @@ impl DBManager {
             None => return mirrors,
         };
 
-        let make_mirror =
-            |table: DBTable, col: MdbxColumn| -> Arc<MdbxShadowMirror<KvdbParitydb>> {
+        let make_entry =
+            |table: DBTable, col: MdbxColumn| -> MirrorEntry {
                 let primary_pdb = KvdbParitydb {
                     kvdb: db.key_value(),
                     col: rocks_db_col(table),
                 };
                 let shadow_mdbx =
                     KvdbMdbx::with_column(Arc::clone(env), col.id());
-                Arc::new(MdbxShadowMirror::new(
+                let mirror = Arc::new(MdbxShadowMirror::new(
                     primary_pdb,
                     shadow_mdbx,
                     col,
-                ))
+                ));
+                // Use the MdbxColumn name (stable, one enum) for the
+                // metrics group so column renames on the storage
+                // side stay visible in existing dashboards until
+                // we regenerate them.
+                let metrics = MirrorMetrics::new(col.name());
+                MirrorEntry { mirror, metrics }
             };
 
         if flags.hash_by_block_number {
             mirrors.insert(
                 DBTable::HashByBlockNumber,
-                make_mirror(
+                make_entry(
                     DBTable::HashByBlockNumber,
                     MdbxColumn::HashByNumber,
                 ),
@@ -192,7 +241,7 @@ impl DBManager {
         if flags.tx_index {
             mirrors.insert(
                 DBTable::Transactions,
-                make_mirror(DBTable::Transactions, MdbxColumn::TxIndex),
+                make_entry(DBTable::Transactions, MdbxColumn::TxIndex),
             );
         }
         mirrors
@@ -222,18 +271,24 @@ impl DBManager {
     pub fn mdbx_shadow_mirror(
         &self, table: DBTable,
     ) -> Option<Arc<MdbxShadowMirror<KvdbParitydb>>> {
-        self.mdbx_shadow_mirrors.get(&table).cloned()
+        self.mdbx_shadow_mirrors
+            .get(&table)
+            .map(|entry| Arc::clone(&entry.mirror))
     }
 
     /// Snapshot of every active shadow mirror keyed by `DBTable`.
     /// Used by `debug_mdbxShadowVerifyParity` to walk every mirror
     /// in one RPC roundtrip. Cheap `Arc` clone per entry — the map
     /// itself is rebuilt so callers can iterate without holding a
-    /// borrow on `DBManager`.
+    /// borrow on `DBManager`. Only mirrors are exposed here;
+    /// metrics remain internal and are bumped on the write path.
     pub fn mdbx_shadow_mirrors(
         &self,
     ) -> HashMap<DBTable, Arc<MdbxShadowMirror<KvdbParitydb>>> {
-        self.mdbx_shadow_mirrors.clone()
+        self.mdbx_shadow_mirrors
+            .iter()
+            .map(|(k, v)| (*k, Arc::clone(&v.mirror)))
+            .collect()
     }
 }
 
@@ -654,10 +709,14 @@ impl DBManager {
         // just also flushes to the MDBX shadow column atomically.
         // Falls through to the plain path on mirror error so a
         // shadow-side hiccup doesn't drop primary writes.
-        if let Some(mirror) = self.mdbx_shadow_mirrors.get(&table) {
-            match mirror.put(db_key, &value) {
-                Ok(()) => return,
+        if let Some(entry) = self.mdbx_shadow_mirrors.get(&table) {
+            match entry.mirror.put(db_key, &value) {
+                Ok(()) => {
+                    entry.metrics.put_ok.inc(1);
+                    return;
+                }
                 Err(e) => {
+                    entry.metrics.put_fail.inc(1);
                     DB_WRITE_FAILURES.inc(1);
                     error!(
                         "mdbx-shadow put failed for {:?} key_len={}: \
@@ -694,10 +753,14 @@ impl DBManager {
 
     fn remove_from_db(&self, table: DBTable, db_key: &[u8]) {
         // Shadow-mirror route (see `insert_to_db` for rationale).
-        if let Some(mirror) = self.mdbx_shadow_mirrors.get(&table) {
-            match mirror.delete(db_key) {
-                Ok(()) => return,
+        if let Some(entry) = self.mdbx_shadow_mirrors.get(&table) {
+            match entry.mirror.delete(db_key) {
+                Ok(()) => {
+                    entry.metrics.delete_ok.inc(1);
+                    return;
+                }
                 Err(e) => {
+                    entry.metrics.delete_fail.inc(1);
                     DB_WRITE_FAILURES.inc(1);
                     error!(
                         "mdbx-shadow delete failed for {:?} \

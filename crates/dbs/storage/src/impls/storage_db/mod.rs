@@ -18,6 +18,7 @@
 pub mod delta_db_manager_paritydb;
 pub mod kvdb_mdbx;
 pub mod kvdb_paritydb;
+pub mod mdbx_columns;
 pub mod snapshot_db_manager_paritydb;
 pub mod snapshot_debug;
 pub mod snapshot_kv_db_paritydb;

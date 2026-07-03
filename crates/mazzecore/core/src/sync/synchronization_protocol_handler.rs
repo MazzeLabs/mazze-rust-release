@@ -1431,31 +1431,50 @@ impl SynchronizationProtocolHandler {
     pub fn on_mined_block(&self, mut block: Block) {
         let hash = block.block_header.hash();
 
-        // Execution backpressure on mining. Mining extends the header chain
-        // independently of state execution, and the existing
-        // `max_pending_execution_epochs` throttle only gates DOWNLOADING
-        // headers from peers (see `request_epochs`) — it does NOT gate
-        // locally-mined blocks. Without this guard a miner races its header
-        // tip arbitrarily far ahead of the executor; the stable checkpoint
-        // (which requires executed state, see `should_form_checkpoint_at`)
-        // can then never advance, so the sync-graph arena is never GC'd by
-        // `try_clear_old_era_blocks` and the node eventually deadlocks at the
-        // arena hard cap, rejecting even its own mined blocks. Observed live:
-        // header tip 163712 vs execution 44874 (~120k behind), arena pinned
-        // at 200000, chain halted. When the executor is already
-        // `max_pending_execution_epochs` behind, drop this freshly-mined
-        // block so the tip waits for execution to catch up (which the 500ms
-        // body-sync timer + §5.26 keep feeding). The wasted PoW is bounded
-        // and far cheaper than a chain-wide halt.
+        // Mining guardrails — a miner must never fork the fleet or race the
+        // executor. Dropping the block just re-mines the same tip once
+        // conditions clear; the bounded wasted PoW is far cheaper than the
+        // chain-wide halt these prevent.
+        //
+        // A) Not caught up: if this node is not in Normal phase it is behind
+        //    the canonical tip. Mining now extends its own STALE branch (a
+        //    fork) instead of syncing forward — the primary divergence driver
+        //    in a multi-miner fleet (observed live: miners stuck in
+        //    CatchUpSyncBlock kept mining at ~81k while the leader ran to
+        //    ~129k, fragmenting the fleet). Drop until caught up (Normal).
+        if self.catch_up_mode() {
+            warn!(
+                "Dropping mined block {:?} — node not in Normal phase \
+                 (catching up); mining now would fork a stale branch.",
+                hash
+            );
+            return;
+        }
+        // B) Executor too far behind: even in Normal, mining extends the
+        //    header chain independently of state execution, and the existing
+        //    `max_pending_execution_epochs` throttle only gates DOWNLOADING
+        //    from peers — not locally-mined blocks. Keyed on the REAL lag
+        //    `best_epoch - best_executed_state_epoch` (NOT the pending-queue
+        //    depth, which drains to ~0 when execution is *stuck* rather than
+        //    slow — why the queue-based check never fired). Keeping the tip
+        //    within the cap lets the stable checkpoint (which needs executed
+        //    state) advance, so the sync-graph arena keeps getting GC'd
+        //    instead of hitting its hard cap. Observed live: header tip
+        //    163712 vs executed 44874 with a near-empty queue. Missing bodies
+        //    are fed continuously by the 500ms body-sync timer (§5.20) +
+        //    §5.26, so the pause lets execution catch up, not dig deeper.
         let exec_cap = self.protocol_config.max_pending_execution_epochs;
         if exec_cap != 0 {
-            let backlog = self.graph.consensus.pending_execution_count();
-            if backlog >= exec_cap {
+            let best = self.graph.consensus.best_epoch_number();
+            let executed =
+                self.graph.consensus.best_executed_state_epoch_number();
+            let lag = best.saturating_sub(executed) as usize;
+            if lag >= exec_cap {
                 warn!(
-                    "Dropping mined block {:?} — execution backlog {} >= cap \
-                     {}; pausing mining until the executor catches up so the \
-                     stable checkpoint and sync-graph GC keep advancing.",
-                    hash, backlog, exec_cap
+                    "Dropping mined block {:?} — execution lag {} (best {} - \
+                     executed {}) >= cap {}; pausing mining until the executor \
+                     catches up.",
+                    hash, lag, best, executed, exec_cap
                 );
                 return;
             }

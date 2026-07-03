@@ -2620,6 +2620,10 @@ impl ConsensusGraphTrait for ConsensusGraph {
         self.executor.pending_execution_count()
     }
 
+    fn best_executed_state_epoch_number(&self) -> u64 {
+        self.data_man.state_availability_boundary.read().upper_bound
+    }
+
     fn enter_normal_phase(&self) {
         self.ready_for_mining.store(true, Ordering::SeqCst);
         self.update_best_info(true);

@@ -135,6 +135,15 @@ pub trait ConsensusGraphTrait: Send + Sync {
     /// backpressure fix.
     fn pending_execution_count(&self) -> usize;
 
+    /// Height of the latest epoch whose state has actually been EXECUTED
+    /// (the upper bound of the state-availability boundary). Unlike
+    /// `pending_execution_count` (a queue depth that drains to ~0 when
+    /// execution is *stuck* rather than merely slow), `best_epoch_number()
+    /// - best_executed_state_epoch_number()` is the true header-vs-execution
+    /// lag. The mining backpressure keys on this so a miner never races its
+    /// header tip arbitrarily far ahead of executed state.
+    fn best_executed_state_epoch_number(&self) -> u64;
+
     fn enter_normal_phase(&self);
     fn leave_normal_phase(&self);
     fn reset(&self);

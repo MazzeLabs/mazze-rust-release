@@ -88,6 +88,10 @@ lazy_static! {
 /// few orphans) is well under this number — see era_epoch_count =
 /// 20 000 in `docs/chain-model.md`. Tuned conservatively to give legit
 /// catch-up plenty of headroom. See docs/security-audit.md finding H-2.
+///
+/// In healthy operation the arena is kept near one era by
+/// `try_clear_old_era_blocks` (driven by consensus era-genesis
+/// advancement); this cap is only a DoS ceiling, not the working bound.
 const SYNC_GRAPH_ARENA_HARD_CAP: usize = 200_000;
 
 const NULL: usize = !0;
@@ -1678,15 +1682,41 @@ impl SynchronizationGraph {
         if !self.verification_config.catch_up_mode()
             && inner.arena.len() >= SYNC_GRAPH_ARENA_HARD_CAP
         {
-            SYNC_GRAPH_REJECTED_OVER_CAP.mark(1);
+            // Deadlock safety net: reject ONLY orphan headers (parent not in
+            // the graph) — those are the RAM-filling flood the H-2 guard
+            // targets. A header whose parent is already present extends a
+            // known chain and MUST be admitted even at cap: rejecting it
+            // (e.g. our own freshly-mined block, or the next pivot block)
+            // would freeze the tip, which freezes stable-checkpoint
+            // advancement, which freezes arena GC — a permanent deadlock.
+            // Chain-extending blocks are PoW-verified downstream so admitting
+            // them is not a cheap flood vector. In healthy operation the
+            // mining backpressure in `on_mined_block` keeps the arena well
+            // below the cap; this guard only matters if it is somehow reached.
+            let parent_present =
+                inner.hash_to_arena_indices.contains_key(header.parent_hash());
+            if !parent_present {
+                SYNC_GRAPH_REJECTED_OVER_CAP.mark(1);
+                warn!(
+                    "Rejecting ORPHAN header {} — sync-graph arena at cap \
+                     ({}/{}) outside catch-up. Likely a peer flooding orphans.",
+                    header.hash(),
+                    inner.arena.len(),
+                    SYNC_GRAPH_ARENA_HARD_CAP
+                );
+                return (BlockHeaderInsertionResult::Invalid, Vec::new());
+            }
+            // Chain-extending block at cap: try to reclaim old-era blocks to
+            // bound growth, then admit it so the pivot can keep advancing.
+            inner.try_clear_old_era_blocks();
             warn!(
-                "Rejecting header {} — sync-graph arena at cap ({}/{}) \
-                 outside catch-up. Likely a peer flooding orphans.",
-                header.hash(),
+                "sync-graph arena at cap ({}/{}) but admitting chain-extending \
+                 header {} (parent present) to avoid a pivot deadlock — arena \
+                 GC is lagging; check execution/checkpoint backpressure.",
                 inner.arena.len(),
-                SYNC_GRAPH_ARENA_HARD_CAP
+                SYNC_GRAPH_ARENA_HARD_CAP,
+                header.hash()
             );
-            return (BlockHeaderInsertionResult::Invalid, Vec::new());
         }
         let hash = header.hash();
 

@@ -1430,6 +1430,37 @@ impl SynchronizationProtocolHandler {
 
     pub fn on_mined_block(&self, mut block: Block) {
         let hash = block.block_header.hash();
+
+        // Execution backpressure on mining. Mining extends the header chain
+        // independently of state execution, and the existing
+        // `max_pending_execution_epochs` throttle only gates DOWNLOADING
+        // headers from peers (see `request_epochs`) — it does NOT gate
+        // locally-mined blocks. Without this guard a miner races its header
+        // tip arbitrarily far ahead of the executor; the stable checkpoint
+        // (which requires executed state, see `should_form_checkpoint_at`)
+        // can then never advance, so the sync-graph arena is never GC'd by
+        // `try_clear_old_era_blocks` and the node eventually deadlocks at the
+        // arena hard cap, rejecting even its own mined blocks. Observed live:
+        // header tip 163712 vs execution 44874 (~120k behind), arena pinned
+        // at 200000, chain halted. When the executor is already
+        // `max_pending_execution_epochs` behind, drop this freshly-mined
+        // block so the tip waits for execution to catch up (which the 500ms
+        // body-sync timer + §5.26 keep feeding). The wasted PoW is bounded
+        // and far cheaper than a chain-wide halt.
+        let exec_cap = self.protocol_config.max_pending_execution_epochs;
+        if exec_cap != 0 {
+            let backlog = self.graph.consensus.pending_execution_count();
+            if backlog >= exec_cap {
+                warn!(
+                    "Dropping mined block {:?} — execution backlog {} >= cap \
+                     {}; pausing mining until the executor catches up so the \
+                     stable checkpoint and sync-graph GC keep advancing.",
+                    hash, backlog, exec_cap
+                );
+                return;
+            }
+        }
+
         info!("Mined block {:?} header={:?}", hash, block.block_header);
         let parent_hash = *block.block_header.parent_hash();
 

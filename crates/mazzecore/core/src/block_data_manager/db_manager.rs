@@ -83,6 +83,8 @@ fn rocks_db_col(table: DBTable) -> u32 {
 pub struct MdbxShadowFlags {
     pub hash_by_block_number: bool,
     pub tx_index: bool,
+    pub blamed_header_verified_roots: bool,
+    pub block_traces: bool,
 }
 
 /// Per-table shadow-mirror metrics registered under the
@@ -242,6 +244,24 @@ impl DBManager {
             mirrors.insert(
                 DBTable::Transactions,
                 make_entry(DBTable::Transactions, MdbxColumn::TxIndex),
+            );
+        }
+        if flags.blamed_header_verified_roots {
+            mirrors.insert(
+                DBTable::BlamedHeaderVerifiedRoots,
+                make_entry(
+                    DBTable::BlamedHeaderVerifiedRoots,
+                    MdbxColumn::BlamedHeaderVerifiedRoots,
+                ),
+            );
+        }
+        if flags.block_traces {
+            mirrors.insert(
+                DBTable::BlockTraces,
+                make_entry(
+                    DBTable::BlockTraces,
+                    MdbxColumn::BlockTraces,
+                ),
             );
         }
         mirrors
@@ -1066,6 +1086,8 @@ mod shadow_routing_tests {
         let flags = MdbxShadowFlags {
             hash_by_block_number: true,
             tx_index: true,
+            blamed_header_verified_roots: true,
+            block_traces: true,
         };
         let (mgr, _pdb, _mdbx, _env) = build_manager(flags, false);
         assert!(mgr.mdbx_shadow_mirrors().is_empty());
@@ -1077,7 +1099,7 @@ mod shadow_routing_tests {
     fn selected_flags_yield_selected_mirrors() {
         let flags = MdbxShadowFlags {
             hash_by_block_number: true,
-            tx_index: false,
+            ..MdbxShadowFlags::default()
         };
         let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
         let mirrors = mgr.mdbx_shadow_mirrors();
@@ -1088,12 +1110,29 @@ mod shadow_routing_tests {
         let flags = MdbxShadowFlags {
             hash_by_block_number: true,
             tx_index: true,
+            ..MdbxShadowFlags::default()
         };
         let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
         let mirrors = mgr.mdbx_shadow_mirrors();
         assert_eq!(mirrors.len(), 2);
         assert!(mirrors.contains_key(&DBTable::HashByBlockNumber));
         assert!(mirrors.contains_key(&DBTable::Transactions));
+
+        // All four flags on ⇒ all four mirrors present.
+        let flags = MdbxShadowFlags {
+            hash_by_block_number: true,
+            tx_index: true,
+            blamed_header_verified_roots: true,
+            block_traces: true,
+        };
+        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
+        let mirrors = mgr.mdbx_shadow_mirrors();
+        assert_eq!(mirrors.len(), 4);
+        assert!(mirrors.contains_key(&DBTable::HashByBlockNumber));
+        assert!(mirrors.contains_key(&DBTable::Transactions));
+        assert!(mirrors
+            .contains_key(&DBTable::BlamedHeaderVerifiedRoots));
+        assert!(mirrors.contains_key(&DBTable::BlockTraces));
     }
 
     /// The mirror routes real DBManager write-path calls: after an
@@ -1105,7 +1144,7 @@ mod shadow_routing_tests {
     fn hash_by_number_writes_reach_shadow() {
         let flags = MdbxShadowFlags {
             hash_by_block_number: true,
-            tx_index: false,
+            ..MdbxShadowFlags::default()
         };
         let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
 
@@ -1135,7 +1174,7 @@ mod shadow_routing_tests {
     fn removes_are_mirrored() {
         let flags = MdbxShadowFlags {
             hash_by_block_number: true,
-            tx_index: false,
+            ..MdbxShadowFlags::default()
         };
         let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
 

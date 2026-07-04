@@ -361,6 +361,14 @@ build_config! {
         // `MdbxColumn::TxIndex`). Independent — a full-node can
         // stage its table swaps one at a time.
         (enable_mdbx_shadow_tx_index, (bool), false)
+        // Same for BlamedHeaderVerifiedRoots (light-node support
+        // records; low write volume in production) — safe first
+        // fleet sanity check for the routing itself.
+        (enable_mdbx_shadow_blamed_header_verified_roots, (bool), false)
+        // Same for BlockTraces (only meaningfully exercised on
+        // nodes with tracing enabled; a no-op on miners and full-
+        // fast).
+        (enable_mdbx_shadow_block_traces, (bool), false)
         (print_memory_usage_period_s, (Option<u64>), None)
         (target_block_gas_limit, (u64), DEFAULT_TARGET_BLOCK_GAS_LIMIT)
         (executive_trace, (bool), false)
@@ -1267,6 +1275,12 @@ impl Configuration {
             enable_mdbx_shadow_tx_index: self
                 .raw_conf
                 .enable_mdbx_shadow_tx_index,
+            enable_mdbx_shadow_blamed_header_verified_roots: self
+                .raw_conf
+                .enable_mdbx_shadow_blamed_header_verified_roots,
+            enable_mdbx_shadow_block_traces: self
+                .raw_conf
+                .enable_mdbx_shadow_block_traces,
         };
 
         // By default, we do not keep the block data for additional period,

@@ -265,6 +265,9 @@ impl BlockDataManager {
                 hash_by_block_number: config
                     .enable_mdbx_shadow_hash_by_number,
                 tx_index: config.enable_mdbx_shadow_tx_index,
+                blamed_header_verified_roots: config
+                    .enable_mdbx_shadow_blamed_header_verified_roots,
+                block_traces: config.enable_mdbx_shadow_block_traces,
             },
         );
         let previous_db_progress =
@@ -1963,6 +1966,20 @@ pub struct DataManagerConfiguration {
     /// operators can stage table swaps one at a time; leaving one on
     /// doesn't force the other. Default `false`.
     pub enable_mdbx_shadow_tx_index: bool,
+    /// Same shadow-then-cutover semantics for the
+    /// `BlamedHeaderVerifiedRoots` column (→
+    /// `MdbxColumn::BlamedHeaderVerifiedRoots`). Low write volume
+    /// in production — only blamed headers materialize entries —
+    /// which makes it a safe first-in-fleet sanity check that the
+    /// routing works before enabling higher-volume tables.
+    /// Default `false`.
+    pub enable_mdbx_shadow_blamed_header_verified_roots: bool,
+    /// Same shadow-then-cutover semantics for the `BlockTraces`
+    /// column (→ `MdbxColumn::BlockTraces`). Only meaningfully
+    /// exercised on nodes with tracing enabled — miners and full-
+    /// fast typically disable, so there the flag is effectively a
+    /// no-op. Default `false`.
+    pub enable_mdbx_shadow_block_traces: bool,
 }
 
 impl MallocSizeOf for DataManagerConfiguration {
@@ -1992,6 +2009,8 @@ impl DataManagerConfiguration {
             strict_tx_index_gc: true,
             enable_mdbx_shadow_hash_by_number: false,
             enable_mdbx_shadow_tx_index: false,
+            enable_mdbx_shadow_blamed_header_verified_roots: false,
+            enable_mdbx_shadow_block_traces: false,
         }
     }
 }

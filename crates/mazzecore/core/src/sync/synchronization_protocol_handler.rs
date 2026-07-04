@@ -1022,6 +1022,25 @@ impl SynchronizationProtocolHandler {
             // chain wedged at epoch 13017 while the fleet reached 52k+.
             self.request_manager.remove_inflight_blocks(stuck.iter());
             self.graph.reinsert_to_fill_set(&stuck);
+
+            // §C: request the stuck FRONTIER bodies FIRST, with priority.
+            // §5.23/§5.26 only ensured these hashes are in `block_to_fill_set`
+            // and cleared from the in-flight set — but the general drain below
+            // requests just `to_request_blocks[0..n]`, the first n of an
+            // UNORDERED HashSet difference. During deep catch-up
+            // `block_to_fill_set` holds 100k+ hashes while n is capped at
+            // `max_inflight` (<=400), so a handful of frontier hashes sit far
+            // beyond the cutoff and are never reached — the node fetches other
+            // bodies (missing_bodies slowly falls) while the FRONTIER stays
+            // frozen and the node wedges forever in CatchUpSyncBlock (observed
+            // live: m5, 7 not-ready frontier blocks, missing_bodies 115642,
+            // latest epoch pinned at 80383 for hours). These blocks are what
+            // gates promotion, so request them directly and unconditionally.
+            // `request_blocks_without_check` re-registers them in-flight, so
+            // the `.difference()` drain below won't double-request them.
+            for chunk in stuck.chunks(MAX_BLOCKS_TO_SEND as usize) {
+                self.request_blocks_without_check(io, None, chunk.to_vec());
+            }
         }
 
         let in_flight_blocks = self.request_manager.in_flight_blocks();

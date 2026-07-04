@@ -268,6 +268,7 @@ impl BlockDataManager {
                 blamed_header_verified_roots: config
                     .enable_mdbx_shadow_blamed_header_verified_roots,
                 block_traces: config.enable_mdbx_shadow_block_traces,
+                blocks: config.enable_mdbx_shadow_blocks,
             },
         );
         let previous_db_progress =
@@ -1980,6 +1981,17 @@ pub struct DataManagerConfiguration {
     /// fast typically disable, so there the flag is effectively a
     /// no-op. Default `false`.
     pub enable_mdbx_shadow_block_traces: bool,
+    /// Storage Phase 2 step 8c: shadow-mirror `DBTable::Blocks`.
+    /// A compound flag — Blocks is multiplexed in ParityDB via
+    /// key-suffix bytes, so enabling this installs a
+    /// [`CompoundMirror`] with 7 sub-columns
+    /// (BlockHeaders / LocalBlockInfo / BlockBodies /
+    /// BlockExecutionResult / EpochExecutionContext /
+    /// BlockExecutionCommitment / BlockRewards). Highest write
+    /// volume of any shadow. Enable last: only after the four
+    /// single-purpose mirrors have shown clean parity for at
+    /// least a full era. Default `false`.
+    pub enable_mdbx_shadow_blocks: bool,
 }
 
 impl MallocSizeOf for DataManagerConfiguration {
@@ -2011,6 +2023,7 @@ impl DataManagerConfiguration {
             enable_mdbx_shadow_tx_index: false,
             enable_mdbx_shadow_blamed_header_verified_roots: false,
             enable_mdbx_shadow_block_traces: false,
+            enable_mdbx_shadow_blocks: false,
         }
     }
 }

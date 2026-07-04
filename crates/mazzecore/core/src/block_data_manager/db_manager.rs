@@ -20,11 +20,14 @@ use mazze_internal_common::{
 };
 use mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
 use mazze_storage::{
-    storage_db::KeyValueDbTrait, KvdbMdbx, KvdbParitydb, MdbxColumn, MdbxEnv,
-    MdbxShadowMirror,
+    storage_db::KeyValueDbTrait, DualWritePrimary, KvdbMdbx, KvdbParitydb,
+    MdbxColumn, MdbxEnv, MdbxShadowMirror,
 };
 use mazze_types::H256;
-use primitives::{Block, BlockHeader, SignedTransaction, TransactionIndex};
+use primitives::{
+    Block, BlockHeader, BlockHeaderBuilder, SignedTransaction,
+    TransactionIndex,
+};
 use metrics::{Counter, CounterUsize};
 use rlp::Rlp;
 use std::{collections::HashMap, sync::Arc};
@@ -49,6 +52,72 @@ const EPOCH_SKIPPED_BLOCK_SET_SUFFIX_BYTE: u8 = 7;
 const BLOCK_REWARD_RESULT_SUFFIX_BYTE: u8 = 8;
 const BLOCK_TERMINAL_KEY: &[u8] = b"block_terminals";
 const GC_PROGRESS_KEY: &[u8] = b"gc_progress";
+
+/// Sentinel router key for a bare 32-byte block-hash key in the
+/// `Blocks` compound DBTable (BlockHeader writes). Chosen to be
+/// `0` because the suffix bytes used by every other sub-table are
+/// all in the range 1..=8 — no collision possible.
+const BLOCKS_ROUTE_BARE_HEADER: u8 = 0;
+
+/// Route a `DBTable::Blocks` write to a sub-mirror. Header writes
+/// use the raw 32-byte block hash; every other sub-table appends
+/// a single suffix byte to the hash. The router inspects length
+/// first (headers are the only 32-byte-exact key shape) and falls
+/// back to the last byte for the suffixed variants.
+///
+/// Preconditions the caller (DBManager) guarantees:
+/// * All writes to `DBTable::Blocks` originate from one of the
+///   `insert_*` helpers in this file, so the key shape is either
+///   `H256::len_bytes()` or `H256::len_bytes() + 1`.
+/// * `k` is never empty — a zero-length key is impossible on
+///   this table.
+fn blocks_route(k: &[u8]) -> u8 {
+    if k.len() == H256::len_bytes() {
+        BLOCKS_ROUTE_BARE_HEADER
+    } else {
+        *k.last().expect(
+            "blocks_route: empty key — no DBTable::Blocks caller \
+             produces this",
+        )
+    }
+}
+
+/// Predicates: keep only keys belonging to a single sub-table of
+/// the `Blocks` compound DBTable. Sub-mirrors wrap the SAME
+/// underlying ParityDB column, so `verify_parity` needs the
+/// primary iteration filtered to the slice this sub owns —
+/// otherwise every sub reports the entire column as its primary
+/// and divergence counts explode. Free functions instead of
+/// closures so `fn(&[u8]) -> bool` (Send + Sync) can be stored
+/// verbatim in [`FilteredKvdbParitydb`].
+fn blocks_predicate_header(k: &[u8]) -> bool {
+    k.len() == H256::len_bytes()
+}
+fn blocks_predicate_local_info(k: &[u8]) -> bool {
+    k.len() == H256::len_bytes() + 1
+        && *k.last().unwrap() == LOCAL_BLOCK_INFO_SUFFIX_BYTE
+}
+fn blocks_predicate_body(k: &[u8]) -> bool {
+    k.len() == H256::len_bytes() + 1
+        && *k.last().unwrap() == BLOCK_BODY_SUFFIX_BYTE
+}
+fn blocks_predicate_exec_result(k: &[u8]) -> bool {
+    k.len() == H256::len_bytes() + 1
+        && *k.last().unwrap() == BLOCK_EXECUTION_RESULT_SUFFIX_BYTE
+}
+fn blocks_predicate_epoch_exec_ctx(k: &[u8]) -> bool {
+    k.len() == H256::len_bytes() + 1
+        && *k.last().unwrap() == EPOCH_EXECUTION_CONTEXT_SUFFIX_BYTE
+}
+fn blocks_predicate_epoch_exec_commitment(k: &[u8]) -> bool {
+    k.len() == H256::len_bytes() + 1
+        && *k.last().unwrap()
+            == EPOCH_CONSENSUS_EXECUTION_INFO_SUFFIX_BYTE
+}
+fn blocks_predicate_reward(k: &[u8]) -> bool {
+    k.len() == H256::len_bytes() + 1
+        && *k.last().unwrap() == BLOCK_REWARD_RESULT_SUFFIX_BYTE
+}
 
 #[derive(Clone, Copy, Debug, Hash, Ord, PartialOrd, Eq, PartialEq, EnumIter)]
 pub enum DBTable {
@@ -85,6 +154,14 @@ pub struct MdbxShadowFlags {
     pub tx_index: bool,
     pub blamed_header_verified_roots: bool,
     pub block_traces: bool,
+    /// Storage Phase 2 step 8c: shadow-mirror the `Blocks`
+    /// compound DBTable. Highest-volume shadow of the migration
+    /// (headers + local info + bodies + execution results +
+    /// contexts + commitments + rewards all fan out through one
+    /// [`CompoundMirror`] with 7 sub-columns). Enable last on a
+    /// live fleet — once every other single-purpose mirror has
+    /// shown clean parity for a full era.
+    pub blocks: bool,
 }
 
 /// Per-table shadow-mirror metrics registered under the
@@ -122,11 +199,56 @@ impl MirrorMetrics {
     }
 }
 
+/// [`KvdbParitydb`] wrapped with a compile-time-fixed key-predicate
+/// so a sub-mirror of a [`CompoundMirror`] only *sees* the slice of
+/// its parent ParityDB column that logically belongs to it. Writes /
+/// deletes / point reads pass through unchanged; only
+/// [`Self::dw_iter_range`] (the parity-audit path) filters.
+///
+/// The predicate is a plain `fn` pointer so [`FilteredKvdbParitydb`]
+/// stays trivially `Send + Sync` and the routing rule sits next to
+/// the DBTable it serves. For Simple mirrors (their own ParityDB
+/// column, no multiplex) the predicate is `accept_all` and the
+/// filter is a no-op.
+struct FilteredKvdbParitydb {
+    inner: KvdbParitydb,
+    predicate: fn(&[u8]) -> bool,
+}
+
+/// Predicate: keep every key. Used by Simple mirrors whose primary
+/// ParityDB column is already single-purpose.
+fn accept_all(_: &[u8]) -> bool {
+    true
+}
+
+impl DualWritePrimary for FilteredKvdbParitydb {
+    fn dw_put(
+        &self, k: &[u8], v: &[u8],
+    ) -> mazze_storage::Result<()> {
+        self.inner.dw_put(k, v)
+    }
+    fn dw_delete(&self, k: &[u8]) -> mazze_storage::Result<()> {
+        self.inner.dw_delete(k)
+    }
+    fn dw_get(
+        &self, k: &[u8],
+    ) -> mazze_storage::Result<Option<Box<[u8]>>> {
+        self.inner.dw_get(k)
+    }
+    fn dw_iter_range(
+        &self, lower: &[u8], upper: Option<&[u8]>,
+    ) -> mazze_storage::Result<Vec<(Box<[u8]>, Box<[u8]>)>> {
+        let mut all = self.inner.dw_iter_range(lower, upper)?;
+        all.retain(|(k, _)| (self.predicate)(k));
+        Ok(all)
+    }
+}
+
 /// A 1:1 shadow mirror — one primary ParityDB column ↔ one MDBX
 /// shadow column. The write path takes a single mirror `put`/
 /// `delete` and its metrics increment as one bucket.
 struct SimpleMirror {
-    mirror: Arc<MdbxShadowMirror<KvdbParitydb>>,
+    mirror: Arc<MdbxShadowMirror<FilteredKvdbParitydb>>,
     metrics: MirrorMetrics,
 }
 
@@ -344,10 +466,16 @@ impl DBManager {
             None => return mirrors,
         };
 
-        let make_simple = |table: DBTable, col: MdbxColumn| -> SimpleMirror {
-            let primary_pdb = KvdbParitydb {
-                kvdb: db.key_value(),
-                col: rocks_db_col(table),
+        let make_filtered_simple = |table: DBTable,
+                                    col: MdbxColumn,
+                                    predicate: fn(&[u8]) -> bool|
+         -> SimpleMirror {
+            let primary_pdb = FilteredKvdbParitydb {
+                inner: KvdbParitydb {
+                    kvdb: db.key_value(),
+                    col: rocks_db_col(table),
+                },
+                predicate,
             };
             let shadow_mdbx =
                 KvdbMdbx::with_column(Arc::clone(env), col.id());
@@ -362,6 +490,14 @@ impl DBManager {
             // regenerate them.
             let metrics = MirrorMetrics::new(col.name());
             SimpleMirror { mirror, metrics }
+        };
+        // Simple mirrors sit on a single-purpose ParityDB column;
+        // no filtering needed on iteration — `accept_all` is a
+        // pass-through. Sub-mirrors of a compound DBTable go
+        // through `make_filtered_simple` directly with the
+        // suffix-specific predicate.
+        let make_simple = |table: DBTable, col: MdbxColumn| -> SimpleMirror {
+            make_filtered_simple(table, col, accept_all)
         };
         let make_entry = |table: DBTable, col: MdbxColumn| -> MirrorEntry {
             MirrorEntry::Simple(make_simple(table, col))
@@ -398,6 +534,86 @@ impl DBManager {
                     DBTable::BlockTraces,
                     MdbxColumn::BlockTraces,
                 ),
+            );
+        }
+        if flags.blocks {
+            // 7 sub-mirrors — one per logical sub-table currently
+            // multiplexed into COL_BLOCKS via key-suffix bytes.
+            // Every sub wraps the SAME ParityDB column (COL_BLOCKS
+            // via DBTable::Blocks) as its primary — no duplicated
+            // primary writes — but each writes to a distinct MDBX
+            // column on the shadow side. Each sub's primary is
+            // wrapped in a `FilteredKvdbParitydb` with a
+            // suffix-specific predicate so `verify_parity` only
+            // sees the keys that logically belong to that sub.
+            // Without that filter every sub reports the whole
+            // COL_BLOCKS as its primary and divergences explode
+            // (see the failing test that motivated introducing
+            // FilteredKvdbParitydb in step 8c).
+            let mut subs: HashMap<u8, SimpleMirror> = HashMap::new();
+            subs.insert(
+                BLOCKS_ROUTE_BARE_HEADER,
+                make_filtered_simple(
+                    DBTable::Blocks,
+                    MdbxColumn::BlockHeaders,
+                    blocks_predicate_header,
+                ),
+            );
+            subs.insert(
+                LOCAL_BLOCK_INFO_SUFFIX_BYTE,
+                make_filtered_simple(
+                    DBTable::Blocks,
+                    MdbxColumn::LocalBlockInfo,
+                    blocks_predicate_local_info,
+                ),
+            );
+            subs.insert(
+                BLOCK_BODY_SUFFIX_BYTE,
+                make_filtered_simple(
+                    DBTable::Blocks,
+                    MdbxColumn::BlockBodies,
+                    blocks_predicate_body,
+                ),
+            );
+            subs.insert(
+                BLOCK_EXECUTION_RESULT_SUFFIX_BYTE,
+                make_filtered_simple(
+                    DBTable::Blocks,
+                    MdbxColumn::BlockExecutionResult,
+                    blocks_predicate_exec_result,
+                ),
+            );
+            subs.insert(
+                EPOCH_EXECUTION_CONTEXT_SUFFIX_BYTE,
+                make_filtered_simple(
+                    DBTable::Blocks,
+                    MdbxColumn::EpochExecutionContext,
+                    blocks_predicate_epoch_exec_ctx,
+                ),
+            );
+            subs.insert(
+                EPOCH_CONSENSUS_EXECUTION_INFO_SUFFIX_BYTE,
+                make_filtered_simple(
+                    DBTable::Blocks,
+                    MdbxColumn::BlockExecutionCommitment,
+                    blocks_predicate_epoch_exec_commitment,
+                ),
+            );
+            subs.insert(
+                BLOCK_REWARD_RESULT_SUFFIX_BYTE,
+                make_filtered_simple(
+                    DBTable::Blocks,
+                    MdbxColumn::BlockRewards,
+                    blocks_predicate_reward,
+                ),
+            );
+            mirrors.insert(
+                DBTable::Blocks,
+                MirrorEntry::Compound(CompoundMirror {
+                    subs,
+                    route: blocks_route,
+                    table_name: "Blocks",
+                }),
             );
         }
         mirrors
@@ -1211,6 +1427,7 @@ mod shadow_routing_tests {
             tx_index: true,
             blamed_header_verified_roots: true,
             block_traces: true,
+            blocks: true,
         };
         let (mgr, _pdb, _mdbx, _env) = build_manager(flags, false);
         assert!(!mgr.has_active_shadow_mirrors());
@@ -1250,6 +1467,7 @@ mod shadow_routing_tests {
             tx_index: true,
             blamed_header_verified_roots: true,
             block_traces: true,
+            blocks: false,
         };
         let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
         let mut reports = mgr.verify_all_shadow_parity().unwrap();
@@ -1331,5 +1549,136 @@ mod shadow_routing_tests {
         assert!(r.is_matched(), "report: {:?}", r);
         assert_eq!(r.primary_count, 0);
         assert_eq!(r.shadow_count, 0);
+    }
+
+    /// The `Blocks` compound router: bare 32B keys ⇒ headers
+    /// column; suffixed keys ⇒ the sub-column named by the suffix
+    /// byte. Pure-function level test — proves the routing before
+    /// the CompoundMirror even touches disk. If this ever breaks
+    /// silently, every downstream Blocks assertion falls over.
+    #[test]
+    fn blocks_router_shape() {
+        // 32B hash → header route (0).
+        let hash = [0xAB_u8; 32];
+        assert_eq!(blocks_route(&hash), BLOCKS_ROUTE_BARE_HEADER);
+
+        // Hash + each known suffix byte → that suffix.
+        for suffix in [
+            LOCAL_BLOCK_INFO_SUFFIX_BYTE,
+            BLOCK_BODY_SUFFIX_BYTE,
+            BLOCK_EXECUTION_RESULT_SUFFIX_BYTE,
+            EPOCH_EXECUTION_CONTEXT_SUFFIX_BYTE,
+            EPOCH_CONSENSUS_EXECUTION_INFO_SUFFIX_BYTE,
+            BLOCK_REWARD_RESULT_SUFFIX_BYTE,
+        ] {
+            let mut suffixed = hash.to_vec();
+            suffixed.push(suffix);
+            assert_eq!(
+                blocks_route(&suffixed),
+                suffix,
+                "suffix {:#x}",
+                suffix
+            );
+        }
+    }
+
+    /// End-to-end: Blocks flag on ⇒ 7 sub-mirrors installed.
+    /// verify_all_shadow_parity emits one report per sub-column,
+    /// with distinct table names — 7 different `MdbxColumn`s, all
+    /// initially empty and matched.
+    #[test]
+    fn blocks_compound_all_seven_subs_present() {
+        let flags = MdbxShadowFlags {
+            blocks: true,
+            ..MdbxShadowFlags::default()
+        };
+        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
+
+        let mut reports = mgr.verify_all_shadow_parity().unwrap();
+        reports.sort_by(|a, b| a.table.cmp(b.table));
+        let names: Vec<&str> =
+            reports.iter().map(|r| r.table).collect();
+        assert_eq!(
+            names,
+            vec![
+                "BlockBodies",
+                "BlockExecutionCommitment",
+                "BlockExecutionResult",
+                "BlockHeaders",
+                "BlockRewards",
+                "EpochExecutionContext",
+                "LocalBlockInfo",
+            ],
+            "report table names"
+        );
+        // Every sub matched with zero entries.
+        for r in &reports {
+            assert!(r.is_matched(), "sub {:?} diverged", r.table);
+            assert_eq!(r.primary_count, 0);
+            assert_eq!(r.shadow_count, 0);
+        }
+    }
+
+    /// The compound router really does dispatch writes to distinct
+    /// sub-columns: after inserting a header (bare) and a body
+    /// (suffix 2) for the same block hash, we see exactly one
+    /// entry in BlockHeaders and one in BlockBodies. Also proves
+    /// that reads still answer from the primary path.
+    #[test]
+    fn blocks_compound_header_and_body_dispatch() {
+        let flags = MdbxShadowFlags {
+            blocks: true,
+            ..MdbxShadowFlags::default()
+        };
+        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
+
+        // Insert a header (bare 32B key) and one body via the
+        // DBManager public API — the same code paths the
+        // executor commit path drives on a live node.
+        let header = BlockHeaderBuilder::new().build();
+        mgr.insert_block_header_to_db(&header);
+        let body_block: Block = Block::new(header.clone(), Vec::new());
+        mgr.insert_block_body_to_db(&body_block);
+
+        let mut reports = mgr.verify_all_shadow_parity().unwrap();
+        reports.sort_by(|a, b| a.table.cmp(b.table));
+
+        // The two sub-columns we wrote to should hold one entry
+        // each; the other five sub-columns stay empty. Every
+        // report matched.
+        for r in &reports {
+            assert!(
+                r.is_matched(),
+                "sub {:?} diverged: {:?}",
+                r.table,
+                r
+            );
+            match r.table {
+                "BlockHeaders" | "BlockBodies" => {
+                    assert_eq!(
+                        r.primary_count, 1,
+                        "sub {} primary count",
+                        r.table
+                    );
+                    assert_eq!(
+                        r.shadow_count, 1,
+                        "sub {} shadow count",
+                        r.table
+                    );
+                }
+                _ => {
+                    assert_eq!(
+                        r.primary_count, 0,
+                        "sub {} primary count",
+                        r.table
+                    );
+                    assert_eq!(
+                        r.shadow_count, 0,
+                        "sub {} shadow count",
+                        r.table
+                    );
+                }
+            }
+        }
     }
 }

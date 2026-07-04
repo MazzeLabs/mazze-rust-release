@@ -369,6 +369,13 @@ build_config! {
         // nodes with tracing enabled; a no-op on miners and full-
         // fast).
         (enable_mdbx_shadow_block_traces, (bool), false)
+        // Compound flag: DBTable::Blocks fans out to 7 shadow
+        // sub-columns (headers, local info, bodies, exec results,
+        // exec contexts, exec commitments, rewards). Highest
+        // write volume of the migration — enable last, after the
+        // single-purpose flags have shown clean parity for a
+        // full era.
+        (enable_mdbx_shadow_blocks, (bool), false)
         (print_memory_usage_period_s, (Option<u64>), None)
         (target_block_gas_limit, (u64), DEFAULT_TARGET_BLOCK_GAS_LIMIT)
         (executive_trace, (bool), false)
@@ -1281,6 +1288,9 @@ impl Configuration {
             enable_mdbx_shadow_block_traces: self
                 .raw_conf
                 .enable_mdbx_shadow_block_traces,
+            enable_mdbx_shadow_blocks: self
+                .raw_conf
+                .enable_mdbx_shadow_blocks,
         };
 
         // By default, we do not keep the block data for additional period,

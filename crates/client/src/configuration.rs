@@ -376,6 +376,11 @@ build_config! {
         // single-purpose flags have shown clean parity for a
         // full era.
         (enable_mdbx_shadow_blocks, (bool), false)
+        // Compound flag: DBTable::EpochNumbers fans out to 2
+        // shadow sub-columns (EpochBlocks for executed sets,
+        // EpochSkippedBlockSet for skipped). Moderate write
+        // volume — one per executed epoch.
+        (enable_mdbx_shadow_epoch_numbers, (bool), false)
         (print_memory_usage_period_s, (Option<u64>), None)
         (target_block_gas_limit, (u64), DEFAULT_TARGET_BLOCK_GAS_LIMIT)
         (executive_trace, (bool), false)
@@ -1291,6 +1296,9 @@ impl Configuration {
             enable_mdbx_shadow_blocks: self
                 .raw_conf
                 .enable_mdbx_shadow_blocks,
+            enable_mdbx_shadow_epoch_numbers: self
+                .raw_conf
+                .enable_mdbx_shadow_epoch_numbers,
         };
 
         // By default, we do not keep the block data for additional period,

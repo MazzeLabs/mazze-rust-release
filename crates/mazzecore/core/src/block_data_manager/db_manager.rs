@@ -119,6 +119,26 @@ fn blocks_predicate_reward(k: &[u8]) -> bool {
         && *k.last().unwrap() == BLOCK_REWARD_RESULT_SUFFIX_BYTE
 }
 
+/// Route a `DBTable::EpochNumbers` write. Both sub-tables share a
+/// 9-byte key shape (`epoch_u64_le | suffix_byte`), so routing is
+/// just "look at the last byte". Executed / skipped are the only
+/// two legal suffixes.
+fn epoch_numbers_route(k: &[u8]) -> u8 {
+    debug_assert_eq!(
+        k.len(),
+        9,
+        "epoch_numbers_route: unexpected key length"
+    );
+    *k.last().expect("epoch_numbers_route: empty key")
+}
+
+fn epoch_numbers_predicate_executed(k: &[u8]) -> bool {
+    k.len() == 9 && *k.last().unwrap() == EPOCH_EXECUTED_BLOCK_SET_SUFFIX_BYTE
+}
+fn epoch_numbers_predicate_skipped(k: &[u8]) -> bool {
+    k.len() == 9 && *k.last().unwrap() == EPOCH_SKIPPED_BLOCK_SET_SUFFIX_BYTE
+}
+
 #[derive(Clone, Copy, Debug, Hash, Ord, PartialOrd, Eq, PartialEq, EnumIter)]
 pub enum DBTable {
     Misc,
@@ -162,6 +182,13 @@ pub struct MdbxShadowFlags {
     /// live fleet — once every other single-purpose mirror has
     /// shown clean parity for a full era.
     pub blocks: bool,
+    /// Storage Phase 2 step 8d: shadow-mirror the `EpochNumbers`
+    /// compound DBTable — 2 sub-mirrors, one per key suffix:
+    /// `0x06` = executed epoch set (→ `MdbxColumn::EpochBlocks`)
+    /// and `0x07` = skipped epoch set (→
+    /// `MdbxColumn::EpochSkippedBlockSet`). Once per executed
+    /// epoch on the write path — moderate volume.
+    pub epoch_numbers: bool,
 }
 
 /// Per-table shadow-mirror metrics registered under the
@@ -613,6 +640,36 @@ impl DBManager {
                     subs,
                     route: blocks_route,
                     table_name: "Blocks",
+                }),
+            );
+        }
+        if flags.epoch_numbers {
+            // 2 sub-mirrors — executed + skipped. Same
+            // FilteredKvdbParitydb pattern as Blocks so each sub
+            // audits only the slice of COL_EPOCH_NUMBER it owns.
+            let mut subs: HashMap<u8, SimpleMirror> = HashMap::new();
+            subs.insert(
+                EPOCH_EXECUTED_BLOCK_SET_SUFFIX_BYTE,
+                make_filtered_simple(
+                    DBTable::EpochNumbers,
+                    MdbxColumn::EpochBlocks,
+                    epoch_numbers_predicate_executed,
+                ),
+            );
+            subs.insert(
+                EPOCH_SKIPPED_BLOCK_SET_SUFFIX_BYTE,
+                make_filtered_simple(
+                    DBTable::EpochNumbers,
+                    MdbxColumn::EpochSkippedBlockSet,
+                    epoch_numbers_predicate_skipped,
+                ),
+            );
+            mirrors.insert(
+                DBTable::EpochNumbers,
+                MirrorEntry::Compound(CompoundMirror {
+                    subs,
+                    route: epoch_numbers_route,
+                    table_name: "EpochNumbers",
                 }),
             );
         }
@@ -1428,6 +1485,7 @@ mod shadow_routing_tests {
             blamed_header_verified_roots: true,
             block_traces: true,
             blocks: true,
+            epoch_numbers: true,
         };
         let (mgr, _pdb, _mdbx, _env) = build_manager(flags, false);
         assert!(!mgr.has_active_shadow_mirrors());
@@ -1468,6 +1526,7 @@ mod shadow_routing_tests {
             blamed_header_verified_roots: true,
             block_traces: true,
             blocks: false,
+            epoch_numbers: false,
         };
         let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
         let mut reports = mgr.verify_all_shadow_parity().unwrap();
@@ -1680,5 +1739,91 @@ mod shadow_routing_tests {
                 }
             }
         }
+    }
+
+    /// EpochNumbers compound router — both sub-tables share a
+    /// 9-byte `(epoch_u64_le | suffix_byte)` key shape, routing
+    /// is just the last byte.
+    #[test]
+    fn epoch_numbers_router_shape() {
+        let mut executed_key = [0u8; 9];
+        executed_key[8] = EPOCH_EXECUTED_BLOCK_SET_SUFFIX_BYTE;
+        assert_eq!(
+            epoch_numbers_route(&executed_key),
+            EPOCH_EXECUTED_BLOCK_SET_SUFFIX_BYTE
+        );
+
+        let mut skipped_key = [0u8; 9];
+        skipped_key[8] = EPOCH_SKIPPED_BLOCK_SET_SUFFIX_BYTE;
+        assert_eq!(
+            epoch_numbers_route(&skipped_key),
+            EPOCH_SKIPPED_BLOCK_SET_SUFFIX_BYTE
+        );
+    }
+
+    /// EpochNumbers flag on ⇒ two sub-mirrors installed
+    /// (EpochBlocks + EpochSkippedBlockSet).
+    #[test]
+    fn epoch_numbers_compound_both_subs_present() {
+        let flags = MdbxShadowFlags {
+            epoch_numbers: true,
+            ..MdbxShadowFlags::default()
+        };
+        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
+        let mut reports = mgr.verify_all_shadow_parity().unwrap();
+        reports.sort_by(|a, b| a.table.cmp(b.table));
+        let names: Vec<&str> =
+            reports.iter().map(|r| r.table).collect();
+        assert_eq!(names, vec!["EpochBlocks", "EpochSkippedBlockSet"]);
+        for r in &reports {
+            assert!(r.is_matched(), "sub {:?}", r.table);
+            assert_eq!(r.primary_count, 0);
+            assert_eq!(r.shadow_count, 0);
+        }
+    }
+
+    /// Executed and skipped writes route to distinct sub-mirrors.
+    /// After inserting each once, the EpochBlocks and
+    /// EpochSkippedBlockSet sub-columns each carry one entry;
+    /// verify_all_shadow_parity reports matched for both.
+    #[test]
+    fn epoch_numbers_dispatches_executed_and_skipped() {
+        let flags = MdbxShadowFlags {
+            epoch_numbers: true,
+            ..MdbxShadowFlags::default()
+        };
+        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
+
+        let exec_hashes = vec![
+            "3333333333333333333333333333333333333333333333333333333333333333"
+                .parse::<H256>()
+                .unwrap(),
+        ];
+        let skip_hashes = vec![
+            "4444444444444444444444444444444444444444444444444444444444444444"
+                .parse::<H256>()
+                .unwrap(),
+        ];
+        mgr.insert_executed_epoch_set_hashes_to_db(11, &exec_hashes);
+        mgr.insert_skipped_epoch_set_hashes_to_db(11, &skip_hashes);
+
+        let mut reports = mgr.verify_all_shadow_parity().unwrap();
+        reports.sort_by(|a, b| a.table.cmp(b.table));
+        assert_eq!(reports.len(), 2);
+        for r in &reports {
+            assert!(r.is_matched(), "sub {:?}", r);
+            assert_eq!(r.primary_count, 1, "sub {} primary", r.table);
+            assert_eq!(r.shadow_count, 1, "sub {} shadow", r.table);
+        }
+
+        // Reads still answer from the primary.
+        assert_eq!(
+            mgr.executed_epoch_set_hashes_from_db(11),
+            Some(exec_hashes)
+        );
+        assert_eq!(
+            mgr.skipped_epoch_set_hashes_from_db(11),
+            Some(skip_hashes)
+        );
     }
 }

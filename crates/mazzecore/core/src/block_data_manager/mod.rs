@@ -269,6 +269,8 @@ impl BlockDataManager {
                     .enable_mdbx_shadow_blamed_header_verified_roots,
                 block_traces: config.enable_mdbx_shadow_block_traces,
                 blocks: config.enable_mdbx_shadow_blocks,
+                epoch_numbers: config
+                    .enable_mdbx_shadow_epoch_numbers,
             },
         );
         let previous_db_progress =
@@ -1992,6 +1994,12 @@ pub struct DataManagerConfiguration {
     /// single-purpose mirrors have shown clean parity for at
     /// least a full era. Default `false`.
     pub enable_mdbx_shadow_blocks: bool,
+    /// Storage Phase 2 step 8d: shadow-mirror
+    /// `DBTable::EpochNumbers`. Compound flag — 2 sub-columns
+    /// (`EpochBlocks` for executed sets, `EpochSkippedBlockSet`
+    /// for skipped). Moderate write volume (one per executed
+    /// epoch). Default `false`.
+    pub enable_mdbx_shadow_epoch_numbers: bool,
 }
 
 impl MallocSizeOf for DataManagerConfiguration {
@@ -2024,6 +2032,7 @@ impl DataManagerConfiguration {
             enable_mdbx_shadow_blamed_header_verified_roots: false,
             enable_mdbx_shadow_block_traces: false,
             enable_mdbx_shadow_blocks: false,
+            enable_mdbx_shadow_epoch_numbers: false,
         }
     }
 }

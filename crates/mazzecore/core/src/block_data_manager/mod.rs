@@ -271,6 +271,7 @@ impl BlockDataManager {
                 blocks: config.enable_mdbx_shadow_blocks,
                 epoch_numbers: config
                     .enable_mdbx_shadow_epoch_numbers,
+                misc: config.enable_mdbx_shadow_misc,
             },
         );
         let previous_db_progress =
@@ -2000,6 +2001,12 @@ pub struct DataManagerConfiguration {
     /// for skipped). Moderate write volume (one per executed
     /// epoch). Default `false`.
     pub enable_mdbx_shadow_epoch_numbers: bool,
+    /// Storage Phase 2 step 8e: shadow-mirror `DBTable::Misc`.
+    /// Single MdbxColumn::Misc — the keyspace is small and
+    /// heterogeneous, so no per-key split. Very low write
+    /// volume (checkpoint bumps + rare metadata). Default
+    /// `false`.
+    pub enable_mdbx_shadow_misc: bool,
 }
 
 impl MallocSizeOf for DataManagerConfiguration {
@@ -2033,6 +2040,7 @@ impl DataManagerConfiguration {
             enable_mdbx_shadow_block_traces: false,
             enable_mdbx_shadow_blocks: false,
             enable_mdbx_shadow_epoch_numbers: false,
+            enable_mdbx_shadow_misc: false,
         }
     }
 }

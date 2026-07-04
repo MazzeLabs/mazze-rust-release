@@ -381,6 +381,11 @@ build_config! {
         // EpochSkippedBlockSet for skipped). Moderate write
         // volume — one per executed epoch.
         (enable_mdbx_shadow_epoch_numbers, (bool), false)
+        // Simple flag: DBTable::Misc → MdbxColumn::Misc.
+        // Heterogeneous keyspace, deliberately not split further.
+        // Very low write volume (checkpoint bumps + rare
+        // metadata).
+        (enable_mdbx_shadow_misc, (bool), false)
         (print_memory_usage_period_s, (Option<u64>), None)
         (target_block_gas_limit, (u64), DEFAULT_TARGET_BLOCK_GAS_LIMIT)
         (executive_trace, (bool), false)
@@ -1299,6 +1304,9 @@ impl Configuration {
             enable_mdbx_shadow_epoch_numbers: self
                 .raw_conf
                 .enable_mdbx_shadow_epoch_numbers,
+            enable_mdbx_shadow_misc: self
+                .raw_conf
+                .enable_mdbx_shadow_misc,
         };
 
         // By default, we do not keep the block data for additional period,

@@ -189,6 +189,15 @@ pub struct MdbxShadowFlags {
     /// `MdbxColumn::EpochSkippedBlockSet`). Once per executed
     /// epoch on the write path — moderate volume.
     pub epoch_numbers: bool,
+    /// Storage Phase 2 step 8e: shadow-mirror the `Misc`
+    /// DBTable. Heterogeneous single-key metadata (`checkpoint`,
+    /// `checkpoint_epoch`, `instance`, `block_terminals`,
+    /// `gc_progress`) — treated as a single MDBX column
+    /// (`MdbxColumn::Misc`) rather than fan-out because the
+    /// keyspace is small and dashboards don't need per-key
+    /// breakdown. Very low write volume — a `checkpoint` bump
+    /// every ~30 s and rare metadata updates otherwise.
+    pub misc: bool,
 }
 
 /// Per-table shadow-mirror metrics registered under the
@@ -641,6 +650,16 @@ impl DBManager {
                     route: blocks_route,
                     table_name: "Blocks",
                 }),
+            );
+        }
+        if flags.misc {
+            // Single mirror — Misc's key domain is small and
+            // heterogeneous; no per-key column split. Uses the
+            // same Simple pattern as HashByBlockNumber /
+            // TxIndex etc, just aimed at MdbxColumn::Misc.
+            mirrors.insert(
+                DBTable::Misc,
+                make_entry(DBTable::Misc, MdbxColumn::Misc),
             );
         }
         if flags.epoch_numbers {
@@ -1486,6 +1505,7 @@ mod shadow_routing_tests {
             block_traces: true,
             blocks: true,
             epoch_numbers: true,
+            misc: true,
         };
         let (mgr, _pdb, _mdbx, _env) = build_manager(flags, false);
         assert!(!mgr.has_active_shadow_mirrors());
@@ -1527,6 +1547,7 @@ mod shadow_routing_tests {
             block_traces: true,
             blocks: false,
             epoch_numbers: false,
+            misc: false,
         };
         let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
         let mut reports = mgr.verify_all_shadow_parity().unwrap();
@@ -1825,5 +1846,93 @@ mod shadow_routing_tests {
             mgr.skipped_epoch_set_hashes_from_db(11),
             Some(skip_hashes)
         );
+    }
+
+    /// Misc is a Simple mirror on `MdbxColumn::Misc`. Writing an
+    /// instance id + gc progress + terminals via the DBManager
+    /// public API lands three keys in the primary column and its
+    /// mirror; verify_parity says matched with count 3 on both
+    /// sides.
+    #[test]
+    fn misc_mirror_round_trip() {
+        let flags = MdbxShadowFlags {
+            misc: true,
+            ..MdbxShadowFlags::default()
+        };
+        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
+
+        mgr.insert_instance_id_to_db(0xdead_beef);
+        mgr.insert_gc_progress_to_db(1_000);
+        let terminals = vec![
+            "5555555555555555555555555555555555555555555555555555555555555555"
+                .parse::<H256>()
+                .unwrap(),
+            "6666666666666666666666666666666666666666666666666666666666666666"
+                .parse::<H256>()
+                .unwrap(),
+        ];
+        mgr.insert_terminals_to_db(&terminals);
+
+        let reports = mgr.verify_all_shadow_parity().unwrap();
+        assert_eq!(reports.len(), 1);
+        let r = &reports[0];
+        assert_eq!(r.table, "Misc");
+        assert!(r.is_matched(), "report: {:?}", r);
+        assert_eq!(r.primary_count, 3);
+        assert_eq!(r.shadow_count, 3);
+
+        assert_eq!(mgr.instance_id_from_db(), Some(0xdead_beef));
+        assert_eq!(mgr.gc_progress_from_db(), Some(1_000));
+        assert_eq!(mgr.terminals_from_db(), Some(terminals));
+    }
+
+    /// Every flag on ⇒ every mirror installed. Aggregated audit
+    /// emits the full set of column reports (4 Simple + 7 Blocks
+    /// subs + 2 EpochNumbers subs + 1 Misc = 14) with no
+    /// duplicates. Serves as the pre-fleet-flip smoke test: if
+    /// this passes, every write path Phase 2 targets is under
+    /// audit and ready to be turned on.
+    #[test]
+    fn all_flags_on_covers_full_column_set() {
+        let flags = MdbxShadowFlags {
+            hash_by_block_number: true,
+            tx_index: true,
+            blamed_header_verified_roots: true,
+            block_traces: true,
+            blocks: true,
+            epoch_numbers: true,
+            misc: true,
+        };
+        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
+        let mut reports = mgr.verify_all_shadow_parity().unwrap();
+        reports.sort_by(|a, b| a.table.cmp(b.table));
+        let names: Vec<&str> =
+            reports.iter().map(|r| r.table).collect();
+        assert_eq!(
+            names,
+            vec![
+                "BlamedHeaderVerifiedRoots",
+                "BlockBodies",
+                "BlockExecutionCommitment",
+                "BlockExecutionResult",
+                "BlockHeaders",
+                "BlockRewards",
+                "BlockTraces",
+                "EpochBlocks",
+                "EpochExecutionContext",
+                "EpochSkippedBlockSet",
+                "HashByNumber",
+                "LocalBlockInfo",
+                "Misc",
+                "TxIndex",
+            ],
+            "full mirror set"
+        );
+        // All empty at construction time and matched.
+        for r in &reports {
+            assert!(r.is_matched(), "sub {:?}", r.table);
+            assert_eq!(r.primary_count, 0);
+            assert_eq!(r.shadow_count, 0);
+        }
     }
 }

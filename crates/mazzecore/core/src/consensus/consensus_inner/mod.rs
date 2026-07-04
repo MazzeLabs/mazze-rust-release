@@ -1691,12 +1691,32 @@ impl ConsensusGraphInner {
                     .db_manager
                     .get_current_seed_hash(block_header.height()),
             ));
-        let is_heavy = pow_quality
-            >= U512::from(self.inner_conf.heavy_block_difficulty_ratio)
+        // A heavy/timer block's PoW hash must be small enough to satisfy a
+        // difficulty `ratio` times harder than the block's own. `pow_quality`
+        // is the raw PoW hash as a number — LOWER means more work (verify_pow
+        // accepts a block when `quality <= difficulty_to_boundary(difficulty)`,
+        // i.e. `hash <= 2^256 / difficulty`). So a heavy/timer block is one
+        // whose hash clears the tighter boundary `2^256 / (ratio *
+        // difficulty)`, and the test is `<=`, not `>=`.
+        //
+        // The previous `pow_quality >= ratio * difficulty` compared a ~2^256
+        // hash against a tiny value (~ratio*difficulty, e.g. 180*47) and was
+        // therefore true for essentially EVERY block — flagging all blocks as
+        // timer/heavy and saturating the timer chain (mazze_isTimerBlock
+        // returned true for 100% of blocks, and the timer-chain anchor that
+        // gates checkpoint formation lost all meaning). Done in U512 to avoid
+        // overflow when `ratio * difficulty` is large.
+        let pow_max = U512::one() << 256; // 2^256
+        let heavy_target =
+            U512::from(self.inner_conf.heavy_block_difficulty_ratio)
                 * U512::from(block_header.difficulty());
-        let is_timer = pow_quality
-            >= U512::from(self.inner_conf.timer_chain_block_difficulty_ratio)
+        let is_heavy =
+            !heavy_target.is_zero() && pow_quality <= pow_max / heavy_target;
+        let timer_target =
+            U512::from(self.inner_conf.timer_chain_block_difficulty_ratio)
                 * U512::from(block_header.difficulty());
+        let is_timer =
+            !timer_target.is_zero() && pow_quality <= pow_max / timer_target;
 
         let parent =
             if hash != self.data_man.get_cur_consensus_era_genesis_hash() {

@@ -9,7 +9,8 @@ use mazze_types::{Space, H160, H256, U256, U64};
 use mazzecore::{
     block_data_manager::{BlockDataManager, DataVersionTuple},
     consensus::{ConsensusConfig, ConsensusGraphInner},
-    pow, ConsensusGraphTrait, SharedConsensusGraph,
+    pow, verification::VerificationConfig, ConsensusGraphTrait,
+    SharedConsensusGraph,
 };
 use primitives::{
     Block as PrimitiveBlock, BlockHeader as PrimitiveBlockHeader,
@@ -314,10 +315,21 @@ impl Block {
                 .into(),
             timestamp: b.block_header.timestamp().into(),
             difficulty: b.block_header.difficulty().clone().into(),
-            pow_quality: b
-                .block_header
-                .pow_hash
-                .map(|h| pow::pow_hash_to_quality(&h, &b.block_header.nonce())),
+            // Recompute the PoW quality: the transient `pow_hash` is not
+            // persisted, so blocks read from the DB carried None and
+            // `powQuality` was always null. `get_or_compute_header_pow_quality`
+            // returns the cached hash when present and otherwise recomputes it
+            // via the node's existing RandomX context (light-cache verify path,
+            // ~ms) using the epoch seed.
+            pow_quality: Some(
+                VerificationConfig::get_or_compute_header_pow_quality(
+                    &consensus_inner.pow,
+                    &b.block_header,
+                    &data_man
+                        .db_manager
+                        .get_current_seed_hash(b.block_header.height()),
+                ),
+            ),
             adaptive: b.block_header.adaptive(),
             referee_hashes: b
                 .block_header

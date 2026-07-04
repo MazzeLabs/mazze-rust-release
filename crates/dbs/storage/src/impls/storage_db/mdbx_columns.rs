@@ -539,14 +539,80 @@ pub enum Column {
     /// stored one and refuses to open the DB if they diverge (early
     /// signal of a config drift, not a silent fork).
     GenesisMetadata = 43,
+
+    // ------------------------------------------------------------------
+    // 11. Compound-table dispatch (Phase 2 step 8)
+    // ------------------------------------------------------------------
+    //
+    // In the ParityDB layout the DBManager multiplexes several logical
+    // tables into a single physical column via key-suffix bytes: e.g.
+    // `COL_BLOCKS` holds block headers (bare 32B key), local block
+    // info (suffix 0x01), block bodies (0x02), block execution results
+    // (0x03), epoch execution contexts (0x04), epoch execution
+    // commitments (already carved out as `BlockExecutionCommitment`
+    // above), and block reward results (0x08). Storage Phase 2 step 8
+    // splits every one of those logical sub-tables into its own MDBX
+    // column so post-cutover metrics, stats, and range pruning work
+    // per logical table instead of on the multiplexed blob.
+
+    /// **`LocalBlockInfo`** —
+    /// `block_hash (32B) → LocalBlockInfo (RLP)`.
+    ///
+    /// Per-block metadata stored alongside the block:
+    /// `{ status, instance_id, seq_num }`. In ParityDB this rode
+    /// inside `COL_BLOCKS` under suffix byte `0x01`; here it gets its
+    /// own column so `size_of`/`stats()` reflect its footprint
+    /// distinctly from the header/body payload.
+    LocalBlockInfo = 44,
+
+    /// **`BlockExecutionResult`** —
+    /// `block_hash (32B) → BlockExecutionResult (RLP)`.
+    ///
+    /// The per-block execution artefact: `{ receipts,
+    /// bloom, block_number, epoch_number }`. Distinct from
+    /// [`BlockReceipts`] in the current data model — receipts are
+    /// per-tx logs, whereas `BlockExecutionResult` is the block-
+    /// level bundle produced by the executor. In ParityDB this was
+    /// `COL_BLOCKS` under suffix byte `0x03`.
+    BlockExecutionResult = 45,
+    /// **`EpochExecutionContext`** —
+    /// `pivot_block_hash (32B) → EpochExecutionContext (RLP)`.
+    ///
+    /// Executor input context for the epoch pivoted on this hash:
+    /// which blocks contribute to the epoch, ordering, referee set,
+    /// timing metadata. In ParityDB this was `COL_BLOCKS` under
+    /// suffix byte `0x04`.
+    EpochExecutionContext = 46,
+
+    /// **`EpochSkippedBlockSet`** —
+    /// `epoch (u64 LE) → Vec<block_hash> (RLP)`.
+    ///
+    /// The set of blocks that landed in the epoch but were NOT
+    /// executed (skipped). Complement to [`EpochBlocks`] (the
+    /// executed set). In ParityDB this rode inside
+    /// `COL_EPOCH_NUMBER` under suffix byte `0x07`.
+    EpochSkippedBlockSet = 47,
+
+    /// **`Misc`** — heterogeneous single-key metadata.
+    ///
+    /// Mirrors ParityDB `COL_MISC` 1:1: a small set of stable keys
+    /// (`checkpoint`, `checkpoint_epoch`, `instance`,
+    /// `block_terminals`, `gc_progress`) each with its own value
+    /// shape. Deliberately NOT split further — the keyspace is too
+    /// heterogeneous and too small to benefit from per-key columns;
+    /// operators care about "did Misc get written this epoch?" not
+    /// "which Misc sub-key changed". Kept as its own column instead
+    /// of merging into [`ChainMetadata`] so a future decision to
+    /// carve it up doesn't rewrite consumer code.
+    Misc = 48,
 }
 
 /// Total number of MDBX columns. Update on adding a variant.
 ///
 /// The `KvdbMdbx` env is created with `set_max_tables(64)` (see
-/// [`DEFAULT_MAX_TABLES`](super::kvdb_mdbx)); we have headroom for
-/// ~20 more logical tables before that cap becomes a concern.
-pub const NUM_COLUMNS: u32 = 44;
+/// [`DEFAULT_MAX_TABLES`](super::kvdb_mdbx)); ~15 slots remain
+/// after Phase 2 step 8.
+pub const NUM_COLUMNS: u32 = 49;
 
 impl Column {
     /// The stable `u32` id assigned to this column. `#[repr(u32)]` on
@@ -604,6 +670,11 @@ impl Column {
         Column::TopicTouchedBitmap,
         Column::RewardWindowMetadata,
         Column::GenesisMetadata,
+        Column::LocalBlockInfo,
+        Column::BlockExecutionResult,
+        Column::EpochExecutionContext,
+        Column::EpochSkippedBlockSet,
+        Column::Misc,
     ];
 
     /// Human-readable name — same as the variant identifier, hoisted
@@ -654,6 +725,11 @@ impl Column {
             Column::TopicTouchedBitmap => "TopicTouchedBitmap",
             Column::RewardWindowMetadata => "RewardWindowMetadata",
             Column::GenesisMetadata => "GenesisMetadata",
+            Column::LocalBlockInfo => "LocalBlockInfo",
+            Column::BlockExecutionResult => "BlockExecutionResult",
+            Column::EpochExecutionContext => "EpochExecutionContext",
+            Column::EpochSkippedBlockSet => "EpochSkippedBlockSet",
+            Column::Misc => "Misc",
         }
     }
 }

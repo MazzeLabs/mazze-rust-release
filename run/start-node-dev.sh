@@ -86,6 +86,18 @@ set_kv "mining_type" "\"disable\""
 set_kv "jsonrpc_local_http_port" "12539"
 set_kv "genesis_secrets" "\"$ABS_GENESIS_SECRETS\""
 set_kv "mazze_data_dir" "\"$DATA_DIR\""
+
+# Storage Phase 2 — turn on every shadow mirror the migration ships
+# with, so a local dev node exercises the same write path the fleet
+# will after Phase 3 flips reads over. Adjust to `false` if you're
+# reproducing an issue that pre-dates a specific flag.
+set_kv "enable_mdbx_shadow_hash_by_number" "true"
+set_kv "enable_mdbx_shadow_tx_index" "true"
+set_kv "enable_mdbx_shadow_blamed_header_verified_roots" "true"
+set_kv "enable_mdbx_shadow_block_traces" "true"
+set_kv "enable_mdbx_shadow_blocks" "true"
+set_kv "enable_mdbx_shadow_epoch_numbers" "true"
+set_kv "enable_mdbx_shadow_misc" "true"
 has_chain_data() {
   local base="$1"
   if compgen -G "$base/blockchain_db/*" > /dev/null; then

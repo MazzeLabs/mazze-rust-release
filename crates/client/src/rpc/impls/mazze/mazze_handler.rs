@@ -1859,30 +1859,29 @@ impl RpcImpl {
     ) -> JsonRpcResult<Vec<MdbxShadowParityReport>> {
         debug!("debug_mdbxShadowVerifyParity");
         let data_man = self.consensus.get_data_manager();
-        let mirrors = data_man.db_manager.mdbx_shadow_mirrors();
-        if mirrors.is_empty() {
+        if !data_man.db_manager.has_active_shadow_mirrors() {
             // No shadow flags on / MDBX unavailable — return an
             // empty vec so the operator dashboard can distinguish
             // "no mirror" from "one report with is_matched=true".
             return Ok(Vec::new());
         }
-        // Sort by MdbxColumn name for a stable RPC response — the
-        // HashMap iteration order is unspecified and dashboards
-        // want a deterministic table order.
-        let mut reports: Vec<MdbxShadowParityReport> = mirrors
-            .into_iter()
-            .map(|(_table, mirror)| {
-                mirror.verify_parity().map(
-                    MdbxShadowParityReport::from_storage_report,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()
+        let raw_reports = data_man
+            .db_manager
+            .verify_all_shadow_parity()
             .map_err(|e| {
                 internal_error_msg(&format!(
                     "mdbx shadow verify_parity failed: {:?}",
                     e
                 ))
             })?;
+        // Sort by MdbxColumn name for a stable RPC response —
+        // dashboards want a deterministic table order across
+        // audits. Compound mirrors emit one report per sub-column,
+        // so this ordering is per-column, not per-DBTable.
+        let mut reports: Vec<MdbxShadowParityReport> = raw_reports
+            .into_iter()
+            .map(MdbxShadowParityReport::from_storage_report)
+            .collect();
         reports.sort_by(|a, b| a.table.cmp(&b.table));
         Ok(reports)
     }

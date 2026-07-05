@@ -588,17 +588,32 @@ impl ConsensusGraph {
             if prices.len() == number_of_tx_to_sample {
                 break;
             }
-            let mut hashes = inner
-                .block_hashes_by_epoch(last_epoch_number.into())
-                .unwrap();
+            // During catch-up the sampled epoch may not be materialized in the
+            // consensus graph yet. The explorer hammers gas-price RPC, so an
+            // `.unwrap()` here panics an http.worker thread on every miss
+            // (observed live: consensus/mod.rs:601 `Option::unwrap() on None`
+            // firing repeatedly while nodes caught up post-relaunch). Stop
+            // sampling gracefully instead — an empty sample falls back to the
+            // default gas price below.
+            let mut hashes =
+                match inner.block_hashes_by_epoch(last_epoch_number.into()) {
+                    Ok(hashes) => hashes,
+                    Err(_) => break,
+                };
             hashes.reverse();
             last_epoch_number -= 1;
 
             for hash in hashes {
-                let block = self
+                // Body may not be present yet (common during catch-up). Skip
+                // this block rather than unwrapping None and killing the RPC
+                // worker.
+                let block = match self
                     .data_man
                     .block_by_hash(&hash, false /* update_cache */)
-                    .unwrap();
+                {
+                    Some(block) => block,
+                    None => continue,
+                };
                 total_block_gas_limit +=
                     block.block_header.gas_limit().as_u64() * block_gas_ratio;
                 for tx in block.transactions.iter() {

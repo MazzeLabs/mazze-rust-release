@@ -997,13 +997,30 @@ impl SynchronizationPhaseTrait for NormalSyncPhase {
         &self, _io: &dyn NetworkContext,
         sync_handler: &SynchronizationProtocolHandler,
     ) -> SyncPhaseType {
+        let best_epoch = sync_handler.graph.consensus.best_epoch_number();
         if let Some(median_epoch) =
             sync_handler.syn.median_epoch_from_normal_peers()
         {
-            if sync_handler.graph.consensus.best_epoch_number()
-                + CATCH_UP_EPOCH_LAG_THRESHOLD
-                < median_epoch
-            {
+            if best_epoch + CATCH_UP_EPOCH_LAG_THRESHOLD < median_epoch {
+                sync_handler.graph.consensus.leave_normal_phase();
+                return SyncPhaseType::CatchUpSyncBlock;
+            }
+        } else if let Some(all_median) =
+            sync_handler.syn.median_epoch_from_all_peers()
+        {
+            // premature-Normal safety net. The primary signal above only
+            // considers peers advertising Normal phase; when none do (mesh
+            // split, or all peers are themselves catching up) it returns
+            // `None` and we would sit wedged in Normal forever even while far
+            // behind the network. Fall back to the median `best_epoch` across
+            // ALL peers: if we are meaningfully behind it, we either exited to
+            // Normal prematurely or fell behind after a split, and must resume
+            // catch-up. Re-entering is self-correcting — if we are actually up
+            // to date, CatchUpSyncBlock exits straight back to Normal — so the
+            // asymmetry (cheap false catch-up vs. catastrophic permanent
+            // divergence) is deliberately biased toward recovery. Median keeps
+            // one lying peer from trapping us.
+            if best_epoch + CATCH_UP_EPOCH_LAG_THRESHOLD < all_median {
                 sync_handler.graph.consensus.leave_normal_phase();
                 return SyncPhaseType::CatchUpSyncBlock;
             }

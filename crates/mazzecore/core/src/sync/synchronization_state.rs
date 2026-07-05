@@ -271,6 +271,36 @@ impl SynchronizationState {
                 Some(max) => Some(if x > max { x } else { max }),
             })
     }
+
+    /// Median `best_epoch` across ALL connected peers, regardless of phase.
+    ///
+    /// Unlike [`median_epoch_from_normal_peers`], this does NOT require peers
+    /// to advertise `NormalPhase(true)`. It exists as a safety net for the
+    /// "premature-Normal" wedge: when a node has fallen far behind the network
+    /// but none of its peers advertise Normal phase (mesh split, or the peers
+    /// are themselves catching up), `median_epoch_from_normal_peers` returns
+    /// `None` and the node would otherwise sit forever in a premature Normal
+    /// phase, never resuming catch-up (observed live: an archive stranded at
+    /// epoch 130985 while the leader ran to 254052 — a 123k gap that never
+    /// closed). `best_epoch` is tracked for every peer on each Status, so the
+    /// information is always available. Using the MEDIAN (not the max) keeps a
+    /// single lying/forked peer from trapping honest nodes in perpetual
+    /// catch-up. Peers still at epoch 0 (freshly handshaked, no Status yet)
+    /// are excluded so they don't drag the estimate down.
+    pub fn median_epoch_from_all_peers(&self) -> Option<u64> {
+        let mut epochs: Vec<u64> = self
+            .peers
+            .read()
+            .iter()
+            .map(|(_, state)| state.read().best_epoch)
+            .filter(|e| *e != 0)
+            .collect();
+        if epochs.is_empty() {
+            return None;
+        }
+        epochs.sort_unstable();
+        Some(epochs[epochs.len() / 2])
+    }
 }
 
 #[derive(Default)]

@@ -250,6 +250,7 @@ pub use self::{
             mdbx_columns::{Column as MdbxColumn, NUM_COLUMNS as MDBX_NUM_COLUMNS},
             mdbx_dual_write::{
                 DualWritePrimary, DualWriteReport, MdbxShadowMirror,
+                ReadSource,
             },
             snapshot_db_manager_paritydb::SnapshotDbManagerParitydb,
         },

@@ -229,19 +229,106 @@ impl DualWriteReport {
 /// either a `KvdbMdbx` (unit tests) or a `KvdbParitydb` (Phase 2 real
 /// swap) as its primary side. The shadow is always [`KvdbMdbx`].
 ///
+/// Where a mirror's [`MdbxShadowMirror::get`] answers from during
+/// the migration lifecycle. Writes always land on both backends
+/// regardless of this setting; only read routing changes.
+///
+/// - [`ReadSource::Primary`] — original behaviour. Reads answer
+///   from the ParityDB primary; the shadow is write-only. Safe
+///   default while parity is still being validated.
+/// - [`ReadSource::ShadowWithPrimaryFallback`] — read from the
+///   shadow first; on miss, fall back to the primary. This is the
+///   staging mode for Phase 3 read cutover: reads that hit the
+///   shadow ARE using the new hot tier, but any pre-flag key that
+///   never made it to the shadow still resolves via the primary.
+///   Adds one extra MDBX read on every primary hit.
+/// - [`ReadSource::Shadow`] — reads answer only from the shadow.
+///   Cutover complete; the primary is about to be dropped. Any
+///   key not in the shadow will surface as `Ok(None)` — the
+///   caller sees the same absence it would after a wipe.
+///
+/// Kept as an atomic-swappable field so an operator RPC can flip
+/// modes at runtime without a full node restart. See
+/// [`MdbxShadowMirror::set_read_source`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadSource {
+    Primary,
+    ShadowWithPrimaryFallback,
+    Shadow,
+}
+
 /// See module-level doc for the migration flow this enables.
 pub struct MdbxShadowMirror<P: DualWritePrimary> {
     primary: P,
     shadow: KvdbMdbx,
     column: Column,
+    /// Which backend [`Self::get`] answers from. Atomic so that
+    /// concurrent readers observe a coherent single value even
+    /// while an operator is flipping cutover on this table.
+    read_source: std::sync::atomic::AtomicU8,
+}
+
+// Encoding for the atomic: keep u8 stable so future variants
+// slot in without shifting.
+const READ_SOURCE_PRIMARY: u8 = 0;
+const READ_SOURCE_SHADOW_WITH_FALLBACK: u8 = 1;
+const READ_SOURCE_SHADOW: u8 = 2;
+
+fn encode_read_source(r: ReadSource) -> u8 {
+    match r {
+        ReadSource::Primary => READ_SOURCE_PRIMARY,
+        ReadSource::ShadowWithPrimaryFallback => {
+            READ_SOURCE_SHADOW_WITH_FALLBACK
+        }
+        ReadSource::Shadow => READ_SOURCE_SHADOW,
+    }
+}
+fn decode_read_source(v: u8) -> ReadSource {
+    match v {
+        READ_SOURCE_PRIMARY => ReadSource::Primary,
+        READ_SOURCE_SHADOW_WITH_FALLBACK => {
+            ReadSource::ShadowWithPrimaryFallback
+        }
+        READ_SOURCE_SHADOW => ReadSource::Shadow,
+        // Unknown value shouldn't happen (we only write via
+        // encode); default to Primary as the safe fallback.
+        _ => ReadSource::Primary,
+    }
 }
 
 impl<P: DualWritePrimary> MdbxShadowMirror<P> {
     /// Construct a mirror from a primary handle (any
     /// [`DualWritePrimary`] impl), an MDBX shadow column, and the
-    /// [`Column`] identity used to name audit reports.
+    /// [`Column`] identity used to name audit reports. Starts in
+    /// [`ReadSource::Primary`] mode — safe default until parity
+    /// is validated.
     pub fn new(primary: P, shadow: KvdbMdbx, column: Column) -> Self {
-        Self { primary, shadow, column }
+        Self {
+            primary,
+            shadow,
+            column,
+            read_source: std::sync::atomic::AtomicU8::new(
+                READ_SOURCE_PRIMARY,
+            ),
+        }
+    }
+
+    /// Which side [`Self::get`] will currently answer from.
+    pub fn read_source(&self) -> ReadSource {
+        decode_read_source(
+            self.read_source
+                .load(std::sync::atomic::Ordering::Acquire),
+        )
+    }
+
+    /// Atomically flip the read source at runtime. Concurrent
+    /// [`Self::get`] callers observe either the old or the new
+    /// source but never a torn value.
+    pub fn set_read_source(&self, r: ReadSource) {
+        self.read_source.store(
+            encode_read_source(r),
+            std::sync::atomic::Ordering::Release,
+        );
     }
 
     /// Mirror a single-key write to both backends.
@@ -289,10 +376,33 @@ impl<P: DualWritePrimary> MdbxShadowMirror<P> {
         Ok(())
     }
 
-    /// Read via the primary. During the shadow phase this is the
-    /// only path — the shadow is write-only until cutover.
+    /// Read the mirrored key. Where the answer comes from depends
+    /// on [`Self::read_source`]:
+    ///
+    /// - `Primary` — the pre-cutover default; reads only from
+    ///   ParityDB.
+    /// - `ShadowWithPrimaryFallback` — try MDBX first; on a miss
+    ///   fall back to ParityDB. Any key not yet materialized in
+    ///   the shadow still resolves. Cost: one extra MDBX read on
+    ///   every primary hit.
+    /// - `Shadow` — read only from MDBX. Keys not in the shadow
+    ///   return `Ok(None)`, matching the post-wipe view.
+    ///
+    /// Called on the RPC hot path (`load_from_db` in the
+    /// `BlockDataManager`); the atomic load is a single
+    /// unsynchronized memory read.
     pub fn get(&self, k: &[u8]) -> Result<Option<Box<[u8]>>> {
-        self.primary.dw_get(k)
+        use crate::storage_db::key_value_db::KeyValueDbTraitRead;
+        match self.read_source() {
+            ReadSource::Primary => self.primary.dw_get(k),
+            ReadSource::ShadowWithPrimaryFallback => {
+                match self.shadow.get(k)? {
+                    Some(v) => Ok(Some(v)),
+                    None => self.primary.dw_get(k),
+                }
+            }
+            ReadSource::Shadow => self.shadow.get(k),
+        }
     }
 
     /// Walk both backends in full and produce a
@@ -498,6 +608,99 @@ mod tests {
         let report = mirror.verify_parity().unwrap();
         assert!(!report.is_matched());
         assert_eq!(report.value_mismatches.len(), 1);
+    }
+
+    /// Default `read_source` is `Primary` — the safe pre-cutover
+    /// default. Set/get round-trips correctly on every variant.
+    #[test]
+    fn read_source_defaults_to_primary_and_can_flip() {
+        let (_a, _b, mirror) = make_mirror(Column::HashByNumber);
+        assert_eq!(mirror.read_source(), ReadSource::Primary);
+
+        mirror.set_read_source(ReadSource::ShadowWithPrimaryFallback);
+        assert_eq!(
+            mirror.read_source(),
+            ReadSource::ShadowWithPrimaryFallback
+        );
+
+        mirror.set_read_source(ReadSource::Shadow);
+        assert_eq!(mirror.read_source(), ReadSource::Shadow);
+
+        mirror.set_read_source(ReadSource::Primary);
+        assert_eq!(mirror.read_source(), ReadSource::Primary);
+    }
+
+    /// `Shadow` mode reads only from MDBX. A key that only lives
+    /// on the primary — the pre-flag debt case — resolves to
+    /// `Ok(None)`, matching the post-wipe view a fully-cutover
+    /// node will see.
+    #[test]
+    fn read_source_shadow_ignores_primary_only_keys() {
+        let (_a, _b, mirror) = make_mirror(Column::HashByNumber);
+        // Simulate a pre-flag key that landed only on the primary.
+        use crate::storage_db::key_value_db::KeyValueDbTrait;
+        mirror
+            .primary_for_test()
+            .put(b"pre-flag", b"only-primary")
+            .unwrap();
+        mirror.set_read_source(ReadSource::Shadow);
+        assert_eq!(mirror.get(b"pre-flag").unwrap(), None);
+    }
+
+    /// `ShadowWithPrimaryFallback` reads from MDBX when the key
+    /// exists there, and falls back to the primary otherwise —
+    /// the safe staging mode for Phase 3.
+    #[test]
+    fn read_source_shadow_with_fallback_covers_both() {
+        let (_a, _b, mirror) = make_mirror(Column::HashByNumber);
+        // `mirror-key` gets both sides (normal mirror path).
+        mirror.put(b"mirror-key", b"both").unwrap();
+        // `primary-only` simulates pre-flag debt.
+        use crate::storage_db::key_value_db::KeyValueDbTrait;
+        mirror
+            .primary_for_test()
+            .put(b"primary-only", b"only-primary")
+            .unwrap();
+
+        mirror.set_read_source(ReadSource::ShadowWithPrimaryFallback);
+        assert_eq!(
+            mirror.get(b"mirror-key").unwrap().as_deref(),
+            Some(&b"both"[..])
+        );
+        assert_eq!(
+            mirror.get(b"primary-only").unwrap().as_deref(),
+            Some(&b"only-primary"[..])
+        );
+        assert_eq!(mirror.get(b"absent").unwrap(), None);
+    }
+
+    /// `Shadow` mode reads a shadow-only value even if the primary
+    /// disagrees. Verifies the switch really flips: after a flip
+    /// the same `get()` sees the shadow's answer, not primary's.
+    #[test]
+    fn read_source_shadow_reads_shadow_value_after_flip() {
+        let (_a, _b, mirror) = make_mirror(Column::HashByNumber);
+        mirror.put(b"k", b"initial").unwrap();
+
+        // Tamper with the shadow directly (simulates operator
+        // backfill / repair). Primary keeps `initial`.
+        use crate::storage_db::key_value_db::KeyValueDbTrait;
+        mirror
+            .shadow_for_test()
+            .put(b"k", b"repaired-in-shadow")
+            .unwrap();
+
+        // Before flip: primary answer.
+        assert_eq!(
+            mirror.get(b"k").unwrap().as_deref(),
+            Some(&b"initial"[..])
+        );
+        // After flip: shadow answer.
+        mirror.set_read_source(ReadSource::Shadow);
+        assert_eq!(
+            mirror.get(b"k").unwrap().as_deref(),
+            Some(&b"repaired-in-shadow"[..])
+        );
     }
 
     /// A key present only in the primary shows up in

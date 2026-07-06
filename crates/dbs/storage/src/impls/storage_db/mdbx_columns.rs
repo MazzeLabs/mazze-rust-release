@@ -605,14 +605,36 @@ pub enum Column {
     /// of merging into [`ChainMetadata`] so a future decision to
     /// carve it up doesn't rewrite consumer code.
     Misc = 48,
+
+    // ------------------------------------------------------------------
+    // 12. Delta MPTs (Phase 4c native-MDBX)
+    // ------------------------------------------------------------------
+
+    /// **`DeltaMpt`** — per-snapshot delta MPT node storage,
+    /// key-prefixed by `snapshot_epoch_id (32B) | inner_key`.
+    ///
+    /// Under ParityDB, delta MPTs lived in one paritydb env per
+    /// snapshot at `storage_db/delta_mpts/paritydb_<hex_id>/`.
+    /// The Phase 4c migration consolidates them into a single
+    /// shared MDBX column keyed by
+    /// `snapshot_epoch_id (32B) | inner_key`, addressed through
+    /// [`PrefixedKvdbMdbx`](super::prefixed_kvdb_mdbx::
+    /// PrefixedKvdbMdbx). One snapshot's node set is contiguous in
+    /// the B+tree; destroy fires a cursor-driven range delete on
+    /// `[epoch_id, epoch_id + 1)`.
+    ///
+    /// See
+    /// [storage-delta-mpt-migration.md](../../../../../docs/internal/storage-delta-mpt-migration.md)
+    /// for the migration path and cutover story.
+    DeltaMpt = 49,
 }
 
 /// Total number of MDBX columns. Update on adding a variant.
 ///
 /// The `KvdbMdbx` env is created with `set_max_tables(64)` (see
-/// [`DEFAULT_MAX_TABLES`](super::kvdb_mdbx)); ~15 slots remain
-/// after Phase 2 step 8.
-pub const NUM_COLUMNS: u32 = 49;
+/// [`DEFAULT_MAX_TABLES`](super::kvdb_mdbx)); ~14 slots remain
+/// after Phase 4c (`DeltaMpt`).
+pub const NUM_COLUMNS: u32 = 50;
 
 impl Column {
     /// The stable `u32` id assigned to this column. `#[repr(u32)]` on
@@ -675,6 +697,7 @@ impl Column {
         Column::EpochExecutionContext,
         Column::EpochSkippedBlockSet,
         Column::Misc,
+        Column::DeltaMpt,
     ];
 
     /// Human-readable name — same as the variant identifier, hoisted
@@ -730,6 +753,7 @@ impl Column {
             Column::EpochExecutionContext => "EpochExecutionContext",
             Column::EpochSkippedBlockSet => "EpochSkippedBlockSet",
             Column::Misc => "Misc",
+            Column::DeltaMpt => "DeltaMpt",
         }
     }
 }

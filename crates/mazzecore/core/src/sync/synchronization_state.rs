@@ -356,6 +356,10 @@ impl<'a> PeerFilter<'a> {
 
     pub fn select_all(self, syn: &SynchronizationState) -> Vec<NodeId> {
         let mut peers = Vec::new();
+        // Peers that pass every filter EXCEPT `preferred_node_type`. Used only
+        // when no preferred-type peer qualifies — see the soft-preference note
+        // at the end of the loop.
+        let mut fallback = Vec::new();
 
         let check_state = self.throttle_msg_ids.is_some()
             || self.cap.is_some()
@@ -363,11 +367,6 @@ impl<'a> PeerFilter<'a> {
 
         for (id, peer) in syn.peers.read().iter() {
             let peer_node_type = peer.read().node_type.clone();
-            if let Some(ref preferred_node_type) = self.preferred_node_type {
-                if *preferred_node_type != peer_node_type {
-                    continue;
-                }
-            }
 
             if let Some(ref excludes) = self.excludes {
                 if excludes.contains(id) {
@@ -412,10 +411,28 @@ impl<'a> PeerFilter<'a> {
                 }
             }
 
-            peers.push(*id);
+            // Soft preference (was a hard filter): peers matching
+            // `preferred_node_type` go into `peers`; every other qualifying
+            // peer is kept in `fallback` and used ONLY when no preferred-type
+            // peer is available. This fixes an archive-node catch-up wedge —
+            // an archive in CatchUpSyncBlock prefers Archive peers (they keep
+            // pruned history), but the old hard filter meant that when the only
+            // archive peer was itself behind and missing a frontier body, the
+            // request never fell back to the full/full-fast peers that HAD it,
+            // wedging the archive permanently (observed live on m1/m2 while
+            // m3/m5/m6 all held the block). Falling back keeps the old-block
+            // affinity while guaranteeing progress.
+            match self.preferred_node_type {
+                Some(ref pt) if *pt != peer_node_type => fallback.push(*id),
+                _ => peers.push(*id),
+            }
         }
 
-        peers
+        if peers.is_empty() {
+            fallback
+        } else {
+            peers
+        }
     }
 
     pub fn select(self, syn: &SynchronizationState) -> Option<NodeId> {

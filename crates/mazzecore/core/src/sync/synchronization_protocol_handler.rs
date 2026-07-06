@@ -13,8 +13,8 @@ use crate::{
     sync::{
         message::{
             handle_rlp_message, msgid, Context, DynamicCapability,
-            GetBlockHeadersResponse, Heartbeat, NewBlockHashes, StatusV3,
-            TransactionDigests,
+            GetBlockHeadersResponse, Heartbeat, NewBlock, NewBlockHashes,
+            StatusV3, TransactionDigests,
         },
         request_manager::{try_get_block_hashes, Request},
         state::SnapshotChunkSync,
@@ -1447,7 +1447,9 @@ impl SynchronizationProtocolHandler {
         self.on_message(io, &io.self_node_id(), task.message.as_slice());
     }
 
-    pub fn on_mined_block(&self, mut block: Block) {
+    /// Returns `true` if the mined block was inserted (and should be
+    /// broadcast to peers), `false` if a guardrail dropped it.
+    pub fn on_mined_block(&self, mut block: Block) -> bool {
         let hash = block.block_header.hash();
 
         // Mining guardrails — a miner must never fork the fleet or race the
@@ -1467,7 +1469,7 @@ impl SynchronizationProtocolHandler {
                  (catching up); mining now would fork a stale branch.",
                 hash
             );
-            return;
+            return false;
         }
         // B) Executor too far behind: even in Normal, mining extends the
         //    header chain independently of state execution, and the existing
@@ -1495,7 +1497,7 @@ impl SynchronizationProtocolHandler {
                      catches up.",
                     hash, lag, best, executed, exec_cap
                 );
-                return;
+                return false;
             }
         }
         // NOTE: a former guardrail C throttled mining when this node's tip ran
@@ -1518,7 +1520,7 @@ impl SynchronizationProtocolHandler {
         assert!(self.graph.contains_block_header(&parent_hash));
         if self.graph.contains_block_header(&hash) {
             warn!("Mined an duplicate block, the mining power is wasted!");
-            return;
+            return false;
         }
         self.graph.insert_block_header(
             &mut block.block_header,
@@ -1534,6 +1536,27 @@ impl SynchronizationProtocolHandler {
             true,  /* persistent */
             false, /* recover_from_db */
         );
+        true
+    }
+
+    /// Broadcast a full block body (`NewBlock`) to peers. Used for locally
+    /// MINED blocks: this node is the sole source of a freshly-mined block's
+    /// body, so relaying only its hash (`NewBlockHashes`, see `relay_blocks`)
+    /// risks the body being lost if this node shuts down before a peer lazily
+    /// fetches it via `GetBlocks` — an uncle referenced by the consensus DAG
+    /// would then wedge every node that needs it. Sending the body up front
+    /// guarantees availability; the cost is bounded (only our own mined blocks,
+    /// not relayed traffic).
+    pub fn broadcast_new_block(
+        &self, io: &dyn NetworkContext, block: &Block,
+    ) {
+        let msg: Box<dyn Message> = Box::new(NewBlock {
+            block: block.clone(),
+        });
+        self.broadcast_message(io, &Default::default(), msg.as_ref())
+            .unwrap_or_else(|e| {
+                warn!("Error broadcasting NewBlock, err={:?}", e);
+            });
     }
 
     fn broadcast_message(

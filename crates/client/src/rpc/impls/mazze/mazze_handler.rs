@@ -1859,21 +1859,48 @@ impl RpcImpl {
     ) -> JsonRpcResult<Vec<MdbxShadowParityReport>> {
         debug!("debug_mdbxShadowVerifyParity");
         let data_man = self.consensus.get_data_manager();
-        if !data_man.db_manager.has_active_shadow_mirrors() {
+        let mut raw_reports = if data_man
+            .db_manager
+            .has_active_shadow_mirrors()
+        {
+            data_man.db_manager.verify_all_shadow_parity().map_err(
+                |e| {
+                    internal_error_msg(&format!(
+                        "mdbx shadow verify_parity failed: {:?}",
+                        e
+                    ))
+                },
+            )?
+        } else {
+            Vec::new()
+        };
+
+        // Phase 4a: storage-layer shadow (snapshot_info_db) audit.
+        // Lives on StorageManager, not DBManager, so we poll it
+        // separately and fold its report into the same response.
+        // Consumers see one flat list of MdbxColumn reports
+        // regardless of which subsystem owns each mirror.
+        if let Some(mirror) = data_man
+            .storage_manager
+            .get_storage_manager()
+            .snapshot_info_shadow_mirror()
+        {
+            let report = mirror.verify_parity().map_err(|e| {
+                internal_error_msg(&format!(
+                    "snapshot_info verify_parity failed: {:?}",
+                    e
+                ))
+            })?;
+            raw_reports.push(report);
+        }
+
+        if raw_reports.is_empty() {
             // No shadow flags on / MDBX unavailable — return an
             // empty vec so the operator dashboard can distinguish
             // "no mirror" from "one report with is_matched=true".
             return Ok(Vec::new());
         }
-        let raw_reports = data_man
-            .db_manager
-            .verify_all_shadow_parity()
-            .map_err(|e| {
-                internal_error_msg(&format!(
-                    "mdbx shadow verify_parity failed: {:?}",
-                    e
-                ))
-            })?;
+
         // Sort by MdbxColumn name for a stable RPC response —
         // dashboards want a deterministic table order across
         // audits. Compound mirrors emit one report per sub-column,

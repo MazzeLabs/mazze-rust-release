@@ -98,6 +98,7 @@ set_kv "enable_mdbx_shadow_block_traces" "true"
 set_kv "enable_mdbx_shadow_blocks" "true"
 set_kv "enable_mdbx_shadow_epoch_numbers" "true"
 set_kv "enable_mdbx_shadow_misc" "true"
+set_kv "enable_mdbx_shadow_snapshot_info" "true"
 has_chain_data() {
   local base="$1"
   if compgen -G "$base/blockchain_db/*" > /dev/null; then

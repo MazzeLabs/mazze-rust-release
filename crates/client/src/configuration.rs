@@ -386,6 +386,11 @@ build_config! {
         // Very low write volume (checkpoint bumps + rare
         // metadata).
         (enable_mdbx_shadow_misc, (bool), false)
+        // Phase 4a: shadow-mirror the storage-crate
+        // snapshot_info_db (per-epoch SnapshotInfo). Handled at
+        // the StorageManager layer, not DBManager. Same
+        // shadow-then-cutover semantics.
+        (enable_mdbx_shadow_snapshot_info, (bool), false)
         // Phase 3 cutover: boot installed shadow mirrors directly on
         // MDBX-only reads (ReadSource::Shadow) from genesis, no runtime
         // flip. Only effective with the enable_mdbx_shadow_* flags on and
@@ -1121,6 +1126,9 @@ impl Configuration {
                 .use_isolated_db_for_mpt_table_height,
             keep_era_genesis_snapshot: self.raw_conf.keep_era_genesis_snapshot,
             state_db_backend: self.state_db_backend(),
+            enable_mdbx_shadow_snapshot_info: self
+                .raw_conf
+                .enable_mdbx_shadow_snapshot_info,
         }
     }
 

@@ -7,16 +7,46 @@
 pub struct PersistedSnapshotInfoMap {
     // Db to persist snapshot_info.
     snapshot_info_db: KvdbParitydb,
+    /// Storage Phase 4a shadow: when the operator flips
+    /// `enable_mdbx_shadow_snapshot_info` AND an MDBX env is
+    /// open, this holds an `MdbxShadowMirror` over the same
+    /// paritydb column. `insert` / `remove` route through the
+    /// mirror; iterations for `load_persist_state` still hit the
+    /// primary directly (mirror.get_iter() is deferred to a
+    /// later phase together with delta-MPT read cutover). This
+    /// is `None` when the flag is off, or the MDBX env isn't
+    /// present, so pre-Phase-4a behavior is byte-for-byte
+    /// preserved by default.
+    snapshot_info_shadow:
+        Option<Arc<MdbxShadowMirror<KvdbParitydb>>>,
     // In memory snapshot_info_map_by_epoch.
     snapshot_info_map_by_epoch: HashMap<EpochId, SnapshotInfo>,
 }
 
 impl PersistedSnapshotInfoMap {
     fn new(snapshot_info_db: KvdbParitydb) -> Result<Self> {
+        Self::new_with_shadow(snapshot_info_db, None)
+    }
+
+    /// Construct with an optional [`MdbxShadowMirror`] so
+    /// [`PersistedSnapshotInfoMap::insert`] and
+    /// [`PersistedSnapshotInfoMap::remove`] dual-write to both the
+    /// paritydb primary and the MDBX shadow column. The mirror
+    /// must wrap the SAME `KvdbParitydb` (or an equivalent handle
+    /// on the same underlying paritydb column) — otherwise the
+    /// primary write path here and the mirror's primary would
+    /// diverge, defeating parity verification.
+    fn new_with_shadow(
+        snapshot_info_db: KvdbParitydb,
+        snapshot_info_shadow: Option<
+            Arc<MdbxShadowMirror<KvdbParitydb>>,
+        >,
+    ) -> Result<Self> {
         let mut result = Self {
             // The map is loaded later
             snapshot_info_map_by_epoch: Default::default(),
             snapshot_info_db,
+            snapshot_info_shadow,
         };
         result.load_persist_state()?;
         Ok(result)
@@ -28,6 +58,26 @@ impl PersistedSnapshotInfoMap {
         let rlp_bytes = snapshot_info.rlp_bytes();
         self.snapshot_info_map_by_epoch
             .insert(epoch.clone(), snapshot_info);
+        if let Some(mirror) = &self.snapshot_info_shadow {
+            // Mirror wraps the same paritydb column as
+            // `snapshot_info_db`, so `mirror.put` handles both
+            // the primary AND shadow write. Skipping the
+            // explicit `snapshot_info_db.put` below avoids a
+            // double primary write.
+            match mirror.put(epoch.as_ref(), &rlp_bytes) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    error!(
+                        "mdbx-shadow snapshot_info put failed \
+                         epoch={:?}: {:?}. Falling back to \
+                         primary-only write",
+                        epoch, e
+                    );
+                    // Fall through to the plain path below so
+                    // the primary still lands the write.
+                }
+            }
+        }
         self.snapshot_info_db.put(epoch.as_ref(), &rlp_bytes)?;
         Ok(())
     }
@@ -42,8 +92,31 @@ impl PersistedSnapshotInfoMap {
 
     fn remove(&mut self, epoch: &EpochId) -> Result<()> {
         self.snapshot_info_map_by_epoch.remove(epoch);
+        if let Some(mirror) = &self.snapshot_info_shadow {
+            match mirror.delete(epoch.as_ref()) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    error!(
+                        "mdbx-shadow snapshot_info delete failed \
+                         epoch={:?}: {:?}. Falling back to \
+                         primary-only delete",
+                        epoch, e
+                    );
+                }
+            }
+        }
         self.snapshot_info_db.delete(epoch.as_ref())?;
         Ok(())
+    }
+
+    /// Shadow-mirror handle for the operator control plane
+    /// (verify_parity / set_read_source). `None` when the flag
+    /// is off or MDBX is unavailable. Exposed via
+    /// [`StorageManager::snapshot_info_shadow_mirror`].
+    pub(crate) fn shadow_mirror(
+        &self,
+    ) -> Option<Arc<MdbxShadowMirror<KvdbParitydb>>> {
+        self.snapshot_info_shadow.clone()
     }
 
     // Unsafe because the in mem map isn't in sync with the db.
@@ -277,21 +350,15 @@ impl StorageManager {
             kvdb: snapshot_info_db.key_value(),
             col: 0,
         };
-        let snapshot_info_map =
-            PersistedSnapshotInfoMap::new(snapshot_info_kvdb)?;
-
-        let (
-            in_progress_snapshot_finish_signaler,
-            in_progress_snapshot_finish_signal_receiver,
-        ) = channel();
-
-        let delta_db_manager = Arc::new(DeltaDbManager::new(
-            storage_conf.path_delta_mpts_dir.clone(),
-        )?);
 
         // Open the hot-tier MDBX environment when configured. Living
         // for the lifetime of the StorageManager. See
         // docs/storage-architecture.md §3.
+        //
+        // Moved BEFORE PersistedSnapshotInfoMap construction (Phase
+        // 4a) so we can hand the env into the snapshot_info shadow
+        // mirror. The env open is a filesystem op; ordering doesn't
+        // affect the paritydb open above.
         let mdbx_env = match &storage_conf.state_db_backend {
             crate::StateDbBackend::Mdbx(cfg) => {
                 let mdbx_dir = storage_dir.join("mdbx");
@@ -316,6 +383,51 @@ impl StorageManager {
             }
             crate::StateDbBackend::ParityDb => None,
         };
+
+        // Phase 4a: assemble the snapshot_info shadow mirror when
+        // opted in AND MDBX is available. Same shadow-then-cutover
+        // semantics as the DBManager mirrors: primary keeps the
+        // authoritative copy; the mirror dual-writes so
+        // `verify_parity` can prove the shadow tracks the primary
+        // before Phase 5 flips reads over.
+        let snapshot_info_shadow: Option<
+            Arc<MdbxShadowMirror<KvdbParitydb>>,
+        > = match (
+            mdbx_env.as_ref(),
+            storage_conf.enable_mdbx_shadow_snapshot_info,
+        ) {
+            (Some(env), true) => {
+                use crate::impls::storage_db::{
+                    kvdb_mdbx::KvdbMdbx, mdbx_columns::Column,
+                };
+                let shadow_col = Column::SnapshotInfo;
+                let shadow_mdbx =
+                    KvdbMdbx::with_column(Arc::clone(env), shadow_col.id());
+                Some(Arc::new(MdbxShadowMirror::new(
+                    KvdbParitydb {
+                        kvdb: snapshot_info_db.key_value(),
+                        col: 0,
+                    },
+                    shadow_mdbx,
+                    shadow_col,
+                )))
+            }
+            _ => None,
+        };
+
+        let snapshot_info_map = PersistedSnapshotInfoMap::new_with_shadow(
+            snapshot_info_kvdb,
+            snapshot_info_shadow,
+        )?;
+
+        let (
+            in_progress_snapshot_finish_signaler,
+            in_progress_snapshot_finish_signal_receiver,
+        ) = channel();
+
+        let delta_db_manager = Arc::new(DeltaDbManager::new(
+            storage_conf.path_delta_mpts_dir.clone(),
+        )?);
 
         let new_storage_manager_result = Ok(Arc::new(Self {
             delta_db_manager: delta_db_manager.clone(),
@@ -1656,6 +1768,18 @@ impl StorageManager {
         self.mdbx_env.clone()
     }
 
+    /// Handle to the `snapshot_info_db` shadow mirror, if the
+    /// operator opted in AND MDBX is available. Exposed so the
+    /// RPC layer can run `verify_parity` / flip `ReadSource` on
+    /// this table independently of the DBManager mirrors. Returns
+    /// `None` when the shadow is disabled — matches the same
+    /// convention as [`StorageManager::mdbx_env`].
+    pub fn snapshot_info_shadow_mirror(
+        &self,
+    ) -> Option<Arc<MdbxShadowMirror<KvdbParitydb>>> {
+        self.snapshot_info_map_by_epoch.read().shadow_mirror()
+    }
+
     pub fn log_usage(&self) {
         let mut delta_mpts = HashMap::new();
         for (_snapshot_epoch_id, associated_delta_mpts) in
@@ -2000,8 +2124,8 @@ use crate::{
     },
     utils::guarded_value::GuardedValue,
     DeltaMpt, DeltaMptIdGen, DeltaMptIterator, KeyValueDbTrait, KvdbParitydb,
-    OpenDeltaDbLru, ProvideExtraSnapshotSyncConfig, StateIndex,
-    StateRootWithAuxInfo, StorageConfiguration,
+    MdbxShadowMirror, OpenDeltaDbLru, ProvideExtraSnapshotSyncConfig,
+    StateIndex, StateRootWithAuxInfo, StorageConfiguration,
 };
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use mazze_internal_common::{

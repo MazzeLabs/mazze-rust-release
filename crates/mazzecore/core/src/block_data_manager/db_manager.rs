@@ -237,6 +237,14 @@ pub struct MdbxShadowFlags {
     /// breakdown. Very low write volume — a `checkpoint` bump
     /// every ~30 s and rare metadata updates otherwise.
     pub misc: bool,
+    /// Storage Phase 3: boot every installed shadow mirror directly on
+    /// `ReadSource::Shadow` (MDBX-only reads) instead of the default
+    /// `Primary`. This is the "start on MDBX from genesis, no runtime
+    /// flip" mode — combined with a from-genesis relaunch MDBX is
+    /// dual-written from block 0 so there is no historical gap to miss.
+    /// ParityDB is still written (parity oracle) but never read. Default
+    /// `false` (Primary), so a plain node is unaffected.
+    pub read_shadow: bool,
 }
 
 /// Per-table shadow-mirror metrics registered under the
@@ -776,6 +784,15 @@ impl DBManager {
                     table_name: "EpochNumbers",
                 }),
             );
+        }
+        // Phase 3 "start on MDBX from genesis": boot every installed mirror
+        // directly on Shadow (MDBX-only reads), no runtime flip. Safe only from
+        // genesis (dual-write fills MDBX from block 0). ParityDB stays written
+        // as the parity oracle but is not read.
+        if flags.read_shadow {
+            for entry in mirrors.values() {
+                entry.set_read_source(ReadSource::Shadow);
+            }
         }
         mirrors
     }

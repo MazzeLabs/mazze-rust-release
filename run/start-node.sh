@@ -98,7 +98,8 @@ fi
 for _f in enable_mdbx_shadow_hash_by_number enable_mdbx_shadow_tx_index \
           enable_mdbx_shadow_blamed_header_verified_roots \
           enable_mdbx_shadow_block_traces enable_mdbx_shadow_blocks \
-          enable_mdbx_shadow_epoch_numbers enable_mdbx_shadow_misc; do
+          enable_mdbx_shadow_epoch_numbers enable_mdbx_shadow_misc \
+          mdbx_read_shadow; do
   if grep -q "^[[:space:]]*${_f}[[:space:]]*=" "$TEMP_CONF"; then
     sed -i "s#^[[:space:]]*${_f}[[:space:]]*=.*#${_f} = true#" "$TEMP_CONF"
   else

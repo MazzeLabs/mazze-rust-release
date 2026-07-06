@@ -386,6 +386,11 @@ build_config! {
         // Very low write volume (checkpoint bumps + rare
         // metadata).
         (enable_mdbx_shadow_misc, (bool), false)
+        // Phase 3 cutover: boot installed shadow mirrors directly on
+        // MDBX-only reads (ReadSource::Shadow) from genesis, no runtime
+        // flip. Only effective with the enable_mdbx_shadow_* flags on and
+        // a from-genesis start. Default false.
+        (mdbx_read_shadow, (bool), false)
         (print_memory_usage_period_s, (Option<u64>), None)
         (target_block_gas_limit, (u64), DEFAULT_TARGET_BLOCK_GAS_LIMIT)
         (executive_trace, (bool), false)
@@ -1307,6 +1312,7 @@ impl Configuration {
             enable_mdbx_shadow_misc: self
                 .raw_conf
                 .enable_mdbx_shadow_misc,
+            mdbx_read_shadow: self.raw_conf.mdbx_read_shadow,
         };
 
         // By default, we do not keep the block data for additional period,

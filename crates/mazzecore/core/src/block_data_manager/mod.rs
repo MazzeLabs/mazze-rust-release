@@ -272,6 +272,7 @@ impl BlockDataManager {
                 epoch_numbers: config
                     .enable_mdbx_shadow_epoch_numbers,
                 misc: config.enable_mdbx_shadow_misc,
+                read_shadow: config.mdbx_read_shadow,
             },
         );
         let previous_db_progress =
@@ -2007,6 +2008,12 @@ pub struct DataManagerConfiguration {
     /// volume (checkpoint bumps + rare metadata). Default
     /// `false`.
     pub enable_mdbx_shadow_misc: bool,
+    /// Storage Phase 3: boot installed shadow mirrors directly on
+    /// `ReadSource::Shadow` (MDBX-only reads) from genesis, no runtime
+    /// flip. Only meaningful when the relevant `enable_mdbx_shadow_*`
+    /// flags are also on and the node starts from genesis. Default
+    /// `false`.
+    pub mdbx_read_shadow: bool,
 }
 
 impl MallocSizeOf for DataManagerConfiguration {
@@ -2041,6 +2048,7 @@ impl DataManagerConfiguration {
             enable_mdbx_shadow_blocks: false,
             enable_mdbx_shadow_epoch_numbers: false,
             enable_mdbx_shadow_misc: false,
+            mdbx_read_shadow: false,
         }
     }
 }

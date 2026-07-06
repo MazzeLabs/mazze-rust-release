@@ -145,4 +145,34 @@ pub trait LocalRpc {
     fn mdbx_shadow_verify_parity(
         &self,
     ) -> JsonRpcResult<Vec<MdbxShadowParityReport>>;
+
+    /// Flip the `ReadSource` for one shadowed `DBTable` at runtime
+    /// (Storage Phase 3 cutover). `table` names one of the enum
+    /// variants: `"Misc"`, `"Blocks"`, `"Transactions"`,
+    /// `"EpochNumbers"`, `"BlamedHeaderVerifiedRoots"`,
+    /// `"BlockTraces"`, `"HashByBlockNumber"`. `source` is one of
+    /// `"primary"`, `"shadow_with_fallback"`, `"shadow"`.
+    ///
+    /// Returns `Ok(true)` when the mirror exists and the flip was
+    /// applied, `Ok(false)` when the table isn't currently
+    /// shadowed. Rejects unknown table / source strings with a
+    /// JSON-RPC error so the caller can distinguish typo from
+    /// no-op.
+    ///
+    /// Atomic swap inside the mirror — concurrent reads observe
+    /// either the old or the new source, never a torn value.
+    #[rpc(name = "debug_mdbxSetReadSource")]
+    fn mdbx_set_read_source(
+        &self, table: String, source: String,
+    ) -> JsonRpcResult<bool>;
+
+    /// Snapshot of every shadowed table's current `ReadSource`.
+    /// Keys are table names (see `debug_mdbxSetReadSource` for the
+    /// stable name set); values are one of `"primary"`,
+    /// `"shadow_with_fallback"`, `"shadow"`. Empty object when no
+    /// mirror is installed.
+    #[rpc(name = "debug_mdbxGetReadSources")]
+    fn mdbx_get_read_sources(
+        &self,
+    ) -> JsonRpcResult<std::collections::BTreeMap<String, String>>;
 }

@@ -1886,6 +1886,67 @@ impl RpcImpl {
         Ok(reports)
     }
 
+    fn mdbx_set_read_source(
+        &self, table: String, source: String,
+    ) -> JsonRpcResult<bool> {
+        debug!(
+            "debug_mdbxSetReadSource table={} source={}",
+            table, source
+        );
+        let dbtable =
+            mazzecore::block_data_manager::db_manager::DBTable::from_name(
+                &table,
+            )
+            .ok_or_else(|| {
+                invalid_params_msg(&format!(
+                    "unknown DBTable name {:?}; expected one of \
+                     Misc, Blocks, Transactions, EpochNumbers, \
+                     BlamedHeaderVerifiedRoots, BlockTraces, \
+                     HashByBlockNumber",
+                    table
+                ))
+            })?;
+        let read_source = match source.as_str() {
+            "primary" => mazze_storage::ReadSource::Primary,
+            "shadow_with_fallback" => {
+                mazze_storage::ReadSource::ShadowWithPrimaryFallback
+            }
+            "shadow" => mazze_storage::ReadSource::Shadow,
+            _ => {
+                return Err(invalid_params_msg(&format!(
+                    "unknown ReadSource {:?}; expected one of \
+                     primary, shadow_with_fallback, shadow",
+                    source
+                )))
+            }
+        };
+        let data_man = self.consensus.get_data_manager();
+        Ok(data_man
+            .db_manager
+            .set_read_source_for(dbtable, read_source))
+    }
+
+    fn mdbx_get_read_sources(
+        &self,
+    ) -> JsonRpcResult<std::collections::BTreeMap<String, String>> {
+        debug!("debug_mdbxGetReadSources");
+        let data_man = self.consensus.get_data_manager();
+        let snapshot =
+            data_man.db_manager.shadow_read_sources_snapshot();
+        let mut out = std::collections::BTreeMap::new();
+        for (table, source) in snapshot {
+            let source_str = match source {
+                mazze_storage::ReadSource::Primary => "primary",
+                mazze_storage::ReadSource::ShadowWithPrimaryFallback => {
+                    "shadow_with_fallback"
+                }
+                mazze_storage::ReadSource::Shadow => "shadow",
+            };
+            out.insert(table.name().to_string(), source_str.to_string());
+        }
+        Ok(out)
+    }
+
     fn transactions_by_block(
         &self, block_hash: H256,
     ) -> JsonRpcResult<Vec<WrapTransaction>> {
@@ -2313,6 +2374,8 @@ impl LocalRpc for LocalRpcImpl {
             fn transactions_by_epoch(&self, epoch_number: U64) -> JsonRpcResult<Vec<WrapTransaction>>;
             fn transactions_by_block(&self, block_hash: H256) -> JsonRpcResult<Vec<WrapTransaction>>;
             fn mdbx_shadow_verify_parity(&self) -> JsonRpcResult<Vec<MdbxShadowParityReport>>;
+            fn mdbx_set_read_source(&self, table: String, source: String) -> JsonRpcResult<bool>;
+            fn mdbx_get_read_sources(&self) -> JsonRpcResult<std::collections::BTreeMap<String, String>>;
         }
     }
 }

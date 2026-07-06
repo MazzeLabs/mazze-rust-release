@@ -1204,5 +1204,7 @@ impl LocalRpc for DebugRpcImpl {
         fn transactions_by_epoch(&self, epoch_number: U64) -> JsonRpcResult<Vec<WrapTransaction>>;
         fn transactions_by_block(&self, block_hash: H256) -> JsonRpcResult<Vec<WrapTransaction>>;
         fn mdbx_shadow_verify_parity(&self) -> JsonRpcResult<Vec<MdbxShadowParityReport>>;
+        fn mdbx_set_read_source(&self, table: String, source: String) -> JsonRpcResult<bool>;
+        fn mdbx_get_read_sources(&self) -> JsonRpcResult<std::collections::BTreeMap<String, String>>;
     }
 }

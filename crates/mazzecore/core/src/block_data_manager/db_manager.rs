@@ -149,6 +149,45 @@ pub enum DBTable {
     BlockTraces,
     HashByBlockNumber,
 }
+
+impl DBTable {
+    /// Stable name used in RPC arguments and JSON responses.
+    /// Matches the variant identifier so `Debug` and this method
+    /// stay in lockstep — renaming a variant requires updating
+    /// both.
+    pub fn name(self) -> &'static str {
+        match self {
+            DBTable::Misc => "Misc",
+            DBTable::Blocks => "Blocks",
+            DBTable::Transactions => "Transactions",
+            DBTable::EpochNumbers => "EpochNumbers",
+            DBTable::BlamedHeaderVerifiedRoots => {
+                "BlamedHeaderVerifiedRoots"
+            }
+            DBTable::BlockTraces => "BlockTraces",
+            DBTable::HashByBlockNumber => "HashByBlockNumber",
+        }
+    }
+
+    /// Parse a table name from the RPC layer. Case-sensitive by
+    /// design so operators use exactly the strings dashboards
+    /// display; `Ok(None)` on unknown name so the RPC can return
+    /// a clean error to the client.
+    pub fn from_name(s: &str) -> Option<DBTable> {
+        Some(match s {
+            "Misc" => DBTable::Misc,
+            "Blocks" => DBTable::Blocks,
+            "Transactions" => DBTable::Transactions,
+            "EpochNumbers" => DBTable::EpochNumbers,
+            "BlamedHeaderVerifiedRoots" => {
+                DBTable::BlamedHeaderVerifiedRoots
+            }
+            "BlockTraces" => DBTable::BlockTraces,
+            "HashByBlockNumber" => DBTable::HashByBlockNumber,
+            _ => return None,
+        })
+    }
+}
 fn rocks_db_col(table: DBTable) -> u32 {
     match table {
         DBTable::Misc => COL_MISC,
@@ -802,6 +841,34 @@ impl DBManager {
             }
             None => false,
         }
+    }
+
+    /// Snapshot of every shadowed `DBTable`'s current `ReadSource`.
+    /// Keyed by `DBTable`; empty when no mirror is installed.
+    /// For compound tables the source is uniform across sub-mirrors
+    /// by construction (see `CompoundMirror::set_read_source`), so
+    /// we sample sub 0's — any sub would report the same value.
+    pub fn shadow_read_sources_snapshot(
+        &self,
+    ) -> HashMap<DBTable, ReadSource> {
+        let mut out = HashMap::new();
+        for (table, entry) in &self.mdbx_shadow_mirrors {
+            let src = match entry {
+                MirrorEntry::Simple(m) => m.mirror.read_source(),
+                MirrorEntry::Compound(c) => {
+                    // Every sub carries the same source (flip
+                    // fans out atomically); read from any.
+                    c.subs
+                        .values()
+                        .next()
+                        .expect("compound has no subs")
+                        .mirror
+                        .read_source()
+                }
+            };
+            out.insert(*table, src);
+        }
+        out
     }
 }
 

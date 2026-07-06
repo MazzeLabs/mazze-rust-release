@@ -33,7 +33,16 @@ impl RandomXCacheBuilder {
         let global_queue = Worker::new_fifo();
         let stealers = vec![global_queue.stealer()];
 
-        let context = Arc::new(RandomXContext::new(&seed_hash, false));
+        // `true` = RandomX FULL-DATASET mode (~2 GB per seed, ~1-5 ms/hash)
+        // instead of light/cache mode (~100 ms/hash). Full and light produce
+        // identical hashes, so this is consensus-safe — purely a speed/memory
+        // trade. Profiling showed catch-up execution was RandomX-bound: the
+        // reward path recomputes pow_quality per block (PoW verify is bypassed
+        // in catch-up so the header carries no cached hash), and light mode made
+        // that ~100 ms/block — 3-5x the EVM cost. Full dataset collapses it to a
+        // few ms. Fleet hosts have 64 GB; the miner already keeps its own
+        // dataset, this is the node's separate PoW computer.
+        let context = Arc::new(RandomXContext::new(&seed_hash, true));
 
         let builder = Arc::new(RandomXCacheBuilder {
             global_queue,
@@ -79,7 +88,10 @@ impl RandomXCacheBuilder {
                 "Updating RandomX Context for seed hash: {:?}",
                 seed_hash
             );
-            let new_context = Arc::new(RandomXContext::new(seed_hash, false));
+            // Full-dataset mode (see RandomXCacheBuilder::new). Rebuilt once
+            // per seed rotation; the ~2 GB dataset build is amortized over the
+            // many blocks hashed per seed epoch during catch-up.
+            let new_context = Arc::new(RandomXContext::new(seed_hash, true));
             *self.context.write() = new_context;
             *current_hash = *seed_hash;
         }

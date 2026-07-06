@@ -1252,6 +1252,26 @@ impl ConsensusExecutionHandler {
 
         let _t_reward = std::time::Instant::now();
         if let Some(reward_execution_info) = reward_execution_info {
+            // Fix A: warm the PoW-quality cache for every block in the epoch in
+            // PARALLEL before the serial reward loop reads it. Each pow lookup
+            // is a RandomX hash; done serially on the single execution thread it
+            // dominates catch-up (profiled at ~100ms/block in light mode). The
+            // hashes are independent and deterministic, and the shared
+            // PowComputer cache (RwLock LruCache) plus the RandomX VM pool are
+            // already accessed concurrently by IO workers, so par_iter here just
+            // pre-populates the cache — the reward loop below then hits it.
+            // Combined with full-dataset RandomX (pow/cache.rs) this collapses
+            // the reward+pow phase from the dominant cost to a few ms.
+            use rayon::prelude::*;
+            epoch_blocks.par_iter().for_each(|block| {
+                let _ = VerificationConfig::get_or_compute_header_pow_quality(
+                    &self.data_man.pow,
+                    &block.block_header,
+                    &self.data_man.db_manager.get_current_seed_hash(
+                        block.block_header.height(),
+                    ),
+                );
+            });
             let spec = self
                 .machine
                 .spec(current_block_number, main_block.block_header.height());

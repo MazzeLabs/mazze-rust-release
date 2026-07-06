@@ -92,6 +92,20 @@ if has_chain_data "$REPO_ROOT/blockchain_data"; then
   fi
 fi
 
+# Storage Phase 3 — enable all 7 MDBX shadow mirrors so every write is
+# dual-written to MDBX alongside ParityDB from genesis. Required before reads
+# can be cut over to MDBX via debug_mdbxSetReadSource(table, "shadow").
+for _f in enable_mdbx_shadow_hash_by_number enable_mdbx_shadow_tx_index \
+          enable_mdbx_shadow_blamed_header_verified_roots \
+          enable_mdbx_shadow_block_traces enable_mdbx_shadow_blocks \
+          enable_mdbx_shadow_epoch_numbers enable_mdbx_shadow_misc; do
+  if grep -q "^[[:space:]]*${_f}[[:space:]]*=" "$TEMP_CONF"; then
+    sed -i "s#^[[:space:]]*${_f}[[:space:]]*=.*#${_f} = true#" "$TEMP_CONF"
+  else
+    printf '\n%s = true\n' "$_f" >> "$TEMP_CONF"
+  fi
+done
+
 # Run from the repository root so log4rs and helper logs share the same
 # canonical ./logs directory.
 pushd "$REPO_ROOT" >/dev/null

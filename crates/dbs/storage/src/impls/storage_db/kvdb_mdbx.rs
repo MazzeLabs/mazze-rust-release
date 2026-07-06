@@ -407,6 +407,57 @@ impl KvdbMdbx {
         MDBX_RANGE_SCAN_ROWS.inc(out.len());
         Ok(out)
     }
+
+    /// Delete every key in `[lower_bound_incl, upper_bound_excl)`
+    /// inside a single MDBX `rw_txn`. Returns the number of keys
+    /// removed.
+    ///
+    /// Consumed by [`super::prefixed_kvdb_mdbx::PrefixedKvdbMdbx`]-
+    /// based managers (Phase 4c delta MPTs) to purge one snapshot's
+    /// entire slice at destroy time — a 32-byte prefix carves out
+    /// a contiguous range `[prefix, prefix + 1)`, and this walks
+    /// the range with a cursor + `del` per entry.
+    ///
+    /// **Atomicity**: the whole range is deleted in one txn; either
+    /// every entry goes or none do (on error, the txn drops without
+    /// committing). Cost is O(N) in the range size — expected for
+    /// a destroy path.
+    pub fn delete_range(
+        &self, lower_bound_incl: &[u8],
+        upper_bound_excl: Option<&[u8]>,
+    ) -> Result<usize> {
+        let txn = self.env.db.begin_rw_txn().map_err(map_mdbx_error)?;
+        let table = match txn.open_table(Some(&col_table_name(self.col))) {
+            Ok(t) => t,
+            // Column doesn't exist yet — nothing to delete.
+            Err(libmdbx::Error::NotFound) => return Ok(0),
+            Err(e) => return Err(map_mdbx_error(e)),
+        };
+        // Collect keys first, then delete in a second pass. Deleting
+        // via the cursor while iterating is possible but subtle
+        // (libmdbx invalidates the cursor position on some
+        // deletions); the two-pass form is simpler and the cost is
+        // dominated by the delete work either way.
+        let mut cursor = txn.cursor(&table).map_err(map_mdbx_error)?;
+        let iter =
+            cursor.iter_from::<Vec<u8>, Vec<u8>>(lower_bound_incl);
+        let mut to_delete: Vec<Vec<u8>> = Vec::new();
+        for pair in iter {
+            let (k, _v) = pair.map_err(map_mdbx_error)?;
+            if let Some(upper) = upper_bound_excl {
+                if k.as_slice() >= upper {
+                    break;
+                }
+            }
+            to_delete.push(k);
+        }
+        let n = to_delete.len();
+        for k in to_delete {
+            let _ = txn.del(&table, &k, None).map_err(map_mdbx_error)?;
+        }
+        txn.commit().map_err(map_mdbx_error)?;
+        Ok(n)
+    }
 }
 
 mark_kvdb_multi_reader!(KvdbMdbx);

@@ -38,7 +38,54 @@ use crate::{
     storage_db::{delta_db_manager::DeltaDbTrait, key_value_db::*},
 };
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
+use metrics::{Counter, CounterUsize};
 use std::{any::Any, sync::Arc};
+
+/// Per-snapshot counters bumped on each read/write against a
+/// [`PrefixedKvdbMdbx`]. Registered under
+/// `mdbx_delta_mpt.<hex(epoch_id)>` so operator dashboards get
+/// per-snapshot visibility instead of one aggregated number. Cheap
+/// `Arc<dyn Counter>` clones live in the wrapping
+/// `PrefixedKvdbMdbx`; a `None` metrics field means the caller
+/// opted out (tests, or a path where the manager doesn't own the
+/// snapshot yet).
+pub struct DeltaMptSnapshotMetrics {
+    pub puts_ok: Arc<dyn Counter<usize>>,
+    pub puts_fail: Arc<dyn Counter<usize>>,
+    pub gets_ok: Arc<dyn Counter<usize>>,
+    pub gets_miss: Arc<dyn Counter<usize>>,
+    pub deletes_ok: Arc<dyn Counter<usize>>,
+    pub deletes_fail: Arc<dyn Counter<usize>>,
+}
+
+impl DeltaMptSnapshotMetrics {
+    /// Register a fresh set of counters keyed by a group name —
+    /// typically `"mdbx_delta_mpt." + hex(epoch_id)`. Called once
+    /// per snapshot at construction; the returned bundle stays
+    /// alive for the snapshot's lifetime.
+    pub fn register(group: &str) -> Self {
+        Self {
+            puts_ok: CounterUsize::register_with_group(group, "puts_ok"),
+            puts_fail: CounterUsize::register_with_group(
+                group,
+                "puts_fail",
+            ),
+            gets_ok: CounterUsize::register_with_group(group, "gets_ok"),
+            gets_miss: CounterUsize::register_with_group(
+                group,
+                "gets_miss",
+            ),
+            deletes_ok: CounterUsize::register_with_group(
+                group,
+                "deletes_ok",
+            ),
+            deletes_fail: CounterUsize::register_with_group(
+                group,
+                "deletes_fail",
+            ),
+        }
+    }
+}
 
 /// The 32-byte snapshot-scoping prefix. Same shape as `EpochId` in
 /// `primitives` but redeclared here to keep the storage crate
@@ -60,6 +107,12 @@ pub struct PrefixedKvdbMdbx {
     /// cheap to move; the same prefix is shared via `Arc` so
     /// clones don't reallocate.
     prefix: Arc<[u8; PREFIX_LEN]>,
+    /// Optional per-snapshot metrics. `None` for tests and for
+    /// short-lived handles the manager hasn't registered with the
+    /// metric group. When `Some`, every put/get/delete bumps the
+    /// appropriate counter — no aggregation, per-snapshot
+    /// visibility per Phase 4c design §6.5.
+    metrics: Option<Arc<DeltaMptSnapshotMetrics>>,
 }
 
 impl Clone for PrefixedKvdbMdbx {
@@ -67,6 +120,7 @@ impl Clone for PrefixedKvdbMdbx {
         Self {
             inner: self.inner.clone(),
             prefix: Arc::clone(&self.prefix),
+            metrics: self.metrics.clone(),
         }
     }
 }
@@ -80,9 +134,29 @@ impl MallocSizeOf for PrefixedKvdbMdbx {
 }
 
 impl PrefixedKvdbMdbx {
-    /// Wrap an MDBX column handle with a per-snapshot prefix.
+    /// Wrap an MDBX column handle with a per-snapshot prefix. No
+    /// metrics registered — used by tests and by callers that
+    /// don't need per-snapshot dashboards.
     pub fn new(inner: KvdbMdbx, prefix: [u8; PREFIX_LEN]) -> Self {
-        Self { inner, prefix: Arc::new(prefix) }
+        Self {
+            inner,
+            prefix: Arc::new(prefix),
+            metrics: None,
+        }
+    }
+
+    /// Same as [`Self::new`] but with a per-snapshot metrics
+    /// bundle attached. The `DeltaDbManagerMdbx` uses this form so
+    /// each snapshot gets its own counter group.
+    pub fn new_metered(
+        inner: KvdbMdbx, prefix: [u8; PREFIX_LEN],
+        metrics: Arc<DeltaMptSnapshotMetrics>,
+    ) -> Self {
+        Self {
+            inner,
+            prefix: Arc::new(prefix),
+            metrics: Some(metrics),
+        }
     }
 
     /// Copy of the raw prefix bytes. Used by the manager for
@@ -142,7 +216,15 @@ impl KeyValueDbTypes for PrefixedKvdbMdbx {
 
 impl KeyValueDbTraitRead for PrefixedKvdbMdbx {
     fn get(&self, key: &[u8]) -> Result<Option<Box<[u8]>>> {
-        self.inner.get(&self.compose(key))
+        let out = self.inner.get(&self.compose(key))?;
+        if let Some(m) = &self.metrics {
+            if out.is_some() {
+                m.gets_ok.inc(1);
+            } else {
+                m.gets_miss.inc(1);
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -156,13 +238,39 @@ mark_kvdb_multi_reader!(PrefixedKvdbMdbx);
 
 impl KeyValueDbTrait for PrefixedKvdbMdbx {
     fn delete(&self, key: &[u8]) -> Result<Option<Option<Box<[u8]>>>> {
-        self.inner.delete(&self.compose(key))
+        match self.inner.delete(&self.compose(key)) {
+            Ok(v) => {
+                if let Some(m) = &self.metrics {
+                    m.deletes_ok.inc(1);
+                }
+                Ok(v)
+            }
+            Err(e) => {
+                if let Some(m) = &self.metrics {
+                    m.deletes_fail.inc(1);
+                }
+                Err(e)
+            }
+        }
     }
 
     fn put(
         &self, key: &[u8], value: &[u8],
     ) -> Result<Option<Option<Box<[u8]>>>> {
-        self.inner.put(&self.compose(key), value)
+        match self.inner.put(&self.compose(key), value) {
+            Ok(v) => {
+                if let Some(m) = &self.metrics {
+                    m.puts_ok.inc(1);
+                }
+                Ok(v)
+            }
+            Err(e) => {
+                if let Some(m) = &self.metrics {
+                    m.puts_fail.inc(1);
+                }
+                Err(e)
+            }
+        }
     }
 }
 

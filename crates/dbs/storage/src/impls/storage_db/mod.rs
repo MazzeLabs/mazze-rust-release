@@ -15,6 +15,7 @@
 // wiring). MDBX replaces its role as "the second backend" — but at the
 // hot tier rather than as a like-for-like ParityDB alternative.
 
+pub mod delta_db_manager_mdbx;
 pub mod delta_db_manager_paritydb;
 pub mod kvdb_mdbx;
 pub mod kvdb_paritydb;

@@ -32,7 +32,11 @@ pub mod defaults {
         DeltaMptsNodeMemoryManager::START_CAPACITY;
     pub const DEFAULT_DELTA_MPTS_SLAB_IDLE_SIZE: u32 =
         DeltaMptsNodeMemoryManager::MAX_DIRTY_AND_TEMPORARY_TRIE_NODES;
-    pub const DEFAULT_EXECUTION_PREFETCH_THREADS: usize = 4;
+    // Bumped 4 -> 8: the prefetcher warms the state cache for an epoch's tx
+    // senders/targets and execution blocks until it finishes. More threads =
+    // more concurrent state reads served (esp. under MDBX), shortening the
+    // synchronous prefetch stall before each epoch executes.
+    pub const DEFAULT_EXECUTION_PREFETCH_THREADS: usize = 8;
     /// Limit the number of open snapshots to set an upper limit on open files
     /// in Storage subsystem.
     pub const DEFAULT_MAX_OPEN_SNAPSHOTS: u16 = 10;

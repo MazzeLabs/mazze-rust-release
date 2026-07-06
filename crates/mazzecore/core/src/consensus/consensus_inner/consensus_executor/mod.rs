@@ -76,6 +76,9 @@ use alloy_rpc_types_trace::geth::GethDebugTracingOptions;
 
 use self::epoch_execution::{GethTask, VirtualCall};
 
+/// Rolling counter for the per-epoch exec-profile log (see `compute_epoch`).
+static EXEC_PROFILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
 lazy_static! {
     static ref CONSENSIS_EXECUTION_TIMER: Arc<dyn Meter> =
         register_meter_with_group("timer", "consensus::handle_epoch_execution");
@@ -1225,6 +1228,11 @@ impl ConsensusExecutionHandler {
             }
         };
 
+        // Profiling instrumentation (safe — timing only, no consensus impact).
+        // Breaks the per-epoch cost into EVM execution / reward+PoW / DB commit
+        // so we can target the catch-up bottleneck instead of guessing. Logged
+        // once every EXEC_PROFILE_EVERY epochs to avoid log spam.
+        let _t_exec = std::time::Instant::now();
         let epoch_receipts = self
             .process_epoch_transactions(
                 *epoch_hash,
@@ -1237,10 +1245,12 @@ impl ConsensusExecutionHandler {
             // TODO: maybe propagate the error all the way up so that the
             // program may restart by itself.
             .expect("Can not handle db error in consensus, crashing.");
+        let exec_ms = _t_exec.elapsed().as_millis();
 
         let current_block_number =
             start_block_number + epoch_receipts.len() as u64 - 1;
 
+        let _t_reward = std::time::Instant::now();
         if let Some(reward_execution_info) = reward_execution_info {
             let spec = self
                 .machine
@@ -1256,12 +1266,29 @@ impl ConsensusExecutionHandler {
                 spec,
             );
         }
+        let reward_ms = _t_reward.elapsed().as_millis();
 
+        let _t_commit = std::time::Instant::now();
         let _commit_timer =
             ScopeTimer::time_scope(CONSENSUS_STATE_COMMIT_TIMER.clone());
         let commit_result = state
             .commit(*epoch_hash, debug_record.as_deref_mut())
             .expect(&concat!(file!(), ":", line!(), ":", column!()));
+        let commit_ms = _t_commit.elapsed().as_millis();
+        {
+            const EXEC_PROFILE_EVERY: usize = 128;
+            let n = EXEC_PROFILE_COUNTER.fetch_add(1, Relaxed);
+            if n % EXEC_PROFILE_EVERY == 0 {
+                info!(
+                    "exec-profile epoch={} blocks={} | evm={}ms reward+pow={}ms commit={}ms",
+                    epoch_hash,
+                    epoch_blocks.len(),
+                    exec_ms,
+                    reward_ms,
+                    commit_ms,
+                );
+            }
+        }
 
         if on_local_main {
             self.notify_txpool(&commit_result, epoch_hash);

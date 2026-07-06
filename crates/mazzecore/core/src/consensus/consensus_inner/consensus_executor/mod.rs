@@ -1197,6 +1197,7 @@ impl ConsensusExecutionHandler {
             epoch_blocks.len(),
         );
 
+        let _t_newstate = std::time::Instant::now();
         let mut state = match self
             .new_state(main_block, recover_mpt_during_construct_main_state)
         {
@@ -1227,6 +1228,7 @@ impl ConsensusExecutionHandler {
                 }
             }
         };
+        let newstate_ms = _t_newstate.elapsed().as_millis();
 
         // Profiling instrumentation (safe — timing only, no consensus impact).
         // Breaks the per-epoch cost into EVM execution / reward+PoW / DB commit
@@ -1300,9 +1302,10 @@ impl ConsensusExecutionHandler {
             let n = EXEC_PROFILE_COUNTER.fetch_add(1, Relaxed);
             if n % EXEC_PROFILE_EVERY == 0 {
                 info!(
-                    "exec-profile epoch={} blocks={} | evm={}ms reward+pow={}ms commit={}ms",
+                    "exec-profile epoch={} blocks={} | new_state={}ms evm={}ms reward+pow={}ms commit={}ms",
                     epoch_hash,
                     epoch_blocks.len(),
+                    newstate_ms,
                     exec_ms,
                     reward_ms,
                     commit_ms,

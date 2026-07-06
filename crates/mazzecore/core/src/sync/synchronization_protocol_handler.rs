@@ -1498,36 +1498,19 @@ impl SynchronizationProtocolHandler {
                 return;
             }
         }
-        // C) Peers too far behind: guardrails A/B keep THIS node's tip and its
-        //    own executor in step, but nothing stops a single miner from
-        //    running its header tip far ahead of the REST of the fleet when
-        //    peers can't sync as fast as it produces. Observed live: one miner
-        //    reached epoch 254052 while archive peers sat at 125k-142k — a
-        //    ~128k spread that fragmented the fleet into a wide, non-self-
-        //    healing lag. Backpressure on the network median: if best_epoch is
-        //    far above the median peer best_epoch, pause so the pack catches
-        //    up. Median (not min) keeps one slow/lying/freshly-joined peer from
-        //    stalling production, while a genuinely lagging majority — the real
-        //    divergence risk — throttles the tip until they recover. The cap is
-        //    generous so transient per-peer lag never gates mining; only a real
-        //    fleet-wide split does.
-        const PEER_LAG_MINING_THRESHOLD: u64 = 5000;
-        if let Some(peer_median) = self.syn.median_epoch_from_all_peers() {
-            let best = self.graph.consensus.best_epoch_number();
-            if best > peer_median + PEER_LAG_MINING_THRESHOLD {
-                warn!(
-                    "Dropping mined block {:?} — best epoch {} is {} ahead of \
-                     the peer median {} (> {}); pausing mining so the fleet can \
-                     catch up before the tip runs away.",
-                    hash,
-                    best,
-                    best.saturating_sub(peer_median),
-                    peer_median,
-                    PEER_LAG_MINING_THRESHOLD
-                );
-                return;
-            }
-        }
+        // NOTE: a former guardrail C throttled mining when this node's tip ran
+        // far ahead of the MEDIAN PEER epoch. It was removed: coupling local
+        // block production to peer-reported state violates node independence
+        // and is a liveness/DoS hazard — a wedged or malicious minority drags
+        // the median down and can throttle honest miners to a HALT (observed
+        // live: two body-wedged archive nodes pinned the median so far below
+        // the leaders that guardrail C dropped 100k+ mined blocks and stalled
+        // the whole fleet's production). Each node must stand on its own: a
+        // laggard recovers via catch-up (see the premature-Normal safety net
+        // in synchronization_phases.rs) without the network slowing for it, and
+        // must never be able to corrupt the fleet in cascade. Only guardrails
+        // A (own phase) and B (own executor lag) remain — both keyed on THIS
+        // node's own state, never on peers'.
 
         info!("Mined block {:?} header={:?}", hash, block.block_header);
         let parent_hash = *block.block_header.parent_hash();

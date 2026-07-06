@@ -425,7 +425,21 @@ impl StorageManager {
             in_progress_snapshot_finish_signal_receiver,
         ) = channel();
 
+        // Phase 4c cutover: DeltaDbManager is now the MDBX-native
+        // impl (see `impls/state_manager.rs`). It requires the
+        // shared MDBX env; fail loudly if the operator has us in
+        // paritydb-only mode.
+        let delta_env = mdbx_env
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| ErrorKind::Msg(
+                "DeltaDbManagerMdbx requires the shared MDBX env; \
+                 set `state_db_type = \"mdbx\"` in hydra.toml to \
+                 enable it. See docs/internal/\
+                 storage-delta-mpt-migration.md §2.4.".to_string()
+            ))?;
         let delta_db_manager = Arc::new(DeltaDbManager::new(
+            delta_env,
             storage_conf.path_delta_mpts_dir.clone(),
         )?);
 

@@ -38,13 +38,17 @@ use super::{
 };
 use crate::{
     impls::errors::*,
-    storage_db::delta_db_manager::DeltaDbManagerTrait,
+    storage_db::{
+        delta_db_manager::DeltaDbManagerTrait, SnapshotInfo,
+        SnapshotKeptToProvideSyncStatus,
+    },
 };
 use parking_lot::RwLock;
 use primitives::EpochId;
 use rustc_hex::{FromHex, ToHex};
 use std::{
     collections::HashMap,
+    fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -73,6 +77,14 @@ impl DeltaDbManagerMdbx {
     pub const DELTA_DB_MDBX_DIR_PREFIX: &'static str = "paritydb_";
 
     pub fn new(env: Arc<MdbxEnv>, delta_db_path: PathBuf) -> Result<Self> {
+        // Create the directory even though we don't put anything
+        // in it: `DeltaDbManagerTrait::get_delta_db_dir()` is
+        // consumed by callers that expect a real path (log lines,
+        // `path.exists()` checks in operator scripts). Cheap; the
+        // dir stays empty on MDBX-native.
+        if !delta_db_path.exists() {
+            fs::create_dir_all(&delta_db_path)?;
+        }
         Ok(Self {
             env,
             delta_db_path,
@@ -210,6 +222,53 @@ impl DeltaDbManagerMdbx {
 
 impl DeltaDbManagerTrait for DeltaDbManagerMdbx {
     type DeltaDb = PrefixedKvdbMdbx;
+
+    /// Override the default `scan_persist_state`: under the
+    /// paritydb backend the trait's default impl scanned the
+    /// `delta_db_dir` for stray subdirectories to delete. We
+    /// don't create per-snapshot dirs, so the whole
+    /// `fs::read_dir` walk becomes meaningless (and worse,
+    /// panics with "NotFound" on the first boot before anything
+    /// has touched the dir). Query MDBX by prefix instead — that
+    /// IS the source of truth for which delta MPTs exist under
+    /// this backend.
+    ///
+    /// See `docs/internal/storage-delta-mpt-migration.md` §6.4.
+    fn scan_persist_state(
+        &self, snapshot_info_map: &HashMap<EpochId, SnapshotInfo>,
+    ) -> Result<(Vec<EpochId>, HashMap<EpochId, Self::DeltaDb>)> {
+        // Same expected-set assembly as the default impl —
+        // primary delta MPT for each snapshot, plus intermediate
+        // delta MPT keyed by the parent snapshot.
+        let mut expected: HashMap<EpochId, ()> = HashMap::new();
+        for (snapshot_epoch_id, snapshot_info) in snapshot_info_map {
+            expected.insert(snapshot_epoch_id.clone(), ());
+            expected.insert(
+                snapshot_info.parent_snapshot_epoch_id.clone(),
+                (),
+            );
+        }
+
+        let mut delta_mpts = HashMap::new();
+        for epoch_id in expected.keys() {
+            let name = self.get_delta_db_name(epoch_id);
+            if let Some(handle) = self.get_delta_db(&name)? {
+                delta_mpts.insert(*epoch_id, handle);
+            }
+        }
+
+        let mut missing_delta_dbs = vec![];
+        for (snapshot_epoch_id, snapshot_info) in snapshot_info_map {
+            if snapshot_info.snapshot_info_kept_to_provide_sync
+                == SnapshotKeptToProvideSyncStatus::No
+                && !delta_mpts.contains_key(snapshot_epoch_id)
+            {
+                missing_delta_dbs.push(snapshot_epoch_id.clone());
+            }
+        }
+
+        Ok((missing_delta_dbs, delta_mpts))
+    }
 
     fn get_delta_db_dir(&self) -> &Path {
         self.delta_db_path.as_path()

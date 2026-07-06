@@ -2,7 +2,16 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-pub type DeltaDbManager = DeltaDbManagerParitydb;
+/// Storage Phase 4c cutover: point the delta MPT manager at the
+/// MDBX-native implementation. See
+/// [`docs/internal/storage-delta-mpt-migration.md`](../../../../docs/internal/storage-delta-mpt-migration.md).
+///
+/// Every consumer that referenced `DeltaDbManagerParitydb`
+/// indirectly (via this alias) now transparently uses the MDBX
+/// backend — no call-site changes required. The paritydb impl
+/// stays in-tree until fleet validation is complete; it will be
+/// deleted in a follow-up cleanup commit.
+pub type DeltaDbManager = DeltaDbManagerMdbx;
 pub type SnapshotDbManager = SnapshotDbManagerParitydb;
 pub type SnapshotDb = <SnapshotDbManager as SnapshotDbManagerTrait>::SnapshotDb;
 
@@ -826,7 +835,7 @@ use crate::{
         errors::*,
         replicated_state::ReplicatedState,
         storage_db::{
-            delta_db_manager_paritydb::DeltaDbManagerParitydb,
+            delta_db_manager_mdbx::DeltaDbManagerMdbx,
             snapshot_db_manager_paritydb::SnapshotDbManagerParitydb,
         },
         storage_manager::{

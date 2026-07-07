@@ -304,6 +304,7 @@ pub use self::{
                 DualWritePrimary, DualWriteReport, MdbxShadowMirror,
                 ReadSource,
             },
+            snapshot_db_manager_mdbx::SnapshotDbManagerMdbx,
             snapshot_db_manager_paritydb::SnapshotDbManagerParitydb,
         },
     },

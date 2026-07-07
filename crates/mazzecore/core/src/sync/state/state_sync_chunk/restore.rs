@@ -6,7 +6,7 @@ use crate::sync::state::storage::{Chunk, ChunkKey};
 use mazze_storage::{
     state_manager::StateManager,
     storage_db::{SnapshotDbManagerTrait, SnapshotInfo},
-    FullSyncVerifier, Result as StorageResult, SnapshotDbManagerParitydb,
+    FullSyncVerifier, Result as StorageResult, SnapshotDbManagerMdbx,
 };
 use primitives::{EpochId, MerkleHash, NULL_EPOCH};
 use std::sync::Arc;
@@ -17,7 +17,7 @@ pub struct Restorer {
 
     /// The verifier for chunks.
     /// Initialized after receiving a valid manifest.
-    verifier: Option<FullSyncVerifier<SnapshotDbManagerParitydb>>,
+    verifier: Option<FullSyncVerifier<SnapshotDbManagerMdbx>>,
 }
 
 impl Restorer {
@@ -32,7 +32,7 @@ impl Restorer {
     }
 
     pub fn initialize_verifier(
-        &mut self, verifier: FullSyncVerifier<SnapshotDbManagerParitydb>,
+        &mut self, verifier: FullSyncVerifier<SnapshotDbManagerMdbx>,
     ) {
         self.verifier = Some(verifier);
     }

@@ -421,12 +421,21 @@ impl StorageManager {
                 storage_conf.max_open_mpt_count,
             )?),
             snapshot_manager: Box::new(SnapshotManager::<SnapshotDbManager> {
+                // Phase 5c wiring: SnapshotDbManagerMdbx takes the
+                // dedicated snapshot env opened above +
+                // `snapshot_path` (kept for API parity) +
+                // max_open_snapshots. The isolated-MPT-dir knobs
+                // (use_isolated_db_for_mpt_table*) that the
+                // paritydb constructor accepted are dead per §3 /
+                // R1.3 — 5d will delete them from the config.
                 snapshot_db_manager: SnapshotDbManager::new(
+                    Arc::clone(
+                        snapshot_mdbx_env.as_ref().expect(
+                            "snapshot MDBX env just opened above",
+                        ),
+                    ),
                     storage_conf.path_snapshot_dir.clone(),
                     storage_conf.max_open_snapshots,
-                    storage_conf.use_isolated_db_for_mpt_table,
-                    storage_conf.use_isolated_db_for_mpt_table_height,
-                    storage_conf.consensus_param.era_epoch_count,
                 )?,
             }),
             delta_mpts_id_gen: Default::default(),

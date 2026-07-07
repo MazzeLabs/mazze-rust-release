@@ -730,8 +730,24 @@ impl KeyValueDbIterableTrait<MptKeyValue, [u8], KvdbMdbxIteratorTag>
     }
 }
 
+/// Presence-only view of a `PrefixedKvdbMdbx` sub-table. Yields
+/// `(Vec<u8>, ())` from `iter_range` — a distinct concrete type
+/// so callers of `iter_range` get unambiguous type inference.
+///
+/// This mirrors the paritydb reference's typed distinction
+/// between `PrefixedKvdbParitydb<Box<[u8]>>` (used for KV / MPT
+/// / SET) and `PrefixedKvdbParitydb<()>` (used for DEL). Under
+/// MDBX we can't reuse a single generic wrapper because MDBX
+/// stores values as raw byte-strings — the "unit" nature is a
+/// property of the iterator, not the storage. Hence a distinct
+/// wrapper type.
+///
+/// Constructed by [`SnapshotKvDbMdbx::delta_del_view_unit`] and
+/// [`SnapshotKvDbMdbx::dumped_delta_kv_delete_keys_iterator`].
+pub struct SnapshotDelView(pub PrefixedKvdbMdbx);
+
 impl KeyValueDbIterableTrait<(Vec<u8>, ()), [u8], KvdbMdbxIteratorTag>
-    for PrefixedKvdbMdbx
+    for SnapshotDelView
 {
     fn iter_range(
         &mut self, lower_bound_incl: &[u8], upper_bound_excl: Option<&[u8]>,
@@ -741,12 +757,13 @@ impl KeyValueDbIterableTrait<(Vec<u8>, ()), [u8], KvdbMdbxIteratorTag>
             dyn FallibleIterator<Item = (Vec<u8>, ()), Error = Error>,
         >,
     > {
-        let raw_lower = compose_range_endpoint(self, lower_bound_incl);
+        let raw_lower = compose_range_endpoint(&self.0, lower_bound_incl);
         let raw_upper_owned = match upper_bound_excl {
-            Some(u) => compose_range_endpoint(self, u),
-            None => snapshot_slice_upper_bound(self),
+            Some(u) => compose_range_endpoint(&self.0, u),
+            None => snapshot_slice_upper_bound(&self.0),
         };
         let items = self
+            .0
             .inner_kvdb()
             .iter_range_owned(&raw_lower, Some(&raw_upper_owned))?;
         let lower_opt = if lower_bound_incl.is_empty() {
@@ -757,7 +774,7 @@ impl KeyValueDbIterableTrait<(Vec<u8>, ()), [u8], KvdbMdbxIteratorTag>
         let upper_opt = upper_bound_excl.map(|u| u.to_vec());
         Ok(Wrap(MdbxRangeIter {
             remaining: items.into_iter(),
-            prefix_len: self.prefix().len(),
+            prefix_len: self.0.prefix().len(),
             lower_bound: lower_opt,
             lower_exclusive: false,
             upper_bound: upper_opt,
@@ -773,9 +790,10 @@ impl KeyValueDbIterableTrait<(Vec<u8>, ()), [u8], KvdbMdbxIteratorTag>
             dyn FallibleIterator<Item = (Vec<u8>, ()), Error = Error>,
         >,
     > {
-        let raw_lower = compose_range_endpoint(self, lower_bound_excl);
-        let raw_upper_owned = compose_range_endpoint(self, upper_bound_excl);
+        let raw_lower = compose_range_endpoint(&self.0, lower_bound_excl);
+        let raw_upper_owned = compose_range_endpoint(&self.0, upper_bound_excl);
         let items = self
+            .0
             .inner_kvdb()
             .iter_range_owned(&raw_lower, Some(&raw_upper_owned))?;
         let lower_opt = if lower_bound_excl.is_empty() {
@@ -785,7 +803,7 @@ impl KeyValueDbIterableTrait<(Vec<u8>, ()), [u8], KvdbMdbxIteratorTag>
         };
         Ok(Wrap(MdbxRangeIter {
             remaining: items.into_iter(),
-            prefix_len: self.prefix().len(),
+            prefix_len: self.0.prefix().len(),
             lower_bound: lower_opt,
             lower_exclusive: true,
             upper_bound: Some(upper_bound_excl.to_vec()),
@@ -904,6 +922,32 @@ impl SnapshotKvDbMdbx {
         >,
     > {
         Ok(Wrap(self.mpt_view()))
+    }
+
+    /// API-shape parity with
+    /// `SnapshotKvDbParitydb::dumped_delta_kv_set_keys_iterator`.
+    /// Returns a fresh handle scoped to this snapshot's delta-set
+    /// dump, consumable via `KeyValueDbIterableTrait::iter_range`.
+    ///
+    /// Consumed by storage_manager's `debug_snapshot_checker`
+    /// (Phase 5c.f wiring) so its call sites don't change.
+    pub fn dumped_delta_kv_set_keys_iterator(
+        &self,
+    ) -> Result<PrefixedKvdbMdbx> {
+        Ok(self.delta_set_view())
+    }
+
+    /// API-shape parity with
+    /// `SnapshotKvDbParitydb::dumped_delta_kv_delete_keys_iterator`.
+    /// Returns a [`SnapshotDelView`] wrapper — same underlying
+    /// `PrefixedKvdbMdbx` handle as [`Self::delta_del_view`] but
+    /// with the presence-only (`Item = (Vec<u8>, ())`) iteration
+    /// impl. Distinct concrete type so caller-side `iter_range`
+    /// dispatch is unambiguous.
+    pub fn dumped_delta_kv_delete_keys_iterator(
+        &self,
+    ) -> Result<SnapshotDelView> {
+        Ok(SnapshotDelView(self.delta_del_view()))
     }
 }
 
@@ -1078,7 +1122,7 @@ impl SnapshotDbTrait for SnapshotKvDbMdbx {
 
         // Fold the delta into the MPT via MptMerger.
         let mut set_iter_view = self.delta_set_view();
-        let mut del_iter_view = self.delta_del_view();
+        let mut del_iter_view = SnapshotDelView(self.delta_del_view());
         let mut set_iter_wrap = <PrefixedKvdbMdbx as KeyValueDbIterableTrait<
             MptKeyValue,
             [u8],
@@ -1087,12 +1131,8 @@ impl SnapshotDbTrait for SnapshotKvDbMdbx {
             &mut set_iter_view, EMPTY_KEY, None
         )?
         .take();
-        let mut del_iter_wrap =
-            <PrefixedKvdbMdbx as KeyValueDbIterableTrait<
-                (Vec<u8>, ()),
-                [u8],
-                KvdbMdbxIteratorTag,
-            >>::iter_range(&mut del_iter_view, EMPTY_KEY, None)?
+        let mut del_iter_wrap = del_iter_view
+            .iter_range(EMPTY_KEY, None)?
             .take();
         let mut mpt_out =
             <Self as OpenSnapshotMptTrait>::open_snapshot_mpt_owned(self)?;
@@ -1138,7 +1178,7 @@ impl SnapshotDbTrait for SnapshotKvDbMdbx {
         // Step 3: fold delta into the MPT, using the parent MPT
         // as the base so unchanged subtrees reuse its nodes.
         let mut set_iter_view = self.delta_set_view();
-        let mut del_iter_view = self.delta_del_view();
+        let mut del_iter_view = SnapshotDelView(self.delta_del_view());
         let mut set_iter_wrap = <PrefixedKvdbMdbx as KeyValueDbIterableTrait<
             MptKeyValue,
             [u8],
@@ -1147,12 +1187,8 @@ impl SnapshotDbTrait for SnapshotKvDbMdbx {
             &mut set_iter_view, EMPTY_KEY, None
         )?
         .take();
-        let mut del_iter_wrap =
-            <PrefixedKvdbMdbx as KeyValueDbIterableTrait<
-                (Vec<u8>, ()),
-                [u8],
-                KvdbMdbxIteratorTag,
-            >>::iter_range(&mut del_iter_view, EMPTY_KEY, None)?
+        let mut del_iter_wrap = del_iter_view
+            .iter_range(EMPTY_KEY, None)?
             .take();
         let mut base_mpt = old_snapshot_db.open_snapshot_mpt_as_owned()?;
         let mut save_as_mpt =
@@ -1227,12 +1263,9 @@ impl SnapshotKvDbMdbx {
             sets.push((k, v));
         }
         drop(set_wrap);
-        let mut del_wrap =
-            <PrefixedKvdbMdbx as KeyValueDbIterableTrait<
-                (Vec<u8>, ()),
-                [u8],
-                KvdbMdbxIteratorTag,
-            >>::iter_range(&mut del_view, EMPTY_KEY, None)?
+        let mut del_wrap_view = SnapshotDelView(del_view);
+        let mut del_wrap = del_wrap_view
+            .iter_range(EMPTY_KEY, None)?
             .take();
         while let Some((k, _)) = del_wrap.next()? {
             dels.push(k);
@@ -1447,14 +1480,8 @@ mod tests {
             KeyValueDbTrait::put(&sn.delta_del_view(), &[i], &[])
                 .unwrap();
         }
-        let mut view = sn.delta_del_view();
-        let mut it = <PrefixedKvdbMdbx as KeyValueDbIterableTrait<
-            (Vec<u8>, ()),
-            [u8],
-            KvdbMdbxIteratorTag,
-        >>::iter_range(&mut view, EMPTY_KEY, None)
-        .unwrap()
-        .take();
+        let mut view = SnapshotDelView(sn.delta_del_view());
+        let mut it = view.iter_range(EMPTY_KEY, None).unwrap().take();
         let mut count = 0;
         while let Some((k, ())) = it.next().unwrap() {
             assert_eq!(k.len(), 1);

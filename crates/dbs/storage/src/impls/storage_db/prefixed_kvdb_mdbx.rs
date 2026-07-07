@@ -87,26 +87,34 @@ impl DeltaMptSnapshotMetrics {
     }
 }
 
-/// The 32-byte snapshot-scoping prefix. Same shape as `EpochId` in
-/// `primitives` but redeclared here to keep the storage crate
-/// dependency-lean — the caller passes bytes, we don't care about
-/// the semantic type.
-pub const PREFIX_LEN: usize = 32;
+/// The 4c delta-MPT snapshot prefix length. Kept as a public const
+/// for delta-MPT callers that want to assert their `EpochId`
+/// serialises to the expected width; the primitive itself accepts
+/// any prefix length so the same wrapper can back 5c's 33-byte
+/// (32B epoch id + 1B sub-prefix) snapshot chunk store as well.
+pub const DELTA_MPT_PREFIX_LEN: usize = 32;
 
-/// A view into one snapshot's slice of the shared `DeltaMpt` MDBX
-/// column. Cheap to `Clone` — shares the underlying `KvdbMdbx`
-/// (which itself shares the `Arc<MdbxEnv>`).
+/// A view into one snapshot's slice of a shared MDBX column. Cheap
+/// to `Clone` — shares the underlying `KvdbMdbx` (which itself
+/// shares the `Arc<MdbxEnv>`).
 ///
 /// **Invariant**: every read / write / delete transparently
 /// prepends `prefix` before hitting MDBX; iteration is bounded to
 /// `[prefix, prefix + 1)` so it never leaks into an adjacent
 /// snapshot's slice.
+///
+/// **Prefix length is runtime, not type-level** — 4c uses 32 bytes
+/// (bare `EpochId`), 5c uses 33 bytes (`EpochId | sub_prefix`).
+/// The design doc's §2.3.2 fallback ("`Vec<u8>` prefix is
+/// acceptable if the const-generic ripple is noisy") is taken:
+/// there's no hot-path benefit to `PrefixedKvdbMdbx<const N>` — the
+/// prefix bytes are pointer-behind-Arc regardless, and the
+/// composed-key `Vec` allocation dominates.
 pub struct PrefixedKvdbMdbx {
     inner: KvdbMdbx,
-    /// 32-byte snapshot prefix. Boxed so the struct is small and
-    /// cheap to move; the same prefix is shared via `Arc` so
-    /// clones don't reallocate.
-    prefix: Arc<[u8; PREFIX_LEN]>,
+    /// Per-snapshot prefix, shared via `Arc` so clones don't
+    /// reallocate. 32B for delta MPTs, 33B for snapshot chunks.
+    prefix: Arc<Vec<u8>>,
     /// Optional per-snapshot metrics. `None` for tests and for
     /// short-lived handles the manager hasn't registered with the
     /// metric group. When `Some`, every put/get/delete bumps the
@@ -137,7 +145,15 @@ impl PrefixedKvdbMdbx {
     /// Wrap an MDBX column handle with a per-snapshot prefix. No
     /// metrics registered — used by tests and by callers that
     /// don't need per-snapshot dashboards.
-    pub fn new(inner: KvdbMdbx, prefix: [u8; PREFIX_LEN]) -> Self {
+    ///
+    /// Panics if `prefix` is empty — an empty prefix would make
+    /// [`Self::upper_bound_exclusive`] unable to bound the scan and
+    /// would let iteration leak into other snapshots' slices.
+    pub fn new(inner: KvdbMdbx, prefix: Vec<u8>) -> Self {
+        assert!(
+            !prefix.is_empty(),
+            "PrefixedKvdbMdbx::new: prefix must not be empty"
+        );
         Self {
             inner,
             prefix: Arc::new(prefix),
@@ -149,9 +165,13 @@ impl PrefixedKvdbMdbx {
     /// bundle attached. The `DeltaDbManagerMdbx` uses this form so
     /// each snapshot gets its own counter group.
     pub fn new_metered(
-        inner: KvdbMdbx, prefix: [u8; PREFIX_LEN],
+        inner: KvdbMdbx, prefix: Vec<u8>,
         metrics: Arc<DeltaMptSnapshotMetrics>,
     ) -> Self {
+        assert!(
+            !prefix.is_empty(),
+            "PrefixedKvdbMdbx::new_metered: prefix must not be empty"
+        );
         Self {
             inner,
             prefix: Arc::new(prefix),
@@ -159,10 +179,10 @@ impl PrefixedKvdbMdbx {
         }
     }
 
-    /// Copy of the raw prefix bytes. Used by the manager for
-    /// destroy iteration and metrics labels.
-    pub fn prefix(&self) -> [u8; PREFIX_LEN] {
-        *self.prefix
+    /// Borrowed view of the raw prefix bytes. Used by the manager
+    /// for destroy iteration and metrics labels.
+    pub fn prefix(&self) -> &[u8] {
+        &self.prefix
     }
 
     /// Concatenate `prefix ++ key` into a fresh buffer. Kept as a
@@ -170,7 +190,7 @@ impl PrefixedKvdbMdbx {
     /// funnels through it.
     #[inline]
     fn compose(&self, key: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(PREFIX_LEN + key.len());
+        let mut out = Vec::with_capacity(self.prefix.len() + key.len());
         out.extend_from_slice(&self.prefix[..]);
         out.extend_from_slice(key);
         out
@@ -186,8 +206,8 @@ impl PrefixedKvdbMdbx {
     ///
     /// Consumed by [`Self::destroy_by_prefix`] and by future range
     /// scans (`iter_range`) that need to stay inside the snapshot.
-    pub fn upper_bound_exclusive(&self) -> Option<[u8; PREFIX_LEN]> {
-        let mut ub = *self.prefix;
+    pub fn upper_bound_exclusive(&self) -> Option<Vec<u8>> {
+        let mut ub: Vec<u8> = (*self.prefix).clone();
         for byte in ub.iter_mut().rev() {
             if *byte == 0xff {
                 *byte = 0;
@@ -311,13 +331,13 @@ impl PrefixedKvdbMdbx {
 /// [`KvdbMdbxTransaction::commit`] does.
 pub struct PrefixedKvdbMdbxTransaction {
     inner: KvdbMdbxTransaction,
-    prefix: Arc<[u8; PREFIX_LEN]>,
+    prefix: Arc<Vec<u8>>,
 }
 
 impl PrefixedKvdbMdbxTransaction {
     #[inline]
     fn compose(&self, key: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(PREFIX_LEN + key.len());
+        let mut out = Vec::with_capacity(self.prefix.len() + key.len());
         out.extend_from_slice(&self.prefix[..]);
         out.extend_from_slice(key);
         out
@@ -430,7 +450,7 @@ mod tests {
     fn make_prefixed(prefix: u8) -> (TempDir, PrefixedKvdbMdbx) {
         let (dir, env) = open_env();
         let kvdb = KvdbMdbx::with_column(env, Column::DeltaMpt.id());
-        (dir, PrefixedKvdbMdbx::new(kvdb, [prefix; PREFIX_LEN]))
+        (dir, PrefixedKvdbMdbx::new(kvdb, vec![prefix; DELTA_MPT_PREFIX_LEN]))
     }
 
     /// Round-trip put/get/delete without touching the prefix. The
@@ -454,11 +474,11 @@ mod tests {
         let col = Column::DeltaMpt.id();
         let a = PrefixedKvdbMdbx::new(
             KvdbMdbx::with_column(Arc::clone(&env), col),
-            [0xaa; PREFIX_LEN],
+            vec![0xaa; DELTA_MPT_PREFIX_LEN],
         );
         let b = PrefixedKvdbMdbx::new(
             KvdbMdbx::with_column(env, col),
-            [0xbb; PREFIX_LEN],
+            vec![0xbb; DELTA_MPT_PREFIX_LEN],
         );
         a.put(b"key", b"from-a").unwrap();
         b.put(b"key", b"from-b").unwrap();
@@ -474,11 +494,11 @@ mod tests {
         let col = Column::DeltaMpt.id();
         let target = PrefixedKvdbMdbx::new(
             KvdbMdbx::with_column(Arc::clone(&env), col),
-            [0x01; PREFIX_LEN],
+            vec![0x01; DELTA_MPT_PREFIX_LEN],
         );
         let neighbour = PrefixedKvdbMdbx::new(
             KvdbMdbx::with_column(env, col),
-            [0x02; PREFIX_LEN],
+            vec![0x02; DELTA_MPT_PREFIX_LEN],
         );
 
         let mut txn = target.start_transaction(false).unwrap();
@@ -502,11 +522,11 @@ mod tests {
         let col = Column::DeltaMpt.id();
         let a = PrefixedKvdbMdbx::new(
             KvdbMdbx::with_column(Arc::clone(&env), col),
-            [0x03; PREFIX_LEN],
+            vec![0x03; DELTA_MPT_PREFIX_LEN],
         );
         let b = PrefixedKvdbMdbx::new(
             KvdbMdbx::with_column(env, col),
-            [0x04; PREFIX_LEN],
+            vec![0x04; DELTA_MPT_PREFIX_LEN],
         );
         let mut txn = a.start_transaction(false).unwrap();
         txn.put(b"k", b"v").unwrap();
@@ -520,13 +540,55 @@ mod tests {
     #[test]
     fn upper_bound_shape() {
         let (_dir, p) = make_prefixed(0x00);
-        assert_eq!(p.prefix(), [0x00; PREFIX_LEN]);
-        let mut expected = [0x00; PREFIX_LEN];
-        expected[PREFIX_LEN - 1] = 0x01;
+        assert_eq!(p.prefix(), &[0x00; DELTA_MPT_PREFIX_LEN][..]);
+        let mut expected = vec![0x00; DELTA_MPT_PREFIX_LEN];
+        expected[DELTA_MPT_PREFIX_LEN - 1] = 0x01;
         assert_eq!(p.upper_bound_exclusive(), Some(expected));
 
         let (_dir_hi, hi) = make_prefixed(0xff);
         assert_eq!(hi.upper_bound_exclusive(), None);
+    }
+
+    /// A 33-byte prefix works end-to-end: puts, gets, upper bound
+    /// composition, and isolation. This exercises the design goal
+    /// of hosting Phase 5c's `[EpochId | sub_prefix]` layout on the
+    /// same primitive.
+    #[test]
+    fn variable_length_prefix_end_to_end() {
+        let (_dir, env) = open_env();
+        let col = Column::DeltaMpt.id();
+        let mut prefix_33 = vec![0x55u8; 33];
+        prefix_33[32] = 0xa1;
+        let p = PrefixedKvdbMdbx::new(
+            KvdbMdbx::with_column(Arc::clone(&env), col),
+            prefix_33.clone(),
+        );
+        p.put(b"k", b"v").unwrap();
+        assert_eq!(p.get(b"k").unwrap().as_deref(), Some(&b"v"[..]));
+        assert_eq!(p.prefix(), prefix_33.as_slice());
+        // Upper bound is `prefix + 1` — last byte 0xa1 → 0xa2.
+        let mut expected = prefix_33.clone();
+        expected[32] = 0xa2;
+        assert_eq!(p.upper_bound_exclusive(), Some(expected));
+
+        // A neighbouring 33-byte prefix (same first 32B, different
+        // sub-byte) does not observe our key.
+        let mut neighbour_prefix = vec![0x55u8; 33];
+        neighbour_prefix[32] = 0xa2;
+        let neighbour = PrefixedKvdbMdbx::new(
+            KvdbMdbx::with_column(env, col),
+            neighbour_prefix,
+        );
+        assert!(neighbour.get(b"k").unwrap().is_none());
+    }
+
+    /// Empty prefix is rejected — see safety note on `new`.
+    #[test]
+    #[should_panic(expected = "prefix must not be empty")]
+    fn empty_prefix_panics() {
+        let (_dir, env) = open_env();
+        let kvdb = KvdbMdbx::with_column(env, Column::DeltaMpt.id());
+        let _ = PrefixedKvdbMdbx::new(kvdb, Vec::new());
     }
 
     /// `write_batch` composes prefixes on every op and delegates to

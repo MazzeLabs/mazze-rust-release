@@ -33,7 +33,7 @@ use super::{
     kvdb_mdbx::{KvdbMdbx, MdbxEnv},
     mdbx_columns::Column,
     prefixed_kvdb_mdbx::{
-        DeltaMptSnapshotMetrics, PrefixedKvdbMdbx, PREFIX_LEN,
+        DeltaMptSnapshotMetrics, PrefixedKvdbMdbx, DELTA_MPT_PREFIX_LEN,
     },
 };
 use crate::{
@@ -113,16 +113,16 @@ impl DeltaDbManagerMdbx {
                 name, e
             ))
         })?;
-        if bytes.len() != PREFIX_LEN {
+        if bytes.len() != DELTA_MPT_PREFIX_LEN {
             bail!(
                 "DeltaDbManagerMdbx: delta_db_name {:?} decodes to \
                  {} bytes, expected {}",
                 name,
                 bytes.len(),
-                PREFIX_LEN
+                DELTA_MPT_PREFIX_LEN
             );
         }
-        let mut out = [0u8; PREFIX_LEN];
+        let mut out = [0u8; DELTA_MPT_PREFIX_LEN];
         out.copy_from_slice(&bytes);
         Ok(EpochId::from_slice(&out))
     }
@@ -163,8 +163,8 @@ impl DeltaDbManagerMdbx {
 
     /// Prefix bytes for one snapshot. The EpochId is 32 bytes so
     /// this is a direct copy.
-    fn prefix_for(epoch_id: &EpochId) -> [u8; PREFIX_LEN] {
-        let mut out = [0u8; PREFIX_LEN];
+    fn prefix_for(epoch_id: &EpochId) -> [u8; DELTA_MPT_PREFIX_LEN] {
+        let mut out = [0u8; DELTA_MPT_PREFIX_LEN];
         out.copy_from_slice(epoch_id.as_ref());
         out
     }
@@ -178,14 +178,15 @@ impl DeltaDbManagerMdbx {
         );
         PrefixedKvdbMdbx::new_metered(
             kvdb,
-            Self::prefix_for(epoch_id),
+            Self::prefix_for(epoch_id).to_vec(),
             self.metrics_for(epoch_id),
         )
     }
 
     /// Cheap existence probe: does the shared column carry at
-    /// least one key with this prefix? MDBX iter_range is O(log N)
-    /// to seek + O(1) for the first entry — cheap enough for the
+    /// least one key with this prefix? `first_in_range` does one
+    /// MDBX cursor seek — O(log N) — and materialises only the
+    /// first hit's (k,v) pair, so this stays cheap even on the
     /// per-startup `scan_persist_state` walk.
     fn prefix_has_any(&self, epoch_id: &EpochId) -> Result<bool> {
         let kvdb = KvdbMdbx::with_column(
@@ -193,20 +194,60 @@ impl DeltaDbManagerMdbx {
             Column::DeltaMpt.id(),
         );
         let prefix = Self::prefix_for(epoch_id);
-        // Read one entry starting at `prefix`. If it comes back
-        // and is still inside the snapshot's slice, we have data.
-        let hits = kvdb.iter_range_owned(
+        let hit = kvdb.first_in_range(
             &prefix[..],
             Self::upper_bound_bytes(&prefix).as_deref(),
         )?;
-        Ok(!hits.is_empty())
+        Ok(hit.is_some())
+    }
+
+    /// Enumerate every distinct 32-byte prefix that currently
+    /// occupies the shared delta-MPT column. Used by
+    /// `scan_persist_state` to detect orphan snapshots (prefixes
+    /// present in MDBX but not referenced by
+    /// `snapshot_info_map`).
+    ///
+    /// Implementation: repeatedly seek to the smallest key ≥
+    /// `cursor`, take the first 32 bytes as a prefix, then jump
+    /// past the whole `[prefix, prefix + 1)` slice. Result is
+    /// O(distinct_prefixes) MDBX seeks — orders of magnitude
+    /// cheaper than a full-column scan.
+    fn enumerate_present_prefixes(&self) -> Result<Vec<EpochId>> {
+        let kvdb = KvdbMdbx::with_column(
+            Arc::clone(&self.env),
+            Column::DeltaMpt.id(),
+        );
+        let mut out = Vec::new();
+        let mut cursor: Vec<u8> = Vec::new(); // start at column-min
+        loop {
+            let hit = kvdb.first_in_range(&cursor[..], None)?;
+            let (key, _val) = match hit {
+                Some(kv) => kv,
+                None => break,
+            };
+            if key.len() < DELTA_MPT_PREFIX_LEN {
+                // Guard against future callers that store shorter
+                // keys in the same column. Skip past this key.
+                cursor = key.to_vec();
+                cursor.push(0);
+                continue;
+            }
+            let mut prefix = [0u8; DELTA_MPT_PREFIX_LEN];
+            prefix.copy_from_slice(&key[..DELTA_MPT_PREFIX_LEN]);
+            out.push(EpochId::from_slice(&prefix));
+            match Self::upper_bound_bytes(&prefix) {
+                Some(next) => cursor = next,
+                None => break, // prefix was 0xff…ff → no more
+            }
+        }
+        Ok(out)
     }
 
     /// The exclusive upper bound `[prefix + 1]` used for prefix-
     /// scoped range scans/deletes. `None` when `prefix` is
     /// `0xff…ff` (there's no representable next value; caller
     /// should treat as unbounded).
-    fn upper_bound_bytes(prefix: &[u8; PREFIX_LEN]) -> Option<Vec<u8>> {
+    fn upper_bound_bytes(prefix: &[u8; DELTA_MPT_PREFIX_LEN]) -> Option<Vec<u8>> {
         let mut ub = *prefix;
         for byte in ub.iter_mut().rev() {
             if *byte == 0xff {
@@ -233,13 +274,24 @@ impl DeltaDbManagerTrait for DeltaDbManagerMdbx {
     /// IS the source of truth for which delta MPTs exist under
     /// this backend.
     ///
-    /// See `docs/internal/storage-delta-mpt-migration.md` §6.4.
+    /// **Orphan GC (design doc §2.3.2.3)**: enumerate every
+    /// distinct prefix present in the shared column and compare
+    /// against the expected set assembled from
+    /// `snapshot_info_map`. Any prefix present in MDBX but NOT in
+    /// the expected set is a leaked delta MPT from a snapshot
+    /// destroy that crashed after committing snapshot_info but
+    /// before finishing the range delete — under 4c's original
+    /// impl it would persist forever. Range-delete it here.
+    ///
+    /// See `docs/internal/storage-delta-mpt-migration.md` §6.4
+    /// and `docs/internal/storage-phase-5-cde-migration.md`
+    /// §2.3.2.3.
     fn scan_persist_state(
         &self, snapshot_info_map: &HashMap<EpochId, SnapshotInfo>,
     ) -> Result<(Vec<EpochId>, HashMap<EpochId, Self::DeltaDb>)> {
-        // Same expected-set assembly as the default impl —
-        // primary delta MPT for each snapshot, plus intermediate
-        // delta MPT keyed by the parent snapshot.
+        // Expected-set assembly — primary delta MPT for each
+        // snapshot, plus intermediate delta MPT keyed by the parent
+        // snapshot.
         let mut expected: HashMap<EpochId, ()> = HashMap::new();
         for (snapshot_epoch_id, snapshot_info) in snapshot_info_map {
             expected.insert(snapshot_epoch_id.clone(), ());
@@ -249,6 +301,31 @@ impl DeltaDbManagerTrait for DeltaDbManagerMdbx {
             );
         }
 
+        // Enumerate every distinct prefix actually present in MDBX.
+        // Costs O(distinct_prefixes) cursor seeks — cheap.
+        let present = self.enumerate_present_prefixes()?;
+
+        // Any prefix present in MDBX but NOT expected is an orphan
+        // — range-delete it. This closes the 4c leak where a crash
+        // between snapshot_info removal and delta destroy would
+        // strand a delta MPT forever.
+        let expected_set: std::collections::HashSet<EpochId> =
+            expected.keys().copied().collect();
+        for epoch_id in &present {
+            if !expected_set.contains(epoch_id) {
+                let name = self.get_delta_db_name(epoch_id);
+                warn!(
+                    "DeltaDbManagerMdbx: orphan delta MPT prefix {} \
+                     detected at startup — no snapshot_info \
+                     references it; GC'ing.",
+                    epoch_id.as_ref().to_hex::<String>()
+                );
+                self.destroy_delta_db(&name)?;
+            }
+        }
+
+        // Materialise handles for the expected snapshots that do
+        // have data. Anything missing is reported to the caller.
         let mut delta_mpts = HashMap::new();
         for epoch_id in expected.keys() {
             let name = self.get_delta_db_name(epoch_id);
@@ -360,7 +437,7 @@ mod tests {
     }
 
     fn epoch_id(byte: u8) -> EpochId {
-        EpochId::from_slice(&[byte; PREFIX_LEN])
+        EpochId::from_slice(&[byte; DELTA_MPT_PREFIX_LEN])
     }
 
     /// `get_delta_db_name` matches the paritydb manager's format
@@ -373,7 +450,7 @@ mod tests {
         assert!(name.starts_with("paritydb_"));
         assert_eq!(
             name,
-            "paritydb_".to_string() + &"ab".repeat(PREFIX_LEN)
+            "paritydb_".to_string() + &"ab".repeat(DELTA_MPT_PREFIX_LEN)
         );
     }
 
@@ -493,5 +570,63 @@ mod tests {
         assert_eq!(m.snapshot_metrics.read().len(), 1);
         m.destroy_delta_db(&name).unwrap();
         assert_eq!(m.snapshot_metrics.read().len(), 0);
+    }
+
+    /// `enumerate_present_prefixes` sees every distinct 32-byte
+    /// prefix that has any data in the column, and only those.
+    #[test]
+    fn enumerate_present_prefixes_sees_all() {
+        let (_e, _p, m) = make_manager();
+        let mut ids: Vec<EpochId> =
+            (0..4).map(|i| epoch_id(0x10 + i)).collect();
+        ids.sort();
+        for id in &ids {
+            let handle =
+                m.new_empty_delta_db(&m.get_delta_db_name(id)).unwrap();
+            handle.put(b"k", b"v").unwrap();
+        }
+        let mut found = m.enumerate_present_prefixes().unwrap();
+        found.sort();
+        assert_eq!(found, ids);
+    }
+
+    /// `scan_persist_state` deletes any prefix present in MDBX
+    /// that is not referenced by `snapshot_info_map` (orphan GC
+    /// — closes the 4c leak per design doc §2.3.2.3).
+    #[test]
+    fn scan_persist_state_destroys_orphans() {
+        let (_e, _p, m) = make_manager();
+        // Live snapshot: known, referenced.
+        let live_id = epoch_id(0x77);
+        let live = m
+            .new_empty_delta_db(&m.get_delta_db_name(&live_id))
+            .unwrap();
+        live.put(b"k", b"live").unwrap();
+        // Orphan: prefix present, no snapshot_info entry.
+        let orphan_id = epoch_id(0x88);
+        let orphan = m
+            .new_empty_delta_db(&m.get_delta_db_name(&orphan_id))
+            .unwrap();
+        orphan.put(b"k", b"orphan").unwrap();
+
+        // Only `live_id` is in snapshot_info; its parent equals
+        // itself so we don't accidentally register a second
+        // expected id.
+        let mut snapshot_info_map: HashMap<EpochId, SnapshotInfo> =
+            HashMap::new();
+        let mut info = SnapshotInfo::genesis_snapshot_info();
+        info.parent_snapshot_epoch_id = live_id;
+        info.snapshot_info_kept_to_provide_sync =
+            SnapshotKeptToProvideSyncStatus::No;
+        snapshot_info_map.insert(live_id, info);
+
+        let (missing, delta_mpts) =
+            m.scan_persist_state(&snapshot_info_map).unwrap();
+        assert!(missing.is_empty());
+        assert!(delta_mpts.contains_key(&live_id));
+        // Live prefix still has data.
+        assert!(m.prefix_has_any(&live_id).unwrap());
+        // Orphan prefix is gone.
+        assert!(!m.prefix_has_any(&orphan_id).unwrap());
     }
 }

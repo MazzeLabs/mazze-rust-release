@@ -223,8 +223,6 @@ pub fn initialize_synchronization_graph_with_data_manager(
                 debug_dump_dir_invalid_state_root: None,
                 debug_invalid_state_root_epoch: None,
                 force_recompute_height_during_construct_main: None,
-                recovery_latest_mpt_snapshot: false,
-                use_isolated_db_for_mpt_table: false,
             },
             bench_mode: true, /* Set bench_mode to true so that we skip
                                * execution */

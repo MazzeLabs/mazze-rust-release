@@ -424,10 +424,10 @@ impl StorageManager {
                 // Phase 5c wiring: SnapshotDbManagerMdbx takes the
                 // dedicated snapshot env opened above +
                 // `snapshot_path` (kept for API parity) +
-                // max_open_snapshots. The isolated-MPT-dir knobs
-                // (use_isolated_db_for_mpt_table*) that the
-                // paritydb constructor accepted are dead per §3 /
-                // R1.3 — 5d will delete them from the config.
+                // max_open_snapshots. Phase 5d deleted the
+                // `use_isolated_db_for_mpt_table*` knobs the
+                // paritydb constructor accepted — the mode was
+                // already non-functional (design doc §3 / R1.3).
                 snapshot_db_manager: SnapshotDbManager::new(
                     Arc::clone(
                         snapshot_mdbx_env.as_ref().expect(

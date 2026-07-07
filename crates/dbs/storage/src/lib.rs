@@ -214,8 +214,6 @@ pub struct StorageConfiguration {
     pub enable_single_mpt_storage: bool,
     pub single_mpt_space: Option<Space>,
     pub keep_snapshot_before_stable_checkpoint: bool,
-    pub use_isolated_db_for_mpt_table: bool,
-    pub use_isolated_db_for_mpt_table_height: Option<u64>,
     pub keep_era_genesis_snapshot: bool,
     pub state_db_backend: StateDbBackend,
     /// Geometry for the dedicated Phase 5c snapshot MDBX env
@@ -270,8 +268,6 @@ impl StorageConfiguration {
             enable_single_mpt_storage: false,
             single_mpt_space: None,
             keep_snapshot_before_stable_checkpoint: true,
-            use_isolated_db_for_mpt_table: false,
-            use_isolated_db_for_mpt_table_height: None,
             keep_era_genesis_snapshot: false,
             state_db_backend: StateDbBackend::default(),
             snapshot_mdbx_config: SnapshotMdbxConfig::default(),

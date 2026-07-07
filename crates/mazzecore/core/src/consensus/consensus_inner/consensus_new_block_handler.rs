@@ -1992,16 +1992,26 @@ impl ConsensusNewBlockHandler {
             .storage_manager
             .get_storage_manager()
             .get_snapshot_epoch_count();
+        // Phase 5d: the `use_isolated_db_for_mpt_table` recovery
+        // path was already non-functional (paritydb ignored the
+        // flag; see design doc §3 / R1.3) and is gone under the
+        // MDBX cutover — the MPT lives in the same env as KV, no
+        // separate dir to recover. `recover_latest_mpt_snapshot_if_needed`
+        // was deleted in the same commit.
         let mut need_set_intermediate_trie_root_merkle = false;
-        let max_snapshot_epoch_index_has_mpt = self
-            .recover_latest_mpt_snapshot_if_needed(
-                inner,
-                &mut start_compute_epoch_main_index,
-                start_main_index,
-                end_index,
-                &mut need_set_intermediate_trie_root_merkle,
-                snapshot_epoch_count as u64,
-            );
+        let max_snapshot_epoch_index_has_mpt: Option<usize> = Some(end_index);
+        // Clear the stashed persist state so downstream callers
+        // don't consult stale data. The MDBX
+        // `scan_persist_state` in `StorageManager::load_persist_state`
+        // reads and clears it later; we drop here in case it
+        // survived a previous restart.
+        inner
+            .data_man
+            .storage_manager
+            .get_storage_manager()
+            .persist_state_from_initialization
+            .write()
+            .take();
         self.set_intermediate_trie_root_merkle(
             inner,
             start_compute_epoch_main_index,
@@ -2191,246 +2201,6 @@ impl ConsensusNewBlockHandler {
         }
 
         force_compute_index
-    }
-
-    fn recover_latest_mpt_snapshot_if_needed(
-        &self, inner: &mut ConsensusGraphInner,
-        start_compute_epoch_main_index: &mut usize, start_main_index: usize,
-        end_index: usize, need_set_intermediate_trie_root_merkle: &mut bool,
-        snapshot_epoch_count: u64,
-    ) -> Option<usize> {
-        if !self.conf.inner_conf.use_isolated_db_for_mpt_table {
-            return Some(end_index);
-        }
-
-        let (
-            temp_snapshot_db_existing,
-            removed_snapshots,
-            latest_snapshot_epoch_height,
-            max_snapshot_epoch_height_has_mpt,
-        ) = if let Some((
-            temp_snapshot_db_existing,
-            removed_snapshots,
-            latest_snapshot_epoch_height,
-            max_snapshot_epoch_height_has_mpt,
-        )) = inner
-            .data_man
-            .storage_manager
-            .get_storage_manager()
-            .persist_state_from_initialization
-            .write()
-            .take()
-        {
-            (
-                temp_snapshot_db_existing,
-                removed_snapshots,
-                max(latest_snapshot_epoch_height, inner.cur_era_stable_height),
-                max_snapshot_epoch_height_has_mpt,
-            )
-        } else {
-            (None, HashSet::new(), inner.cur_era_stable_height, None)
-        };
-
-        debug!("latest snapshot epoch height: {}, temp snapshot status: {:?}, max snapshot epoch height has mpt: {:?}, removed snapshots {:?}",
-            latest_snapshot_epoch_height, temp_snapshot_db_existing, max_snapshot_epoch_height_has_mpt, removed_snapshots);
-
-        if removed_snapshots.len() == 1
-            && removed_snapshots.contains(&NULL_EPOCH)
-        {
-            debug!("special case for synced snapshot");
-            return Some(end_index);
-        }
-
-        if max_snapshot_epoch_height_has_mpt
-            .is_some_and(|h| h == latest_snapshot_epoch_height)
-        {
-            inner
-                .data_man
-                .storage_manager
-                .get_storage_manager()
-                .get_snapshot_manager()
-                .get_snapshot_db_manager()
-                .recreate_latest_mpt_snapshot()
-                .unwrap();
-
-            info!(
-                "snapshot for epoch height {} is still not use mpt database",
-                start_compute_epoch_main_index
-            );
-            return Some(end_index);
-        }
-
-        // maximum epoch need to compute
-        let maximum_height_to_create_next_snapshot =
-            latest_snapshot_epoch_height + snapshot_epoch_count * 2;
-        let index =
-            inner.height_to_main_index(maximum_height_to_create_next_snapshot);
-        if *start_compute_epoch_main_index > index {
-            warn!("start_compute_epoch_main_index is greater than maximum epoch need to compute {}", index);
-            *start_compute_epoch_main_index = index;
-        }
-
-        // Find the closest ear prior to the start_compute_epoch_height
-        let start_compute_epoch_height = inner.arena
-            [inner.main_chain[*start_compute_epoch_main_index]]
-            .height;
-        info!(
-            "current start compute epoch height {}",
-            start_compute_epoch_height
-        );
-
-        let recovery_latest_mpt_snapshot =
-            if self.conf.inner_conf.recovery_latest_mpt_snapshot
-                || start_compute_epoch_height <= latest_snapshot_epoch_height
-                || (temp_snapshot_db_existing.is_some()
-                    && latest_snapshot_epoch_height
-                        < start_compute_epoch_height
-                    && start_compute_epoch_height
-                        <= latest_snapshot_epoch_height + snapshot_epoch_count)
-            {
-                true
-            } else {
-                let mut max_epoch_height = 0;
-                for main_index in (start_main_index..end_index)
-                    .step_by(snapshot_epoch_count as usize)
-                {
-                    let main_arena_index = inner.main_chain[main_index];
-                    let main_hash = inner.arena[main_arena_index].hash;
-
-                    debug!(
-                        "snapshot main_index {} height {} ",
-                        main_index, inner.arena[main_arena_index].height
-                    );
-
-                    if removed_snapshots.contains(&main_hash) {
-                        max_epoch_height = max(
-                            max_epoch_height,
-                            inner.arena[main_arena_index].height,
-                        );
-                    }
-                }
-
-                // snapshots after latest_snapshot_epoch_height is removed
-                latest_snapshot_epoch_height < max_epoch_height
-            };
-
-        // if the latest_snapshot_epoch_height is greater than
-        // start_compute_epoch_height, the latest MPT snapshot is dirty
-        if recovery_latest_mpt_snapshot {
-            let era_main_epoch_height = if start_compute_epoch_height
-                <= inner.cur_era_stable_height + snapshot_epoch_count
-            {
-                debug!("snapshot for cur_era_stable_height must be exist");
-                inner.cur_era_stable_height
-            } else {
-                (start_compute_epoch_height - snapshot_epoch_count - 1)
-                    / self.conf.inner_conf.era_epoch_count
-                    * self.conf.inner_conf.era_epoch_count
-            };
-
-            if era_main_epoch_height > latest_snapshot_epoch_height {
-                panic!("era_main_epoch_height is greater than latest_snapshot_epoch_height, this should not happen");
-            }
-
-            debug!(
-                "need recovery latest mpt snapshot, start compute epoch height {}, era main epoch height {}",
-                start_compute_epoch_height, era_main_epoch_height
-            );
-
-            if start_compute_epoch_height <= era_main_epoch_height {
-                unreachable!("start_compute_epoch_height {} is smaller than era_main_epoch_height {}", start_compute_epoch_height, era_main_epoch_height);
-            } else if start_compute_epoch_height
-                <= era_main_epoch_height + snapshot_epoch_count
-            {
-                if start_compute_epoch_height % snapshot_epoch_count == 1 {
-                    *need_set_intermediate_trie_root_merkle = true;
-                }
-            } else if start_compute_epoch_height
-                <= era_main_epoch_height + snapshot_epoch_count * 2
-            {
-                // nothing need to do
-            } else {
-                let new_height =
-                    era_main_epoch_height + snapshot_epoch_count * 2;
-                let new_index = inner.height_to_main_index(new_height);
-
-                info!("reset start_compute_epoch_main_index to {}", new_index);
-                *start_compute_epoch_main_index = new_index;
-            }
-
-            let era_main_hash = if era_main_epoch_height == 0 {
-                NULL_EPOCH
-            } else {
-                inner
-                    .get_main_hash_from_epoch_number(era_main_epoch_height)
-                    .expect("main hash should be exist")
-            };
-
-            let snapshot_db_manager = inner
-                .data_man
-                .storage_manager
-                .get_storage_manager()
-                .get_snapshot_manager()
-                .get_snapshot_db_manager();
-
-            snapshot_db_manager.update_latest_snapshot_id(
-                era_main_hash.clone(),
-                era_main_epoch_height,
-            );
-
-            if max_snapshot_epoch_height_has_mpt
-                .is_some_and(|height| height >= era_main_epoch_height)
-            {
-                // mpt snapshot will be created from empty
-                snapshot_db_manager.recreate_latest_mpt_snapshot().unwrap();
-            } else {
-                let main_hash_before_era = if era_main_epoch_height == 0 {
-                    None
-                } else {
-                    Some(
-                        inner
-                            .get_main_hash_from_epoch_number(
-                                era_main_epoch_height - snapshot_epoch_count,
-                            )
-                            .expect("main hash should be exist"),
-                    )
-                };
-
-                // use ear snapshot replace latest
-                snapshot_db_manager
-                    .recovery_latest_mpt_snapshot_from_checkpoint(
-                        &era_main_hash,
-                        main_hash_before_era,
-                    )
-                    .unwrap();
-            }
-
-            max_snapshot_epoch_height_has_mpt.and_then(|v| {
-                if v >= inner.cur_era_stable_height {
-                    Some(inner.height_to_main_index(v))
-                } else {
-                    None
-                }
-            })
-        } else {
-            if temp_snapshot_db_existing.is_some()
-                && latest_snapshot_epoch_height + snapshot_epoch_count
-                    < start_compute_epoch_height
-                && start_compute_epoch_height
-                    <= latest_snapshot_epoch_height + 2 * snapshot_epoch_count
-            {
-                inner
-                    .data_man
-                    .storage_manager
-                    .get_storage_manager()
-                    .get_snapshot_manager()
-                    .get_snapshot_db_manager()
-                    .set_reconstruct_snapshot_id(temp_snapshot_db_existing);
-            }
-
-            debug!("the latest MPT snapshot is valid");
-            Some(end_index)
-        }
     }
 
     fn set_intermediate_trie_root_merkle(

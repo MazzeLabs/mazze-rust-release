@@ -254,6 +254,21 @@ impl KeyValueDbTraitRead for PrefixedKvdbMdbx {
 // in `kvdb_mdbx.rs`.
 mark_kvdb_multi_reader!(PrefixedKvdbMdbx);
 
+// Explicit `KeyValueDbTraitOwnedRead` impl on the plain type —
+// `mark_kvdb_multi_reader!` only supplies the `&PrefixedKvdbMdbx`
+// blanket, and Phase 5c's snapshot MPT machinery
+// (`SnapshotMpt<PrefixedKvdbMdbx, PrefixedKvdbMdbx>`,
+// `SnapshotMptTraitReadAndIterate`) hits generic bounds that
+// resolve against the plain type. Same read behaviour as
+// `KeyValueDbTraitRead::get` — MDBX reads are lock-free MVCC so
+// there's no semantic difference between the shared-borrow and
+// owned-read paths.
+impl KeyValueDbTraitOwnedRead for PrefixedKvdbMdbx {
+    fn get_mut(&mut self, key: &[u8]) -> Result<Option<Box<[u8]>>> {
+        <Self as KeyValueDbTraitRead>::get(&*self, key)
+    }
+}
+
 // -------------------------- write path --------------------------
 
 impl KeyValueDbTrait for PrefixedKvdbMdbx {
@@ -277,6 +292,15 @@ impl KeyValueDbTrait for PrefixedKvdbMdbx {
     fn put(
         &self, key: &[u8], value: &[u8],
     ) -> Result<Option<Option<Box<[u8]>>>> {
+        Self::put_impl(self, key, value)
+    }
+}
+
+impl PrefixedKvdbMdbx {
+    #[inline]
+    fn put_impl(
+        &self, key: &[u8], value: &[u8],
+    ) -> Result<Option<Option<Box<[u8]>>>> {
         match self.inner.put(&self.compose(key), value) {
             Ok(v) => {
                 if let Some(m) = &self.metrics {
@@ -291,6 +315,27 @@ impl KeyValueDbTrait for PrefixedKvdbMdbx {
                 Err(e)
             }
         }
+    }
+}
+
+// `KeyValueDbTraitSingleWriter` — required by Phase 5c's
+// `SnapshotMptTraitRw for SnapshotMpt<PrefixedKvdbMdbx,
+// PrefixedKvdbMdbx>` bound (see the trait's `KeyValueDbTraitSingleWriter<ValueType = SnapshotMptDbValue>`
+// where-clause). Delegates to the shared-borrow `KeyValueDbTrait`
+// variants above — MDBX is single-writer at the env level, so the
+// `&mut self` promise is respected via the underlying rw_txn
+// anyway.
+impl KeyValueDbTraitSingleWriter for PrefixedKvdbMdbx {
+    fn delete(
+        &mut self, key: &[u8],
+    ) -> Result<Option<Option<Box<[u8]>>>> {
+        <Self as KeyValueDbTrait>::delete(&*self, key)
+    }
+
+    fn put(
+        &mut self, key: &[u8], value: &[u8],
+    ) -> Result<Option<Option<Box<[u8]>>>> {
+        Self::put_impl(&*self, key, value)
     }
 }
 

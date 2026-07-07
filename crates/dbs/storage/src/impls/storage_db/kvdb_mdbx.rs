@@ -154,6 +154,59 @@ impl MdbxEnv {
         let db = builder.open(path).map_err(map_mdbx_error)?;
         Ok(Arc::new(Self { db }))
     }
+
+    /// Open (or create) an MDBX env with an explicit **growth-enabled**
+    /// geometry — the map starts at `initial_bytes` and can grow to
+    /// `max_bytes` in steps of `growth_step_bytes` on demand. This is
+    /// the constructor snapshot / cold-tier callers use to avoid the
+    /// pre-existing hot env's pinned-64GB behaviour (see
+    /// `docs/internal/storage-phase-5-cde-migration.md` §2.3.0/§2.3.1).
+    ///
+    /// **Sizing rules of thumb**:
+    /// - `initial`: 1–2 GB. Small enough that a fresh node doesn't over-
+    ///   commit disk; MDBX allocates on-demand within the range.
+    /// - `growth_step`: 1–4 GB. Larger steps mean fewer file-growth
+    ///   syscalls at write bursts, at the cost of more slack between
+    ///   grows.
+    /// - `max`: sized for peak retention. See §2.3.1 formula:
+    ///   `(2–3× peak state) × (max retained snapshots) × safety`.
+    ///
+    /// Returns an error if `initial > max` or `growth_step == 0`.
+    pub fn open_with_geometry(
+        path: &Path, initial_bytes: usize, max_bytes: usize,
+        growth_step_bytes: usize,
+    ) -> Result<Arc<Self>> {
+        if initial_bytes > max_bytes {
+            return Err(Error::from(ErrorKind::Msg(format!(
+                "kvdb_mdbx: initial ({} B) > max ({} B)",
+                initial_bytes, max_bytes
+            ))));
+        }
+        if growth_step_bytes == 0 {
+            return Err(Error::from(ErrorKind::Msg(
+                "kvdb_mdbx: growth_step must be > 0 for a growth-\
+                 enabled geometry (use `open_with_map_size` for \
+                 pinned geometry)".to_string(),
+            )));
+        }
+        std::fs::create_dir_all(path).map_err(|e| {
+            Error::from(ErrorKind::Msg(format!(
+                "kvdb_mdbx: failed to create dir {}: {}",
+                path.display(),
+                e
+            )))
+        })?;
+
+        let mut builder = Database::<NoWriteMap>::new();
+        builder.set_max_tables(DEFAULT_MAX_TABLES);
+        builder.set_geometry(libmdbx::Geometry {
+            size: Some(initial_bytes..max_bytes),
+            growth_step: Some(growth_step_bytes as isize),
+            ..Default::default()
+        });
+        let db = builder.open(path).map_err(map_mdbx_error)?;
+        Ok(Arc::new(Self { db }))
+    }
 }
 
 /// Bridge a `libmdbx::Error` to the storage-crate `Error`.
@@ -457,6 +510,138 @@ impl KvdbMdbx {
         }
         txn.commit().map_err(map_mdbx_error)?;
         Ok(n)
+    }
+
+    /// Return the first `(key, value)` pair strictly within
+    /// `[lower_bound_incl, upper_bound_excl)`, or `None` if the range
+    /// is empty. **Constant-time cursor seek** — does NOT materialize
+    /// the whole range like [`Self::iter_range_owned`].
+    ///
+    /// Consumed by prefix-existence probes (§2.3.2.4 of the migration
+    /// design doc) — a delta MPT or snapshot's "does this epoch have
+    /// any data?" check on a shared column is cheap when it stops at
+    /// the first hit instead of copying every key + value. Retrofits
+    /// [`super::delta_db_manager_mdbx::DeltaDbManagerMdbx::
+    /// prefix_has_any`] onto this too.
+    pub fn first_in_range(
+        &self, lower_bound_incl: &[u8],
+        upper_bound_excl: Option<&[u8]>,
+    ) -> Result<Option<(Box<[u8]>, Box<[u8]>)>> {
+        let txn = self.env.db.begin_ro_txn().map_err(map_mdbx_error)?;
+        let table = match txn.open_table(Some(&col_table_name(self.col))) {
+            Ok(t) => t,
+            Err(libmdbx::Error::NotFound) => return Ok(None),
+            Err(e) => return Err(map_mdbx_error(e)),
+        };
+        let mut cursor = txn.cursor(&table).map_err(map_mdbx_error)?;
+        let mut iter =
+            cursor.iter_from::<Vec<u8>, Vec<u8>>(lower_bound_incl);
+        match iter.next() {
+            None => Ok(None),
+            Some(Err(e)) => Err(map_mdbx_error(e)),
+            Some(Ok((k, v))) => {
+                if let Some(upper) = upper_bound_excl {
+                    if k.as_slice() >= upper {
+                        return Ok(None);
+                    }
+                }
+                Ok(Some((k.into_boxed_slice(), v.into_boxed_slice())))
+            }
+        }
+    }
+
+    /// Chunked variant of [`Self::delete_range`] for large ranges
+    /// (snapshot destroy, Phase 5c). Each iteration begins a fresh
+    /// `rw_txn`, collects up to `chunk_size_keys` keys inside the
+    /// bound range starting from where the previous chunk left off,
+    /// deletes them, commits, and repeats until the range is empty.
+    /// Returns the **total keys deleted** across all chunks.
+    ///
+    /// Why this exists: `delete_range` materializes the whole range
+    /// into RAM and holds the env's writer lock for the entire delete.
+    /// Fine for a delta MPT (few thousand keys); catastrophic for a
+    /// snapshot's `PREFIX_KV` (millions). This form caps peak RAM at
+    /// `chunk_size_keys` × avg-key-size and yields the writer lock
+    /// between chunks so concurrent snapshot-env writers (a merge, a
+    /// full-sync finalize) never wait longer than one chunk. See
+    /// §2.3.2.2 of the migration design doc.
+    ///
+    /// **Space semantics** (design doc §2.3.2.2 — worth stating in
+    /// code for future ops readers): freed pages return to the MDBX
+    /// freelist and are reused by later writes, but with a
+    /// growth-enabled geometry the file **never shrinks below its
+    /// peak**. Capacity math must therefore be done at peak
+    /// occupancy, not steady state.
+    ///
+    /// `chunk_size_keys == 0` is a caller error — returns
+    /// `Err(...)` rather than looping forever.
+    pub fn delete_range_chunked(
+        &self, lower_bound_incl: &[u8],
+        upper_bound_excl: Option<&[u8]>, chunk_size_keys: usize,
+    ) -> Result<usize> {
+        if chunk_size_keys == 0 {
+            return Err(Error::from(ErrorKind::Msg(
+                "delete_range_chunked: chunk_size_keys must be > 0"
+                    .to_string(),
+            )));
+        }
+        // Track the resumption point — the smallest key we haven't
+        // yet processed. Starts at `lower_bound_incl`; after each
+        // chunk we advance past the last deleted key.
+        let mut cursor_start: Vec<u8> = lower_bound_incl.to_vec();
+        let mut total_deleted: usize = 0;
+
+        loop {
+            let txn = self.env.db.begin_rw_txn().map_err(map_mdbx_error)?;
+            let table =
+                match txn.open_table(Some(&col_table_name(self.col))) {
+                    Ok(t) => t,
+                    Err(libmdbx::Error::NotFound) => return Ok(total_deleted),
+                    Err(e) => return Err(map_mdbx_error(e)),
+                };
+            let mut cursor =
+                txn.cursor(&table).map_err(map_mdbx_error)?;
+            let iter =
+                cursor.iter_from::<Vec<u8>, Vec<u8>>(&cursor_start);
+            let mut batch: Vec<Vec<u8>> = Vec::with_capacity(
+                chunk_size_keys.min(1024),
+            );
+            for pair in iter {
+                let (k, _v) = pair.map_err(map_mdbx_error)?;
+                if let Some(upper) = upper_bound_excl {
+                    if k.as_slice() >= upper {
+                        break;
+                    }
+                }
+                batch.push(k);
+                if batch.len() >= chunk_size_keys {
+                    break;
+                }
+            }
+            if batch.is_empty() {
+                // No more work — commit an empty txn (releases the
+                // writer lock cleanly) and return.
+                txn.commit().map_err(map_mdbx_error)?;
+                return Ok(total_deleted);
+            }
+            // Set the resumption cursor to the byte-successor of the
+            // last deleted key so the next iteration doesn't re-see
+            // the current batch. Because keys can be arbitrary
+            // lengths, append a 0 byte to the last key — that gives
+            // us the smallest key that sorts strictly after it under
+            // MDBX's memcmp ordering.
+            let last = batch.last().unwrap().clone();
+            cursor_start = last;
+            cursor_start.push(0);
+
+            let n = batch.len();
+            for k in batch {
+                let _ =
+                    txn.del(&table, &k, None).map_err(map_mdbx_error)?;
+            }
+            txn.commit().map_err(map_mdbx_error)?;
+            total_deleted += n;
+        }
     }
 }
 
@@ -1120,5 +1305,134 @@ mod tests {
             col0.get(b"new").unwrap().as_deref(),
             Some(&b"value"[..])
         );
+    }
+
+    // -------------------------- 5c pre-work --------------------------
+
+    /// `open_with_geometry` rejects zero growth step and inverted
+    /// `initial > max`. These are caller mistakes, not runtime
+    /// conditions; error early instead of letting libmdbx choke.
+    #[test]
+    fn open_with_geometry_rejects_bad_sizes() {
+        let dir =
+            tempdir::TempDir::new("kvdb_mdbx_geom_bad").unwrap();
+        // zero growth step
+        assert!(MdbxEnv::open_with_geometry(
+            dir.path(),
+            1 << 20,
+            1 << 30,
+            0,
+        )
+        .is_err());
+        // initial > max
+        assert!(MdbxEnv::open_with_geometry(
+            dir.path(),
+            1 << 30,
+            1 << 20,
+            1 << 20,
+        )
+        .is_err());
+    }
+
+    /// Happy-path open + write + close under a growth-enabled
+    /// geometry. Verifies the env starts smaller than max and
+    /// accepts normal put/get traffic.
+    #[test]
+    fn open_with_geometry_round_trip() {
+        let dir =
+            tempdir::TempDir::new("kvdb_mdbx_geom_ok").unwrap();
+        let env = MdbxEnv::open_with_geometry(
+            dir.path(),
+            8 * 1024 * 1024, // 8 MiB initial
+            64 * 1024 * 1024, // 64 MiB max
+            4 * 1024 * 1024, // 4 MiB step
+        )
+        .unwrap();
+        let col = KvdbMdbx::with_column(env, 0);
+        col.put(b"k", b"v").unwrap();
+        assert_eq!(col.get(b"k").unwrap().as_deref(), Some(&b"v"[..]));
+    }
+
+    /// `first_in_range` on an empty column returns `None` without
+    /// materializing any keys. `NotFound` on the column open path
+    /// (no writes yet) is handled explicitly.
+    #[test]
+    fn first_in_range_empty() {
+        let dir =
+            tempdir::TempDir::new("kvdb_first_empty").unwrap();
+        let env = MdbxEnv::open(dir.path()).unwrap();
+        let col = KvdbMdbx::with_column(env, 3);
+        assert_eq!(col.first_in_range(b"", None).unwrap(), None);
+    }
+
+    /// After some writes, `first_in_range` returns the smallest
+    /// key ≥ `lower` and stops. Verifies (a) the seek finds the
+    /// right position, (b) it stops at the first hit (unlike
+    /// `iter_range_owned`), (c) `upper_bound_excl` is respected.
+    #[test]
+    fn first_in_range_returns_first_hit() {
+        let dir = tempdir::TempDir::new("kvdb_first_hit").unwrap();
+        let env = MdbxEnv::open(dir.path()).unwrap();
+        let col = KvdbMdbx::with_column(env, 5);
+        for i in 0u8..8 {
+            col.put(&[i], &[i * 10]).unwrap();
+        }
+        // Seek from 3 → returns 3.
+        let (k, v) = col.first_in_range(&[3], None).unwrap().unwrap();
+        assert_eq!(&*k, &[3]);
+        assert_eq!(&*v, &[30]);
+        // Upper bound clips: seek from 6 with upper=6 → empty.
+        assert_eq!(
+            col.first_in_range(&[6], Some(&[6])).unwrap(),
+            None
+        );
+        // Seek from 6 with upper=7 → returns 6.
+        let (k, _) =
+            col.first_in_range(&[6], Some(&[7])).unwrap().unwrap();
+        assert_eq!(&*k, &[6]);
+    }
+
+    /// `delete_range_chunked` deletes the whole range in multiple
+    /// txns bounded by `chunk_size_keys`. Verifies (a) all target
+    /// keys are gone, (b) keys outside the range are untouched,
+    /// (c) chunk boundary bookkeeping doesn't skip or double-count.
+    #[test]
+    fn delete_range_chunked_purges_range() {
+        let dir = tempdir::TempDir::new("kvdb_del_chunk").unwrap();
+        let env = MdbxEnv::open(dir.path()).unwrap();
+        let col = KvdbMdbx::with_column(env, 7);
+        // Layout: keys 0x00..0x20 in-range, keys 0x40..0x50 out-of-range.
+        for i in 0u8..0x20 {
+            col.put(&[i], &[i]).unwrap();
+        }
+        for i in 0x40u8..0x50 {
+            col.put(&[i], &[i]).unwrap();
+        }
+        // chunk_size=5 forces ~7 chunks for the 32-key range.
+        let n = col
+            .delete_range_chunked(&[0x00], Some(&[0x20]), 5)
+            .unwrap();
+        assert_eq!(n, 0x20);
+        // Everything in-range is gone.
+        for i in 0u8..0x20 {
+            assert!(col.get(&[i]).unwrap().is_none(), "kept key {:x}", i);
+        }
+        // Everything out-of-range survived.
+        for i in 0x40u8..0x50 {
+            assert_eq!(col.get(&[i]).unwrap().as_deref(), Some(&[i][..]));
+        }
+    }
+
+    /// `delete_range_chunked` rejects `chunk_size_keys == 0` up
+    /// front instead of looping forever.
+    #[test]
+    fn delete_range_chunked_rejects_zero_chunk() {
+        let dir = tempdir::TempDir::new("kvdb_del_bad").unwrap();
+        let env = MdbxEnv::open(dir.path()).unwrap();
+        let col = KvdbMdbx::with_column(env, 9);
+        col.put(b"k", b"v").unwrap();
+        assert!(col
+            .delete_range_chunked(b"", None, 0)
+            .is_err());
     }
 }

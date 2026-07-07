@@ -34,7 +34,7 @@ pub mod db_gc_manager;
 pub mod db_manager;
 pub mod tx_data_manager;
 use crate::block_data_manager::{
-    db_manager::{DBManager, MdbxShadowFlags},
+    db_manager::DBManager,
     tx_data_manager::TransactionDataManager,
 };
 pub use block_data_types::*;
@@ -249,31 +249,23 @@ impl BlockDataManager {
             config.tx_cache_index_maintain_timeout,
             worker_pool,
         );
-        // Storage Phase 2 wire-up: hand the DBManager the MDBX env
-        // opened by the storage layer (may be None on ParityDB-only
-        // dev fallback) and the per-table shadow-mirror opt-ins.
-        // `mazzecore::StorageManager` is a re-export alias for
-        // `StateManager` — the actual struct that owns `mdbx_env`
-        // is one indirection below (see the `get_storage_manager()`
-        // accessor).
-        let db_manager = DBManager::new_from_paritydb(
-            db,
+        // Storage Phase 5a wire-up: DBManager is MDBX-native. The
+        // shared MDBX env is required; if the storage layer hasn't
+        // opened one (state_db_type != "mdbx" in hydra.toml) we
+        // fail loudly here since there is no ParityDB fallback
+        // anymore.
+        let db_mdbx_env = storage_manager
+            .get_storage_manager()
+            .mdbx_env()
+            .expect(
+                "DBManager requires the shared MDBX env; set \
+                 `state_db_type = \"mdbx\"` in hydra.toml. Phase \
+                 5a removed the ParityDB fallback.",
+            );
+        let db_manager = DBManager::new(
+            db_mdbx_env,
             pow.clone(),
             true_genesis.hash(),
-            storage_manager.get_storage_manager().mdbx_env(),
-            MdbxShadowFlags {
-                hash_by_block_number: config
-                    .enable_mdbx_shadow_hash_by_number,
-                tx_index: config.enable_mdbx_shadow_tx_index,
-                blamed_header_verified_roots: config
-                    .enable_mdbx_shadow_blamed_header_verified_roots,
-                block_traces: config.enable_mdbx_shadow_block_traces,
-                blocks: config.enable_mdbx_shadow_blocks,
-                epoch_numbers: config
-                    .enable_mdbx_shadow_epoch_numbers,
-                misc: config.enable_mdbx_shadow_misc,
-                read_shadow: config.mdbx_read_shadow,
-            },
         );
         let previous_db_progress =
             db_manager.gc_progress_from_db().unwrap_or(0);
@@ -1955,65 +1947,6 @@ pub struct DataManagerConfiguration {
     pub additional_maintained_transaction_index_epoch_count: Option<usize>,
     pub checkpoint_gc_time_in_epoch_count: usize,
     pub strict_tx_index_gc: bool,
-    /// Storage Phase 2 opt-in: mirror `HashByBlockNumber` writes to
-    /// an MDBX shadow column so `MdbxShadowMirror::verify_parity` can
-    /// prove the two backends agree before Phase 3 flips reads over.
-    /// Default `false`. Turned on selectively on the fleet after the
-    /// unit tests in `mdbx_dual_write.rs` pass — no user impact when
-    /// off. The shadow column is opened on the MDBX env
-    /// `StorageManager` already exposes; if that env is `None`
-    /// (ParityDB-only dev fallback), the flag has no effect and the
-    /// mirror is not constructed.
-    pub enable_mdbx_shadow_hash_by_number: bool,
-    /// Storage Phase 2 opt-in for the `Transactions` column (aka
-    /// `MdbxColumn::TxIndex`). Same shadow-then-cutover semantics as
-    /// `enable_mdbx_shadow_hash_by_number`. Independent flag so
-    /// operators can stage table swaps one at a time; leaving one on
-    /// doesn't force the other. Default `false`.
-    pub enable_mdbx_shadow_tx_index: bool,
-    /// Same shadow-then-cutover semantics for the
-    /// `BlamedHeaderVerifiedRoots` column (→
-    /// `MdbxColumn::BlamedHeaderVerifiedRoots`). Low write volume
-    /// in production — only blamed headers materialize entries —
-    /// which makes it a safe first-in-fleet sanity check that the
-    /// routing works before enabling higher-volume tables.
-    /// Default `false`.
-    pub enable_mdbx_shadow_blamed_header_verified_roots: bool,
-    /// Same shadow-then-cutover semantics for the `BlockTraces`
-    /// column (→ `MdbxColumn::BlockTraces`). Only meaningfully
-    /// exercised on nodes with tracing enabled — miners and full-
-    /// fast typically disable, so there the flag is effectively a
-    /// no-op. Default `false`.
-    pub enable_mdbx_shadow_block_traces: bool,
-    /// Storage Phase 2 step 8c: shadow-mirror `DBTable::Blocks`.
-    /// A compound flag — Blocks is multiplexed in ParityDB via
-    /// key-suffix bytes, so enabling this installs a
-    /// [`CompoundMirror`] with 7 sub-columns
-    /// (BlockHeaders / LocalBlockInfo / BlockBodies /
-    /// BlockExecutionResult / EpochExecutionContext /
-    /// BlockExecutionCommitment / BlockRewards). Highest write
-    /// volume of any shadow. Enable last: only after the four
-    /// single-purpose mirrors have shown clean parity for at
-    /// least a full era. Default `false`.
-    pub enable_mdbx_shadow_blocks: bool,
-    /// Storage Phase 2 step 8d: shadow-mirror
-    /// `DBTable::EpochNumbers`. Compound flag — 2 sub-columns
-    /// (`EpochBlocks` for executed sets, `EpochSkippedBlockSet`
-    /// for skipped). Moderate write volume (one per executed
-    /// epoch). Default `false`.
-    pub enable_mdbx_shadow_epoch_numbers: bool,
-    /// Storage Phase 2 step 8e: shadow-mirror `DBTable::Misc`.
-    /// Single MdbxColumn::Misc — the keyspace is small and
-    /// heterogeneous, so no per-key split. Very low write
-    /// volume (checkpoint bumps + rare metadata). Default
-    /// `false`.
-    pub enable_mdbx_shadow_misc: bool,
-    /// Storage Phase 3: boot installed shadow mirrors directly on
-    /// `ReadSource::Shadow` (MDBX-only reads) from genesis, no runtime
-    /// flip. Only meaningful when the relevant `enable_mdbx_shadow_*`
-    /// flags are also on and the node starts from genesis. Default
-    /// `false`.
-    pub mdbx_read_shadow: bool,
 }
 
 impl MallocSizeOf for DataManagerConfiguration {
@@ -2041,14 +1974,6 @@ impl DataManagerConfiguration {
             additional_maintained_transaction_index_epoch_count: None,
             checkpoint_gc_time_in_epoch_count: 1,
             strict_tx_index_gc: true,
-            enable_mdbx_shadow_hash_by_number: false,
-            enable_mdbx_shadow_tx_index: false,
-            enable_mdbx_shadow_blamed_header_verified_roots: false,
-            enable_mdbx_shadow_block_traces: false,
-            enable_mdbx_shadow_blocks: false,
-            enable_mdbx_shadow_epoch_numbers: false,
-            enable_mdbx_shadow_misc: false,
-            mdbx_read_shadow: false,
         }
     }
 }

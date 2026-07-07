@@ -5,28 +5,22 @@ use crate::{
         CheckpointHashes, DataVersionTuple, EpochExecutionContext,
         LocalBlockInfo,
     },
-    db::{
-        COL_BLAMED_HEADER_VERIFIED_ROOTS, COL_BLOCKS, COL_BLOCK_TRACES,
-        COL_EPOCH_NUMBER, COL_HASH_BY_BLOCK_NUMBER, COL_MISC, COL_TX_INDEX,
-    },
     pow::PowComputer,
     verification::VerificationConfig,
 };
 use byteorder::{ByteOrder, LittleEndian};
-use db::SystemDB;
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use mazze_internal_common::{
     DatabaseDecodable, DatabaseEncodable, EpochExecutionCommitment,
 };
 use mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
 use mazze_storage::{
-    storage_db::KeyValueDbTrait, DualWritePrimary, KvdbMdbx, KvdbParitydb,
-    MdbxColumn, MdbxEnv, MdbxShadowMirror, ReadSource,
+    storage_db::{KeyValueDbTrait, KeyValueDbTraitRead},
+    KvdbMdbx, MdbxColumn, MdbxEnv,
 };
 use mazze_types::H256;
 use primitives::{
-    Block, BlockHeader, BlockHeaderBuilder, SignedTransaction,
-    TransactionIndex,
+    Block, BlockHeader, SignedTransaction, TransactionIndex,
 };
 use metrics::{Counter, CounterUsize};
 use rlp::Rlp;
@@ -82,43 +76,6 @@ fn blocks_route(k: &[u8]) -> u8 {
     }
 }
 
-/// Predicates: keep only keys belonging to a single sub-table of
-/// the `Blocks` compound DBTable. Sub-mirrors wrap the SAME
-/// underlying ParityDB column, so `verify_parity` needs the
-/// primary iteration filtered to the slice this sub owns —
-/// otherwise every sub reports the entire column as its primary
-/// and divergence counts explode. Free functions instead of
-/// closures so `fn(&[u8]) -> bool` (Send + Sync) can be stored
-/// verbatim in [`FilteredKvdbParitydb`].
-fn blocks_predicate_header(k: &[u8]) -> bool {
-    k.len() == H256::len_bytes()
-}
-fn blocks_predicate_local_info(k: &[u8]) -> bool {
-    k.len() == H256::len_bytes() + 1
-        && *k.last().unwrap() == LOCAL_BLOCK_INFO_SUFFIX_BYTE
-}
-fn blocks_predicate_body(k: &[u8]) -> bool {
-    k.len() == H256::len_bytes() + 1
-        && *k.last().unwrap() == BLOCK_BODY_SUFFIX_BYTE
-}
-fn blocks_predicate_exec_result(k: &[u8]) -> bool {
-    k.len() == H256::len_bytes() + 1
-        && *k.last().unwrap() == BLOCK_EXECUTION_RESULT_SUFFIX_BYTE
-}
-fn blocks_predicate_epoch_exec_ctx(k: &[u8]) -> bool {
-    k.len() == H256::len_bytes() + 1
-        && *k.last().unwrap() == EPOCH_EXECUTION_CONTEXT_SUFFIX_BYTE
-}
-fn blocks_predicate_epoch_exec_commitment(k: &[u8]) -> bool {
-    k.len() == H256::len_bytes() + 1
-        && *k.last().unwrap()
-            == EPOCH_CONSENSUS_EXECUTION_INFO_SUFFIX_BYTE
-}
-fn blocks_predicate_reward(k: &[u8]) -> bool {
-    k.len() == H256::len_bytes() + 1
-        && *k.last().unwrap() == BLOCK_REWARD_RESULT_SUFFIX_BYTE
-}
-
 /// Route a `DBTable::EpochNumbers` write. Both sub-tables share a
 /// 9-byte key shape (`epoch_u64_le | suffix_byte`), so routing is
 /// just "look at the last byte". Executed / skipped are the only
@@ -130,13 +87,6 @@ fn epoch_numbers_route(k: &[u8]) -> u8 {
         "epoch_numbers_route: unexpected key length"
     );
     *k.last().expect("epoch_numbers_route: empty key")
-}
-
-fn epoch_numbers_predicate_executed(k: &[u8]) -> bool {
-    k.len() == 9 && *k.last().unwrap() == EPOCH_EXECUTED_BLOCK_SET_SUFFIX_BYTE
-}
-fn epoch_numbers_predicate_skipped(k: &[u8]) -> bool {
-    k.len() == 9 && *k.last().unwrap() == EPOCH_SKIPPED_BLOCK_SET_SUFFIX_BYTE
 }
 
 #[derive(Clone, Copy, Debug, Hash, Ord, PartialOrd, Eq, PartialEq, EnumIter)]
@@ -188,85 +138,28 @@ impl DBTable {
         })
     }
 }
-fn rocks_db_col(table: DBTable) -> u32 {
-    match table {
-        DBTable::Misc => COL_MISC,
-        DBTable::Blocks => COL_BLOCKS,
-        DBTable::Transactions => COL_TX_INDEX,
-        DBTable::EpochNumbers => COL_EPOCH_NUMBER,
-        DBTable::BlamedHeaderVerifiedRoots => COL_BLAMED_HEADER_VERIFIED_ROOTS,
-        DBTable::BlockTraces => COL_BLOCK_TRACES,
-        DBTable::HashByBlockNumber => COL_HASH_BY_BLOCK_NUMBER,
-    }
-}
 
-/// Which `DBTable`s should have their writes routed through an MDBX
-/// shadow mirror. Each field defaults to `false`; operators enable
-/// individual tables via `enable_mdbx_shadow_*` keys in `hydra.toml`.
-/// Adding a new shadowed table is: (a) a new field here, (b) a new
-/// arm in [`DBManager::build_shadow_mirrors`], (c) a new key in
-/// [`DataManagerConfiguration`](super::DataManagerConfiguration) and
-/// [`configuration.rs`](../../../../../../client/src/configuration.rs).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct MdbxShadowFlags {
-    pub hash_by_block_number: bool,
-    pub tx_index: bool,
-    pub blamed_header_verified_roots: bool,
-    pub block_traces: bool,
-    /// Storage Phase 2 step 8c: shadow-mirror the `Blocks`
-    /// compound DBTable. Highest-volume shadow of the migration
-    /// (headers + local info + bodies + execution results +
-    /// contexts + commitments + rewards all fan out through one
-    /// [`CompoundMirror`] with 7 sub-columns). Enable last on a
-    /// live fleet — once every other single-purpose mirror has
-    /// shown clean parity for a full era.
-    pub blocks: bool,
-    /// Storage Phase 2 step 8d: shadow-mirror the `EpochNumbers`
-    /// compound DBTable — 2 sub-mirrors, one per key suffix:
-    /// `0x06` = executed epoch set (→ `MdbxColumn::EpochBlocks`)
-    /// and `0x07` = skipped epoch set (→
-    /// `MdbxColumn::EpochSkippedBlockSet`). Once per executed
-    /// epoch on the write path — moderate volume.
-    pub epoch_numbers: bool,
-    /// Storage Phase 2 step 8e: shadow-mirror the `Misc`
-    /// DBTable. Heterogeneous single-key metadata (`checkpoint`,
-    /// `checkpoint_epoch`, `instance`, `block_terminals`,
-    /// `gc_progress`) — treated as a single MDBX column
-    /// (`MdbxColumn::Misc`) rather than fan-out because the
-    /// keyspace is small and dashboards don't need per-key
-    /// breakdown. Very low write volume — a `checkpoint` bump
-    /// every ~30 s and rare metadata updates otherwise.
-    pub misc: bool,
-    /// Storage Phase 3: boot every installed shadow mirror directly on
-    /// `ReadSource::Shadow` (MDBX-only reads) instead of the default
-    /// `Primary`. This is the "start on MDBX from genesis, no runtime
-    /// flip" mode — combined with a from-genesis relaunch MDBX is
-    /// dual-written from block 0 so there is no historical gap to miss.
-    /// ParityDB is still written (parity oracle) but never read. Default
-    /// `false` (Primary), so a plain node is unaffected.
-    pub read_shadow: bool,
-}
-
-/// Per-table shadow-mirror metrics registered under the
-/// `mdbx_shadow.<table_name>` group. Split by op (put / delete) and
-/// outcome (ok / fail) so operator dashboards can:
-///   - confirm the mirror is actually being exercised (put_ok / delete_ok
-///     climb as the executor commits epochs), and
-///   - alert on any nonzero fail counter (a divergence signal that
-///     precedes what `verify_parity` would eventually report).
+/// Per-table backend metrics registered under the
+/// `mdbx_db.<table_name>` group. Split by op (put / delete / get)
+/// and outcome (ok / fail) so operator dashboards can:
+///   - confirm the table is being exercised (put_ok / get_ok climb
+///     as the executor commits epochs), and
+///   - alert on any nonzero fail counter — a real durability or
+///     env-corruption signal since there's no fallback.
 ///
-/// Registered once per mirror at construction; cheap `Arc<dyn Counter>`
-/// clones are stamped into the `MirrorEntry` alongside the mirror.
-struct MirrorMetrics {
+/// Phase 5a rename: previously `mdbx_shadow.<col>` when the same
+/// column was the shadow side of a paritydb mirror. Now the MDBX
+/// column IS the store, so the group prefix is bare `mdbx_db`.
+struct BackendMetrics {
     put_ok: Arc<dyn Counter<usize>>,
     put_fail: Arc<dyn Counter<usize>>,
     delete_ok: Arc<dyn Counter<usize>>,
     delete_fail: Arc<dyn Counter<usize>>,
 }
 
-impl MirrorMetrics {
+impl BackendMetrics {
     fn new(table_name: &str) -> Self {
-        let group = format!("mdbx_shadow.{}", table_name);
+        let group = format!("mdbx_db.{}", table_name);
         Self {
             put_ok: CounterUsize::register_with_group(&group, "put_ok"),
             put_fail: CounterUsize::register_with_group(&group, "put_fail"),
@@ -282,63 +175,18 @@ impl MirrorMetrics {
     }
 }
 
-/// [`KvdbParitydb`] wrapped with a compile-time-fixed key-predicate
-/// so a sub-mirror of a [`CompoundMirror`] only *sees* the slice of
-/// its parent ParityDB column that logically belongs to it. Writes /
-/// deletes / point reads pass through unchanged; only
-/// [`Self::dw_iter_range`] (the parity-audit path) filters.
-///
-/// The predicate is a plain `fn` pointer so [`FilteredKvdbParitydb`]
-/// stays trivially `Send + Sync` and the routing rule sits next to
-/// the DBTable it serves. For Simple mirrors (their own ParityDB
-/// column, no multiplex) the predicate is `accept_all` and the
-/// filter is a no-op.
-struct FilteredKvdbParitydb {
-    inner: KvdbParitydb,
-    predicate: fn(&[u8]) -> bool,
+/// A single-column MDBX-backed store — one [`KvdbMdbx`] wrapped
+/// with metric bumping. Used for DBTables that map 1:1 to a
+/// [`MdbxColumn`] and don't need key-suffix routing.
+struct SimpleBackend {
+    kvdb: KvdbMdbx,
+    metrics: BackendMetrics,
 }
 
-/// Predicate: keep every key. Used by Simple mirrors whose primary
-/// ParityDB column is already single-purpose.
-fn accept_all(_: &[u8]) -> bool {
-    true
-}
-
-impl DualWritePrimary for FilteredKvdbParitydb {
-    fn dw_put(
-        &self, k: &[u8], v: &[u8],
-    ) -> mazze_storage::Result<()> {
-        self.inner.dw_put(k, v)
-    }
-    fn dw_delete(&self, k: &[u8]) -> mazze_storage::Result<()> {
-        self.inner.dw_delete(k)
-    }
-    fn dw_get(
-        &self, k: &[u8],
-    ) -> mazze_storage::Result<Option<Box<[u8]>>> {
-        self.inner.dw_get(k)
-    }
-    fn dw_iter_range(
-        &self, lower: &[u8], upper: Option<&[u8]>,
-    ) -> mazze_storage::Result<Vec<(Box<[u8]>, Box<[u8]>)>> {
-        let mut all = self.inner.dw_iter_range(lower, upper)?;
-        all.retain(|(k, _)| (self.predicate)(k));
-        Ok(all)
-    }
-}
-
-/// A 1:1 shadow mirror — one primary ParityDB column ↔ one MDBX
-/// shadow column. The write path takes a single mirror `put`/
-/// `delete` and its metrics increment as one bucket.
-struct SimpleMirror {
-    mirror: Arc<MdbxShadowMirror<FilteredKvdbParitydb>>,
-    metrics: MirrorMetrics,
-}
-
-impl SimpleMirror {
+impl SimpleBackend {
     fn put(&self, k: &[u8], v: &[u8]) -> mazze_storage::Result<()> {
-        match self.mirror.put(k, v) {
-            Ok(()) => {
+        match self.kvdb.put(k, v) {
+            Ok(_) => {
                 self.metrics.put_ok.inc(1);
                 Ok(())
             }
@@ -350,8 +198,8 @@ impl SimpleMirror {
     }
 
     fn delete(&self, k: &[u8]) -> mazze_storage::Result<()> {
-        match self.mirror.delete(k) {
-            Ok(()) => {
+        match self.kvdb.delete(k) {
+            Ok(_) => {
                 self.metrics.delete_ok.inc(1);
                 Ok(())
             }
@@ -362,63 +210,46 @@ impl SimpleMirror {
         }
     }
 
-    fn verify_parity(
-        &self,
-    ) -> mazze_storage::Result<mazze_storage::DualWriteReport> {
-        self.mirror.verify_parity()
-    }
-
     fn get(
         &self, k: &[u8],
     ) -> mazze_storage::Result<Option<Box<[u8]>>> {
-        // Reads go through the mirror so the atomic ReadSource
-        // decides which backend answers. No metric bump here yet
-        // — reads are ~10× more frequent than writes; we'll add
-        // dedicated read counters if a dashboard needs them.
-        self.mirror.get(k)
-    }
-
-    fn set_read_source(&self, r: ReadSource) {
-        self.mirror.set_read_source(r);
+        self.kvdb.get(k)
     }
 }
 
-/// A compound shadow mirror. The primary DBTable is multiplexed in
-/// ParityDB via key-suffix bytes; on the shadow side, each logical
-/// sub-table gets its own [`MdbxColumn`] and one [`SimpleMirror`].
-/// [`Self::put`]/[`Self::delete`] inspect the key via `route` to
-/// pick the sub-mirror; [`Self::verify_parity`] fans out one
-/// [`DualWriteReport`] per sub-mirror so the operator dashboard
-/// sees per-column divergence.
+/// A compound MDBX-backed store — one [`SimpleBackend`] per logical
+/// sub-table, keyed by the byte the router returns for each write.
+/// Under ParityDB these sub-tables used to be multiplexed into one
+/// column via key-suffix bytes; Phase 5a split them so each
+/// suffix lands in its own [`MdbxColumn`] on the write and read
+/// paths alike (per-sub metrics, per-sub disk footprint, per-sub
+/// prune granularity).
 ///
-/// **Routing completeness invariant**: `route(k)` must return a key
-/// present in `subs` for every possible write to the DBTable. A
-/// missing sub-key is a programmer error (silently missing the
-/// mirror would defeat the whole audit), so we panic loudly.
-struct CompoundMirror {
-    /// Sub-mirrors keyed by the `u8` the router returns. Ordering
-    /// is insignificant — sub-mirrors are independent.
-    subs: HashMap<u8, SimpleMirror>,
-    /// Key-inspection function. Every write hits this to pick a
-    /// sub-mirror. `fn` (not `Box<dyn Fn>`) so `CompoundMirror`
-    /// stays `Send + Sync` without wrapping and so the router
-    /// definition sits next to the DBTable it serves.
+/// **Routing completeness invariant**: `route(k)` must return a
+/// key present in `subs` for every possible write to the DBTable.
+/// A missing sub-key is a programmer error (a silent drop would
+/// lose data), so we panic loudly.
+struct CompoundBackend {
+    /// Sub-backends keyed by the `u8` the router returns.
+    subs: HashMap<u8, SimpleBackend>,
+    /// Key-inspection function. `fn` (not `Box<dyn Fn>`) so
+    /// `CompoundBackend` stays trivially `Send + Sync` and the
+    /// routing rule sits next to the DBTable it serves.
     route: fn(&[u8]) -> u8,
     /// Human-readable DBTable name — logged on the "missing
-    /// sub-mirror" panic so operators can grep for it.
+    /// sub-backend" panic so operators can grep for it.
     table_name: &'static str,
 }
 
-impl CompoundMirror {
-    fn dispatch<'a>(&'a self, key: &[u8]) -> &'a SimpleMirror {
+impl CompoundBackend {
+    fn dispatch<'a>(&'a self, key: &[u8]) -> &'a SimpleBackend {
         let sub_key = (self.route)(key);
         self.subs.get(&sub_key).unwrap_or_else(|| {
             panic!(
-                "CompoundMirror routing hole: table={} key_len={} \
-                 route={:#x} — no sub-mirror registered. This is a \
-                 programmer bug in the router or a novel key shape \
-                 that Phase 2 step 8 didn't anticipate; adding a \
-                 sub-mirror keeps the audit path complete.",
+                "CompoundBackend routing hole: table={} key_len={} \
+                 route={:#x} — no sub-backend registered. This is a \
+                 programmer bug in the router or a novel key shape; \
+                 adding a sub-backend keeps the write path complete.",
                 self.table_name,
                 key.len(),
                 sub_key
@@ -434,59 +265,33 @@ impl CompoundMirror {
         self.dispatch(k).delete(k)
     }
 
-    fn verify_parity(
-        &self,
-    ) -> mazze_storage::Result<Vec<mazze_storage::DualWriteReport>> {
-        // Sort by sub-key for a deterministic report order — the
-        // HashMap iteration order is unspecified and dashboards
-        // want stable per-sub ordering across audits.
-        let mut sub_keys: Vec<u8> = self.subs.keys().copied().collect();
-        sub_keys.sort_unstable();
-        let mut out = Vec::with_capacity(sub_keys.len());
-        for k in sub_keys {
-            out.push(self.subs.get(&k).unwrap().verify_parity()?);
-        }
-        Ok(out)
-    }
-
     fn get(
         &self, k: &[u8],
     ) -> mazze_storage::Result<Option<Box<[u8]>>> {
         self.dispatch(k).get(k)
     }
-
-    /// Propagate a read-source flip to every sub-mirror at once.
-    /// All subs of a compound DBTable share a cutover state — you
-    /// can't half-migrate one sub-column of `Blocks` without
-    /// breaking cross-sub reads.
-    fn set_read_source(&self, r: ReadSource) {
-        for sub in self.subs.values() {
-            sub.set_read_source(r);
-        }
-    }
 }
 
-/// One shadowed table's live state. `Simple` is the 1:1 case we've
-/// used since step 2b; `Compound` (introduced in step 8b) handles
-/// the DBTables still multiplexed by key suffix in ParityDB.
-enum MirrorEntry {
-    Simple(SimpleMirror),
-    #[allow(dead_code)] // wired up per compound DBTable in 8c-e
-    Compound(CompoundMirror),
+/// One DBTable's live storage. `Simple` for 1:1 mappings to a
+/// `MdbxColumn`; `Compound` for tables whose keyspace fans out to
+/// multiple columns via a router.
+enum TableBackend {
+    Simple(SimpleBackend),
+    Compound(CompoundBackend),
 }
 
-impl MirrorEntry {
+impl TableBackend {
     fn put(&self, k: &[u8], v: &[u8]) -> mazze_storage::Result<()> {
         match self {
-            MirrorEntry::Simple(m) => m.put(k, v),
-            MirrorEntry::Compound(c) => c.put(k, v),
+            TableBackend::Simple(b) => b.put(k, v),
+            TableBackend::Compound(c) => c.put(k, v),
         }
     }
 
     fn delete(&self, k: &[u8]) -> mazze_storage::Result<()> {
         match self {
-            MirrorEntry::Simple(m) => m.delete(k),
-            MirrorEntry::Compound(c) => c.delete(k),
+            TableBackend::Simple(b) => b.delete(k),
+            TableBackend::Compound(c) => c.delete(k),
         }
     }
 
@@ -494,398 +299,149 @@ impl MirrorEntry {
         &self, k: &[u8],
     ) -> mazze_storage::Result<Option<Box<[u8]>>> {
         match self {
-            MirrorEntry::Simple(m) => m.get(k),
-            MirrorEntry::Compound(c) => c.get(k),
-        }
-    }
-
-    fn set_read_source(&self, r: ReadSource) {
-        match self {
-            MirrorEntry::Simple(m) => m.set_read_source(r),
-            MirrorEntry::Compound(c) => c.set_read_source(r),
-        }
-    }
-
-    fn verify_parity(
-        &self,
-    ) -> mazze_storage::Result<Vec<mazze_storage::DualWriteReport>> {
-        match self {
-            MirrorEntry::Simple(m) => Ok(vec![m.verify_parity()?]),
-            MirrorEntry::Compound(c) => c.verify_parity(),
+            TableBackend::Simple(b) => b.get(k),
+            TableBackend::Compound(c) => c.get(k),
         }
     }
 }
 
 pub struct DBManager {
-    table_db: HashMap<DBTable, Box<dyn KeyValueDbTrait<ValueType = Box<[u8]>>>>,
+    /// Per-`DBTable` MDBX-native store. `Simple` for tables that
+    /// map 1:1 to a `MdbxColumn`; `Compound` for tables that fan
+    /// out to multiple columns via a key router. This is the ONLY
+    /// storage this manager talks to — no ParityDB anywhere on the
+    /// path.
+    table_backends: HashMap<DBTable, TableBackend>,
     pow: Arc<PowComputer>,
     genesis_hash: H256,
-    /// MDBX hot-tier environment, shared with `StorageManager`. `None`
-    /// when the storage layer runs ParityDB-only (dev fallback); `Some`
-    /// once the storage rewrite starts opening its env at startup
-    /// (see `storage_manager.rs:132`).
-    mdbx_env: Option<Arc<MdbxEnv>>,
-    /// Storage Phase 2 opt-in: per-`DBTable` shadow mirrors. Only
-    /// tables the operator enabled AND that have an MDBX env open
-    /// appear as keys here. Every write to a shadowed table
-    /// [`Self::insert_to_db`] / [`Self::remove_from_db`] routes
-    /// through the mirror, which writes to BOTH the current ParityDB
-    /// column (unchanged behavior for readers) AND an MDBX shadow
-    /// column. `MdbxShadowMirror::verify_parity` (called at era
-    /// boundaries or via `debug_mdbxShadowVerifyParity`) walks both
-    /// sides and reports divergence per table.
-    ///
-    /// Empty map = all shadowing disabled: writes fall through to the
-    /// plain `table_db`, byte-for-byte the same as before Phase 2.
-    /// This lets each flag be flipped independently and rolled back
-    /// cleanly if a mirror shows pathological divergence.
-    mdbx_shadow_mirrors: HashMap<DBTable, MirrorEntry>,
 }
 
 impl DBManager {
-    fn new_from_kvdb(
-        db: Arc<SystemDB>, pow: Arc<PowComputer>, genesis_hash: H256,
-        mdbx_env: Option<Arc<MdbxEnv>>,
-        shadow_flags: MdbxShadowFlags,
-    ) -> Self {
-        let mut table_db = HashMap::new();
+    /// Build the per-`DBTable` MDBX backend map.
+    ///
+    /// Simple tables map to a single `MdbxColumn`; compound tables
+    /// (Blocks, EpochNumbers) fan out to multiple columns keyed by
+    /// the byte a router extracts from every write. Compound
+    /// routing replaces the ParityDB-era practice of multiplexing
+    /// sub-tables into one column via key-suffix bytes.
+    fn build_table_backends(
+        env: &Arc<MdbxEnv>,
+    ) -> HashMap<DBTable, TableBackend> {
+        let make_simple = |col: MdbxColumn| -> SimpleBackend {
+            SimpleBackend {
+                kvdb: KvdbMdbx::with_column(
+                    Arc::clone(env),
+                    col.id(),
+                ),
+                metrics: BackendMetrics::new(col.name()),
+            }
+        };
+        let make_simple_entry =
+            |col: MdbxColumn| -> TableBackend {
+                TableBackend::Simple(make_simple(col))
+            };
 
-        for table in DBTable::iter() {
-            table_db.insert(
-                table,
-                Box::new(KvdbParitydb {
-                    kvdb: db.key_value(),
-                    col: rocks_db_col(table),
-                })
-                    as Box<dyn KeyValueDbTrait<ValueType = Box<[u8]>>>,
-            );
-        }
+        let mut backends: HashMap<DBTable, TableBackend> = HashMap::new();
 
-        let mdbx_shadow_mirrors = Self::build_shadow_mirrors(
-            &db,
-            mdbx_env.as_ref(),
-            shadow_flags,
+        // Simple 1:1 mappings.
+        backends.insert(
+            DBTable::HashByBlockNumber,
+            make_simple_entry(MdbxColumn::HashByNumber),
+        );
+        backends.insert(
+            DBTable::Transactions,
+            make_simple_entry(MdbxColumn::TxIndex),
+        );
+        backends.insert(
+            DBTable::BlamedHeaderVerifiedRoots,
+            make_simple_entry(MdbxColumn::BlamedHeaderVerifiedRoots),
+        );
+        backends.insert(
+            DBTable::BlockTraces,
+            make_simple_entry(MdbxColumn::BlockTraces),
+        );
+        backends.insert(
+            DBTable::Misc,
+            make_simple_entry(MdbxColumn::Misc),
         );
 
-        Self {
-            table_db,
-            pow,
-            genesis_hash,
-            mdbx_env,
-            mdbx_shadow_mirrors,
-        }
-    }
-
-    /// Construct the per-table shadow-mirror map. For every
-    /// `DBTable` that the operator opted into AND for which we have
-    /// an MDBX env open, we wrap the same ParityDB column
-    /// `table_db[table]` writes into by a `KvdbParitydb` primary
-    /// (so no double-write on the primary side) and pair it with a
-    /// `KvdbMdbx` over the matching `MdbxColumn`. The mirror routes
-    /// writes to both sides (see `MdbxShadowMirror::put` for the
-    /// atomicity note).
-    fn build_shadow_mirrors(
-        db: &Arc<SystemDB>, mdbx_env: Option<&Arc<MdbxEnv>>,
-        flags: MdbxShadowFlags,
-    ) -> HashMap<DBTable, MirrorEntry> {
-        let mut mirrors = HashMap::new();
-        let env = match mdbx_env {
-            Some(e) => e,
-            // No MDBX env → nothing to shadow into.
-            None => return mirrors,
-        };
-
-        let make_filtered_simple = |table: DBTable,
-                                    col: MdbxColumn,
-                                    predicate: fn(&[u8]) -> bool|
-         -> SimpleMirror {
-            let primary_pdb = FilteredKvdbParitydb {
-                inner: KvdbParitydb {
-                    kvdb: db.key_value(),
-                    col: rocks_db_col(table),
-                },
-                predicate,
-            };
-            let shadow_mdbx =
-                KvdbMdbx::with_column(Arc::clone(env), col.id());
-            let mirror = Arc::new(MdbxShadowMirror::new(
-                primary_pdb,
-                shadow_mdbx,
-                col,
-            ));
-            // Use the MdbxColumn name (stable, one enum) for the
-            // metrics group so column renames on the storage side
-            // stay visible in existing dashboards until we
-            // regenerate them.
-            let metrics = MirrorMetrics::new(col.name());
-            SimpleMirror { mirror, metrics }
-        };
-        // Simple mirrors sit on a single-purpose ParityDB column;
-        // no filtering needed on iteration — `accept_all` is a
-        // pass-through. Sub-mirrors of a compound DBTable go
-        // through `make_filtered_simple` directly with the
-        // suffix-specific predicate.
-        let make_simple = |table: DBTable, col: MdbxColumn| -> SimpleMirror {
-            make_filtered_simple(table, col, accept_all)
-        };
-        let make_entry = |table: DBTable, col: MdbxColumn| -> MirrorEntry {
-            MirrorEntry::Simple(make_simple(table, col))
-        };
-
-        if flags.hash_by_block_number {
-            mirrors.insert(
-                DBTable::HashByBlockNumber,
-                make_entry(
-                    DBTable::HashByBlockNumber,
-                    MdbxColumn::HashByNumber,
-                ),
-            );
-        }
-        if flags.tx_index {
-            mirrors.insert(
-                DBTable::Transactions,
-                make_entry(DBTable::Transactions, MdbxColumn::TxIndex),
-            );
-        }
-        if flags.blamed_header_verified_roots {
-            mirrors.insert(
-                DBTable::BlamedHeaderVerifiedRoots,
-                make_entry(
-                    DBTable::BlamedHeaderVerifiedRoots,
-                    MdbxColumn::BlamedHeaderVerifiedRoots,
-                ),
-            );
-        }
-        if flags.block_traces {
-            mirrors.insert(
-                DBTable::BlockTraces,
-                make_entry(
-                    DBTable::BlockTraces,
-                    MdbxColumn::BlockTraces,
-                ),
-            );
-        }
-        if flags.blocks {
-            // 7 sub-mirrors — one per logical sub-table currently
-            // multiplexed into COL_BLOCKS via key-suffix bytes.
-            // Every sub wraps the SAME ParityDB column (COL_BLOCKS
-            // via DBTable::Blocks) as its primary — no duplicated
-            // primary writes — but each writes to a distinct MDBX
-            // column on the shadow side. Each sub's primary is
-            // wrapped in a `FilteredKvdbParitydb` with a
-            // suffix-specific predicate so `verify_parity` only
-            // sees the keys that logically belong to that sub.
-            // Without that filter every sub reports the whole
-            // COL_BLOCKS as its primary and divergences explode
-            // (see the failing test that motivated introducing
-            // FilteredKvdbParitydb in step 8c).
-            let mut subs: HashMap<u8, SimpleMirror> = HashMap::new();
+        // Compound: Blocks (7 sub-columns keyed by suffix byte,
+        // with the bare 32B key routing to `BlockHeaders`).
+        {
+            let mut subs: HashMap<u8, SimpleBackend> = HashMap::new();
             subs.insert(
                 BLOCKS_ROUTE_BARE_HEADER,
-                make_filtered_simple(
-                    DBTable::Blocks,
-                    MdbxColumn::BlockHeaders,
-                    blocks_predicate_header,
-                ),
+                make_simple(MdbxColumn::BlockHeaders),
             );
             subs.insert(
                 LOCAL_BLOCK_INFO_SUFFIX_BYTE,
-                make_filtered_simple(
-                    DBTable::Blocks,
-                    MdbxColumn::LocalBlockInfo,
-                    blocks_predicate_local_info,
-                ),
+                make_simple(MdbxColumn::LocalBlockInfo),
             );
             subs.insert(
                 BLOCK_BODY_SUFFIX_BYTE,
-                make_filtered_simple(
-                    DBTable::Blocks,
-                    MdbxColumn::BlockBodies,
-                    blocks_predicate_body,
-                ),
+                make_simple(MdbxColumn::BlockBodies),
             );
             subs.insert(
                 BLOCK_EXECUTION_RESULT_SUFFIX_BYTE,
-                make_filtered_simple(
-                    DBTable::Blocks,
-                    MdbxColumn::BlockExecutionResult,
-                    blocks_predicate_exec_result,
-                ),
+                make_simple(MdbxColumn::BlockExecutionResult),
             );
             subs.insert(
                 EPOCH_EXECUTION_CONTEXT_SUFFIX_BYTE,
-                make_filtered_simple(
-                    DBTable::Blocks,
-                    MdbxColumn::EpochExecutionContext,
-                    blocks_predicate_epoch_exec_ctx,
-                ),
+                make_simple(MdbxColumn::EpochExecutionContext),
             );
             subs.insert(
                 EPOCH_CONSENSUS_EXECUTION_INFO_SUFFIX_BYTE,
-                make_filtered_simple(
-                    DBTable::Blocks,
-                    MdbxColumn::BlockExecutionCommitment,
-                    blocks_predicate_epoch_exec_commitment,
-                ),
+                make_simple(MdbxColumn::BlockExecutionCommitment),
             );
             subs.insert(
                 BLOCK_REWARD_RESULT_SUFFIX_BYTE,
-                make_filtered_simple(
-                    DBTable::Blocks,
-                    MdbxColumn::BlockRewards,
-                    blocks_predicate_reward,
-                ),
+                make_simple(MdbxColumn::BlockRewards),
             );
-            mirrors.insert(
+            backends.insert(
                 DBTable::Blocks,
-                MirrorEntry::Compound(CompoundMirror {
+                TableBackend::Compound(CompoundBackend {
                     subs,
                     route: blocks_route,
                     table_name: "Blocks",
                 }),
             );
         }
-        if flags.misc {
-            // Single mirror — Misc's key domain is small and
-            // heterogeneous; no per-key column split. Uses the
-            // same Simple pattern as HashByBlockNumber /
-            // TxIndex etc, just aimed at MdbxColumn::Misc.
-            mirrors.insert(
-                DBTable::Misc,
-                make_entry(DBTable::Misc, MdbxColumn::Misc),
-            );
-        }
-        if flags.epoch_numbers {
-            // 2 sub-mirrors — executed + skipped. Same
-            // FilteredKvdbParitydb pattern as Blocks so each sub
-            // audits only the slice of COL_EPOCH_NUMBER it owns.
-            let mut subs: HashMap<u8, SimpleMirror> = HashMap::new();
+
+        // Compound: EpochNumbers (executed + skipped).
+        {
+            let mut subs: HashMap<u8, SimpleBackend> = HashMap::new();
             subs.insert(
                 EPOCH_EXECUTED_BLOCK_SET_SUFFIX_BYTE,
-                make_filtered_simple(
-                    DBTable::EpochNumbers,
-                    MdbxColumn::EpochBlocks,
-                    epoch_numbers_predicate_executed,
-                ),
+                make_simple(MdbxColumn::EpochBlocks),
             );
             subs.insert(
                 EPOCH_SKIPPED_BLOCK_SET_SUFFIX_BYTE,
-                make_filtered_simple(
-                    DBTable::EpochNumbers,
-                    MdbxColumn::EpochSkippedBlockSet,
-                    epoch_numbers_predicate_skipped,
-                ),
+                make_simple(MdbxColumn::EpochSkippedBlockSet),
             );
-            mirrors.insert(
+            backends.insert(
                 DBTable::EpochNumbers,
-                MirrorEntry::Compound(CompoundMirror {
+                TableBackend::Compound(CompoundBackend {
                     subs,
                     route: epoch_numbers_route,
                     table_name: "EpochNumbers",
                 }),
             );
         }
-        // Phase 3 "start on MDBX from genesis": boot every installed mirror
-        // directly on Shadow (MDBX-only reads), no runtime flip. Safe only from
-        // genesis (dual-write fills MDBX from block 0). ParityDB stays written
-        // as the parity oracle but is not read.
-        if flags.read_shadow {
-            for entry in mirrors.values() {
-                entry.set_read_source(ReadSource::Shadow);
-            }
-        }
-        mirrors
+
+        backends
     }
 
-    pub fn new_from_paritydb(
-        db: Arc<SystemDB>, pow: Arc<PowComputer>, genesis_hash: H256,
-        mdbx_env: Option<Arc<MdbxEnv>>, shadow_flags: MdbxShadowFlags,
+    /// Build a `DBManager` on top of the shared MDBX env. This is
+    /// the only constructor after Phase 5a — no more paritydb
+    /// backend, no more shadow-mirror machinery.
+    pub fn new(
+        env: Arc<MdbxEnv>, pow: Arc<PowComputer>, genesis_hash: H256,
     ) -> Self {
-        Self::new_from_kvdb(db, pow, genesis_hash, mdbx_env, shadow_flags)
-    }
-
-    /// The MDBX hot-tier env attached to this manager, if the storage
-    /// layer opened one at startup. Consumers add per-table
-    /// `MdbxShadowMirror` fields on this manager and initialize them
-    /// against columns opened on this env.
-    #[allow(dead_code)]
-    pub(crate) fn mdbx_env(&self) -> Option<Arc<MdbxEnv>> {
-        self.mdbx_env.clone()
-    }
-
-    /// Whether any table is currently being shadow-mirrored on
-    /// this manager. Cheap boolean; callers use it to skip an
-    /// audit RPC roundtrip when nothing is on.
-    pub fn has_active_shadow_mirrors(&self) -> bool {
-        !self.mdbx_shadow_mirrors.is_empty()
-    }
-
-    /// Walk every active shadow mirror (simple + compound
-    /// sub-mirrors) and return one [`DualWriteReport`] per
-    /// (`MdbxColumn`) — a compound DBTable emits one report per
-    /// underlying sub-column. Empty vec means no mirrors are
-    /// installed. Meant for `debug_mdbxShadowVerifyParity` and
-    /// era-boundary audits, NOT the hot path — every entry
-    /// materializes both column contents into `Vec`s for the
-    /// comparison.
-    pub fn verify_all_shadow_parity(
-        &self,
-    ) -> mazze_storage::Result<Vec<mazze_storage::DualWriteReport>> {
-        let mut out = Vec::new();
-        for entry in self.mdbx_shadow_mirrors.values() {
-            out.extend(entry.verify_parity()?);
+        Self {
+            table_backends: Self::build_table_backends(&env),
+            pow,
+            genesis_hash,
         }
-        Ok(out)
-    }
-
-    /// Flip the read-source for one shadowed `DBTable` at runtime.
-    /// Returns `true` when the mirror exists and the source was
-    /// applied, `false` when the table isn't currently shadowed
-    /// (flag off / MDBX unavailable). Compound tables apply the
-    /// same source to every sub-mirror atomically.
-    ///
-    /// Meant for the operator control plane (Phase 3 cutover RPC).
-    /// The atomic swap inside the mirror means in-flight
-    /// [`DBManager::load_from_db`] callers see either the old or
-    /// the new source, never a torn value.
-    pub fn set_read_source_for(
-        &self, table: DBTable, source: ReadSource,
-    ) -> bool {
-        match self.mdbx_shadow_mirrors.get(&table) {
-            Some(entry) => {
-                entry.set_read_source(source);
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Snapshot of every shadowed `DBTable`'s current `ReadSource`.
-    /// Keyed by `DBTable`; empty when no mirror is installed.
-    /// For compound tables the source is uniform across sub-mirrors
-    /// by construction (see `CompoundMirror::set_read_source`), so
-    /// we sample sub 0's — any sub would report the same value.
-    pub fn shadow_read_sources_snapshot(
-        &self,
-    ) -> HashMap<DBTable, ReadSource> {
-        let mut out = HashMap::new();
-        for (table, entry) in &self.mdbx_shadow_mirrors {
-            let src = match entry {
-                MirrorEntry::Simple(m) => m.mirror.read_source(),
-                MirrorEntry::Compound(c) => {
-                    // Every sub carries the same source (flip
-                    // fans out atomically); read from any.
-                    c.subs
-                        .values()
-                        .next()
-                        .expect("compound has no subs")
-                        .mirror
-                        .read_source()
-                }
-            };
-            out.insert(*table, src);
-        }
-        out
     }
 }
 
@@ -1298,34 +854,11 @@ impl DBManager {
     /// The functions below are private utils used by the DBManager to access
     /// database
     fn insert_to_db(&self, table: DBTable, db_key: &[u8], value: Vec<u8>) {
-        // Storage Phase 2 shadow route: if the operator has enabled
-        // MDBX shadow-mirroring for this table, route the write
-        // through the mirror. The mirror wraps the SAME ParityDB
-        // column that `table_db[table]` would have written to, so
-        // there's no double-write on the primary side; the mirror
-        // just also flushes to the MDBX shadow column atomically.
-        // Falls through to the plain path on mirror error so a
-        // shadow-side hiccup doesn't drop primary writes.
-        if let Some(entry) = self.mdbx_shadow_mirrors.get(&table) {
-            match entry.put(db_key, &value) {
-                Ok(()) => return,
-                Err(e) => {
-                    DB_WRITE_FAILURES.inc(1);
-                    error!(
-                        "mdbx-shadow put failed for {:?} key_len={}: \
-                         {:?}. Falling back to primary-only write",
-                        table,
-                        db_key.len(),
-                        e
-                    );
-                    // Fall through to the normal path so the
-                    // primary still lands the write.
-                }
-            }
-        }
-        if let Err(e) =
-            self.table_db.get(&table).unwrap().put(db_key, &value)
-        {
+        let backend = self.table_backends.get(&table).expect(
+            "DBManager: no backend registered for the DBTable — \
+             every variant is wired in build_table_backends",
+        );
+        if let Err(e) = backend.put(db_key, &value) {
             // G-TX-3 in docs/flow-audit.md. A failed write here means the
             // in-memory cache and the on-disk DB diverge: the cache has
             // the value but disk does not. We log loudly so corruption
@@ -1345,56 +878,17 @@ impl DBManager {
     }
 
     fn remove_from_db(&self, table: DBTable, db_key: &[u8]) {
-        // Shadow-mirror route (see `insert_to_db` for rationale).
-        if let Some(entry) = self.mdbx_shadow_mirrors.get(&table) {
-            match entry.delete(db_key) {
-                Ok(()) => return,
-                Err(e) => {
-                    DB_WRITE_FAILURES.inc(1);
-                    error!(
-                        "mdbx-shadow delete failed for {:?} \
-                         key_len={}: {:?}. Falling back to \
-                         primary-only delete",
-                        table,
-                        db_key.len(),
-                        e
-                    );
-                }
-            }
-        }
-        self.table_db
-            .get(&table)
-            .unwrap()
-            .delete(db_key)
-            .expect("db removal failure");
+        let backend = self.table_backends.get(&table).expect(
+            "DBManager: no backend registered for the DBTable",
+        );
+        backend.delete(db_key).expect("db removal failure");
     }
 
     fn load_from_db(&self, table: DBTable, db_key: &[u8]) -> Option<Box<[u8]>> {
-        // Storage Phase 3 read routing: when a shadow mirror is
-        // installed for this table, the mirror's atomic ReadSource
-        // decides whether the answer comes from the ParityDB
-        // primary, the MDBX shadow, or shadow-first-with-fallback.
-        // Default is Primary (pre-cutover) so this is a no-op
-        // until an operator flips the source. On mirror error we
-        // fall through to the plain table_db path so a
-        // shadow-side hiccup doesn't hide the primary's answer
-        // during staging.
-        if let Some(entry) = self.mdbx_shadow_mirrors.get(&table) {
-            match entry.get(db_key) {
-                Ok(v) => return v,
-                Err(e) => {
-                    warn!(
-                        "mdbx-shadow get failed for {:?} key_len={}: \
-                         {:?}. Falling back to primary-only read",
-                        table,
-                        db_key.len(),
-                        e
-                    );
-                    // Fall through to the normal path.
-                }
-            }
-        }
-        match self.table_db.get(&table).unwrap().get(db_key) {
+        let backend = self.table_backends.get(&table).expect(
+            "DBManager: no backend registered for the DBTable",
+        );
+        match backend.get(db_key) {
             Ok(v) => v,
             Err(e) => {
                 warn!(
@@ -1582,699 +1076,13 @@ fn epoch_consensus_epoch_execution_commitment_key(hash: &H256) -> Vec<u8> {
 }
 
 impl MallocSizeOf for DBManager {
-    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
-        // Here we only handle the case that all columns are stored within the
-        // same ParityDB backend.
-        self.table_db
-            .get(&DBTable::Blocks)
-            .expect("DBManager initialized")
-            .size_of(ops)
+    fn size_of(&self, _ops: &mut MallocSizeOfOps) -> usize {
+        // MDBX-native: the store's memory is memory-mapped from
+        // disk, not owned Rust heap. Reporting mmap size here is
+        // misleading (doesn't reflect resident set) and there are
+        // no other significant Rust allocations on DBManager to
+        // account for. Return 0.
+        0
     }
 }
 
-#[cfg(test)]
-mod shadow_routing_tests {
-    //! Regression tests for the `DBManager` shadow-mirror routing
-    //! (Storage Phase 2, steps 2–5). The dual-write module already
-    //! proves `MdbxShadowMirror` behaves correctly against a
-    //! ParityDB primary in isolation; these tests prove the wiring
-    //! *at the DBManager layer* — that flipping the `MdbxShadowFlags`
-    //! actually installs mirrors, that write-path methods route
-    //! through them, and that operator-facing accessors (mirror map,
-    //! parity report) reflect the flag state.
-    //!
-    //! We deliberately do not assert Prometheus counter values —
-    //! metrics initialise once as a global atomic and interact
-    //! badly with parallel test runs. The mirror surface tests it
-    //! sufficiently via `verify_parity`.
-    use super::*;
-    use db::{
-        open_database, paritydb_settings, ParityDbOpenConfig,
-    };
-    use tempdir::TempDir;
-
-    /// Number of ParityDB columns the DBManager expects. Matches
-    /// [`crate::db::NUM_COLUMNS`].
-    const TEST_PDB_COLUMNS: u32 = crate::db::NUM_COLUMNS;
-
-    /// Open a fresh ParityDB backend with the full production
-    /// column set at `path`. Uses `disable_wal = true` so tempdir
-    /// cleanup doesn't block on WAL fsync.
-    fn open_test_paritydb(path: &std::path::Path) -> Arc<SystemDB> {
-        let cfg = ParityDbOpenConfig {
-            columns: TEST_PDB_COLUMNS,
-            compression: None,
-            disable_wal: true,
-            stats: false,
-        };
-        let settings = paritydb_settings(path.to_path_buf(), &cfg)
-            .expect("paritydb_settings");
-        open_database(&settings).expect("open_database")
-    }
-
-    /// Build a DBManager with the given shadow flags. Returns the
-    /// manager plus the tempdirs (kept alive to defer cleanup) and
-    /// the MDBX env (returned separately so tests can peek at the
-    /// shadow columns directly if needed).
-    fn build_manager(
-        flags: MdbxShadowFlags, with_mdbx: bool,
-    ) -> (DBManager, TempDir, TempDir, Option<Arc<MdbxEnv>>) {
-        let pdb_dir = TempDir::new("dbm_shadow_pdb").unwrap();
-        let mdbx_dir = TempDir::new("dbm_shadow_mdbx").unwrap();
-        let db = open_test_paritydb(pdb_dir.path());
-        let mdbx_env = if with_mdbx {
-            Some(MdbxEnv::open(mdbx_dir.path()).unwrap())
-        } else {
-            None
-        };
-        let pow = Arc::new(PowComputer::new(H256::default()));
-        let manager = DBManager::new_from_paritydb(
-            db,
-            pow,
-            H256::default(),
-            mdbx_env.clone(),
-            flags,
-        );
-        (manager, pdb_dir, mdbx_dir, mdbx_env)
-    }
-
-    /// Every flag off ⇒ no mirrors installed regardless of MDBX
-    /// availability. The write path stays byte-for-byte the pre-
-    /// Phase-2 path.
-    #[test]
-    fn flags_off_yields_no_mirrors() {
-        let (mgr, _pdb, _mdbx, _env) =
-            build_manager(MdbxShadowFlags::default(), true);
-        assert!(!mgr.has_active_shadow_mirrors());
-        assert!(mgr.verify_all_shadow_parity().unwrap().is_empty());
-    }
-
-    /// Flag on but no MDBX env ⇒ no mirrors installed. This is the
-    /// ParityDB-only dev fallback path — enabling the flag must
-    /// silently no-op instead of panicking.
-    #[test]
-    fn no_mdbx_env_yields_no_mirrors() {
-        let flags = MdbxShadowFlags {
-            hash_by_block_number: true,
-            tx_index: true,
-            blamed_header_verified_roots: true,
-            block_traces: true,
-            blocks: true,
-            epoch_numbers: true,
-            misc: true,
-        };
-        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, false);
-        assert!(!mgr.has_active_shadow_mirrors());
-    }
-
-    /// Both flags on ⇒ mirrors installed for exactly the tables
-    /// the flags asked for. The `verify_all_shadow_parity` audit
-    /// emits one report per active MdbxColumn — for Simple mirrors
-    /// that's 1:1 with DBTable count.
-    #[test]
-    fn selected_flags_yield_selected_mirrors() {
-        let flags = MdbxShadowFlags {
-            hash_by_block_number: true,
-            ..MdbxShadowFlags::default()
-        };
-        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
-        let reports = mgr.verify_all_shadow_parity().unwrap();
-        assert_eq!(reports.len(), 1);
-        assert_eq!(reports[0].table, "HashByNumber");
-
-        let flags = MdbxShadowFlags {
-            hash_by_block_number: true,
-            tx_index: true,
-            ..MdbxShadowFlags::default()
-        };
-        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
-        let mut reports = mgr.verify_all_shadow_parity().unwrap();
-        reports.sort_by(|a, b| a.table.cmp(b.table));
-        assert_eq!(reports.len(), 2);
-        assert_eq!(reports[0].table, "HashByNumber");
-        assert_eq!(reports[1].table, "TxIndex");
-
-        // All four Simple flags on ⇒ four Simple mirrors ⇒ four
-        // reports (one per MdbxColumn).
-        let flags = MdbxShadowFlags {
-            hash_by_block_number: true,
-            tx_index: true,
-            blamed_header_verified_roots: true,
-            block_traces: true,
-            blocks: false,
-            epoch_numbers: false,
-            misc: false,
-        };
-        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
-        let mut reports = mgr.verify_all_shadow_parity().unwrap();
-        reports.sort_by(|a, b| a.table.cmp(b.table));
-        assert_eq!(reports.len(), 4);
-        assert_eq!(reports[0].table, "BlamedHeaderVerifiedRoots");
-        assert_eq!(reports[1].table, "BlockTraces");
-        assert_eq!(reports[2].table, "HashByNumber");
-        assert_eq!(reports[3].table, "TxIndex");
-    }
-
-    /// The mirror routes real DBManager write-path calls: after
-    /// an `insert_hash_by_block_number_to_db`, the aggregated
-    /// parity audit shows one report for HashByNumber with
-    /// primary=1 / shadow=1 / matched. Proves Phase 2 step 2's
-    /// routing wiring still fires under the step-8b enum
-    /// dispatch.
-    #[test]
-    fn hash_by_number_writes_reach_shadow() {
-        let flags = MdbxShadowFlags {
-            hash_by_block_number: true,
-            ..MdbxShadowFlags::default()
-        };
-        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
-
-        let hash: H256 =
-            "1111111111111111111111111111111111111111111111111111111111111111"
-                .parse()
-                .unwrap();
-        mgr.insert_hash_by_block_number_to_db(42, &hash);
-
-        let reports = mgr.verify_all_shadow_parity().unwrap();
-        assert_eq!(reports.len(), 1);
-        let r = &reports[0];
-        assert_eq!(r.table, "HashByNumber");
-        assert!(r.is_matched(), "report: {:?}", r);
-        assert_eq!(r.primary_count, 1);
-        assert_eq!(r.shadow_count, 1);
-
-        // Reads still answer from the primary; the mirror is
-        // write-only during the shadow phase.
-        assert_eq!(mgr.hash_by_block_number_from_db(&42), Some(hash));
-    }
-
-    /// `remove_from_db` propagates deletes to the mirror. Uses a
-    /// second table (Transactions) whose sub-table shape is
-    /// simple 32B key so we can drive `remove_from_db` directly
-    /// via the existing removal helper for tx traces.
-    #[test]
-    fn removes_are_mirrored() {
-        let flags = MdbxShadowFlags {
-            hash_by_block_number: true,
-            ..MdbxShadowFlags::default()
-        };
-        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
-
-        let hash: H256 =
-            "2222222222222222222222222222222222222222222222222222222222222222"
-                .parse()
-                .unwrap();
-        mgr.insert_hash_by_block_number_to_db(7, &hash);
-
-        // Sanity: one entry in both columns.
-        let reports = mgr.verify_all_shadow_parity().unwrap();
-        assert_eq!(reports[0].primary_count, 1);
-        assert_eq!(reports[0].shadow_count, 1);
-
-        // Drive the shared `remove_from_db` path — the same
-        // routing insert_to_db uses. Exercises MirrorEntry::delete
-        // → SimpleMirror::delete → both primary + shadow.
-        mgr.remove_from_db(
-            DBTable::HashByBlockNumber,
-            &7u64.to_be_bytes(),
-        );
-
-        let reports = mgr.verify_all_shadow_parity().unwrap();
-        assert_eq!(reports.len(), 1);
-        let r = &reports[0];
-        assert!(r.is_matched(), "report: {:?}", r);
-        assert_eq!(r.primary_count, 0);
-        assert_eq!(r.shadow_count, 0);
-    }
-
-    /// The `Blocks` compound router: bare 32B keys ⇒ headers
-    /// column; suffixed keys ⇒ the sub-column named by the suffix
-    /// byte. Pure-function level test — proves the routing before
-    /// the CompoundMirror even touches disk. If this ever breaks
-    /// silently, every downstream Blocks assertion falls over.
-    #[test]
-    fn blocks_router_shape() {
-        // 32B hash → header route (0).
-        let hash = [0xAB_u8; 32];
-        assert_eq!(blocks_route(&hash), BLOCKS_ROUTE_BARE_HEADER);
-
-        // Hash + each known suffix byte → that suffix.
-        for suffix in [
-            LOCAL_BLOCK_INFO_SUFFIX_BYTE,
-            BLOCK_BODY_SUFFIX_BYTE,
-            BLOCK_EXECUTION_RESULT_SUFFIX_BYTE,
-            EPOCH_EXECUTION_CONTEXT_SUFFIX_BYTE,
-            EPOCH_CONSENSUS_EXECUTION_INFO_SUFFIX_BYTE,
-            BLOCK_REWARD_RESULT_SUFFIX_BYTE,
-        ] {
-            let mut suffixed = hash.to_vec();
-            suffixed.push(suffix);
-            assert_eq!(
-                blocks_route(&suffixed),
-                suffix,
-                "suffix {:#x}",
-                suffix
-            );
-        }
-    }
-
-    /// End-to-end: Blocks flag on ⇒ 7 sub-mirrors installed.
-    /// verify_all_shadow_parity emits one report per sub-column,
-    /// with distinct table names — 7 different `MdbxColumn`s, all
-    /// initially empty and matched.
-    #[test]
-    fn blocks_compound_all_seven_subs_present() {
-        let flags = MdbxShadowFlags {
-            blocks: true,
-            ..MdbxShadowFlags::default()
-        };
-        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
-
-        let mut reports = mgr.verify_all_shadow_parity().unwrap();
-        reports.sort_by(|a, b| a.table.cmp(b.table));
-        let names: Vec<&str> =
-            reports.iter().map(|r| r.table).collect();
-        assert_eq!(
-            names,
-            vec![
-                "BlockBodies",
-                "BlockExecutionCommitment",
-                "BlockExecutionResult",
-                "BlockHeaders",
-                "BlockRewards",
-                "EpochExecutionContext",
-                "LocalBlockInfo",
-            ],
-            "report table names"
-        );
-        // Every sub matched with zero entries.
-        for r in &reports {
-            assert!(r.is_matched(), "sub {:?} diverged", r.table);
-            assert_eq!(r.primary_count, 0);
-            assert_eq!(r.shadow_count, 0);
-        }
-    }
-
-    /// The compound router really does dispatch writes to distinct
-    /// sub-columns: after inserting a header (bare) and a body
-    /// (suffix 2) for the same block hash, we see exactly one
-    /// entry in BlockHeaders and one in BlockBodies. Also proves
-    /// that reads still answer from the primary path.
-    #[test]
-    fn blocks_compound_header_and_body_dispatch() {
-        let flags = MdbxShadowFlags {
-            blocks: true,
-            ..MdbxShadowFlags::default()
-        };
-        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
-
-        // Insert a header (bare 32B key) and one body via the
-        // DBManager public API — the same code paths the
-        // executor commit path drives on a live node.
-        let header = BlockHeaderBuilder::new().build();
-        mgr.insert_block_header_to_db(&header);
-        let body_block: Block = Block::new(header.clone(), Vec::new());
-        mgr.insert_block_body_to_db(&body_block);
-
-        let mut reports = mgr.verify_all_shadow_parity().unwrap();
-        reports.sort_by(|a, b| a.table.cmp(b.table));
-
-        // The two sub-columns we wrote to should hold one entry
-        // each; the other five sub-columns stay empty. Every
-        // report matched.
-        for r in &reports {
-            assert!(
-                r.is_matched(),
-                "sub {:?} diverged: {:?}",
-                r.table,
-                r
-            );
-            match r.table {
-                "BlockHeaders" | "BlockBodies" => {
-                    assert_eq!(
-                        r.primary_count, 1,
-                        "sub {} primary count",
-                        r.table
-                    );
-                    assert_eq!(
-                        r.shadow_count, 1,
-                        "sub {} shadow count",
-                        r.table
-                    );
-                }
-                _ => {
-                    assert_eq!(
-                        r.primary_count, 0,
-                        "sub {} primary count",
-                        r.table
-                    );
-                    assert_eq!(
-                        r.shadow_count, 0,
-                        "sub {} shadow count",
-                        r.table
-                    );
-                }
-            }
-        }
-    }
-
-    /// EpochNumbers compound router — both sub-tables share a
-    /// 9-byte `(epoch_u64_le | suffix_byte)` key shape, routing
-    /// is just the last byte.
-    #[test]
-    fn epoch_numbers_router_shape() {
-        let mut executed_key = [0u8; 9];
-        executed_key[8] = EPOCH_EXECUTED_BLOCK_SET_SUFFIX_BYTE;
-        assert_eq!(
-            epoch_numbers_route(&executed_key),
-            EPOCH_EXECUTED_BLOCK_SET_SUFFIX_BYTE
-        );
-
-        let mut skipped_key = [0u8; 9];
-        skipped_key[8] = EPOCH_SKIPPED_BLOCK_SET_SUFFIX_BYTE;
-        assert_eq!(
-            epoch_numbers_route(&skipped_key),
-            EPOCH_SKIPPED_BLOCK_SET_SUFFIX_BYTE
-        );
-    }
-
-    /// EpochNumbers flag on ⇒ two sub-mirrors installed
-    /// (EpochBlocks + EpochSkippedBlockSet).
-    #[test]
-    fn epoch_numbers_compound_both_subs_present() {
-        let flags = MdbxShadowFlags {
-            epoch_numbers: true,
-            ..MdbxShadowFlags::default()
-        };
-        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
-        let mut reports = mgr.verify_all_shadow_parity().unwrap();
-        reports.sort_by(|a, b| a.table.cmp(b.table));
-        let names: Vec<&str> =
-            reports.iter().map(|r| r.table).collect();
-        assert_eq!(names, vec!["EpochBlocks", "EpochSkippedBlockSet"]);
-        for r in &reports {
-            assert!(r.is_matched(), "sub {:?}", r.table);
-            assert_eq!(r.primary_count, 0);
-            assert_eq!(r.shadow_count, 0);
-        }
-    }
-
-    /// Executed and skipped writes route to distinct sub-mirrors.
-    /// After inserting each once, the EpochBlocks and
-    /// EpochSkippedBlockSet sub-columns each carry one entry;
-    /// verify_all_shadow_parity reports matched for both.
-    #[test]
-    fn epoch_numbers_dispatches_executed_and_skipped() {
-        let flags = MdbxShadowFlags {
-            epoch_numbers: true,
-            ..MdbxShadowFlags::default()
-        };
-        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
-
-        let exec_hashes = vec![
-            "3333333333333333333333333333333333333333333333333333333333333333"
-                .parse::<H256>()
-                .unwrap(),
-        ];
-        let skip_hashes = vec![
-            "4444444444444444444444444444444444444444444444444444444444444444"
-                .parse::<H256>()
-                .unwrap(),
-        ];
-        mgr.insert_executed_epoch_set_hashes_to_db(11, &exec_hashes);
-        mgr.insert_skipped_epoch_set_hashes_to_db(11, &skip_hashes);
-
-        let mut reports = mgr.verify_all_shadow_parity().unwrap();
-        reports.sort_by(|a, b| a.table.cmp(b.table));
-        assert_eq!(reports.len(), 2);
-        for r in &reports {
-            assert!(r.is_matched(), "sub {:?}", r);
-            assert_eq!(r.primary_count, 1, "sub {} primary", r.table);
-            assert_eq!(r.shadow_count, 1, "sub {} shadow", r.table);
-        }
-
-        // Reads still answer from the primary.
-        assert_eq!(
-            mgr.executed_epoch_set_hashes_from_db(11),
-            Some(exec_hashes)
-        );
-        assert_eq!(
-            mgr.skipped_epoch_set_hashes_from_db(11),
-            Some(skip_hashes)
-        );
-    }
-
-    /// Misc is a Simple mirror on `MdbxColumn::Misc`. Writing an
-    /// instance id + gc progress + terminals via the DBManager
-    /// public API lands three keys in the primary column and its
-    /// mirror; verify_parity says matched with count 3 on both
-    /// sides.
-    #[test]
-    fn misc_mirror_round_trip() {
-        let flags = MdbxShadowFlags {
-            misc: true,
-            ..MdbxShadowFlags::default()
-        };
-        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
-
-        mgr.insert_instance_id_to_db(0xdead_beef);
-        mgr.insert_gc_progress_to_db(1_000);
-        let terminals = vec![
-            "5555555555555555555555555555555555555555555555555555555555555555"
-                .parse::<H256>()
-                .unwrap(),
-            "6666666666666666666666666666666666666666666666666666666666666666"
-                .parse::<H256>()
-                .unwrap(),
-        ];
-        mgr.insert_terminals_to_db(&terminals);
-
-        let reports = mgr.verify_all_shadow_parity().unwrap();
-        assert_eq!(reports.len(), 1);
-        let r = &reports[0];
-        assert_eq!(r.table, "Misc");
-        assert!(r.is_matched(), "report: {:?}", r);
-        assert_eq!(r.primary_count, 3);
-        assert_eq!(r.shadow_count, 3);
-
-        assert_eq!(mgr.instance_id_from_db(), Some(0xdead_beef));
-        assert_eq!(mgr.gc_progress_from_db(), Some(1_000));
-        assert_eq!(mgr.terminals_from_db(), Some(terminals));
-    }
-
-    /// Every flag on ⇒ every mirror installed. Aggregated audit
-    /// emits the full set of column reports (4 Simple + 7 Blocks
-    /// subs + 2 EpochNumbers subs + 1 Misc = 14) with no
-    /// duplicates. Serves as the pre-fleet-flip smoke test: if
-    /// this passes, every write path Phase 2 targets is under
-    /// audit and ready to be turned on.
-    #[test]
-    fn all_flags_on_covers_full_column_set() {
-        let flags = MdbxShadowFlags {
-            hash_by_block_number: true,
-            tx_index: true,
-            blamed_header_verified_roots: true,
-            block_traces: true,
-            blocks: true,
-            epoch_numbers: true,
-            misc: true,
-        };
-        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
-        let mut reports = mgr.verify_all_shadow_parity().unwrap();
-        reports.sort_by(|a, b| a.table.cmp(b.table));
-        let names: Vec<&str> =
-            reports.iter().map(|r| r.table).collect();
-        assert_eq!(
-            names,
-            vec![
-                "BlamedHeaderVerifiedRoots",
-                "BlockBodies",
-                "BlockExecutionCommitment",
-                "BlockExecutionResult",
-                "BlockHeaders",
-                "BlockRewards",
-                "BlockTraces",
-                "EpochBlocks",
-                "EpochExecutionContext",
-                "EpochSkippedBlockSet",
-                "HashByNumber",
-                "LocalBlockInfo",
-                "Misc",
-                "TxIndex",
-            ],
-            "full mirror set"
-        );
-        // All empty at construction time and matched.
-        for r in &reports {
-            assert!(r.is_matched(), "sub {:?}", r.table);
-            assert_eq!(r.primary_count, 0);
-            assert_eq!(r.shadow_count, 0);
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Phase 3 step 3b: read-cutover tests
-    // ------------------------------------------------------------------
-    //
-    // These exercise the DBManager-side read-routing plumbing: a
-    // flip on `set_read_source_for` propagates through `MirrorEntry`
-    // (Simple + Compound) into the underlying MdbxShadowMirror,
-    // and load_from_db observes the new source on the next read.
-
-    /// Baseline: mirror installed but reads still answer from the
-    /// primary — the default cutover state. Even if we manually
-    /// desync the shadow, `hash_by_block_number_from_db` reads the
-    /// primary value.
-    #[test]
-    fn read_source_default_reads_primary_via_load_from_db() {
-        let flags = MdbxShadowFlags {
-            hash_by_block_number: true,
-            ..MdbxShadowFlags::default()
-        };
-        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
-        let hash: H256 =
-            "7777777777777777777777777777777777777777777777777777777777777777"
-                .parse()
-                .unwrap();
-        mgr.insert_hash_by_block_number_to_db(99, &hash);
-
-        assert_eq!(mgr.hash_by_block_number_from_db(&99), Some(hash));
-    }
-
-    /// After flipping the HashByBlockNumber mirror to `Shadow`,
-    /// reads answer from MDBX. Insert a key, flip, read → same
-    /// value. Also proves the flip propagates through
-    /// `set_read_source_for(DBTable, ReadSource)`.
-    #[test]
-    fn read_source_shadow_answers_from_mdbx() {
-        let flags = MdbxShadowFlags {
-            hash_by_block_number: true,
-            ..MdbxShadowFlags::default()
-        };
-        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
-        let hash: H256 =
-            "8888888888888888888888888888888888888888888888888888888888888888"
-                .parse()
-                .unwrap();
-        mgr.insert_hash_by_block_number_to_db(100, &hash);
-
-        let flipped = mgr.set_read_source_for(
-            DBTable::HashByBlockNumber,
-            ReadSource::Shadow,
-        );
-        assert!(flipped, "mirror installed → flip should succeed");
-
-        assert_eq!(
-            mgr.hash_by_block_number_from_db(&100),
-            Some(hash),
-            "post-cutover read must resolve to the same value"
-        );
-    }
-
-    /// `set_read_source_for` on a table with NO mirror installed
-    /// returns `false` and is a no-op — safe to call
-    /// speculatively from the RPC layer without checking.
-    #[test]
-    fn read_source_flip_no_mirror_returns_false() {
-        let (mgr, _pdb, _mdbx, _env) =
-            build_manager(MdbxShadowFlags::default(), true);
-        assert!(!mgr.set_read_source_for(
-            DBTable::HashByBlockNumber,
-            ReadSource::Shadow
-        ));
-    }
-
-    /// Compound-table flip propagates to every sub-mirror. Insert
-    /// a header + body, flip Blocks to `Shadow`, read both back —
-    /// they resolve via MDBX (proving each sub took the flip).
-    #[test]
-    fn read_source_compound_flip_covers_all_subs() {
-        let flags = MdbxShadowFlags {
-            blocks: true,
-            ..MdbxShadowFlags::default()
-        };
-        let (mgr, _pdb, _mdbx, _env) = build_manager(flags, true);
-
-        let header = BlockHeaderBuilder::new().build();
-        mgr.insert_block_header_to_db(&header);
-        let body_block: Block = Block::new(header.clone(), Vec::new());
-        mgr.insert_block_body_to_db(&body_block);
-        let hash = header.hash();
-
-        let flipped = mgr.set_read_source_for(
-            DBTable::Blocks,
-            ReadSource::Shadow,
-        );
-        assert!(flipped);
-
-        // The bare-key (header) sub AND the suffixed body sub
-        // both answered from shadow if this reads back cleanly.
-        assert!(
-            mgr.block_header_from_db(&hash).is_some(),
-            "header sub-mirror on Shadow read"
-        );
-        assert!(
-            mgr.block_body_from_db(&hash).is_some(),
-            "body sub-mirror on Shadow read"
-        );
-    }
-
-    /// `ShadowWithPrimaryFallback` reads a shadow-hit correctly,
-    /// then falls back to primary for a key that never landed in
-    /// the mirror. Simulates the pre-flag-debt case: some old
-    /// keys only live on the primary; the fallback keeps them
-    /// visible during Phase 3 staging.
-    #[test]
-    fn read_source_shadow_with_fallback_serves_pre_flag_debt() {
-        // Build the manager with no mirror active first, insert a
-        // key straight into ParityDB (simulating a pre-flag write),
-        // then rebuild with the mirror on so the new mirror's
-        // shadow starts empty.
-        let flags_off = MdbxShadowFlags::default();
-        let (mgr_off, _pdb_off, _mdbx_off, _env_off) =
-            build_manager(flags_off, true);
-        let hash_old: H256 =
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                .parse()
-                .unwrap();
-        mgr_off.insert_hash_by_block_number_to_db(1, &hash_old);
-        // Sanity: value present via load_from_db (primary path).
-        assert_eq!(
-            mgr_off.hash_by_block_number_from_db(&1),
-            Some(hash_old)
-        );
-
-        // Turn the mirror on and insert a fresh "post-flag" key.
-        // The old key still exists in the ParityDB column carried
-        // over in this test (fresh manager) → simulate by inserting
-        // via the flags-on mgr directly rather than sharing PDB.
-        let flags_on = MdbxShadowFlags {
-            hash_by_block_number: true,
-            ..MdbxShadowFlags::default()
-        };
-        let (mgr_on, _pdb_on, _mdbx_on, _env_on) =
-            build_manager(flags_on, true);
-        let hash_new: H256 =
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                .parse()
-                .unwrap();
-        mgr_on.insert_hash_by_block_number_to_db(2, &hash_new);
-
-        // Flip to ShadowWithPrimaryFallback: post-flag key
-        // resolves via shadow; a lookup for a key never written
-        // returns None (the same view a Shadow-only reader would
-        // see for a shadow-miss). This confirms the routing is
-        // consulting the shadow — the "fallback to primary"
-        // branch is exercised by the storage-crate unit test in
-        // step 3a; here we prove the DBManager wiring hits the
-        // mirror at all.
-        assert!(mgr_on.set_read_source_for(
-            DBTable::HashByBlockNumber,
-            ReadSource::ShadowWithPrimaryFallback
-        ));
-        assert_eq!(
-            mgr_on.hash_by_block_number_from_db(&2),
-            Some(hash_new)
-        );
-    }
-}

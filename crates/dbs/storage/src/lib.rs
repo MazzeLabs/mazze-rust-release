@@ -178,12 +178,6 @@ pub struct StorageConfiguration {
     pub use_isolated_db_for_mpt_table_height: Option<u64>,
     pub keep_era_genesis_snapshot: bool,
     pub state_db_backend: StateDbBackend,
-    /// Storage Phase 4a opt-in: shadow-mirror the on-disk
-    /// `snapshot_info_db` (per-epoch snapshot metadata) to an
-    /// MDBX shadow column so parity can be verified before Phase
-    /// 5 flips reads over. No effect when the MDBX env isn't
-    /// opened (`state_db_backend != Mdbx`). Default `false`.
-    pub enable_mdbx_shadow_snapshot_info: bool,
 }
 
 impl StorageConfiguration {
@@ -231,7 +225,6 @@ impl StorageConfiguration {
             use_isolated_db_for_mpt_table_height: None,
             keep_era_genesis_snapshot: false,
             state_db_backend: StateDbBackend::default(),
-            enable_mdbx_shadow_snapshot_info: false,
         }
     }
 }

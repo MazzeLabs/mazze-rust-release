@@ -8,7 +8,6 @@ mod block;
 mod bytes;
 mod consensus_graph_states;
 mod epoch_number;
-mod mdbx_shadow_parity;
 pub mod errors;
 pub mod eth;
 mod fee_history;
@@ -39,7 +38,6 @@ pub use self::{
     bytes::Bytes,
     consensus_graph_states::ConsensusGraphStates,
     epoch_number::{BlockHashOrEpochNumber, EpochNumber},
-    mdbx_shadow_parity::MdbxShadowParityReport,
     fee_history::FeeHistory,
     filter::{MazzeFilterChanges, MazzeFilterLog, MazzeRpcLogFilter, RevertTo},
     index::Index,

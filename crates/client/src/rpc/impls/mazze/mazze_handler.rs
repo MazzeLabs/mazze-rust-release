@@ -7,7 +7,7 @@ use crate::rpc::{
     types::{
         call_request::rpc_call_request_network,
         errors::check_rpc_address_network, MazzeFeeHistory,
-        MdbxShadowParityReport, RpcAddress, SponsorInfo, StatOnGasLoad,
+        RpcAddress, SponsorInfo, StatOnGasLoad,
         StorageCollateralInfo, TokenSupplyInfo, WrapTransaction,
         U64 as HexU64,
     },
@@ -1854,126 +1854,6 @@ impl RpcImpl {
         self.get_transactions(&blocks, main, epoch_number.as_u64())
     }
 
-    fn mdbx_shadow_verify_parity(
-        &self,
-    ) -> JsonRpcResult<Vec<MdbxShadowParityReport>> {
-        debug!("debug_mdbxShadowVerifyParity");
-        let data_man = self.consensus.get_data_manager();
-        let mut raw_reports = if data_man
-            .db_manager
-            .has_active_shadow_mirrors()
-        {
-            data_man.db_manager.verify_all_shadow_parity().map_err(
-                |e| {
-                    internal_error_msg(&format!(
-                        "mdbx shadow verify_parity failed: {:?}",
-                        e
-                    ))
-                },
-            )?
-        } else {
-            Vec::new()
-        };
-
-        // Phase 4a: storage-layer shadow (snapshot_info_db) audit.
-        // Lives on StorageManager, not DBManager, so we poll it
-        // separately and fold its report into the same response.
-        // Consumers see one flat list of MdbxColumn reports
-        // regardless of which subsystem owns each mirror.
-        if let Some(mirror) = data_man
-            .storage_manager
-            .get_storage_manager()
-            .snapshot_info_shadow_mirror()
-        {
-            let report = mirror.verify_parity().map_err(|e| {
-                internal_error_msg(&format!(
-                    "snapshot_info verify_parity failed: {:?}",
-                    e
-                ))
-            })?;
-            raw_reports.push(report);
-        }
-
-        if raw_reports.is_empty() {
-            // No shadow flags on / MDBX unavailable — return an
-            // empty vec so the operator dashboard can distinguish
-            // "no mirror" from "one report with is_matched=true".
-            return Ok(Vec::new());
-        }
-
-        // Sort by MdbxColumn name for a stable RPC response —
-        // dashboards want a deterministic table order across
-        // audits. Compound mirrors emit one report per sub-column,
-        // so this ordering is per-column, not per-DBTable.
-        let mut reports: Vec<MdbxShadowParityReport> = raw_reports
-            .into_iter()
-            .map(MdbxShadowParityReport::from_storage_report)
-            .collect();
-        reports.sort_by(|a, b| a.table.cmp(&b.table));
-        Ok(reports)
-    }
-
-    fn mdbx_set_read_source(
-        &self, table: String, source: String,
-    ) -> JsonRpcResult<bool> {
-        debug!(
-            "debug_mdbxSetReadSource table={} source={}",
-            table, source
-        );
-        let dbtable =
-            mazzecore::block_data_manager::db_manager::DBTable::from_name(
-                &table,
-            )
-            .ok_or_else(|| {
-                invalid_params_msg(&format!(
-                    "unknown DBTable name {:?}; expected one of \
-                     Misc, Blocks, Transactions, EpochNumbers, \
-                     BlamedHeaderVerifiedRoots, BlockTraces, \
-                     HashByBlockNumber",
-                    table
-                ))
-            })?;
-        let read_source = match source.as_str() {
-            "primary" => mazze_storage::ReadSource::Primary,
-            "shadow_with_fallback" => {
-                mazze_storage::ReadSource::ShadowWithPrimaryFallback
-            }
-            "shadow" => mazze_storage::ReadSource::Shadow,
-            _ => {
-                return Err(invalid_params_msg(&format!(
-                    "unknown ReadSource {:?}; expected one of \
-                     primary, shadow_with_fallback, shadow",
-                    source
-                )))
-            }
-        };
-        let data_man = self.consensus.get_data_manager();
-        Ok(data_man
-            .db_manager
-            .set_read_source_for(dbtable, read_source))
-    }
-
-    fn mdbx_get_read_sources(
-        &self,
-    ) -> JsonRpcResult<std::collections::BTreeMap<String, String>> {
-        debug!("debug_mdbxGetReadSources");
-        let data_man = self.consensus.get_data_manager();
-        let snapshot =
-            data_man.db_manager.shadow_read_sources_snapshot();
-        let mut out = std::collections::BTreeMap::new();
-        for (table, source) in snapshot {
-            let source_str = match source {
-                mazze_storage::ReadSource::Primary => "primary",
-                mazze_storage::ReadSource::ShadowWithPrimaryFallback => {
-                    "shadow_with_fallback"
-                }
-                mazze_storage::ReadSource::Shadow => "shadow",
-            };
-            out.insert(table.name().to_string(), source_str.to_string());
-        }
-        Ok(out)
-    }
-
     fn transactions_by_block(
         &self, block_hash: H256,
     ) -> JsonRpcResult<Vec<WrapTransaction>> {
@@ -2400,9 +2280,6 @@ impl LocalRpc for LocalRpcImpl {
             fn sign_transaction(&self, tx: SendTxRequest, password: Option<String>) -> JsonRpcResult<String>;
             fn transactions_by_epoch(&self, epoch_number: U64) -> JsonRpcResult<Vec<WrapTransaction>>;
             fn transactions_by_block(&self, block_hash: H256) -> JsonRpcResult<Vec<WrapTransaction>>;
-            fn mdbx_shadow_verify_parity(&self) -> JsonRpcResult<Vec<MdbxShadowParityReport>>;
-            fn mdbx_set_read_source(&self, table: String, source: String) -> JsonRpcResult<bool>;
-            fn mdbx_get_read_sources(&self) -> JsonRpcResult<std::collections::BTreeMap<String, String>>;
         }
     }
 }

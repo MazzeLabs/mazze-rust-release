@@ -348,54 +348,6 @@ build_config! {
         (max_trans_count_per_peer_normal, (Option<u64>), None)
         (persist_tx_index, (bool), false)
         (persist_block_number_index, (bool), true)
-        // Storage Phase 2 opt-in. Off by default; turn on selectively
-        // to shadow-mirror `HashByBlockNumber` writes to an MDBX
-        // column so a later `MdbxShadowMirror::verify_parity` pass can
-        // prove the backends agree before Phase 3 flips reads over.
-        // No effect when the storage layer runs ParityDB-only (dev
-        // fallback) — the mirror is only constructed when MDBX is
-        // available at startup.
-        (enable_mdbx_shadow_hash_by_number, (bool), false)
-        // Storage Phase 2 sibling flag. Same shadow-then-cutover
-        // semantics for the `Transactions` column (mapped to
-        // `MdbxColumn::TxIndex`). Independent — a full-node can
-        // stage its table swaps one at a time.
-        (enable_mdbx_shadow_tx_index, (bool), false)
-        // Same for BlamedHeaderVerifiedRoots (light-node support
-        // records; low write volume in production) — safe first
-        // fleet sanity check for the routing itself.
-        (enable_mdbx_shadow_blamed_header_verified_roots, (bool), false)
-        // Same for BlockTraces (only meaningfully exercised on
-        // nodes with tracing enabled; a no-op on miners and full-
-        // fast).
-        (enable_mdbx_shadow_block_traces, (bool), false)
-        // Compound flag: DBTable::Blocks fans out to 7 shadow
-        // sub-columns (headers, local info, bodies, exec results,
-        // exec contexts, exec commitments, rewards). Highest
-        // write volume of the migration — enable last, after the
-        // single-purpose flags have shown clean parity for a
-        // full era.
-        (enable_mdbx_shadow_blocks, (bool), false)
-        // Compound flag: DBTable::EpochNumbers fans out to 2
-        // shadow sub-columns (EpochBlocks for executed sets,
-        // EpochSkippedBlockSet for skipped). Moderate write
-        // volume — one per executed epoch.
-        (enable_mdbx_shadow_epoch_numbers, (bool), false)
-        // Simple flag: DBTable::Misc → MdbxColumn::Misc.
-        // Heterogeneous keyspace, deliberately not split further.
-        // Very low write volume (checkpoint bumps + rare
-        // metadata).
-        (enable_mdbx_shadow_misc, (bool), false)
-        // Phase 4a: shadow-mirror the storage-crate
-        // snapshot_info_db (per-epoch SnapshotInfo). Handled at
-        // the StorageManager layer, not DBManager. Same
-        // shadow-then-cutover semantics.
-        (enable_mdbx_shadow_snapshot_info, (bool), false)
-        // Phase 3 cutover: boot installed shadow mirrors directly on
-        // MDBX-only reads (ReadSource::Shadow) from genesis, no runtime
-        // flip. Only effective with the enable_mdbx_shadow_* flags on and
-        // a from-genesis start. Default false.
-        (mdbx_read_shadow, (bool), false)
         (print_memory_usage_period_s, (Option<u64>), None)
         (target_block_gas_limit, (u64), DEFAULT_TARGET_BLOCK_GAS_LIMIT)
         (executive_trace, (bool), false)
@@ -1126,9 +1078,6 @@ impl Configuration {
                 .use_isolated_db_for_mpt_table_height,
             keep_era_genesis_snapshot: self.raw_conf.keep_era_genesis_snapshot,
             state_db_backend: self.state_db_backend(),
-            enable_mdbx_shadow_snapshot_info: self
-                .raw_conf
-                .enable_mdbx_shadow_snapshot_info,
         }
     }
 
@@ -1299,28 +1248,6 @@ impl Configuration {
                 * self.raw_conf.era_epoch_count as f64)
                 as usize,
             strict_tx_index_gc: self.raw_conf.strict_tx_index_gc,
-            enable_mdbx_shadow_hash_by_number: self
-                .raw_conf
-                .enable_mdbx_shadow_hash_by_number,
-            enable_mdbx_shadow_tx_index: self
-                .raw_conf
-                .enable_mdbx_shadow_tx_index,
-            enable_mdbx_shadow_blamed_header_verified_roots: self
-                .raw_conf
-                .enable_mdbx_shadow_blamed_header_verified_roots,
-            enable_mdbx_shadow_block_traces: self
-                .raw_conf
-                .enable_mdbx_shadow_block_traces,
-            enable_mdbx_shadow_blocks: self
-                .raw_conf
-                .enable_mdbx_shadow_blocks,
-            enable_mdbx_shadow_epoch_numbers: self
-                .raw_conf
-                .enable_mdbx_shadow_epoch_numbers,
-            enable_mdbx_shadow_misc: self
-                .raw_conf
-                .enable_mdbx_shadow_misc,
-            mdbx_read_shadow: self.raw_conf.mdbx_read_shadow,
         };
 
         // By default, we do not keep the block data for additional period,

@@ -571,13 +571,20 @@ impl RpcImpl {
             vec![50f64],
         )?;
 
-        let total_reward: U256 = fee_history
+        // Each per-block reward vec should carry the single percentile
+        // we asked for (50%). Empty inner vecs would happen when
+        // fee_history couldn't compute rewards for a block (typically
+        // because the block has no transactions). Skip those instead
+        // of `.unwrap()`-panicking the http.worker.
+        let (sum, n) = fee_history
             .reward()
             .iter()
-            .map(|x| x.first().unwrap())
-            .fold(U256::zero(), |x, y| x + *y);
-
-        Ok(total_reward / 300)
+            .filter_map(|per_block| per_block.first().copied())
+            .fold((U256::zero(), 0u64), |(acc, cnt), r| (acc + r, cnt + 1));
+        if n == 0 {
+            return Ok(U256::zero());
+        }
+        Ok(sum / U256::from(n))
     }
 }
 

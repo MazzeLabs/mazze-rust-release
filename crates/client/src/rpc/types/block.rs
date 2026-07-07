@@ -163,11 +163,40 @@ impl Block {
         let (gas_used, transactions) = if tx_len == 0 {
             (Some(U256::from(0)), BlockTransactions::Hashes(vec![]))
         } else {
-            let maybe_results = consensus_inner
+            let raw_results = consensus_inner
                 .block_execution_results_by_hash(
                     &b.hash(),
                     false, /* update_cache */
                 );
+
+            // A block's transactions and its receipts must be the same
+            // length by construction. In practice inconsistent snapshots
+            // do slip in — commonly during catch-up when a block is
+            // inserted but its receipts aren't materialised yet, or when
+            // receipts get pruned ahead of the block itself. Any RPC
+            // path that indexes `receipts[tx_idx]` under that
+            // inconsistency panics an http.worker thread. Defensively
+            // fold "shorter receipts than transactions" into the same
+            // no-execution-result path we already handle — the caller
+            // sees a degraded but valid response instead of a panic.
+            let maybe_results = raw_results.and_then(|dvt| {
+                let receipts_len = dvt.1.block_receipts.receipts.len();
+                let msgs_len = dvt.1.block_receipts.tx_execution_error_messages.len();
+                if receipts_len >= tx_len && msgs_len >= tx_len {
+                    Some(dvt)
+                } else {
+                    warn!(
+                        "block {:?}: execution result shorter than \
+                         tx list (receipts={}, error_msgs={}, txs={}). \
+                         Falling back to no-execution-result RPC path.",
+                        b.hash(),
+                        receipts_len,
+                        msgs_len,
+                        tx_len
+                    );
+                    None
+                }
+            });
 
             // calculate block gasUsed according block.execution_result and
             // tx_space_filter
@@ -219,11 +248,34 @@ impl Block {
                                 .filter(|(_idx, tx)| tx_space_filter.is_none() || tx.space() == tx_space_filter.unwrap())
                                 .enumerate()
                                 .map(|(new_index, (original_index, tx))| {
-                                    let receipt = execution_result.block_receipts.receipts.get(original_index).unwrap();
+                                    // The `maybe_results` guard above already
+                                    // asserted `receipts.len() >= tx_len`, so
+                                    // both indexes are in-range under any
+                                    // consistent block. Defence-in-depth for
+                                    // catch-up races that slip past the guard
+                                    // between `let maybe_results = ...` and
+                                    // here: return a soft RPC error instead of
+                                    // panicking the http.worker.
+                                    let receipt = execution_result
+                                        .block_receipts
+                                        .receipts
+                                        .get(original_index)
+                                        .ok_or_else(|| format!(
+                                            "block {:?}: receipt at index {} \
+                                             missing (len={})",
+                                            b.hash(),
+                                            original_index,
+                                            execution_result.block_receipts.receipts.len(),
+                                        ))?;
                                     let prior_gas_used = if original_index == 0 {
                                         U256::zero()
                                     } else {
-                                        execution_result.block_receipts.receipts[original_index - 1].accumulated_gas_used
+                                        execution_result
+                                            .block_receipts
+                                            .receipts
+                                            .get(original_index - 1)
+                                            .map(|r| r.accumulated_gas_used)
+                                            .unwrap_or(U256::zero())
                                     };
                                     match receipt.outcome_status {
                                         TransactionStatus::Success | TransactionStatus::Failure => {

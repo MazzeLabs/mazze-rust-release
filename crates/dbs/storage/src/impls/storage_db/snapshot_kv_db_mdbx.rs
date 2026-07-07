@@ -293,21 +293,69 @@ impl SnapshotKvDbMdbx {
 
 impl Drop for SnapshotKvDbMdbx {
     fn drop(&mut self) {
-        // remove_on_close firing here does NOT yet wipe the
-        // snapshot's slice from MDBX — that requires the manager's
-        // chunked destroy (arrives in 5c.d). We log so the manager
-        // wire-up commit can grep for the site.
+        // Fire the chunked destroy inline if `remove_on_close` was
+        // armed — the same code path the manager runs via
+        // `SnapshotDbManagerMdbx::destroy_snapshot`. Errors are
+        // logged only: Drop cannot propagate, and a stalled
+        // destroy is better observed via the `snapshot.pruned_*`
+        // meters than a panic.
         if *self.remove_on_close.read() {
-            debug!(
-                "SnapshotKvDbMdbx::drop: remove_on_close set for \
-                 snapshot {:?} — manager-driven chunked destroy \
-                 lands in Phase 5c.d.",
-                self.snapshot_epoch_id
-            );
+            if let Err(e) = Self::destroy_slice(
+                &self.env,
+                &self.snapshot_epoch_id,
+            ) {
+                warn!(
+                    "SnapshotKvDbMdbx::drop: chunked destroy for \
+                     snapshot {:?} failed: {}",
+                    self.snapshot_epoch_id, e
+                );
+            }
         }
         if self.release_semaphore_on_drop {
             self.open_semaphore.add_permits(1);
         }
+    }
+}
+
+impl SnapshotKvDbMdbx {
+    /// Chunked range-delete of every key under
+    /// `[snapshot_epoch_id, snapshot_epoch_id + 1)` in the
+    /// snapshot env's column. Shared between
+    /// [`SnapshotDbManagerMdbx::destroy_snapshot`] (manager-driven)
+    /// and this type's `Drop` (RAII destroy on
+    /// `remove_on_close`).
+    ///
+    /// **Chunking**: uses
+    /// [`KvdbMdbx::delete_range_chunked`] from pre-work #1 so a
+    /// multi-million-key snapshot doesn't hold the snapshot env's
+    /// writer lock for the full destroy — MDBX single-writer
+    /// serialisation would block every concurrent read-txn's
+    /// commit otherwise. See design doc §2.3.2.2 for the freelist
+    /// / peak-occupancy caveat.
+    pub fn destroy_slice(env: &Arc<MdbxEnv>, epoch_id: &EpochId) -> Result<()> {
+        use super::snapshot_prefix::{
+            compose_snapshot_scope, snapshot_scope_upper_bound,
+        };
+        let lower = compose_snapshot_scope(epoch_id);
+        let upper = snapshot_scope_upper_bound(epoch_id);
+        let kvdb = KvdbMdbx::with_column(Arc::clone(env), SNAPSHOT_COL);
+        // 50k keys per rw_txn — same cap the design doc calls out
+        // for merges (§2.3.2.1). Destroy work is smaller per key
+        // than merge (no MPT rebalance), so this leaves head-room
+        // for concurrent reads on the same env.
+        const DESTROY_CHUNK_SIZE: usize = 50_000;
+        let upper_slice: Option<&[u8]> = upper.as_ref().map(|a| &a[..]);
+        let n = kvdb.delete_range_chunked(
+            &lower[..],
+            upper_slice,
+            DESTROY_CHUNK_SIZE,
+        )?;
+        debug!(
+            "SnapshotKvDbMdbx::destroy_slice: purged {} keys under \
+             snapshot {:?}",
+            n, epoch_id
+        );
+        Ok(())
     }
 }
 

@@ -2,21 +2,24 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-/// The in mem snapshot_info map and the on disk snapshot_info_db is always in
-/// sync.
+/// The in-mem snapshot_info map and the on-disk MDBX column
+/// `SnapshotInfo` are always in sync.
 ///
-/// Phase 5a (mid): the shadow-mirror wiring was removed alongside
-/// the DBManager shadow layer. Backend is still ParityDB;
-/// Phase 5b will swap it to native MDBX.
+/// Phase 5b: swapped from `KvdbParitydb` on its own paritydb env
+/// to `KvdbMdbx` on the shared hot-tier MDBX env
+/// ([`MdbxColumn::SnapshotInfo`]). No more per-subsystem paritydb
+/// envs; the whole storage layer talks to one env after 5b.
 pub struct PersistedSnapshotInfoMap {
     // Db to persist snapshot_info.
-    snapshot_info_db: KvdbParitydb,
+    snapshot_info_db: crate::impls::storage_db::kvdb_mdbx::KvdbMdbx,
     // In memory snapshot_info_map_by_epoch.
     snapshot_info_map_by_epoch: HashMap<EpochId, SnapshotInfo>,
 }
 
 impl PersistedSnapshotInfoMap {
-    fn new(snapshot_info_db: KvdbParitydb) -> Result<Self> {
+    fn new(
+        snapshot_info_db: crate::impls::storage_db::kvdb_mdbx::KvdbMdbx,
+    ) -> Result<Self> {
         let mut result = Self {
             snapshot_info_map_by_epoch: Default::default(),
             snapshot_info_db,
@@ -31,6 +34,9 @@ impl PersistedSnapshotInfoMap {
         let rlp_bytes = snapshot_info.rlp_bytes();
         self.snapshot_info_map_by_epoch
             .insert(epoch.clone(), snapshot_info);
+        // KvdbMdbx implements KeyValueDbTrait; `put` is the same
+        // signature the paritydb variant exposed.
+        use crate::storage_db::key_value_db::KeyValueDbTrait;
         self.snapshot_info_db.put(epoch.as_ref(), &rlp_bytes)?;
         Ok(())
     }
@@ -45,6 +51,7 @@ impl PersistedSnapshotInfoMap {
 
     fn remove(&mut self, epoch: &EpochId) -> Result<()> {
         self.snapshot_info_map_by_epoch.remove(epoch);
+        use crate::storage_db::key_value_db::KeyValueDbTrait;
         self.snapshot_info_db.delete(epoch.as_ref())?;
         Ok(())
     }
@@ -57,8 +64,14 @@ impl PersistedSnapshotInfoMap {
     }
 
     fn load_persist_state(&mut self) -> Result<()> {
-        for (key, value) in
-            self.snapshot_info_db.kvdb.iter(self.snapshot_info_db.col)
+        // MDBX iteration: read the whole column into a Vec via
+        // `iter_range_owned` and rebuild the in-mem map. The
+        // per-epoch entries fit trivially in memory (dozens to
+        // low thousands even on archive nodes).
+        for (key, value) in self
+            .snapshot_info_db
+            .iter_range_owned(b"", None)?
+            .into_iter()
         {
             if key.len() != EpochId::len_bytes() {
                 return Err(DecoderError::RlpInvalidLength.into());
@@ -265,30 +278,10 @@ impl StorageManager {
             );
         }
 
-        let snapshot_info_config = db::ParityDbOpenConfig {
-            columns: 1,
-            compression: None,
-            disable_wal: false,
-            stats: false,
-        };
-        let snapshot_info_settings = db::paritydb_settings(
-            storage_conf.path_snapshot_info_db.clone(),
-            &snapshot_info_config,
-        )?;
-        let snapshot_info_db = db::open_database(&snapshot_info_settings)?;
-        let snapshot_info_kvdb = KvdbParitydb {
-            kvdb: snapshot_info_db.key_value(),
-            col: 0,
-        };
-
-        // Open the hot-tier MDBX environment when configured. Living
-        // for the lifetime of the StorageManager. See
-        // docs/storage-architecture.md §3.
-        //
-        // Moved BEFORE PersistedSnapshotInfoMap construction (Phase
-        // 4a) so we can hand the env into the snapshot_info shadow
-        // mirror. The env open is a filesystem op; ordering doesn't
-        // affect the paritydb open above.
+        // Phase 5b: MDBX hot-tier env is now mandatory for the
+        // storage manager (DBManager, DeltaDbManager, and
+        // PersistedSnapshotInfoMap all live on it). Refuse to
+        // start under the paritydb-only fallback.
         let mdbx_env = match &storage_conf.state_db_backend {
             crate::StateDbBackend::Mdbx(cfg) => {
                 let mdbx_dir = storage_dir.join("mdbx");
@@ -311,7 +304,28 @@ impl StorageManager {
                 );
                 Some(env)
             }
-            crate::StateDbBackend::ParityDb => None,
+            crate::StateDbBackend::ParityDb => {
+                bail!(
+                    "storage manager requires MDBX after Phase 5; \
+                     set `state_db_type = \"mdbx\"` in hydra.toml"
+                );
+            }
+        };
+
+        // Snapshot info now lives in `MdbxColumn::SnapshotInfo` on
+        // the shared MDBX env — no per-subsystem paritydb any more.
+        let snapshot_info_kvdb = {
+            use crate::impls::storage_db::{
+                kvdb_mdbx::KvdbMdbx, mdbx_columns::Column,
+            };
+            KvdbMdbx::with_column(
+                Arc::clone(
+                    mdbx_env
+                        .as_ref()
+                        .expect("MDBX env just opened above"),
+                ),
+                Column::SnapshotInfo.id(),
+            )
         };
 
         let snapshot_info_map =

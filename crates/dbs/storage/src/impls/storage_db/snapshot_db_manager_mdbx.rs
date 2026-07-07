@@ -54,18 +54,98 @@ use crate::{
         SnapshotInfo,
     },
 };
+use lazy_static::lazy_static;
+use metrics::{register_meter_with_group, Counter, CounterUsize, Meter};
 use parking_lot::{RwLock, RwLockWriteGuard};
 use primitives::{EpochId, MerkleHash, NULL_EPOCH};
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use rustc_hex::ToHex;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Semaphore;
+
+// ---------------- 5c.e: aggregate-per-subsystem metrics ----------------
+//
+// Per design doc §6 Q#4 (option A confirmed by the user before 5c.a
+// started): a fixed set of counters at `mdbx_snapshot.*` instead of
+// the 4c per-snapshot pattern that leaks the metrics registry on
+// long-lived archives. Bounded series count (well below dashboard
+// throttling) — operators correlate to specific snapshot ids via
+// log lines, not per-series labels.
+lazy_static! {
+    /// Cumulative successful `new_snapshot_by_merging` completions
+    /// (the marker was written, the child data landed, and the
+    /// snapshot_info registration committed under lock).
+    static ref MDBX_SNAPSHOT_MERGES_OK: Arc<dyn Meter> =
+        register_meter_with_group("mdbx_snapshot", "merges_ok_total");
+
+    /// Cumulative errored `new_snapshot_by_merging` calls — the
+    /// marker was written but something in the merge failed. The
+    /// stale marker gets GC'd on the next `scan_persist_state`.
+    static ref MDBX_SNAPSHOT_MERGES_FAIL: Arc<dyn Meter> =
+        register_meter_with_group("mdbx_snapshot", "merges_fail_total");
+
+    /// Cumulative full-sync ingests started (marker written) and
+    /// finalised (marker deleted under lock).
+    static ref MDBX_SNAPSHOT_FULLSYNC_STARTED: Arc<dyn Meter> =
+        register_meter_with_group("mdbx_snapshot", "full_sync_started_total");
+    static ref MDBX_SNAPSHOT_FULLSYNC_FINALIZED: Arc<dyn Meter> =
+        register_meter_with_group("mdbx_snapshot", "full_sync_finalized_total");
+
+    /// Cumulative `destroy_snapshot` invocations — either manager-
+    /// driven (retention pruning, non-canonical-fork cleanup) or
+    /// RAII-drop-driven (`remove_on_close`).
+    static ref MDBX_SNAPSHOT_DESTROYS: Arc<dyn Meter> =
+        register_meter_with_group("mdbx_snapshot", "destroys_total");
+
+    /// Cumulative interrupted merges the recovery scan picked up
+    /// via the marker sentinel. A steady-state value of 0 is
+    /// expected; every crash-during-merge bumps this exactly once
+    /// on the following restart.
+    static ref MDBX_SNAPSHOT_RECOVERED_INTERRUPTED: Arc<dyn Meter> =
+        register_meter_with_group("mdbx_snapshot", "recovered_interrupted_total");
+
+    /// Cumulative orphan prefixes the recovery scan range-deleted
+    /// (present in MDBX, not referenced by snapshot_info_map).
+    /// Distinct from interrupted-merge recoveries above.
+    static ref MDBX_SNAPSHOT_RECOVERED_ORPHANS: Arc<dyn Meter> =
+        register_meter_with_group("mdbx_snapshot", "recovered_orphans_total");
+
+    /// Gauge of the count of snapshots currently known to the
+    /// manager (post-`scan_persist_state`). Republished on every
+    /// `mark_snapshot_known` / `destroy_snapshot`.
+    static ref MDBX_SNAPSHOT_KNOWN_COUNT: Arc<dyn metrics::Gauge<usize>> =
+        metrics::GaugeUsize::register_with_group("mdbx_snapshot", "known_count");
+
+    /// Aggregate per-op counters — cheaper than the 4c `<epoch_id>`
+    /// series, but still tell operators when the snapshot tier is
+    /// under load.
+    static ref MDBX_SNAPSHOT_PUTS_OK: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("mdbx_snapshot", "puts_ok_total");
+    static ref MDBX_SNAPSHOT_GETS_OK: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("mdbx_snapshot", "gets_ok_total");
+    static ref MDBX_SNAPSHOT_GETS_MISS: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("mdbx_snapshot", "gets_miss_total");
+    static ref MDBX_SNAPSHOT_DELETES: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("mdbx_snapshot", "deletes_total");
+}
+
+/// Current unix epoch seconds — kept separate from
+/// `SystemTime::now` so tests can stub if needed. The value is
+/// operator-facing only; correctness doesn't hinge on precise
+/// clock values.
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// RLP body of a crash-recovery marker written under
 /// `[epoch_id | b'!']` in the snapshot column. The 5c.a
@@ -361,6 +441,207 @@ impl SnapshotDbManagerMdbx {
         let hit = kvdb.first_in_range(&lower[..], upper_slice)?;
         Ok(hit.is_some())
     }
+
+    // ---------------- 5c.e: marker + prefix enumeration ----------------
+
+    /// The marker key for `epoch_id` — `[epoch_id | b'!']`. Kept
+    /// as a helper so both the merge writer and the recovery
+    /// reader use the same layout.
+    fn marker_key(epoch_id: &EpochId) -> Vec<u8> {
+        use super::snapshot_prefix::{
+            compose_snapshot_prefix, SUB_PREFIX_MERGE_MARKER,
+        };
+        // Zero-length "inner" key — the marker occupies exactly
+        // the 33-byte prefix. Iteration on the sub-prefix returns
+        // this one entry.
+        compose_snapshot_prefix(epoch_id, SUB_PREFIX_MERGE_MARKER)
+    }
+
+    /// Write the crash-recovery marker for a merge-in-progress.
+    /// Called by the FIRST rw_txn of `new_snapshot_by_merging`.
+    /// Idempotent — MDBX overwrites the same key.
+    fn write_marker(
+        &self, epoch_id: &EpochId, marker: &MergeMarker,
+    ) -> Result<()> {
+        use super::{
+            kvdb_mdbx::KvdbMdbx, snapshot_kv_db_mdbx::SNAPSHOT_COL,
+        };
+        use crate::storage_db::KeyValueDbTrait;
+        let kvdb = KvdbMdbx::with_column(
+            Arc::clone(&self.env),
+            SNAPSHOT_COL,
+        );
+        let key = Self::marker_key(epoch_id);
+        let value = rlp::encode(marker);
+        KeyValueDbTrait::put(&kvdb, &key, &value)?;
+        Ok(())
+    }
+
+    /// Delete the crash-recovery marker for a
+    /// merge-just-committed snapshot. Called by the LAST rw_txn
+    /// under the `snapshot_info_map_rwlock` write guard — this
+    /// **is** the commit point of the marker protocol.
+    fn delete_marker(&self, epoch_id: &EpochId) -> Result<()> {
+        use super::{
+            kvdb_mdbx::KvdbMdbx, snapshot_kv_db_mdbx::SNAPSHOT_COL,
+        };
+        use crate::storage_db::KeyValueDbTrait;
+        let kvdb = KvdbMdbx::with_column(
+            Arc::clone(&self.env),
+            SNAPSHOT_COL,
+        );
+        let key = Self::marker_key(epoch_id);
+        KeyValueDbTrait::delete(&kvdb, &key)?;
+        Ok(())
+    }
+
+    /// Read the crash-recovery marker for a snapshot, if any.
+    /// Consumed by `scan_persist_state` on the recovery path.
+    fn read_marker(
+        &self, epoch_id: &EpochId,
+    ) -> Result<Option<MergeMarker>> {
+        use super::{
+            kvdb_mdbx::KvdbMdbx, snapshot_kv_db_mdbx::SNAPSHOT_COL,
+        };
+        let kvdb = KvdbMdbx::with_column(
+            Arc::clone(&self.env),
+            SNAPSHOT_COL,
+        );
+        let key = Self::marker_key(epoch_id);
+        use crate::storage_db::KeyValueDbTraitRead;
+        let raw = kvdb.get(&key)?;
+        match raw {
+            None => Ok(None),
+            Some(bytes) => match rlp::decode::<MergeMarker>(&bytes) {
+                Ok(m) => Ok(Some(m)),
+                Err(e) => {
+                    // Corrupt marker → warn + treat as "unknown
+                    // stale prefix", GC without attempting resume.
+                    warn!(
+                        "SnapshotDbManagerMdbx: marker for {:?} is \
+                         RLP-invalid ({}) — will be GC'd as an \
+                         orphan on this scan_persist_state pass.",
+                        epoch_id, e
+                    );
+                    Ok(None)
+                }
+            },
+        }
+    }
+
+    /// Run the actual data-writing steps of a merge, after the
+    /// marker has been written and before it is deleted. Split
+    /// out of `new_snapshot_by_merging` so the marker-writing
+    /// try/catch is easy to reason about. Any error here leaves
+    /// the marker in place, which is exactly what we want —
+    /// `scan_persist_state` will GC the partial child on the
+    /// next boot.
+    fn run_chunked_merge(
+        &self, old_snapshot_epoch_id: &EpochId,
+        snapshot_epoch_id: &EpochId, delta_mpt: DeltaMptIterator,
+        recover_mpt_with_kv_snapshot_exist: bool,
+        in_reconstruct_snapshot_state: bool,
+    ) -> Result<MerkleHash> {
+        // Attach a child handle. `attach` skips the semaphore —
+        // production callers must not open a peer readonly view
+        // of the child mid-merge (it wouldn't observe the marker
+        // + dump anyway), so we don't need to burn a permit.
+        let mut child = SnapshotKvDbMdbx::attach(
+            Arc::clone(&self.env),
+            *snapshot_epoch_id,
+            Arc::clone(&self.open_snapshot_semaphore),
+        );
+
+        // Skip the delta dump when the caller is recovering the
+        // MPT while the KV snapshot already exists — matches the
+        // paritydb reference's early-out.
+        if !recover_mpt_with_kv_snapshot_exist {
+            child.dump_delta_mpt(&delta_mpt)?;
+        }
+
+        // Pick between direct_merge (no parent) and
+        // copy_and_merge (parent → child). Same branch as
+        // paritydb.
+        let root = if *old_snapshot_epoch_id == NULL_EPOCH {
+            child.direct_merge(
+                None,
+                &mut None,
+                recover_mpt_with_kv_snapshot_exist,
+                in_reconstruct_snapshot_state,
+            )?
+        } else {
+            // Open the parent readonly. Errors here bubble out
+            // (with the marker still in place, so the next boot's
+            // scan_persist_state GCs the partial child).
+            let parent = self
+                .get_snapshot_by_epoch_id(
+                    old_snapshot_epoch_id,
+                    false,
+                    false,
+                )?
+                .ok_or_else(|| Error::from(ErrorKind::SnapshotNotFound))?;
+            let parent = Arc::new(parent);
+            child.copy_and_merge(
+                &parent,
+                &mut None,
+                in_reconstruct_snapshot_state,
+            )?
+        };
+        Ok(root)
+    }
+
+    /// Enumerate every distinct 32-byte prefix present in the
+    /// snapshot column. O(distinct_snapshots) cursor jumps —
+    /// same trick as
+    /// `DeltaDbManagerMdbx::enumerate_present_prefixes` per
+    /// design doc §2.3.2.3.
+    fn enumerate_present_prefixes(&self) -> Result<Vec<EpochId>> {
+        use super::{
+            kvdb_mdbx::KvdbMdbx, snapshot_kv_db_mdbx::SNAPSHOT_COL,
+            snapshot_prefix::SNAPSHOT_EPOCH_ID_LEN,
+        };
+        let kvdb = KvdbMdbx::with_column(
+            Arc::clone(&self.env),
+            SNAPSHOT_COL,
+        );
+        let mut out = Vec::new();
+        let mut cursor: Vec<u8> = Vec::new();
+        loop {
+            let hit = kvdb.first_in_range(&cursor[..], None)?;
+            let (key, _val) = match hit {
+                Some(kv) => kv,
+                None => break,
+            };
+            if key.len() < SNAPSHOT_EPOCH_ID_LEN {
+                cursor = key.to_vec();
+                cursor.push(0);
+                continue;
+            }
+            let mut prefix = [0u8; SNAPSHOT_EPOCH_ID_LEN];
+            prefix.copy_from_slice(&key[..SNAPSHOT_EPOCH_ID_LEN]);
+            let id = EpochId::from_slice(&prefix);
+            out.push(id);
+            // Jump past this snapshot's whole 32-byte scope.
+            let mut next = prefix;
+            let mut carry = true;
+            for byte in next.iter_mut().rev() {
+                if !carry {
+                    break;
+                }
+                if *byte == 0xff {
+                    *byte = 0;
+                } else {
+                    *byte += 1;
+                    carry = false;
+                }
+            }
+            if carry {
+                break; // Was 0xff…ff — no more.
+            }
+            cursor = next.to_vec();
+        }
+        Ok(out)
+    }
 }
 
 // ================= SnapshotDbManagerTrait =================
@@ -445,46 +726,299 @@ impl SnapshotDbManagerTrait for SnapshotDbManagerMdbx {
         None
     }
 
-    // ---------- 5c.e-scoped methods: bail loudly ----------
+    // ---------- 5c.e: chunked merge + marker protocol ----------
 
+    /// Merge the delta MPT into a new child snapshot, staged
+    /// crash-safely via the `[epoch_id | b'!']` marker key.
+    ///
+    /// Sequence (design doc §2.3.2.1):
+    /// 1. Write `MergeMarker { Merge, started_at, parent }` at
+    ///    the child's marker key. First rw_txn — declares
+    ///    "there was a merge in flight for this epoch".
+    /// 2. Open the child snapshot handle via `attach` (no disk
+    ///    allocation — the prefix materialises on first write).
+    /// 3. Dump the delta MPT into `SUB_PREFIX_DELTA_SET` /
+    ///    `SUB_PREFIX_DELTA_DEL`.
+    /// 4. Fold the delta into the MPT via `direct_merge` (no
+    ///    parent) or `copy_and_merge` (parent → child).
+    /// 5. Stamp the child's merkle root into
+    ///    `in_progress_snapshot_info`.
+    /// 6. Acquire the `snapshot_info_map_rwlock` write guard.
+    /// 7. Delete the marker under that guard — the actual
+    ///    commit point.
+    /// 8. Register the child as known (in-memory set).
+    /// 9. Update the `latest_snapshot_id` bookkeeping.
+    /// 10. Return the guard so the caller can persist
+    ///     `snapshot_info` under it — the analogue of
+    ///     paritydb's "rename dir under the info lock".
+    ///
+    /// A crash between steps 1-6 leaves the marker present; a
+    /// crash between 7 and 8 leaves the marker deleted but the
+    /// snapshot unknown — `scan_persist_state` handles both
+    /// cases (interrupted merge / orphan-without-info).
     fn new_snapshot_by_merging<'m>(
-        &self, _old_snapshot_epoch_id: &EpochId, _snapshot_epoch_id: EpochId,
-        _delta_mpt: DeltaMptIterator,
-        _in_progress_snapshot_info: SnapshotInfo,
-        _snapshot_info_map_rwlock:
+        &self, old_snapshot_epoch_id: &EpochId, snapshot_epoch_id: EpochId,
+        delta_mpt: DeltaMptIterator,
+        mut in_progress_snapshot_info: SnapshotInfo,
+        snapshot_info_map_rwlock:
             &'m parking_lot::RwLock<PersistedSnapshotInfoMap>,
-        _new_epoch_height: u64, _recover_mpt_with_kv_snapshot_exist: bool,
+        _new_epoch_height: u64, recover_mpt_with_kv_snapshot_exist: bool,
     ) -> Result<(
         RwLockWriteGuard<'m, PersistedSnapshotInfoMap>,
         SnapshotInfo,
     )> {
-        bail!(
-            "SnapshotDbManagerMdbx::new_snapshot_by_merging: \
-             chunked merge implementation lands in Phase 5c.e; \
-             consensus should still be routing through the \
-             paritydb manager until the 5c.f wiring commit."
-        )
+        info!(
+            "new_snapshot_by_merging (MDBX): old={:?} new={:?}",
+            old_snapshot_epoch_id, snapshot_epoch_id
+        );
+
+        // Consensus can request a snapshot rebuild by staging the
+        // target here — mirrors the paritydb reference.
+        let in_reconstruct_snapshot_state = self
+            .reconstruct_snapshot_id_for_reboot
+            .write()
+            .take()
+            .is_some_and(|v| v == snapshot_epoch_id);
+
+        // Step 1: write the marker (crash-recovery sentinel).
+        let marker = MergeMarker::merge(
+            old_snapshot_epoch_id,
+            now_secs(),
+        );
+        if let Err(e) = self.write_marker(&snapshot_epoch_id, &marker) {
+            MDBX_SNAPSHOT_MERGES_FAIL.mark(1);
+            return Err(e);
+        }
+
+        // Steps 2-5: run the merge. Any error here leaves the
+        // marker in place — the next `scan_persist_state` will
+        // range-delete the partial child.
+        let outcome = self.run_chunked_merge(
+            old_snapshot_epoch_id,
+            &snapshot_epoch_id,
+            delta_mpt,
+            recover_mpt_with_kv_snapshot_exist,
+            in_reconstruct_snapshot_state,
+        );
+        let new_snapshot_root = match outcome {
+            Ok(root) => root,
+            Err(e) => {
+                MDBX_SNAPSHOT_MERGES_FAIL.mark(1);
+                // Do NOT delete the marker — `scan_persist_state`
+                // needs it to GC the partial data.
+                return Err(e);
+            }
+        };
+        in_progress_snapshot_info.merkle_root = new_snapshot_root;
+
+        // Steps 6-8: commit under the info-map lock.
+        let locked = snapshot_info_map_rwlock.write();
+        self.delete_marker(&snapshot_epoch_id)?;
+        self.mark_snapshot_known(snapshot_epoch_id);
+        // Bump the known-count gauge (aggregate metric).
+        let known_len = self.known_snapshots.read().len();
+        MDBX_SNAPSHOT_KNOWN_COUNT.update(known_len);
+
+        MDBX_SNAPSHOT_MERGES_OK.mark(1);
+        Ok((locked, in_progress_snapshot_info))
     }
 
     fn new_temp_snapshot_for_full_sync(
-        &self, _snapshot_epoch_id: &EpochId, _merkle_root: &MerkleHash,
+        &self, snapshot_epoch_id: &EpochId, merkle_root: &MerkleHash,
         _new_epoch_height: u64,
     ) -> Result<Self::SnapshotDbWrite> {
-        bail!(
-            "SnapshotDbManagerMdbx::new_temp_snapshot_for_full_sync: \
-             marker-driven full-sync ingest lands in Phase 5c.e."
-        )
+        // Write the full-sync marker BEFORE handing out the
+        // handle. If the caller drops the handle without calling
+        // `finalize_full_sync_snapshot`, the marker survives and
+        // `scan_persist_state` GCs the partial state on the next
+        // boot.
+        let marker = MergeMarker::full_sync(merkle_root, now_secs());
+        self.write_marker(snapshot_epoch_id, &marker)?;
+        // Acquire a permit and hand out the handle.
+        self.acquire_open_permit(false)?;
+        MDBX_SNAPSHOT_FULLSYNC_STARTED.mark(1);
+        Ok(SnapshotKvDbMdbx::attach(
+            Arc::clone(&self.env),
+            *snapshot_epoch_id,
+            Arc::clone(&self.open_snapshot_semaphore),
+        ))
     }
 
     fn finalize_full_sync_snapshot<'m>(
-        &self, _snapshot_epoch_id: &EpochId, _merkle_root: &MerkleHash,
-        _snapshot_info_map_rwlock:
+        &self, snapshot_epoch_id: &EpochId, _merkle_root: &MerkleHash,
+        snapshot_info_map_rwlock:
             &'m parking_lot::RwLock<PersistedSnapshotInfoMap>,
     ) -> Result<RwLockWriteGuard<'m, PersistedSnapshotInfoMap>> {
-        bail!(
-            "SnapshotDbManagerMdbx::finalize_full_sync_snapshot: \
-             marker-driven full-sync ingest lands in Phase 5c.e."
-        )
+        // Acquire the info-map lock, then delete the marker and
+        // register the snapshot as known — the analogue of the
+        // paritydb rename-under-lock.
+        let locked = snapshot_info_map_rwlock.write();
+        self.delete_marker(snapshot_epoch_id)?;
+        self.mark_snapshot_known(*snapshot_epoch_id);
+        let known_len = self.known_snapshots.read().len();
+        MDBX_SNAPSHOT_KNOWN_COUNT.update(known_len);
+        MDBX_SNAPSHOT_FULLSYNC_FINALIZED.mark(1);
+        Ok(locked)
+    }
+
+    /// Override the default `scan_persist_state`: enumerate every
+    /// distinct prefix present in MDBX, correlate against
+    /// `snapshot_info_map`, GC orphans and interrupted merges,
+    /// and populate the same [`SnapshotPersistState`] the paritydb
+    /// default would have produced.
+    ///
+    /// Runs at [`crate::impls::storage_manager::StorageManager::load_persist_state`]
+    /// time. O(distinct_snapshots) cursor jumps + O(distinct_snapshots)
+    /// marker reads — never a full-column scan.
+    ///
+    /// See design doc §2.3.2.3 for the required output shape and
+    /// the crash-recovery semantics.
+    fn scan_persist_state(
+        &self, snapshot_info_map: &HashMap<EpochId, SnapshotInfo>,
+    ) -> Result<crate::storage_db::SnapshotPersistState> {
+        use crate::storage_db::{
+            SnapshotKeptToProvideSyncStatus, SnapshotPersistState,
+        };
+
+        // Build the expected set from snapshot_info_map. Same
+        // partition the paritydb default uses: snapshots NOT
+        // marked `InfoOnly` must have on-disk data; those marked
+        // `InfoOnly` are info-only survivors (their ancestor is
+        // still around for sync).
+        let mut expected_full: HashMap<EpochId, u64> = HashMap::new();
+        let mut info_only: HashSet<EpochId> = HashSet::new();
+        for (id, info) in snapshot_info_map {
+            if info.snapshot_info_kept_to_provide_sync
+                != SnapshotKeptToProvideSyncStatus::InfoOnly
+            {
+                expected_full.insert(*id, info.height);
+            } else {
+                info_only.insert(*id);
+            }
+        }
+
+        let present = self.enumerate_present_prefixes()?;
+
+        let mut temp_snapshot_db_existing: Option<EpochId> = None;
+        let mut removed_snapshots: HashSet<EpochId> = HashSet::new();
+        let mut survivors: HashSet<EpochId> = HashSet::new();
+        let mut max_epoch_id = NULL_EPOCH;
+        let mut max_epoch_height: u64 = 0;
+
+        for id in &present {
+            let marker = self.read_marker(id)?;
+            match marker {
+                Some(m) => {
+                    // Interrupted merge or full-sync — range-
+                    // delete the partial child.
+                    info!(
+                        "scan_persist_state: recovering \
+                         interrupted {:?} for snapshot {:?} \
+                         (started_at={}); range-deleting partial \
+                         data.",
+                        m.kind, id, m.started_at
+                    );
+                    SnapshotKvDbMdbx::destroy_slice(&self.env, id)?;
+                    MDBX_SNAPSHOT_RECOVERED_INTERRUPTED.mark(1);
+                    if temp_snapshot_db_existing.is_none() {
+                        temp_snapshot_db_existing = Some(*id);
+                    } else {
+                        // The design doc + paritydb reference
+                        // both assume at most one temp at a time.
+                        // Log loudly if two exist — likely a bug
+                        // in the merge caller, but proceed with
+                        // GC.
+                        warn!(
+                            "scan_persist_state: more than one \
+                             in-progress marker present (already \
+                             saw {:?}, now {:?}) — GC'ing both.",
+                            temp_snapshot_db_existing.as_ref().unwrap(),
+                            id
+                        );
+                    }
+                }
+                None => {
+                    if expected_full.contains_key(id) {
+                        survivors.insert(*id);
+                        let h = expected_full[id];
+                        if h > max_epoch_height {
+                            max_epoch_height = h;
+                            max_epoch_id = *id;
+                        }
+                    } else if info_only.contains(id) {
+                        // Info-only snapshots have data but no
+                        // full-tracking; leave them alone.
+                        survivors.insert(*id);
+                    } else {
+                        // Orphan — present in MDBX but no
+                        // snapshot_info entry.
+                        info!(
+                            "scan_persist_state: orphan prefix {:?} \
+                             (no snapshot_info reference); \
+                             range-deleting.",
+                            id
+                        );
+                        SnapshotKvDbMdbx::destroy_slice(&self.env, id)?;
+                        MDBX_SNAPSHOT_RECOVERED_ORPHANS.mark(1);
+                        removed_snapshots.insert(*id);
+                    }
+                }
+            }
+        }
+
+        // Any expected snapshot that has no MDBX data is
+        // reported as missing (unless InfoOnly, which the
+        // default's exclude-from-expected already handled).
+        let mut missing_snapshots: Vec<EpochId> = Vec::new();
+        for id in expected_full.keys() {
+            if !survivors.contains(id) {
+                missing_snapshots.push(*id);
+            }
+        }
+
+        // Sync the in-memory known-snapshots set to survivors —
+        // this is what `snapshot_dir_exists` reads.
+        {
+            let mut known = self.known_snapshots.write();
+            *known = survivors.clone();
+            MDBX_SNAPSHOT_KNOWN_COUNT.update(known.len());
+        }
+        // Stamp the latest known snapshot for bookkeeping.
+        *self.latest_snapshot_id.write() =
+            (max_epoch_id, max_epoch_height);
+
+        // Under MDBX every snapshot always has its MPT in the
+        // current db (§3 / R1.3). If ANY expected snapshot
+        // survived, the max height above IS the max height with
+        // MPT.
+        let max_snapshot_epoch_height_has_mpt =
+            if max_epoch_height > 0 {
+                Some(max_epoch_height)
+            } else {
+                None
+            };
+
+        info!(
+            "SnapshotDbManagerMdbx::scan_persist_state: max epoch \
+             height {} (id {:?}), temp existing {:?}, removed {} \
+             orphan(s), missing {} snapshot(s), max height with \
+             MPT {:?}",
+            max_epoch_height,
+            max_epoch_id,
+            temp_snapshot_db_existing,
+            removed_snapshots.len(),
+            missing_snapshots.len(),
+            max_snapshot_epoch_height_has_mpt,
+        );
+
+        Ok(SnapshotPersistState {
+            missing_snapshots,
+            max_epoch_id,
+            max_epoch_height,
+            temp_snapshot_db_existing,
+            removed_snapshots,
+            max_snapshot_epoch_height_has_mpt,
+        })
     }
 
     // ---------- 5c.d covers the rest ----------
@@ -521,6 +1055,10 @@ impl SnapshotDbManagerTrait for SnapshotDbManagerMdbx {
         // for the writer-lock rationale.
         SnapshotKvDbMdbx::destroy_slice(&self.env, snapshot_epoch_id)?;
         self.known_snapshots.write().remove(snapshot_epoch_id);
+        // Republish the known-count gauge + bump aggregate meter.
+        let known_len = self.known_snapshots.read().len();
+        MDBX_SNAPSHOT_KNOWN_COUNT.update(known_len);
+        MDBX_SNAPSHOT_DESTROYS.mark(1);
         debug!(
             "SnapshotDbManagerMdbx: destroyed snapshot {:?}",
             snapshot_epoch_id
@@ -732,27 +1270,6 @@ mod tests {
         assert!(m.snapshot_dir_exists(&bystander));
     }
 
-    /// 5c.e-scoped methods currently bail with a clear message.
-    #[test]
-    fn merge_and_full_sync_stubs_bail_loudly() {
-        let (_e, _p, m) = make_manager();
-        // We can't easily construct a `DeltaMptIterator` /
-        // `SnapshotInfo` / `PersistedSnapshotInfoMap` from a
-        // test — instead call the simpler `new_temp_snapshot_for_full_sync`
-        // stub which takes primitives only.
-        let root = MerkleHash::from_slice(&[0u8; 32]);
-        // `.unwrap_err()` would require `SnapshotKvDbMdbx: Debug`
-        // which the type deliberately doesn't derive (it holds
-        // `Arc<MdbxEnv>` etc). `.err()` gets us the error side
-        // directly.
-        let err_msg = m
-            .new_temp_snapshot_for_full_sync(&snapshot_id(0), &root, 0)
-            .err()
-            .expect("stub must bail")
-            .to_string();
-        assert!(err_msg.contains("Phase 5c.e"));
-    }
-
     /// `try_get_new_snapshot_epoch_from_*_path` return `None`
     /// under MDBX — the marker protocol replaces the temp-path
     /// scan.
@@ -767,5 +1284,233 @@ mod tests {
             m.try_get_new_snapshot_epoch_from_mpt_temp_path("anything")
                 .is_none()
         );
+    }
+
+    // ---------------- 5c.e: marker + scan_persist_state ----------------
+    //
+    // Full merge/copy paths need real DeltaMptIterators + a
+    // Persisted­SnapshotInfoMap; those are covered end-to-end in the
+    // 5c.f integration test. Here we cover the marker primitives,
+    // the full-sync lifecycle, and scan_persist_state's recovery
+    // paths in isolation.
+
+    /// The marker key for `epoch_id` is exactly the 33-byte
+    /// prefix `[epoch_id | b'!']`.
+    #[test]
+    fn marker_key_layout() {
+        use crate::impls::storage_db::snapshot_prefix::{
+            SNAPSHOT_EPOCH_ID_LEN, SUB_PREFIX_MERGE_MARKER,
+        };
+        let id = snapshot_id(0x99);
+        let key = SnapshotDbManagerMdbx::marker_key(&id);
+        assert_eq!(key.len(), SNAPSHOT_EPOCH_ID_LEN + 1);
+        assert_eq!(&key[..SNAPSHOT_EPOCH_ID_LEN], id.as_ref());
+        assert_eq!(key[SNAPSHOT_EPOCH_ID_LEN], SUB_PREFIX_MERGE_MARKER);
+    }
+
+    /// Write → read → delete round-trip through the manager's
+    /// marker primitives.
+    #[test]
+    fn write_read_delete_marker_round_trip() {
+        let (_e, _p, m) = make_manager();
+        let id = snapshot_id(0xdd);
+        // Nothing there before.
+        assert!(m.read_marker(&id).unwrap().is_none());
+        let marker = MergeMarker::merge(&snapshot_id(0xd0), 42);
+        m.write_marker(&id, &marker).unwrap();
+        let read = m.read_marker(&id).unwrap().unwrap();
+        assert_eq!(read, marker);
+        m.delete_marker(&id).unwrap();
+        assert!(m.read_marker(&id).unwrap().is_none());
+    }
+
+    /// A corrupt marker (arbitrary bytes at the marker key)
+    /// decodes as `None` with a warn — recovery still range-
+    /// deletes the prefix as an orphan.
+    #[test]
+    fn corrupt_marker_reads_as_none() {
+        use crate::impls::storage_db::{
+            kvdb_mdbx::KvdbMdbx, snapshot_kv_db_mdbx::SNAPSHOT_COL,
+        };
+        use crate::storage_db::KeyValueDbTrait;
+        let (_e, _p, m) = make_manager();
+        let id = snapshot_id(0xee);
+        let kvdb = KvdbMdbx::with_column(m.env(), SNAPSHOT_COL);
+        // Stamp garbage at the marker key.
+        let key = SnapshotDbManagerMdbx::marker_key(&id);
+        KeyValueDbTrait::put(&kvdb, &key, b"not-rlp").unwrap();
+        // Reader returns None (garbage doesn't RLP-decode).
+        assert!(m.read_marker(&id).unwrap().is_none());
+    }
+
+    /// `enumerate_present_prefixes` returns exactly the distinct
+    /// 32-byte snapshot ids present in the column — same shape as
+    /// `DeltaDbManagerMdbx`'s equivalent.
+    #[test]
+    fn enumerate_present_prefixes_all_snapshots() {
+        use crate::impls::storage_db::{
+            kvdb_mdbx::KvdbMdbx, snapshot_kv_db_mdbx::SNAPSHOT_COL,
+            snapshot_prefix::{compose_snapshot_prefix, SUB_PREFIX_KV},
+        };
+        use crate::storage_db::KeyValueDbTrait;
+        let (_e, _p, m) = make_manager();
+        let ids: Vec<EpochId> =
+            (0..4).map(|i| snapshot_id(0x10 + i)).collect();
+        let kvdb = KvdbMdbx::with_column(m.env(), SNAPSHOT_COL);
+        for id in &ids {
+            let mut key = compose_snapshot_prefix(id, SUB_PREFIX_KV);
+            key.extend_from_slice(b"payload");
+            KeyValueDbTrait::put(&kvdb, &key, b"v").unwrap();
+        }
+        let mut found = m.enumerate_present_prefixes().unwrap();
+        found.sort();
+        let mut expected = ids;
+        expected.sort();
+        assert_eq!(found, expected);
+    }
+
+    /// Interrupted merge: `scan_persist_state` finds the marker,
+    /// range-deletes the partial child, and reports it in
+    /// `temp_snapshot_db_existing`.
+    #[test]
+    fn scan_persist_state_recovers_interrupted_merge() {
+        use crate::impls::storage_db::{
+            kvdb_mdbx::KvdbMdbx, snapshot_kv_db_mdbx::SNAPSHOT_COL,
+            snapshot_prefix::{compose_snapshot_prefix, SUB_PREFIX_KV},
+        };
+        use crate::storage_db::KeyValueDbTrait;
+        let (_e, _p, m) = make_manager();
+
+        // Simulate the state of a mid-merge crash: marker present
+        // + some partial child data.
+        let child_id = snapshot_id(0x55);
+        m.write_marker(
+            &child_id,
+            &MergeMarker::merge(&snapshot_id(0x54), 100),
+        )
+        .unwrap();
+        let kvdb = KvdbMdbx::with_column(m.env(), SNAPSHOT_COL);
+        let mut key =
+            compose_snapshot_prefix(&child_id, SUB_PREFIX_KV);
+        key.extend_from_slice(b"partial");
+        KeyValueDbTrait::put(&kvdb, &key, b"data").unwrap();
+        assert!(m.snapshot_has_any_data(&child_id).unwrap());
+
+        // Nothing in snapshot_info_map — the child is unregistered.
+        let empty: HashMap<EpochId, SnapshotInfo> = HashMap::new();
+        let state = m.scan_persist_state(&empty).unwrap();
+        assert_eq!(state.temp_snapshot_db_existing, Some(child_id));
+        // Partial data purged.
+        assert!(!m.snapshot_has_any_data(&child_id).unwrap());
+        assert!(m.read_marker(&child_id).unwrap().is_none());
+    }
+
+    /// Orphan recovery: `scan_persist_state` range-deletes a
+    /// prefix present in MDBX with no snapshot_info entry AND no
+    /// marker.
+    #[test]
+    fn scan_persist_state_gcs_orphan_without_marker() {
+        use crate::impls::storage_db::{
+            kvdb_mdbx::KvdbMdbx, snapshot_kv_db_mdbx::SNAPSHOT_COL,
+            snapshot_prefix::{compose_snapshot_prefix, SUB_PREFIX_KV},
+        };
+        use crate::storage_db::KeyValueDbTrait;
+        let (_e, _p, m) = make_manager();
+        let orphan_id = snapshot_id(0x66);
+        let kvdb = KvdbMdbx::with_column(m.env(), SNAPSHOT_COL);
+        let mut key = compose_snapshot_prefix(&orphan_id, SUB_PREFIX_KV);
+        key.extend_from_slice(b"leftover");
+        KeyValueDbTrait::put(&kvdb, &key, b"v").unwrap();
+
+        let empty: HashMap<EpochId, SnapshotInfo> = HashMap::new();
+        let state = m.scan_persist_state(&empty).unwrap();
+        assert!(state.removed_snapshots.contains(&orphan_id));
+        assert_eq!(state.temp_snapshot_db_existing, None);
+        assert!(!m.snapshot_has_any_data(&orphan_id).unwrap());
+    }
+
+    /// Happy path: an expected snapshot present in both MDBX and
+    /// snapshot_info_map is preserved, marks the max height, and
+    /// gets into the in-memory known set.
+    #[test]
+    fn scan_persist_state_preserves_expected_snapshots() {
+        use crate::impls::storage_db::{
+            kvdb_mdbx::KvdbMdbx, snapshot_kv_db_mdbx::SNAPSHOT_COL,
+            snapshot_prefix::{compose_snapshot_prefix, SUB_PREFIX_KV},
+        };
+        use crate::storage_db::{
+            KeyValueDbTrait, SnapshotKeptToProvideSyncStatus,
+        };
+        let (_e, _p, m) = make_manager();
+        let expected_id = snapshot_id(0xaa);
+        let kvdb = KvdbMdbx::with_column(m.env(), SNAPSHOT_COL);
+        let mut key =
+            compose_snapshot_prefix(&expected_id, SUB_PREFIX_KV);
+        key.extend_from_slice(b"account");
+        KeyValueDbTrait::put(&kvdb, &key, b"balance").unwrap();
+
+        let mut info_map: HashMap<EpochId, SnapshotInfo> = HashMap::new();
+        let mut info = SnapshotInfo::genesis_snapshot_info();
+        info.height = 42;
+        info.parent_snapshot_epoch_id = expected_id;
+        info.snapshot_info_kept_to_provide_sync =
+            SnapshotKeptToProvideSyncStatus::No;
+        info_map.insert(expected_id, info);
+
+        let state = m.scan_persist_state(&info_map).unwrap();
+        assert_eq!(state.max_epoch_id, expected_id);
+        assert_eq!(state.max_epoch_height, 42);
+        assert!(state.missing_snapshots.is_empty());
+        assert!(state.removed_snapshots.is_empty());
+        assert_eq!(
+            state.max_snapshot_epoch_height_has_mpt,
+            Some(42)
+        );
+        // Known-snapshots set synced from the survivors.
+        assert!(m.snapshot_dir_exists(&expected_id));
+    }
+
+    /// Expected snapshot with NO data in MDBX shows up as
+    /// `missing_snapshots`.
+    #[test]
+    fn scan_persist_state_reports_missing_snapshots() {
+        use crate::storage_db::SnapshotKeptToProvideSyncStatus;
+        let (_e, _p, m) = make_manager();
+        let missing_id = snapshot_id(0xbb);
+        let mut info_map: HashMap<EpochId, SnapshotInfo> = HashMap::new();
+        let mut info = SnapshotInfo::genesis_snapshot_info();
+        info.height = 7;
+        info.parent_snapshot_epoch_id = missing_id;
+        info.snapshot_info_kept_to_provide_sync =
+            SnapshotKeptToProvideSyncStatus::No;
+        info_map.insert(missing_id, info);
+        let state = m.scan_persist_state(&info_map).unwrap();
+        assert_eq!(state.missing_snapshots, vec![missing_id]);
+        assert_eq!(state.max_epoch_id, NULL_EPOCH);
+        assert_eq!(state.max_epoch_height, 0);
+    }
+
+    /// `new_temp_snapshot_for_full_sync` writes the FullSync
+    /// marker AND acquires a semaphore permit. Finalize is covered
+    /// end-to-end in the 5c.f integration test where
+    /// `PersistedSnapshotInfoMap::new` is reachable via the
+    /// storage-manager wiring; here we validate the marker is
+    /// stamped and the handle isn't yet known.
+    #[test]
+    fn full_sync_start_writes_marker_and_defers_known() {
+        let (_e, _p, m) = make_manager();
+        let id = snapshot_id(0xcc);
+        let root = MerkleHash::from_slice(&[0xcc; 32]);
+        let handle = m
+            .new_temp_snapshot_for_full_sync(&id, &root, 100)
+            .unwrap();
+        // Marker written under the FullSync kind, carrying the
+        // expected root as context.
+        let marker = m.read_marker(&id).unwrap().unwrap();
+        assert_eq!(marker.kind, MergeMarkerKind::FullSync);
+        assert_eq!(&marker.context[..], root.as_ref());
+        // Not yet in the known set — finalize hasn't run.
+        assert!(!m.snapshot_dir_exists(&id));
+        drop(handle);
     }
 }

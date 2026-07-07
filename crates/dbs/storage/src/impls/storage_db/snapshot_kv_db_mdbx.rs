@@ -159,27 +159,39 @@ impl SnapshotKvDbMdbx {
     /// vanishes when the process exits; consensus never persists
     /// anything through this handle.
     pub fn get_null_snapshot() -> Self {
-        use std::path::PathBuf;
-        // A per-process temp directory so parallel test binaries
-        // don't collide. Reopen is idempotent: MDBX just picks up
-        // the existing (empty) column.
-        let null_path: PathBuf = std::env::temp_dir().join(format!(
-            "mazze_null_snapshot_mdbx_{}",
-            std::process::id()
-        ));
-        // If the env fails to open (e.g. disk full in tmp), fall
-        // back to a minimal in-process env in the current dir — the
-        // null snapshot should never actually error out, callers
-        // treat it as always-present.
-        let env = MdbxEnv::open(&null_path).unwrap_or_else(|_| {
-            // Last-ditch: reuse the same path but with a random
-            // suffix. Only fires on outright OS-level failures.
-            let alt = null_path.with_extension("alt");
-            MdbxEnv::open(&alt)
-                .expect("null snapshot env open must not fail twice")
-        });
+        // The null snapshot's MDBX env MUST be opened exactly
+        // once per process — MDBX holds an exclusive lock on
+        // `mdbx.lck`, so a second `MdbxEnv::open` on the same
+        // path fails with `Resource temporarily unavailable` and
+        // takes down any thread that panics on it (observed:
+        // Consensus Execution Worker on the 5-node testnet,
+        // relaunch of 2026-07-07). Cache via `lazy_static!` — same
+        // shape as the paritydb reference's `NULL_SNAPSHOT_STORE`.
+        //
+        // Callers get a fresh `SnapshotKvDbMdbx` struct on every
+        // call (the wrapper is per-call state — semaphore return,
+        // remove_on_close), but every wrapper shares the same
+        // `Arc<MdbxEnv>` cloned from the process-wide cache.
+        lazy_static::lazy_static! {
+            static ref NULL_SNAPSHOT_ENV: Arc<MdbxEnv> = {
+                use std::path::PathBuf;
+                let null_path: PathBuf = std::env::temp_dir().join(format!(
+                    "mazze_null_snapshot_mdbx_{}",
+                    std::process::id()
+                ));
+                MdbxEnv::open(&null_path).unwrap_or_else(|_| {
+                    // Last-ditch: reuse the same path with an
+                    // alternate suffix. Only fires on outright
+                    // OS-level failures (disk full in tmp, etc.).
+                    let alt = null_path.with_extension("alt");
+                    MdbxEnv::open(&alt).expect(
+                        "null snapshot env open must not fail twice",
+                    )
+                })
+            };
+        }
         Self {
-            env,
+            env: Arc::clone(&NULL_SNAPSHOT_ENV),
             snapshot_epoch_id: primitives::NULL_EPOCH,
             open_semaphore: Arc::new(Semaphore::new(0)),
             release_semaphore_on_drop: false,
@@ -1402,6 +1414,39 @@ mod tests {
         let sn = SnapshotKvDbMdbx::get_null_snapshot();
         assert_eq!(sn.snapshot_epoch_id(), &primitives::NULL_EPOCH);
         assert!(sn.is_mpt_table_in_current_db());
+    }
+
+    /// **Regression** for the 2026-07-07 fleet incident: repeated
+    /// calls to `get_null_snapshot` must NOT panic. The pre-fix
+    /// impl opened a fresh `MdbxEnv` on every call, and MDBX's
+    /// exclusive `mdbx.lck` lock rejected the second concurrent
+    /// open with `Resource temporarily unavailable`, wedging the
+    /// Consensus Execution Worker on m3/m6. Fix caches the env
+    /// via `lazy_static!` — same shape as the paritydb reference.
+    #[test]
+    fn null_snapshot_is_idempotent_across_repeated_and_concurrent_calls() {
+        // Sequential — the pre-fix bug fires on the SECOND call.
+        for _ in 0..8 {
+            let sn = SnapshotKvDbMdbx::get_null_snapshot();
+            assert_eq!(sn.snapshot_epoch_id(), &primitives::NULL_EPOCH);
+        }
+        // Concurrent — matches the runtime scenario: multiple
+        // http.worker + Consensus Execution Worker threads
+        // requesting the null snapshot at the same time.
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let sn = SnapshotKvDbMdbx::get_null_snapshot();
+                    assert_eq!(
+                        sn.snapshot_epoch_id(),
+                        &primitives::NULL_EPOCH
+                    );
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("null snapshot thread must not panic");
+        }
     }
 
     /// The DELTA_SET / DELTA_DEL views don't leak into the KV

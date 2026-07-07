@@ -51,5 +51,27 @@ pub mod defaults {
     /// Default MDBX map size in MB to avoid hard failures at large state sizes.
     pub const DEFAULT_MDBX_MAP_SIZE_MB: u64 = 65_536;
 
+    // -------------------- snapshot MDBX geometry (Phase 5c) --------------------
+    //
+    // The snapshot env is opened growth-enabled per design doc §2.3.1
+    // (the hot env's pinned-64GB behaviour is out of scope for 5c).
+    // Full-fast retention (≤ 2 eras) sits comfortably in a few GB;
+    // archive retention (100+ generations) wants operators to raise
+    // `snapshot_mdbx_max_mb`. Choose defaults that (a) leave room for
+    // the observed ~35 MB/snapshot × 100 gens × 3× (KV + MPT + slack)
+    // ≈ 10 GB archive floor, plus (b) a safety margin so operators
+    // hit the capacity alert (see `sample_snapshot_mdbx_capacity`)
+    // well before `MDBX_MAP_FULL`.
+    /// Initial map size for the snapshot env. Small enough that a
+    /// fresh node doesn't over-commit disk — MDBX allocates on
+    /// demand within the [`initial`, `max`] range.
+    pub const DEFAULT_SNAPSHOT_MDBX_INITIAL_MB: u64 = 1_024;
+    /// Ceiling the snapshot env can grow toward. Archives should
+    /// override this in `hydra.toml`.
+    pub const DEFAULT_SNAPSHOT_MDBX_MAX_MB: u64 = 32_768;
+    /// Growth step. Larger → fewer file-growth syscalls at write
+    /// bursts; smaller → less slack between grows.
+    pub const DEFAULT_SNAPSHOT_MDBX_GROWTH_STEP_MB: u64 = 2_048;
+
     use super::delta_mpt::node_memory_manager::DeltaMptsNodeMemoryManager;
 }

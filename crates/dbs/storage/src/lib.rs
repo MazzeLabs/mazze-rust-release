@@ -42,6 +42,11 @@ pub mod storage_dir {
                 .iter()
                 .collect::<PathBuf>();
         pub static ref STORAGE_DIR: PathBuf = "storage_db".into();
+        /// Dedicated MDBX env for the snapshot tier (Phase 5c). NOT
+        /// shared with the hot env — snapshots are cold, bulky, and
+        /// have their own writer-lock domain per design doc §2.3.0.
+        pub static ref SNAPSHOT_MDBX_DIR: PathBuf =
+            ["storage_db", "mdbx_snapshot"].iter().collect::<PathBuf>();
     }
 }
 
@@ -133,6 +138,41 @@ impl Default for MdbxConfig {
     }
 }
 
+/// Geometry knobs for the dedicated snapshot MDBX env (Phase 5c).
+///
+/// Distinct from [`MdbxConfig`] because snapshot storage has a
+/// different profile: cold, bulky, growth-enabled ceiling per node
+/// profile (archives keep 100+ generations, full-fast retains a
+/// short floor). Sharing the hot env's pinned 64 GB ceiling would
+/// halt the node at a snapshot boundary once the merged tier
+/// crossed it — see design doc §2.3.0 / §2.3.1.
+#[derive(Debug, Clone)]
+pub struct SnapshotMdbxConfig {
+    /// Initial map size in MB. Small (1-2 GB) so a fresh node
+    /// doesn't over-commit disk; MDBX grows on demand.
+    pub initial_mb: u64,
+    /// Maximum map size in MB — the ceiling the env grows toward.
+    /// Size for retention: `(2-3× peak state) × (max retained
+    /// snapshots) × safety_margin`, uncompressed. Archives want
+    /// this much higher than full-fast.
+    pub max_mb: u64,
+    /// Growth step in MB. Larger steps → fewer file-growth
+    /// syscalls at write bursts, at the cost of more slack
+    /// between grows.
+    pub growth_step_mb: u64,
+}
+
+impl Default for SnapshotMdbxConfig {
+    fn default() -> Self {
+        Self {
+            initial_mb: crate::impls::defaults::DEFAULT_SNAPSHOT_MDBX_INITIAL_MB,
+            max_mb: crate::impls::defaults::DEFAULT_SNAPSHOT_MDBX_MAX_MB,
+            growth_step_mb:
+                crate::impls::defaults::DEFAULT_SNAPSHOT_MDBX_GROWTH_STEP_MB,
+        }
+    }
+}
+
 /// Selects the *hot* state-DB backend. ParityDB is the cold-tier
 /// reference (history, snapshots) — it does *not* appear here.
 /// See [`docs/storage-architecture.md`](../../../docs/storage-architecture.md).
@@ -178,6 +218,15 @@ pub struct StorageConfiguration {
     pub use_isolated_db_for_mpt_table_height: Option<u64>,
     pub keep_era_genesis_snapshot: bool,
     pub state_db_backend: StateDbBackend,
+    /// Geometry for the dedicated Phase 5c snapshot MDBX env
+    /// (`storage_db/mdbx_snapshot/`). Independent of
+    /// [`StateDbBackend`] — the snapshot env is opened whenever the
+    /// hot env is on MDBX (5b+ makes that mandatory).
+    pub snapshot_mdbx_config: SnapshotMdbxConfig,
+    /// Directory that hosts the dedicated snapshot MDBX env. Set
+    /// alongside `path_storage_dir` so operators can mount it on a
+    /// larger/slower cold disk without moving the hot tier.
+    pub path_snapshot_mdbx_dir: PathBuf,
 }
 
 impl StorageConfiguration {
@@ -225,6 +274,9 @@ impl StorageConfiguration {
             use_isolated_db_for_mpt_table_height: None,
             keep_era_genesis_snapshot: false,
             state_db_backend: StateDbBackend::default(),
+            snapshot_mdbx_config: SnapshotMdbxConfig::default(),
+            path_snapshot_mdbx_dir: mazze_data_path
+                .join(&*storage_dir::SNAPSHOT_MDBX_DIR),
         }
     }
 }

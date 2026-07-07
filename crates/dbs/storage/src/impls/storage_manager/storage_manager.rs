@@ -146,6 +146,25 @@ pub struct StorageManager {
     /// storage cleanup plan but not yet *consumed* — see
     /// docs/storage-architecture.md for the next integration step.
     mdbx_env: Option<Arc<crate::impls::storage_db::kvdb_mdbx::MdbxEnv>>,
+    /// Dedicated MDBX env for the Phase 5c snapshot tier at
+    /// `storage_db/mdbx_snapshot/`. NOT shared with `mdbx_env`
+    /// because snapshot data is cold, bulky, and has its own
+    /// writer-lock domain (see design doc §2.3.0). Opened
+    /// **growth-enabled** so the map can grow up to
+    /// `SnapshotMdbxConfig::max_mb` — the capacity gauge fires a
+    /// warn well before it hits.
+    ///
+    /// **Wiring status (pre-work #3)**: opened, exposed via
+    /// [`Self::snapshot_mdbx_env`], gauge-monitored via
+    /// [`Self::sample_snapshot_mdbx_capacity`]. Consumed by
+    /// `SnapshotDbManagerMdbx` in the 5c main commit.
+    snapshot_mdbx_env:
+        Option<Arc<crate::impls::storage_db::kvdb_mdbx::MdbxEnv>>,
+    /// Snapshot env's configured `max_bytes` cached alongside the
+    /// env for the capacity-percentage gauge — avoids re-multiplying
+    /// on every sample and keeps the alert threshold checkable in
+    /// one place.
+    snapshot_mdbx_max_bytes: u64,
 }
 
 impl MallocSizeOf for StorageManager {
@@ -312,6 +331,47 @@ impl StorageManager {
             }
         };
 
+        // Phase 5c pre-work #3: open the dedicated snapshot MDBX env
+        // with a growth-enabled geometry. This env is separate from
+        // the hot `mdbx_env` — snapshot data is cold, bulky, and has
+        // its own writer-lock domain per design doc §2.3.0. The
+        // physical dir is created lazily by `open_with_geometry` so
+        // fresh nodes don't need extra setup. `SnapshotDbManagerMdbx`
+        // will consume the env in the 5c main commit; pre-work #3
+        // just opens it and stands up the capacity gauge.
+        let snapshot_cfg = &storage_conf.snapshot_mdbx_config;
+        let snapshot_initial_bytes =
+            (snapshot_cfg.initial_mb as usize).saturating_mul(1024 * 1024);
+        let snapshot_max_bytes =
+            (snapshot_cfg.max_mb as usize).saturating_mul(1024 * 1024);
+        let snapshot_growth_bytes = (snapshot_cfg.growth_step_mb as usize)
+            .saturating_mul(1024 * 1024);
+        let snapshot_mdbx_env = match &storage_conf.state_db_backend {
+            crate::StateDbBackend::Mdbx(_) => {
+                let env = crate::impls::storage_db::kvdb_mdbx::MdbxEnv
+                    ::open_with_geometry(
+                        &storage_conf.path_snapshot_mdbx_dir,
+                        snapshot_initial_bytes,
+                        snapshot_max_bytes,
+                        snapshot_growth_bytes,
+                    )?;
+                debug!(
+                    "Opened MDBX snapshot tier at {} (initial={} MB, \
+                     max={} MB, growth_step={} MB)",
+                    storage_conf.path_snapshot_mdbx_dir.display(),
+                    snapshot_cfg.initial_mb,
+                    snapshot_cfg.max_mb,
+                    snapshot_cfg.growth_step_mb
+                );
+                Some(env)
+            }
+            // Unreachable in practice — we `bail!`ed above when the
+            // backend is ParityDb — but keep the arm exhaustive so
+            // the match is future-proof.
+            crate::StateDbBackend::ParityDb => None,
+        };
+        let snapshot_mdbx_max_bytes = snapshot_max_bytes as u64;
+
         // Snapshot info now lives in `MdbxColumn::SnapshotInfo` on
         // the shared MDBX env — no per-subsystem paritydb any more.
         let snapshot_info_kvdb = {
@@ -395,6 +455,8 @@ impl StorageManager {
             intermediate_trie_root_merkle: RwLock::new(None),
             persist_state_from_initialization: RwLock::new(None),
             mdbx_env,
+            snapshot_mdbx_env,
+            snapshot_mdbx_max_bytes,
         }));
 
         let storage_manager_arc =
@@ -1693,7 +1755,75 @@ impl StorageManager {
         self.mdbx_env.clone()
     }
 
+    /// Handle to the dedicated snapshot MDBX env — the growth-
+    /// enabled cold tier at `storage_db/mdbx_snapshot/`. Returns
+    /// `None` iff the node was pinned to `ParityDb` (a rollout
+    /// escape hatch already rejected in `new_arc` — kept `Option`
+    /// for parallel shape with `mdbx_env`). Consumed by
+    /// `SnapshotDbManagerMdbx` in the Phase 5c main commit.
+    pub fn snapshot_mdbx_env(
+        &self,
+    ) -> Option<Arc<crate::impls::storage_db::kvdb_mdbx::MdbxEnv>> {
+        self.snapshot_mdbx_env.clone()
+    }
+
+    /// Sample the snapshot env's occupancy and republish it into
+    /// the `mdbx_snapshot.bytes_used` and
+    /// `mdbx_snapshot.map_pct_used_x100` gauges. Emits a `warn!`
+    /// when occupancy crosses [`SNAPSHOT_MDBX_CAPACITY_WARN_PCT`]
+    /// so operators can raise `snapshot_mdbx_max_mb` in hydra.toml
+    /// before hitting `MDBX_MAP_FULL`.
+    ///
+    /// Cheap: one `mdbx_stat` call on col-0. Called at each
+    /// [`Self::log_usage`] tick.
+    pub fn sample_snapshot_mdbx_capacity(&self) {
+        let env = match &self.snapshot_mdbx_env {
+            Some(e) => Arc::clone(e),
+            None => return,
+        };
+        // The snapshot env owns col-0; other columns are reserved
+        // in the design doc but not yet allocated, so col-0 stats
+        // is the whole env's disk footprint today.
+        let kvdb = crate::impls::storage_db::kvdb_mdbx::KvdbMdbx
+            ::with_column(env, 0);
+        let stats = match kvdb.stats() {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    "sample_snapshot_mdbx_capacity: stats() failed: {}",
+                    e
+                );
+                return;
+            }
+        };
+        SNAPSHOT_MDBX_BYTES_USED.update(stats.bytes_used as usize);
+        let Some(pct_x100) = snapshot_mdbx_pct_x100(
+            stats.bytes_used,
+            self.snapshot_mdbx_max_bytes,
+        ) else {
+            return; // max_bytes == 0: gauge left untouched.
+        };
+        SNAPSHOT_MDBX_MAP_PCT_USED_X100.update(pct_x100 as usize);
+        let pct = pct_x100 / 100;
+        if pct >= SNAPSHOT_MDBX_CAPACITY_WARN_PCT {
+            warn!(
+                "mdbx_snapshot capacity at {}.{:02}% ({} / {} \
+                 MB) — raise `snapshot_mdbx_max_mb` in hydra.toml \
+                 and restart before hitting MDBX_MAP_FULL.",
+                pct,
+                pct_x100 % 100,
+                stats.bytes_used / (1024 * 1024),
+                self.snapshot_mdbx_max_bytes / (1024 * 1024)
+            );
+        }
+    }
+
     pub fn log_usage(&self) {
+        // Refresh the snapshot-env capacity gauge at the same
+        // cadence as other storage-usage logging — cheap `mdbx_stat`
+        // on col-0.
+        self.sample_snapshot_mdbx_capacity();
+
         let mut delta_mpts = HashMap::new();
         for (_snapshot_epoch_id, associated_delta_mpts) in
             &*self.snapshot_associated_mpts_by_epoch.read()
@@ -2130,7 +2260,34 @@ lazy_static! {
     /// 0 with brief spikes to 1 around era boundaries.
     static ref SNAPSHOT_IN_FLIGHT_GAUGE: Arc<dyn metrics::Gauge<usize>> =
         metrics::GaugeUsize::register_with_group("snapshot", "in_flight");
+
+    /// Phase 5c — Bytes actually occupied on disk by the dedicated
+    /// snapshot MDBX env (`storage_db/mdbx_snapshot/`). Sampled from
+    /// `KvdbMdbxStats::bytes_used` on the col-0 handle at each
+    /// `log_usage` tick. Snapshot data is uncompressed and the env's
+    /// map has a hard `max_mb` ceiling — this gauge is the earliest
+    /// warning of a full-map halt.
+    static ref SNAPSHOT_MDBX_BYTES_USED: Arc<dyn metrics::Gauge<usize>> =
+        metrics::GaugeUsize::register_with_group("mdbx_snapshot", "bytes_used");
+
+    /// Phase 5c — `bytes_used` as a percentage of the env's
+    /// configured `max_mb`. This is the operator-facing number: the
+    /// alert threshold at 80% is enforced by a `warn!` in
+    /// `sample_snapshot_mdbx_capacity`. Multiplied by 100 (i.e. an
+    /// integer 0..=10_000 encodes 0.00-100.00%) so we don't lose
+    /// resolution against a `Gauge<usize>`.
+    static ref SNAPSHOT_MDBX_MAP_PCT_USED_X100: Arc<dyn metrics::Gauge<usize>> =
+        metrics::GaugeUsize::register_with_group(
+            "mdbx_snapshot",
+            "map_pct_used_x100",
+        );
 }
+
+/// The operator-alert threshold at which `sample_snapshot_mdbx_capacity`
+/// emits a warn-level log. Kept below 100 so operators have runway to
+/// raise `snapshot_mdbx_max_mb` in hydra.toml + restart before the map
+/// fills. See design doc §2.3.1.
+const SNAPSHOT_MDBX_CAPACITY_WARN_PCT: u64 = 80;
 
 /// Phase E — Helper that adjusts the in-flight count and republishes
 /// it into the gauge. Called on bg-thread spawn (delta=+1) and on
@@ -2147,4 +2304,66 @@ fn snapshot_in_flight_adjust(delta: i64) {
         prev.saturating_sub(dec)
     };
     SNAPSHOT_IN_FLIGHT_GAUGE.update(new_value);
+}
+
+/// Pure integer arithmetic for the `mdbx_snapshot.map_pct_used_x100`
+/// gauge — returns the occupancy as basis-points × 100 (i.e. an
+/// integer 0..=10_000 encodes 0.00-100.00%). Returns `None` when
+/// `max_bytes == 0` so the caller can leave the gauge untouched
+/// instead of publishing a bogus zero. Multiplies through `u128` so
+/// `bytes_used × 10_000` cannot overflow at any plausible map size.
+fn snapshot_mdbx_pct_x100(bytes_used: u64, max_bytes: u64) -> Option<u64> {
+    if max_bytes == 0 {
+        return None;
+    }
+    let pct_x100 =
+        (bytes_used as u128).saturating_mul(10_000) / max_bytes as u128;
+    Some(pct_x100 as u64)
+}
+
+#[cfg(test)]
+mod snapshot_mdbx_gauge_tests {
+    use super::snapshot_mdbx_pct_x100;
+
+    #[test]
+    fn zero_bytes_used() {
+        assert_eq!(snapshot_mdbx_pct_x100(0, 1024 * 1024).unwrap(), 0);
+    }
+
+    #[test]
+    fn half_full() {
+        // 512 MB out of 1024 MB → 50.00% → 5000.
+        let mb: u64 = 1024 * 1024;
+        assert_eq!(
+            snapshot_mdbx_pct_x100(512 * mb, 1024 * mb).unwrap(),
+            5000
+        );
+    }
+
+    #[test]
+    fn full_and_over_full() {
+        let m = 1024;
+        // Exactly full → 10_000 (100.00%).
+        assert_eq!(snapshot_mdbx_pct_x100(m, m).unwrap(), 10_000);
+        // Over-full (page rounding can push bytes_used past max) —
+        // must not overflow; integer division just returns > 10_000.
+        assert_eq!(snapshot_mdbx_pct_x100(m * 2, m).unwrap(), 20_000);
+    }
+
+    #[test]
+    fn zero_max_returns_none() {
+        // Sentinel path for the "disabled" case; caller uses this to
+        // skip the gauge update.
+        assert!(snapshot_mdbx_pct_x100(1_000_000, 0).is_none());
+    }
+
+    #[test]
+    fn huge_bytes_used_does_not_overflow() {
+        // 1 EB used, 32 GB ceiling — the intermediate multiply must
+        // stay inside u128.
+        let one_eb = 1u64 << 60;
+        let max = 32u64 * 1024 * 1024 * 1024;
+        let pct = snapshot_mdbx_pct_x100(one_eb, max).unwrap();
+        assert!(pct > 100_000_000);
+    }
 }

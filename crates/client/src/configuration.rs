@@ -21,7 +21,7 @@ use mazze_parameters::{
 use mazze_storage::{
     defaults::DEFAULT_DEBUG_SNAPSHOT_CHECKER_THREADS, storage_dir,
     ConsensusParam, MdbxConfig, MdbxSyncMode, ProvideExtraSnapshotSyncConfig,
-    StateDbBackend, StorageConfiguration,
+    SnapshotMdbxConfig, StateDbBackend, StorageConfiguration,
 };
 use mazze_types::{Address, AllChainID, Space, SpaceMap, H256, U256};
 use mazzecore::{
@@ -313,6 +313,9 @@ build_config! {
         (mdbx_map_size_mb, (Option<u64>), Some(mazze_storage::defaults::DEFAULT_MDBX_MAP_SIZE_MB))
         (mdbx_max_readers, (Option<u32>), None)
         (mdbx_sync_mode, (Option<String>), None)
+        (snapshot_mdbx_initial_mb, (u64), mazze_storage::defaults::DEFAULT_SNAPSHOT_MDBX_INITIAL_MB)
+        (snapshot_mdbx_max_mb, (u64), mazze_storage::defaults::DEFAULT_SNAPSHOT_MDBX_MAX_MB)
+        (snapshot_mdbx_growth_step_mb, (u64), mazze_storage::defaults::DEFAULT_SNAPSHOT_MDBX_GROWTH_STEP_MB)
         (storage_delta_mpts_cache_recent_lfu_factor, (f64), mazze_storage::defaults::DEFAULT_DELTA_MPTS_CACHE_RECENT_LFU_FACTOR)
         (storage_delta_mpts_cache_size, (u32), mazze_storage::defaults::DEFAULT_DELTA_MPTS_CACHE_SIZE)
         (storage_delta_mpts_cache_start_size, (u32), mazze_storage::defaults::DEFAULT_DELTA_MPTS_CACHE_START_SIZE)
@@ -1078,6 +1081,13 @@ impl Configuration {
                 .use_isolated_db_for_mpt_table_height,
             keep_era_genesis_snapshot: self.raw_conf.keep_era_genesis_snapshot,
             state_db_backend: self.state_db_backend(),
+            snapshot_mdbx_config: SnapshotMdbxConfig {
+                initial_mb: self.raw_conf.snapshot_mdbx_initial_mb,
+                max_mb: self.raw_conf.snapshot_mdbx_max_mb,
+                growth_step_mb: self.raw_conf.snapshot_mdbx_growth_step_mb,
+            },
+            path_snapshot_mdbx_dir: mazze_data_path
+                .join(&*storage_dir::SNAPSHOT_MDBX_DIR),
         }
     }
 

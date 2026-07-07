@@ -297,38 +297,33 @@ impl StorageManager {
             );
         }
 
-        // Phase 5b: MDBX hot-tier env is now mandatory for the
-        // storage manager (DBManager, DeltaDbManager, and
-        // PersistedSnapshotInfoMap all live on it). Refuse to
-        // start under the paritydb-only fallback.
-        let mdbx_env = match &storage_conf.state_db_backend {
-            crate::StateDbBackend::Mdbx(cfg) => {
-                let mdbx_dir = storage_dir.join("mdbx");
-                let map_size_bytes = cfg
-                    .map_size_mb
-                    .unwrap_or(
-                        crate::impls::defaults::DEFAULT_MDBX_MAP_SIZE_MB,
-                    )
-                    .saturating_mul(1024 * 1024)
-                    as usize;
-                let env =
-                    crate::impls::storage_db::kvdb_mdbx::MdbxEnv::open_with_map_size(
-                        &mdbx_dir,
-                        map_size_bytes,
-                    )?;
-                debug!(
-                    "Opened MDBX hot tier at {} (map_size={} MB)",
-                    mdbx_dir.display(),
-                    map_size_bytes / (1024 * 1024)
-                );
-                Some(env)
-            }
-            crate::StateDbBackend::ParityDb => {
-                bail!(
-                    "storage manager requires MDBX after Phase 5; \
-                     set `state_db_type = \"mdbx\"` in hydra.toml"
-                );
-            }
+        // Phase 5e: `StateDbBackend` is now `Mdbx`-only — the
+        // ParityDB fallback went with the paritydb impl files.
+        // The env is still `Option<Arc<MdbxEnv>>` for API-shape
+        // parity with getters/wiring downstream; it is always
+        // `Some` under the current single-variant enum.
+        let mdbx_env = {
+            let crate::StateDbBackend::Mdbx(cfg) =
+                &storage_conf.state_db_backend;
+            let mdbx_dir = storage_dir.join("mdbx");
+            let map_size_bytes = cfg
+                .map_size_mb
+                .unwrap_or(
+                    crate::impls::defaults::DEFAULT_MDBX_MAP_SIZE_MB,
+                )
+                .saturating_mul(1024 * 1024)
+                as usize;
+            let env =
+                crate::impls::storage_db::kvdb_mdbx::MdbxEnv::open_with_map_size(
+                    &mdbx_dir,
+                    map_size_bytes,
+                )?;
+            debug!(
+                "Opened MDBX hot tier at {} (map_size={} MB)",
+                mdbx_dir.display(),
+                map_size_bytes / (1024 * 1024)
+            );
+            Some(env)
         };
 
         // Phase 5c pre-work #3: open the dedicated snapshot MDBX env
@@ -346,29 +341,23 @@ impl StorageManager {
             (snapshot_cfg.max_mb as usize).saturating_mul(1024 * 1024);
         let snapshot_growth_bytes = (snapshot_cfg.growth_step_mb as usize)
             .saturating_mul(1024 * 1024);
-        let snapshot_mdbx_env = match &storage_conf.state_db_backend {
-            crate::StateDbBackend::Mdbx(_) => {
-                let env = crate::impls::storage_db::kvdb_mdbx::MdbxEnv
-                    ::open_with_geometry(
-                        &storage_conf.path_snapshot_mdbx_dir,
-                        snapshot_initial_bytes,
-                        snapshot_max_bytes,
-                        snapshot_growth_bytes,
-                    )?;
-                debug!(
-                    "Opened MDBX snapshot tier at {} (initial={} MB, \
-                     max={} MB, growth_step={} MB)",
-                    storage_conf.path_snapshot_mdbx_dir.display(),
-                    snapshot_cfg.initial_mb,
-                    snapshot_cfg.max_mb,
-                    snapshot_cfg.growth_step_mb
-                );
-                Some(env)
-            }
-            // Unreachable in practice — we `bail!`ed above when the
-            // backend is ParityDb — but keep the arm exhaustive so
-            // the match is future-proof.
-            crate::StateDbBackend::ParityDb => None,
+        let snapshot_mdbx_env = {
+            let env = crate::impls::storage_db::kvdb_mdbx::MdbxEnv
+                ::open_with_geometry(
+                    &storage_conf.path_snapshot_mdbx_dir,
+                    snapshot_initial_bytes,
+                    snapshot_max_bytes,
+                    snapshot_growth_bytes,
+                )?;
+            debug!(
+                "Opened MDBX snapshot tier at {} (initial={} MB, \
+                 max={} MB, growth_step={} MB)",
+                storage_conf.path_snapshot_mdbx_dir.display(),
+                snapshot_cfg.initial_mb,
+                snapshot_cfg.max_mb,
+                snapshot_cfg.growth_step_mb
+            );
+            Some(env)
         };
         let snapshot_mdbx_max_bytes = snapshot_max_bytes as u64;
 
@@ -2175,7 +2164,7 @@ use crate::{
         SnapshotInfo, SnapshotKeptToProvideSyncStatus,
     },
     utils::guarded_value::GuardedValue,
-    DeltaMpt, DeltaMptIdGen, DeltaMptIterator, KeyValueDbTrait, KvdbParitydb,
+    DeltaMpt, DeltaMptIdGen, DeltaMptIterator, KeyValueDbTrait,
     OpenDeltaDbLru, ProvideExtraSnapshotSyncConfig,
     StateIndex, StateRootWithAuxInfo, StorageConfiguration,
 };

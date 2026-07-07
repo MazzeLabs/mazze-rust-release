@@ -2,30 +2,25 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-// Storage backend implementations.
+// Storage backend implementations — MDBX-native.
 //
-// Two-tier model — see [docs/storage-architecture.md](../../../../docs/storage-architecture.md):
-//   - **ParityDB** (cold tier): blocks, receipts, traces, snapshot tries,
-//     delta-MPT increments. Sole backend today for everything.
-//   - **MDBX** (hot tier): live state for revm + recent DAG topology.
-//     The `kvdb_mdbx` module is a stub awaiting Phase B implementation.
+// Phase 5e completed the cutover: ParityDB is entirely gone from
+// the storage crate. The hot tier (state, delta MPTs, snapshot
+// info) lives in `mdbx` under `storage_db/`; the snapshot tier
+// (KV / MPT / delta dumps) lives in its own dedicated
+// `mdbx_snapshot` env per design doc §2.3.0.
 //
-// The historical SQLite parallel implementation was removed because it
-// was production-dead (only test/benchmark consumers, no `StateManager`
-// wiring). MDBX replaces its role as "the second backend" — but at the
-// hot tier rather than as a like-for-like ParityDB alternative.
+// See `docs/storage-architecture.md` for the full column /
+// prefix layout, and
+// `docs/internal/storage-phase-5-cde-migration.md` for the
+// migration story.
 
 pub mod delta_db_manager_mdbx;
-pub mod delta_db_manager_paritydb;
 pub mod kvdb_mdbx;
-pub mod kvdb_paritydb;
 pub mod mdbx_columns;
-pub mod mdbx_dual_write;
 pub mod prefixed_kvdb_mdbx;
 pub mod snapshot_db_manager_mdbx;
-pub mod snapshot_db_manager_paritydb;
 pub mod snapshot_debug;
 pub mod snapshot_kv_db_mdbx;
-pub mod snapshot_kv_db_paritydb;
 pub mod snapshot_mpt;
 pub mod snapshot_prefix;

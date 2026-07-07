@@ -2,12 +2,9 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-use crate::{
-    block_data_manager::BlockDbBackend,
-    sync::{
-        utils::{create_simple_block_impl, initialize_synchronization_graph},
-        SynchronizationGraphNode,
-    },
+use crate::sync::{
+    utils::{create_simple_block_impl, initialize_synchronization_graph},
+    SynchronizationGraphNode,
 };
 use mazze_types::{BigEndianHash, H256, U256};
 use primitives::Block;
@@ -28,7 +25,6 @@ fn test_remove_expire_blocks() {
             1,
             1,
             50000,
-            BlockDbBackend::Paritydb,
             H256::default(),
         );
         // test initialization

@@ -21,7 +21,7 @@ use primitives::{Block, BlockHeaderBuilder};
 
 use crate::{
     block_data_manager::{
-        BlockDataManager, BlockDbBackend, DataManagerConfiguration,
+        BlockDataManager, DataManagerConfiguration,
     },
     cache_config::CacheConfig,
     consensus::{
@@ -103,7 +103,7 @@ pub fn create_simple_block(
 }
 
 pub fn initialize_data_manager(
-    db_dir: &str, dbtype: BlockDbBackend, pow: Arc<PowComputer>, vm: VmFactory,
+    db_dir: &str, pow: Arc<PowComputer>, vm: VmFactory,
 ) -> (Arc<BlockDataManager>, Arc<Block>) {
     let parity_config = db::ParityDbOpenConfig {
         columns: NUM_COLUMNS,
@@ -163,7 +163,6 @@ pub fn initialize_data_manager(
                                              * address */
             false, /* do not persist block number index */
             Duration::from_millis(300_000), /* max cached tx count */
-            dbtype,
         ),
         pow,
     ));
@@ -269,7 +268,7 @@ pub fn initialize_synchronization_graph_with_data_manager(
 /// This method is only used in tests and benchmarks.
 pub fn initialize_synchronization_graph(
     db_dir: &str, beta: u64, h: u64, tcr: u64, tcb: u64, era_epoch_count: u64,
-    dbtype: BlockDbBackend, seed_hash: H256,
+    seed_hash: H256,
 ) -> (
     Arc<SynchronizationGraph>,
     Arc<ConsensusGraph>,
@@ -280,7 +279,7 @@ pub fn initialize_synchronization_graph(
     let pow = Arc::new(PowComputer::new(seed_hash));
 
     let (data_man, genesis_block) =
-        initialize_data_manager(db_dir, dbtype, pow.clone(), vm.clone());
+        initialize_data_manager(db_dir, pow.clone(), vm.clone());
 
     let (sync, consensus) = initialize_synchronization_graph_with_data_manager(
         data_man.clone(),

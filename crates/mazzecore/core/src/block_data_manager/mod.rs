@@ -1929,17 +1929,10 @@ impl BlockDataManager {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum BlockDbBackend {
-    Paritydb,
-}
-
 pub struct DataManagerConfiguration {
     pub persist_tx_index: bool,
     pub persist_block_number_index: bool,
     pub tx_cache_index_maintain_timeout: Duration,
-    pub block_db_backend: BlockDbBackend,
-    pub paritydb_settings: Option<db::ParityDbOpenConfig>,
     pub additional_maintained_block_body_epoch_count: Option<usize>,
     pub additional_maintained_execution_result_epoch_count: Option<usize>,
     pub additional_maintained_reward_epoch_count: Option<usize>,
@@ -1959,14 +1952,11 @@ impl DataManagerConfiguration {
     pub fn new(
         persist_tx_index: bool, persist_block_number_index: bool,
         tx_cache_index_maintain_timeout: Duration,
-        block_db_backend: BlockDbBackend,
     ) -> Self {
         Self {
             persist_tx_index,
             persist_block_number_index,
             tx_cache_index_maintain_timeout,
-            block_db_backend,
-            paritydb_settings: None,
             additional_maintained_block_body_epoch_count: None,
             additional_maintained_execution_result_epoch_count: None,
             additional_maintained_reward_epoch_count: None,

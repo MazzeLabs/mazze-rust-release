@@ -108,32 +108,14 @@ impl ProvideExtraSnapshotSyncConfig {
 }
 
 #[derive(Debug, Clone)]
-pub enum MdbxSyncMode {
-    /// Flush metadata on commit for maximum durability.
-    Safe,
-    /// Skip metadata syncs to speed up writes at the cost of resilience.
-    Relaxed,
-}
-
-impl Default for MdbxSyncMode {
-    fn default() -> Self {
-        MdbxSyncMode::Safe
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct MdbxConfig {
     pub map_size_mb: Option<u64>,
-    pub max_readers: Option<u32>,
-    pub sync_mode: MdbxSyncMode,
 }
 
 impl Default for MdbxConfig {
     fn default() -> Self {
         Self {
             map_size_mb: Some(crate::impls::defaults::DEFAULT_MDBX_MAP_SIZE_MB),
-            max_readers: None,
-            sync_mode: MdbxSyncMode::default(),
         }
     }
 }
@@ -173,16 +155,16 @@ impl Default for SnapshotMdbxConfig {
     }
 }
 
-/// Selects the *hot* state-DB backend. ParityDB is the cold-tier
-/// reference (history, snapshots) — it does *not* appear here.
-/// See [`docs/storage-architecture.md`](../../../docs/storage-architecture.md).
+/// Selects the *hot* state-DB backend. Only `Mdbx` after Phase
+/// 5e — the ParityDB fallback and every paritydb impl file went
+/// with it. Kept as an enum (instead of a bare `MdbxConfig`) so
+/// a future backend (e.g. a per-space storage split) can add a
+/// variant without rippling through call sites.
 #[derive(Debug, Clone)]
 pub enum StateDbBackend {
-    /// Memory-mapped MDBX (recommended; RAM-speed reads for revm).
+    /// Memory-mapped MDBX — RAM-speed reads for revm, MVCC
+    /// concurrent readers.
     Mdbx(MdbxConfig),
-    /// Fallback during rollout — ParityDB hosts the hot state too.
-    /// Slated for removal once Mdbx is verified in production.
-    ParityDb,
 }
 
 impl Default for StateDbBackend {
@@ -294,14 +276,8 @@ pub use self::{
         state_proof::StateProof,
         storage_db::{
             kvdb_mdbx::{KvdbMdbx, KvdbMdbxStats, MdbxEnv},
-            kvdb_paritydb::KvdbParitydb,
             mdbx_columns::{Column as MdbxColumn, NUM_COLUMNS as MDBX_NUM_COLUMNS},
-            mdbx_dual_write::{
-                DualWritePrimary, DualWriteReport, MdbxShadowMirror,
-                ReadSource,
-            },
             snapshot_db_manager_mdbx::SnapshotDbManagerMdbx,
-            snapshot_db_manager_paritydb::SnapshotDbManagerParitydb,
         },
     },
     replicated_state::ReplicatedState,

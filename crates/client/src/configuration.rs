@@ -20,12 +20,12 @@ use mazze_parameters::{
 };
 use mazze_storage::{
     defaults::DEFAULT_DEBUG_SNAPSHOT_CHECKER_THREADS, storage_dir,
-    ConsensusParam, MdbxConfig, MdbxSyncMode, ProvideExtraSnapshotSyncConfig,
+    ConsensusParam, MdbxConfig, ProvideExtraSnapshotSyncConfig,
     SnapshotMdbxConfig, StateDbBackend, StorageConfiguration,
 };
 use mazze_types::{Address, AllChainID, Space, SpaceMap, H256, U256};
 use mazzecore::{
-    block_data_manager::{BlockDbBackend, DataManagerConfiguration},
+    block_data_manager::DataManagerConfiguration,
     block_parameters::*,
     cache_config::{
         DEFAULT_INVALID_BLOCK_HASH_CACHE_SIZE_IN_COUNT,
@@ -311,8 +311,6 @@ build_config! {
         (invalid_block_hash_cache_size_in_count, (usize), DEFAULT_INVALID_BLOCK_HASH_CACHE_SIZE_IN_COUNT)
         (state_db_type, (String), "mdbx".to_string())
         (mdbx_map_size_mb, (Option<u64>), Some(mazze_storage::defaults::DEFAULT_MDBX_MAP_SIZE_MB))
-        (mdbx_max_readers, (Option<u32>), None)
-        (mdbx_sync_mode, (Option<String>), None)
         (snapshot_mdbx_initial_mb, (u64), mazze_storage::defaults::DEFAULT_SNAPSHOT_MDBX_INITIAL_MB)
         (snapshot_mdbx_max_mb, (u64), mazze_storage::defaults::DEFAULT_SNAPSHOT_MDBX_MAX_MB)
         (snapshot_mdbx_growth_step_mb, (u64), mazze_storage::defaults::DEFAULT_SNAPSHOT_MDBX_GROWTH_STEP_MB)
@@ -666,49 +664,20 @@ impl Configuration {
         }
     }
 
-    fn paritydb_settings(&self) -> Option<db::ParityDbOpenConfig> {
-        if self.raw_conf.block_db_type != "paritydb" {
-            panic!(
-                "Invalid block_db_type parameter: {}. Expected paritydb",
-                self.raw_conf.block_db_type
-            );
-        }
-
-        let compression = self
-            .raw_conf
-            .paritydb_journal_compression
-            .as_ref()
-            .map(|c| db::ParityCompression::from_str(c).unwrap());
-
-        Some(db::ParityDbOpenConfig {
-            columns: self.raw_conf.paritydb_columns.unwrap_or(NUM_COLUMNS),
-            compression,
-            disable_wal: self.raw_conf.paritydb_disable_wal,
-            stats: false,
-        })
-    }
-
     fn state_db_backend(&self) -> StateDbBackend {
+        // Phase 5e: `state_db_type` accepts only `"mdbx"` now —
+        // the ParityDb fallback was removed alongside the paritydb
+        // impl files. The `mdbx_sync_mode` / `mdbx_max_readers`
+        // knobs were never wired into `MdbxEnv::open_with_map_size`
+        // and are silently ignored per design doc R3.4; delete
+        // from hydra.toml.
         match self.raw_conf.state_db_type.as_str() {
-            "mdbx" => {
-                let sync_mode = match self.raw_conf.mdbx_sync_mode.as_deref() {
-                    None | Some("safe") => MdbxSyncMode::Safe,
-                    Some("relaxed") => MdbxSyncMode::Relaxed,
-                    Some(other) => panic!(
-                        "Invalid mdbx_sync_mode parameter: {other}. Expected safe/relaxed",
-                    ),
-                };
-                StateDbBackend::Mdbx(MdbxConfig {
-                    map_size_mb: self.raw_conf.mdbx_map_size_mb,
-                    max_readers: self.raw_conf.mdbx_max_readers,
-                    sync_mode,
-                })
-            }
-            // Fallback during the MDBX rollout. Slated for removal —
-            // see docs/storage-architecture.md.
-            "paritydb" => StateDbBackend::ParityDb,
+            "mdbx" => StateDbBackend::Mdbx(MdbxConfig {
+                map_size_mb: self.raw_conf.mdbx_map_size_mb,
+            }),
             other => panic!(
-                "Invalid state_db_type parameter: {other}. Expected mdbx or paritydb"
+                "Invalid state_db_type parameter: {other}. Only `mdbx` \
+                 is supported after Phase 5e."
             ),
         }
     }
@@ -1219,13 +1188,6 @@ impl Configuration {
             tx_cache_index_maintain_timeout: Duration::from_millis(
                 self.raw_conf.tx_cache_index_maintain_timeout_ms,
             ),
-            block_db_backend: match self.raw_conf.block_db_type.as_str() {
-                "paritydb" => BlockDbBackend::Paritydb,
-                other => panic!(
-                    "Invalid block_db_type parameter: {other}. Expected paritydb"
-                ),
-            },
-            paritydb_settings: self.paritydb_settings(),
             additional_maintained_block_body_epoch_count: self
                 .raw_conf
                 .additional_maintained_block_body_epoch_count,

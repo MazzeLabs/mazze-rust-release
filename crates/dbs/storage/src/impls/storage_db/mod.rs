@@ -26,3 +26,4 @@ pub mod snapshot_db_manager_paritydb;
 pub mod snapshot_debug;
 pub mod snapshot_kv_db_paritydb;
 pub mod snapshot_mpt;
+pub mod snapshot_prefix;

@@ -313,15 +313,18 @@ impl StorageManager {
                 )
                 .saturating_mul(1024 * 1024)
                 as usize;
+            let sync_mode = cfg.sync_mode.to_libmdbx();
             let env =
-                crate::impls::storage_db::kvdb_mdbx::MdbxEnv::open_with_map_size(
+                crate::impls::storage_db::kvdb_mdbx::MdbxEnv::open_with_map_size_and_sync(
                     &mdbx_dir,
                     map_size_bytes,
+                    sync_mode,
                 )?;
-            debug!(
-                "Opened MDBX hot tier at {} (map_size={} MB)",
+            info!(
+                "Opened MDBX hot tier at {} (map_size={} MB, sync_mode={:?})",
                 mdbx_dir.display(),
-                map_size_bytes / (1024 * 1024)
+                map_size_bytes / (1024 * 1024),
+                cfg.sync_mode
             );
             Some(env)
         };
@@ -342,20 +345,31 @@ impl StorageManager {
         let snapshot_growth_bytes = (snapshot_cfg.growth_step_mb as usize)
             .saturating_mul(1024 * 1024);
         let snapshot_mdbx_env = {
+            // Reuse the hot-env sync mode for the snapshot env —
+            // operators pick one durability tier per node profile;
+            // the snapshot env's writes are only during era merges
+            // + destroy so a slightly relaxed sync is safe (a
+            // partial snapshot on crash is reconstructed by
+            // `scan_persist_state`'s marker-driven recovery).
+            let crate::StateDbBackend::Mdbx(hot_cfg) =
+                &storage_conf.state_db_backend;
+            let sync_mode = hot_cfg.sync_mode.to_libmdbx();
             let env = crate::impls::storage_db::kvdb_mdbx::MdbxEnv
-                ::open_with_geometry(
+                ::open_with_geometry_and_sync(
                     &storage_conf.path_snapshot_mdbx_dir,
                     snapshot_initial_bytes,
                     snapshot_max_bytes,
                     snapshot_growth_bytes,
+                    sync_mode,
                 )?;
-            debug!(
+            info!(
                 "Opened MDBX snapshot tier at {} (initial={} MB, \
-                 max={} MB, growth_step={} MB)",
+                 max={} MB, growth_step={} MB, sync_mode={:?})",
                 storage_conf.path_snapshot_mdbx_dir.display(),
                 snapshot_cfg.initial_mb,
                 snapshot_cfg.max_mb,
-                snapshot_cfg.growth_step_mb
+                snapshot_cfg.growth_step_mb,
+                hot_cfg.sync_mode
             );
             Some(env)
         };

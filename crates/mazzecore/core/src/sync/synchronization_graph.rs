@@ -312,11 +312,64 @@ impl SynchronizationGraphInner {
     }
 
     fn update_metrics(&self) {
-        SYNC_GRAPH_ARENA_SIZE.update(self.arena.len());
+        let arena_size = self.arena.len();
+        SYNC_GRAPH_ARENA_SIZE.update(arena_size);
         SYNC_GRAPH_OLD_ERA_FRONTIER_SIZE
             .update(self.old_era_blocks_frontier_set.len());
         SYNC_GRAPH_NOT_READY_FRONTIER_SIZE
             .update(self.not_ready_blocks_frontier.len());
+
+        // Fleet incident 2026-07-08 report §5 recommendation #7:
+        // fleet TOMLs don't wire metrics egress, so
+        // `sync_graph.orphan_inserts_rejected_over_cap_total`
+        // used to increment invisibly and the arena silently
+        // filled ~11h post-relaunch. Log a rate-limited warn in-
+        // process whenever the arena crosses tripwire fractions,
+        // so at least operators tailing the log see it early.
+        //
+        // Kept as static atomics to avoid a lock on the hot
+        // insert path — worst case is a duplicate log line
+        // across two threads at the exact same tick, which is
+        // fine.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // Last logged bucket: 0 = below 75%, 1 = 75-90%, 2 = >90%.
+        static LAST_BUCKET: AtomicUsize = AtomicUsize::new(0);
+        let pct = arena_size * 100 / SYNC_GRAPH_ARENA_HARD_CAP;
+        let bucket = if pct >= 90 {
+            2usize
+        } else if pct >= 75 {
+            1usize
+        } else {
+            0usize
+        };
+        let prev = LAST_BUCKET.swap(bucket, Ordering::Relaxed);
+        if bucket > prev {
+            match bucket {
+                1 => info!(
+                    "sync-graph arena at {}% of cap ({}/{}). GC \
+                     health monitor: watch old_era_frontier_size + \
+                     execution catch-up rate. See H-2 guard.",
+                    pct, arena_size, SYNC_GRAPH_ARENA_HARD_CAP
+                ),
+                2 => warn!(
+                    "sync-graph arena at {}% of cap ({}/{}). \
+                     ORPHAN-REJECT threshold imminent. Over-cap \
+                     orphans now route to `AtCapacity` (soft drop, \
+                     no peer disconnect) after the 2026-07-08 \
+                     fleet fork fix, so peers stay in the mesh — \
+                     but headers WILL be dropped and the tip may \
+                     stall until GC catches up.",
+                    pct, arena_size, SYNC_GRAPH_ARENA_HARD_CAP
+                ),
+                _ => {}
+            }
+        } else if bucket < prev {
+            // Recovery — log so operators see the ramp end.
+            info!(
+                "sync-graph arena recovered to {}% of cap ({}/{}).",
+                pct, arena_size, SYNC_GRAPH_ARENA_HARD_CAP
+            );
+        }
     }
 
     fn try_clear_old_era_blocks(&mut self) {
@@ -1698,13 +1751,22 @@ impl SynchronizationGraph {
             if !parent_present {
                 SYNC_GRAPH_REJECTED_OVER_CAP.mark(1);
                 warn!(
-                    "Rejecting ORPHAN header {} — sync-graph arena at cap \
-                     ({}/{}) outside catch-up. Likely a peer flooding orphans.",
+                    "Dropping ORPHAN header {} — sync-graph arena at cap \
+                     ({}/{}) outside catch-up. Peer NOT penalised: the \
+                     header may be well-formed, only our local backlog is \
+                     full (see H-2 guard + `AtCapacity` variant).",
                     header.hash(),
                     inner.arena.len(),
                     SYNC_GRAPH_ARENA_HARD_CAP
                 );
-                return (BlockHeaderInsertionResult::Invalid, Vec::new());
+                // AtCapacity, NOT Invalid — a fresh block from a
+                // faster peer LOOKS like an orphan to a lagging
+                // peer; routing to Invalid → Failure → disconnect
+                // systematically drops exactly the peers we need
+                // to catch up with. That cascade fragmented the
+                // fleet into a 3-way miner fork on 2026-07-08
+                // (see fleet incident report).
+                return (BlockHeaderInsertionResult::AtCapacity, Vec::new());
             }
             // Chain-extending block at cap: try to reclaim old-era blocks to
             // bound growth, then admit it so the pivot can keep advancing.
@@ -2719,6 +2781,24 @@ pub enum BlockHeaderInsertionResult {
     Invalid,
     // The header is received when we have locked sync graph.
     TemporarySkipped,
+    /// The header is a well-formed orphan that could not be admitted
+    /// because the sync-graph arena is at
+    /// [`SYNC_GRAPH_ARENA_HARD_CAP`] (see the H-2 guard at
+    /// `insert_block_header_inner`). Semantically different from
+    /// [`Self::Invalid`]:
+    /// - `Invalid` = the peer sent malformed/wrong-chain data →
+    ///   punish + disconnect.
+    /// - `AtCapacity` = our local backlog is full; the header
+    ///   itself is probably fine → drop silently, do NOT punish
+    ///   the sender.
+    ///
+    /// Callers surface this via the sync-protocol handler as a
+    /// non-disconnecting error (`RequestNotFound`-style) so the
+    /// peer stays in the mesh. See fleet incident report,
+    /// 2026-07-08: era-140k arena-cap cascade fragmented the
+    /// mesh into three miner forks because over-cap orphans were
+    /// routed to `Invalid` → `Failure` → disconnect.
+    AtCapacity,
 }
 
 impl BlockHeaderInsertionResult {
@@ -2728,6 +2808,17 @@ impl BlockHeaderInsertionResult {
 
     pub fn is_invalid(&self) -> bool {
         matches!(self, BlockHeaderInsertionResult::Invalid)
+    }
+
+    /// True iff this outcome represents a peer-side fault worthy
+    /// of a disconnect. `Invalid` = malformed / wrong-chain =
+    /// yes. `AtCapacity` = local backlog full = no.
+    pub fn is_peer_fault(&self) -> bool {
+        matches!(self, BlockHeaderInsertionResult::Invalid)
+    }
+
+    pub fn is_at_capacity(&self) -> bool {
+        matches!(self, BlockHeaderInsertionResult::AtCapacity)
     }
 
     pub fn should_process_body(&self) -> bool {

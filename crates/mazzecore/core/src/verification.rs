@@ -325,7 +325,11 @@ impl VerificationConfig {
     ) -> H256 {
         if header.pow_hash.is_none() {
             let computed_hash = Self::compute_pow_hash(pow, header, seed_hash);
-            info!(
+            // trace, not info — archives verify ~2 nonces per
+            // received header and this line was producing 6+ GB
+            // log files on the fleet within a few hours (per
+            // fleet incident 2026-07-08 report §5).
+            trace!(
                 "Computed PoW hash: {:?} for nonce: {:?}",
                 computed_hash,
                 header.nonce()

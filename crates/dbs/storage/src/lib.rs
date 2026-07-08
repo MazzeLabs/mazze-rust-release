@@ -107,15 +107,101 @@ impl ProvideExtraSnapshotSyncConfig {
     }
 }
 
+/// MDBX commit durability tier. Wired on top of libmdbx's
+/// `SyncMode` — the runtime default is libmdbx's `Durable` (fsync
+/// on every commit), which is fine for a bank but crushes write
+/// throughput on a testnet where a merge can be many chunk-txns
+/// and every fsync stalls concurrent reads.
+///
+/// This knob was flagged in design doc R3.4 as "wire it or delete
+/// it" — 5e deleted the (dead) enum; the 2026-07-08 fleet fork
+/// incident reintroduced the case for wiring it (see fleet
+/// incident report §5 recommendation #6). Fleet operators pick
+/// per node profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MdbxSyncMode {
+    /// libmdbx `SyncMode::Durable` — fsync data + meta on every
+    /// commit. Full crash-safety, worst throughput. Use on
+    /// operator archives that hold canonical history.
+    Durable,
+    /// libmdbx `SyncMode::NoMetaSync` — sync data pages, defer
+    /// meta-page fsync. ~2x write throughput vs Durable per the
+    /// libmdbx docs. On crash you may lose the last few
+    /// committed txns (data itself is preserved). Good for
+    /// full-fast miners.
+    NoMetaSync,
+    /// libmdbx `SyncMode::SafeNoSync` — asynchronous mmap
+    /// flushes; data still page-locally consistent
+    /// (transaction-atomic), just not durably synced to platter
+    /// on every commit. Up to 10x throughput per the libmdbx
+    /// docs. Recommended default for testnet nodes since a
+    /// crash-loss of the last few seconds of state is
+    /// re-syncable from peers.
+    SafeNoSync,
+    /// libmdbx `SyncMode::UtterlyNoSync` — no fsync at all,
+    /// database file relies on OS page cache flush. Ceiling
+    /// throughput at the cost of "on system power loss, the
+    /// database may be corrupt beyond recovery". Only for
+    /// throwaway benchmarks; never for a networked node.
+    UtterlyNoSync,
+}
+
+impl Default for MdbxSyncMode {
+    fn default() -> Self {
+        // Match libmdbx's default so behaviour is unchanged for
+        // any operator who does not opt in.
+        MdbxSyncMode::Durable
+    }
+}
+
+impl MdbxSyncMode {
+    /// Convert to the libmdbx wire enum. Kept behind this
+    /// wrapper so the storage crate is the only place that
+    /// depends on the libmdbx flag surface.
+    pub(crate) fn to_libmdbx(self) -> libmdbx::SyncMode {
+        match self {
+            MdbxSyncMode::Durable => libmdbx::SyncMode::Durable,
+            MdbxSyncMode::NoMetaSync => libmdbx::SyncMode::NoMetaSync,
+            MdbxSyncMode::SafeNoSync => libmdbx::SyncMode::SafeNoSync,
+            MdbxSyncMode::UtterlyNoSync => {
+                libmdbx::SyncMode::UtterlyNoSync
+            }
+        }
+    }
+
+    /// Parse `"durable" | "nometasync" | "safenosync" |
+    /// "utterlynosync"` (case-insensitive) — the string format
+    /// hydra.toml accepts.
+    pub fn from_str_lossy(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "durable" | "safe" => Some(MdbxSyncMode::Durable),
+            "nometasync" | "no_meta_sync" | "no-meta-sync" => {
+                Some(MdbxSyncMode::NoMetaSync)
+            }
+            "safenosync" | "safe_no_sync" | "safe-no-sync"
+            | "relaxed" => Some(MdbxSyncMode::SafeNoSync),
+            "utterlynosync" | "utterly_no_sync" => {
+                Some(MdbxSyncMode::UtterlyNoSync)
+            }
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MdbxConfig {
     pub map_size_mb: Option<u64>,
+    /// Durability tier for the hot env's rw_txn commits. See
+    /// [`MdbxSyncMode`]. Recommended: `SafeNoSync` on testnet
+    /// miners, `Durable` on operator archives.
+    pub sync_mode: MdbxSyncMode,
 }
 
 impl Default for MdbxConfig {
     fn default() -> Self {
         Self {
             map_size_mb: Some(crate::impls::defaults::DEFAULT_MDBX_MAP_SIZE_MB),
+            sync_mode: MdbxSyncMode::default(),
         }
     }
 }

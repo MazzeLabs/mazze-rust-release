@@ -487,8 +487,15 @@ state_db_type = "mdbx"
 # Additional MDBX parameters. Only in effect when `state_db_type = "mdbx"`.
 #
 mdbx_map_size_mb = 65536
-mdbx_max_readers = 2048
-mdbx_sync_mode = "relaxed" # allowed: safe, relaxed
+# MDBX commit durability tier.
+#   durable     — fsync every commit (libmdbx default; safest, slowest)
+#   nometasync  — sync data pages, defer meta fsync (~2x throughput)
+#   safenosync  — asynchronous mmap flush; transaction-atomic on
+#                 crash but last few seconds may be lost (up to 10x
+#                 throughput; recommended for testnet nodes)
+#   utterlynosync — no fsync (throwaway benchmarks only)
+# See fleet incident 2026-07-08 report §5 recommendation #6.
+mdbx_sync_mode = "safenosync"
 
 # State storage parameters.
 # Refer to the documentation for details.

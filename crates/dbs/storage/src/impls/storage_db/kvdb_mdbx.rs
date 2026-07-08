@@ -37,7 +37,10 @@ use super::super::{
 };
 use error_chain::bail;
 use lazy_static::lazy_static;
-use libmdbx::{Database, NoWriteMap, TableFlags, WriteFlags};
+use libmdbx::{
+    Database, DatabaseFlags, Mode, NoWriteMap, SyncMode, TableFlags,
+    WriteFlags,
+};
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use metrics::{
     register_meter_with_group, Counter, CounterUsize, Meter, MeterTimer,
@@ -134,6 +137,22 @@ impl MdbxEnv {
     pub fn open_with_map_size(
         path: &Path, map_size_bytes: usize,
     ) -> Result<Arc<Self>> {
+        Self::open_with_map_size_and_sync(
+            path,
+            map_size_bytes,
+            SyncMode::Durable,
+        )
+    }
+
+    /// Same as [`Self::open_with_map_size`] but with an explicit
+    /// libmdbx `SyncMode`. Wired for Phase-5 hardening per fleet
+    /// incident report §5 recommendation #6 — testnet nodes can
+    /// pick `SafeNoSync` for ~10x commit throughput at the cost
+    /// of losing the last few seconds of state on crash (which
+    /// is re-syncable from peers).
+    pub fn open_with_map_size_and_sync(
+        path: &Path, map_size_bytes: usize, sync_mode: SyncMode,
+    ) -> Result<Arc<Self>> {
         std::fs::create_dir_all(path).map_err(|e| {
             Error::from(ErrorKind::Msg(format!(
                 "kvdb_mdbx: failed to create dir {}: {}",
@@ -149,6 +168,10 @@ impl MdbxEnv {
             // can grow to `high` on demand". Setting both to the same
             // value pins the size up front.
             size: Some(map_size_bytes..map_size_bytes),
+            ..Default::default()
+        });
+        builder.set_flags(DatabaseFlags {
+            mode: Mode::ReadWrite { sync_mode },
             ..Default::default()
         });
         let db = builder.open(path).map_err(map_mdbx_error)?;
@@ -176,6 +199,22 @@ impl MdbxEnv {
         path: &Path, initial_bytes: usize, max_bytes: usize,
         growth_step_bytes: usize,
     ) -> Result<Arc<Self>> {
+        Self::open_with_geometry_and_sync(
+            path,
+            initial_bytes,
+            max_bytes,
+            growth_step_bytes,
+            SyncMode::Durable,
+        )
+    }
+
+    /// Growth-enabled geometry with explicit sync mode. Same
+    /// hardening rationale as
+    /// [`Self::open_with_map_size_and_sync`].
+    pub fn open_with_geometry_and_sync(
+        path: &Path, initial_bytes: usize, max_bytes: usize,
+        growth_step_bytes: usize, sync_mode: SyncMode,
+    ) -> Result<Arc<Self>> {
         if initial_bytes > max_bytes {
             return Err(Error::from(ErrorKind::Msg(format!(
                 "kvdb_mdbx: initial ({} B) > max ({} B)",
@@ -202,6 +241,10 @@ impl MdbxEnv {
         builder.set_geometry(libmdbx::Geometry {
             size: Some(initial_bytes..max_bytes),
             growth_step: Some(growth_step_bytes as isize),
+            ..Default::default()
+        });
+        builder.set_flags(DatabaseFlags {
+            mode: Mode::ReadWrite { sync_mode },
             ..Default::default()
         });
         let db = builder.open(path).map_err(map_mdbx_error)?;

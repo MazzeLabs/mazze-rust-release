@@ -311,6 +311,13 @@ build_config! {
         (invalid_block_hash_cache_size_in_count, (usize), DEFAULT_INVALID_BLOCK_HASH_CACHE_SIZE_IN_COUNT)
         (state_db_type, (String), "mdbx".to_string())
         (mdbx_map_size_mb, (Option<u64>), Some(mazze_storage::defaults::DEFAULT_MDBX_MAP_SIZE_MB))
+        // MDBX commit durability tier. `safe`/`durable` = fsync on
+        // every commit (libmdbx default, safest). `safenosync`/`relaxed`
+        // = up to 10x throughput at the cost of losing the last few
+        // seconds of state on OS crash. Recommended `safenosync` on
+        // testnet miners, `durable` on operator archives. See fleet
+        // incident 2026-07-08 report §5 recommendation #6.
+        (mdbx_sync_mode, (Option<String>), None)
         (snapshot_mdbx_initial_mb, (u64), mazze_storage::defaults::DEFAULT_SNAPSHOT_MDBX_INITIAL_MB)
         (snapshot_mdbx_max_mb, (u64), mazze_storage::defaults::DEFAULT_SNAPSHOT_MDBX_MAX_MB)
         (snapshot_mdbx_growth_step_mb, (u64), mazze_storage::defaults::DEFAULT_SNAPSHOT_MDBX_GROWTH_STEP_MB)
@@ -667,14 +674,34 @@ impl Configuration {
     fn state_db_backend(&self) -> StateDbBackend {
         // Phase 5e: `state_db_type` accepts only `"mdbx"` now —
         // the ParityDb fallback was removed alongside the paritydb
-        // impl files. The `mdbx_sync_mode` / `mdbx_max_readers`
-        // knobs were never wired into `MdbxEnv::open_with_map_size`
-        // and are silently ignored per design doc R3.4; delete
-        // from hydra.toml.
+        // impl files. `mdbx_sync_mode` was re-wired 2026-07-08
+        // after the fleet fork incident (report §5 rec #6) — the
+        // libmdbx default is `Durable` (fsync every commit), which
+        // is the worst throughput tier and NOT what a testnet
+        // needs.
         match self.raw_conf.state_db_type.as_str() {
-            "mdbx" => StateDbBackend::Mdbx(MdbxConfig {
-                map_size_mb: self.raw_conf.mdbx_map_size_mb,
-            }),
+            "mdbx" => {
+                let sync_mode = match self
+                    .raw_conf
+                    .mdbx_sync_mode
+                    .as_deref()
+                {
+                    None => mazze_storage::MdbxSyncMode::default(),
+                    Some(s) => mazze_storage::MdbxSyncMode::from_str_lossy(s)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "Invalid mdbx_sync_mode {:?}. Expected \
+                                 durable | nometasync | safenosync | \
+                                 utterlynosync (case-insensitive).",
+                                s
+                            )
+                        }),
+                };
+                StateDbBackend::Mdbx(MdbxConfig {
+                    map_size_mb: self.raw_conf.mdbx_map_size_mb,
+                    sync_mode,
+                })
+            }
             other => panic!(
                 "Invalid state_db_type parameter: {other}. Only `mdbx` \
                  is supported after Phase 5e."

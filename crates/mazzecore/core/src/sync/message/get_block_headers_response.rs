@@ -245,10 +245,18 @@ impl GetBlockHeadersResponse {
                     true, /* persistent */
                 )
             };
-            if insert_result.is_invalid() {
+            if insert_result.is_peer_fault() {
+                // Only true `Invalid` (malformed / wrong chain) triggers
+                // the `has_invalid_header` disconnect path. `AtCapacity`
+                // (our local arena is full) is a LOCAL condition — do
+                // NOT punish the peer for it, or a lagging node will
+                // systematically drop the very peers it needs to catch
+                // up with. See fleet incident 2026-07-08.
                 has_invalid_header = true;
                 continue;
             } else if !insert_result.is_new_valid() {
+                // AlreadyProcessed*, TemporarySkipped, AtCapacity — all
+                // soft outcomes, drop silently.
                 continue;
             }
 

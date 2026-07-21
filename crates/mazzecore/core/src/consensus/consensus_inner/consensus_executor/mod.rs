@@ -1068,14 +1068,20 @@ impl ConsensusExecutionHandler {
         &self, main_block: &Block,
         recover_mpt_during_construct_main_state: bool,
     ) -> DbResult<State> {
-        let state_root_with_aux_info = &self
-            .data_man
-            .get_epoch_execution_commitment(
-                main_block.block_header.parent_hash(),
-            )
-            // Unwrapping is safe because the state exists.
-            .unwrap()
-            .state_root_with_aux_info;
+        // Previously `.unwrap()` — a missing parent execution commitment is a
+        // recoverable data gap, not a reason to kill the consensus worker.
+        // Bind the guard so the read-lock (and the borrowed commitment) live
+        // through the StateIndex construction below.
+        let commitment_guard = self.data_man.get_epoch_execution_commitment(
+            main_block.block_header.parent_hash(),
+        );
+        let state_root_with_aux_info = match &*commitment_guard {
+            Some(commitment) => &commitment.state_root_with_aux_info,
+            None => bail!(
+                "new_state: parent execution commitment missing for {:?}",
+                main_block.block_header.parent_hash()
+            ),
+        };
 
         let state_index = StateIndex::new_for_next_epoch(
             main_block.block_header.parent_hash(),
@@ -1084,15 +1090,26 @@ impl ConsensusExecutionHandler {
             self.data_man.get_snapshot_epoch_count(),
         );
 
-        let storage = self
+        let storage = match self
             .data_man
             .storage_manager
             .get_state_for_next_epoch(
                 state_index,
                 recover_mpt_during_construct_main_state,
-            )?
-            // Unwrapping is safe because the state exists.
-            .expect("State exists");
+            )? {
+            Some(storage) => storage,
+            // Previously `.expect("State exists")` — this fired at epoch
+            // 360,005 when the base snapshot (pre-stable parent) had been
+            // pruned, hard-killing the mining leader and halting the chain.
+            // A missing base state is recoverable (re-sync the snapshot), so
+            // return an error and let `compute_epoch`'s retry-then-skip path
+            // handle it instead of panicking.
+            None => bail!(
+                "new_state: base state unavailable (snapshot pruned?) for the \
+                 epoch after {:?}",
+                main_block.block_header.parent_hash()
+            ),
+        };
 
         let state_db = StateDb::new(storage);
         State::new(state_db)
@@ -1235,18 +1252,29 @@ impl ConsensusExecutionHandler {
         // so we can target the catch-up bottleneck instead of guessing. Logged
         // once every EXEC_PROFILE_EVERY epochs to avoid log spam.
         let _t_exec = std::time::Instant::now();
-        let epoch_receipts = self
-            .process_epoch_transactions(
-                *epoch_hash,
-                &mut state,
-                &epoch_blocks,
-                start_block_number,
-                on_local_main,
-                /* virtual_call */ None,
-            )
-            // TODO: maybe propagate the error all the way up so that the
-            // program may restart by itself.
-            .expect("Can not handle db error in consensus, crashing.");
+        let epoch_receipts = match self.process_epoch_transactions(
+            *epoch_hash,
+            &mut state,
+            &epoch_blocks,
+            start_block_number,
+            on_local_main,
+            /* virtual_call */ None,
+        ) {
+            Ok(receipts) => receipts,
+            // Previously `.expect(...)` hard-crashed the node on any DB error
+            // mid-execution. Nothing is committed yet (commit is below), so the
+            // half-built `state` is simply discarded; skip the epoch and let it
+            // be retried rather than taking down the mining leader / halting the
+            // chain.
+            Err(err) => {
+                warn!(
+                    "compute_epoch: process_epoch_transactions db error for \
+                     epoch {:?}, skipping epoch: {}",
+                    epoch_hash, err
+                );
+                return false;
+            }
+        };
         let exec_ms = _t_exec.elapsed().as_millis();
 
         let current_block_number =
@@ -1293,9 +1321,22 @@ impl ConsensusExecutionHandler {
         let _t_commit = std::time::Instant::now();
         let _commit_timer =
             ScopeTimer::time_scope(CONSENSUS_STATE_COMMIT_TIMER.clone());
-        let commit_result = state
+        let commit_result = match state
             .commit(*epoch_hash, debug_record.as_deref_mut())
-            .expect(&concat!(file!(), ":", line!(), ":", column!()));
+        {
+            Ok(result) => result,
+            // Previously `.expect(...)` crashed on a commit DB error. The
+            // commit is atomic (nothing persisted on error); skip and retry
+            // instead of halting the chain.
+            Err(err) => {
+                warn!(
+                    "compute_epoch: state.commit db error for epoch {:?}, \
+                     skipping epoch: {}",
+                    epoch_hash, err
+                );
+                return false;
+            }
+        };
         let commit_ms = _t_commit.elapsed().as_millis();
         {
             const EXEC_PROFILE_EVERY: usize = 128;
@@ -1324,14 +1365,16 @@ impl ConsensusExecutionHandler {
             BlockHeaderBuilder::compute_block_logs_bloom_hash(&epoch_receipts),
         );
 
-        let epoch_execution_commitment = self
-            .data_man
-            .get_epoch_execution_commitment(&epoch_hash)
-            .unwrap();
-        debug!(
-            "compute_epoch: on_local_main={}, epoch={:?} state_root={:?} receipt_root={:?}, logs_bloom_hash={:?}",
-            on_local_main, epoch_hash, commit_result.state_root, epoch_execution_commitment.receipts_root, epoch_execution_commitment.logs_bloom_hash,
-        );
+        // Read-back of the commitment just inserted above; used only for the
+        // debug log. Guard against a missing entry instead of `.unwrap()`.
+        if let Some(epoch_execution_commitment) =
+            &*self.data_man.get_epoch_execution_commitment(&epoch_hash)
+        {
+            debug!(
+                "compute_epoch: on_local_main={}, epoch={:?} state_root={:?} receipt_root={:?}, logs_bloom_hash={:?}",
+                on_local_main, epoch_hash, commit_result.state_root, epoch_execution_commitment.receipts_root, epoch_execution_commitment.logs_bloom_hash,
+            );
+        }
         self.data_man
             .state_availability_boundary
             .write()

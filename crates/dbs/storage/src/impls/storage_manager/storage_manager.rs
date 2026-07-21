@@ -2005,7 +2005,24 @@ impl StorageManager {
         // while running crashed on its next restart, taking down the mining
         // leader and halting the chain.
         let mut healed_orphans = HashSet::new();
+        // The OLDEST retained snapshot is the BASE of the retention window:
+        // retention legitimately pruned *its* parent, and a snapshot is a
+        // self-contained full materialization of state that forward epochs
+        // delta against — so a missing parent at the base is EXPECTED, not a
+        // broken chain. Only snapshots ABOVE the base with a missing parent are
+        // genuine mid-chain gaps. Previously this self-heal deleted the base
+        // too: once retention first pruned the base's parent (around epoch
+        // 360,000 on the 5-node testnet), the next restart destroyed the base
+        // snapshot itself, and the executor then hit `.expect("State exists")`
+        // at epoch 360,005 — killing the mining leader and halting the chain.
+        // `snapshots` is sorted ascending by height, so the base = min height.
+        let base_height = snapshots.first().map(|s| s.height);
         for snapshot_info in snapshots.iter() {
+            if Some(snapshot_info.height) == base_height {
+                // Base of the retention window: its pruned parent is expected;
+                // the snapshot is complete and usable on its own. Never delete.
+                continue;
+            }
             let parent_id = &snapshot_info.parent_snapshot_epoch_id;
             if *parent_id != NULL_EPOCH
                 && snapshot_info_map.get(parent_id).is_none()

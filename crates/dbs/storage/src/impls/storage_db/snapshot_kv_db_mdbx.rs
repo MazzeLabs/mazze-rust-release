@@ -175,19 +175,33 @@ impl SnapshotKvDbMdbx {
         lazy_static::lazy_static! {
             static ref NULL_SNAPSHOT_ENV: Arc<MdbxEnv> = {
                 use std::path::PathBuf;
+                // The null snapshot is empty and never persisted through
+                // (consensus never writes here). Open it with a SMALL pinned
+                // map instead of `MdbxEnv::open`'s 64 GB default: the oversized
+                // 64 GB mmap was the trigger for `mdbx: Resource temporarily
+                // unavailable` (EAGAIN) under `vm.max_map_count` / `RLIMIT_AS`
+                // pressure, panicking here once per process start (observed
+                // ~154x across relaunches on the 5-node testnet). 256 MB is
+                // ample for an env that only ever holds the empty scope.
+                const NULL_SNAPSHOT_MAP_BYTES: usize = 256 * 1024 * 1024;
                 let null_path: PathBuf = std::env::temp_dir().join(format!(
                     "mazze_null_snapshot_mdbx_{}",
                     std::process::id()
                 ));
-                MdbxEnv::open(&null_path).unwrap_or_else(|_| {
-                    // Last-ditch: reuse the same path with an
-                    // alternate suffix. Only fires on outright
-                    // OS-level failures (disk full in tmp, etc.).
-                    let alt = null_path.with_extension("alt");
-                    MdbxEnv::open(&alt).expect(
-                        "null snapshot env open must not fail twice",
-                    )
-                })
+                MdbxEnv::open_with_map_size(&null_path, NULL_SNAPSHOT_MAP_BYTES)
+                    .unwrap_or_else(|_| {
+                        // Last-ditch: reuse the same path with an
+                        // alternate suffix. Only fires on outright
+                        // OS-level failures (disk full in tmp, etc.).
+                        let alt = null_path.with_extension("alt");
+                        MdbxEnv::open_with_map_size(
+                            &alt,
+                            NULL_SNAPSHOT_MAP_BYTES,
+                        )
+                        .expect(
+                            "null snapshot env open must not fail twice",
+                        )
+                    })
             };
         }
         Self {

@@ -411,7 +411,9 @@ persist_tx_index = false
 
 # Maximum number of transactions allowed in the transaction pool.
 #
-# tx_pool_size = 50_000
+# Raised 50k -> 500k to absorb tx-spam bursts without hitting the cliff
+# (full pool dropping txs / stalling packing under load).
+tx_pool_size = 500_000
 
 # Minimum allowed transaction gas price for two spaces in the transaction pool.
 #

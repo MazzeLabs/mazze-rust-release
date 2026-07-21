@@ -225,7 +225,21 @@ impl DeferredPool {
                 .split_off_suffix(tx.sender(), tx.nonce());
         }
 
-        let gas_used = block_gas_limit - rest_gas_limit;
+        // `gas_used` MUST equal the validator's `total_gas` — the sum of
+        // `gas_limit` over the txs ACTUALLY packed — because the 1559 base
+        // price is derived from it and re-checked in verification. Deriving it
+        // from `rest_gas_limit` over-counts: a tx that passes the gas check
+        // (which already decremented `rest_gas_limit`) but then fails the
+        // *size* check is dropped from `to_pack_txs`, yet its gas stayed
+        // subtracted. Under heavy load blocks hit the size limit, so this
+        // over-count inflated the producer's base price above the validator's
+        // expected value → `InvalidBasePrice` on every full block, wedging the
+        // chain. Sum over the packed set instead so producer == validator.
+        let gas_used: U256 =
+            to_pack_txs.iter().map(|tx| *tx.gas_limit()).fold(
+                U256::zero(),
+                |acc, g| acc + g,
+            );
         let size_used = block_size_limit - rest_size_limit;
         (to_pack_txs, gas_used, size_used)
     }

@@ -374,8 +374,27 @@ impl SynchronizationGraphInner {
 
     fn try_clear_old_era_blocks(&mut self) {
         let backlog = self.old_era_blocks_frontier.len();
+        // Fleet incident 2026-07-08 report §5 recommendation #4 —
+        // proportional drain. The prior cap `min(256, max(2, backlog/8))`
+        // drained at most 256 entries per call regardless of how
+        // deep the backlog was, so under a header flood the arena
+        // grew faster than GC could reclaim and hit the H-2 hard
+        // cap ~11h post-relaunch (observed on m3 at 03:05:05 UTC on
+        // 2026-07-08; then again 13 days later — m3 arena stuck at
+        // 240k/200k, tip frozen at epoch 200,316). The higher
+        // ceiling here (was 256, now 16k) lets GC keep pace with
+        // realistic ingest bursts without changing the correctness
+        // guarantees (all skipped entries still respect the
+        // is_graph_ready_in_db gate below). Divisor tightened
+        // from /8 to /2 for the same reason.
+        //
+        // This is only ONE HALF of rec #4 — the second half
+        // ("expire never-consensus-processed headers older than N
+        // eras" — closes the immortal-foreign-fork-header hole) is
+        // deferred because it touches correctness and needs its
+        // own review pass.
         let max_num_of_cleared_blocks =
-            std::cmp::min(256, std::cmp::max(2, backlog / 8));
+            std::cmp::min(16_384, std::cmp::max(2, backlog / 2));
         let mut num_cleared = 0;
         let era_genesis = self.get_genesis_in_current_era();
         let genesis_seq_num = self

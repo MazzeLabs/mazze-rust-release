@@ -1500,19 +1500,45 @@ impl SynchronizationProtocolHandler {
                 return false;
             }
         }
-        // NOTE: a former guardrail C throttled mining when this node's tip ran
-        // far ahead of the MEDIAN PEER epoch. It was removed: coupling local
-        // block production to peer-reported state violates node independence
-        // and is a liveness/DoS hazard — a wedged or malicious minority drags
-        // the median down and can throttle honest miners to a HALT (observed
+        // NOTE: a former guardrail C (added 9631e12, removed 848a5f6)
+        // throttled mining when this node's tip ran far ahead of the MEDIAN
+        // PEER epoch. It was removed: coupling local block production to
+        // peer-reported STATE violates node independence and is a
+        // liveness/DoS hazard — a wedged or malicious minority drags the
+        // median down and can throttle honest miners to a HALT (observed
         // live: two body-wedged archive nodes pinned the median so far below
-        // the leaders that guardrail C dropped 100k+ mined blocks and stalled
-        // the whole fleet's production). Each node must stand on its own: a
-        // laggard recovers via catch-up (see the premature-Normal safety net
-        // in synchronization_phases.rs) without the network slowing for it, and
-        // must never be able to corrupt the fleet in cascade. Only guardrails
-        // A (own phase) and B (own executor lag) remain — both keyed on THIS
-        // node's own state, never on peers'.
+        // the leaders that guardrail C dropped 100k+ mined blocks and
+        // stalled the whole fleet's production). The median-based check is
+        // NOT reinstated for the same reason.
+        //
+        // C') Isolation guard (reinstated 2026-07-21, fleet incident report
+        //     rec #3). This is DIFFERENT from the removed median-based C —
+        //     it keys on whether we have ANYONE to gossip to, not on their
+        //     reported state. A miner with zero peers CANNOT possibly
+        //     participate in consensus: its blocks reach no one and it will
+        //     drift onto a solo fork whose validity is judged by the network
+        //     later (observed 2026-07-21: m6 kept mining while its peers
+        //     were stuck in body-fetch stall, extended a solo chain 160k
+        //     epochs deep). Zero-peer is a LOCAL condition on this node's
+        //     own connectivity — cannot be manipulated by a slow/malicious
+        //     minority because it doesn't consult ANY peer's state. Safe.
+        //
+        //     Threshold of "< 2" (not "== 0") because a single peer could
+        //     itself be the one wedged half of the split we are about to
+        //     cause; with two or more peers we are meaningfully connected
+        //     to the pack.
+        {
+            let peer_count = self.syn.peers.read().len();
+            if peer_count < 2 {
+                warn!(
+                    "Dropping mined block {:?} — only {} handshaked peer(s); \
+                     pausing mining until the mesh is healthy so this node \
+                     does not solo-fork.",
+                    hash, peer_count
+                );
+                return false;
+            }
+        }
 
         info!("Mined block {:?} header={:?}", hash, block.block_header);
         let parent_hash = *block.block_header.parent_hash();

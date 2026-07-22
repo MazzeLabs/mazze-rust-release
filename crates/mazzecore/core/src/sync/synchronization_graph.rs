@@ -2476,9 +2476,22 @@ impl SynchronizationGraph {
     /// block was already requested) and to re-request the body.
     pub fn collect_stuck_frontier_bodies(&self) -> Vec<H256> {
         let inner = self.inner.read();
-        if inner.locked_for_catchup {
-            return Vec::new();
-        }
+        // NOTE: previously this early-returned `Vec::new()` when
+        // `locked_for_catchup` (i.e. during CatchUpFillBlockBodyPhase). That
+        // created a DEADLOCK: if a frontier body is orphaned in the request
+        // manager's in-flight set — so the regular drain's
+        // `.difference(&in_flight_blocks)` filter skips it forever, 0 GetBlocks
+        // go out, missing_bodies frozen — the fill never completes,
+        // `complete_filling_block_bodies` keeps returning false,
+        // `locked_for_catchup` never clears, and THIS recovery (the only path
+        // that clears the orphaned in-flight entry + priority re-requests it,
+        // see §5.26 in `request_block_bodies`) stays disabled. The missing body
+        // keeps the lock set; the lock keeps the recovery off. This collection
+        // is read-only and its caller only mutates request-manager /
+        // `block_to_fill_set` state — never the sync/consensus graph that
+        // `locked_for_catchup` protects — so it is safe to run during catch-up,
+        // and necessary to break the deadlock. Observed live: fleet wedged with
+        // 1 not-ready frontier body present only on a forked peer.
         let mut stuck = Vec::new();
         for &idx in inner.not_ready_blocks_frontier.get_frontier().iter() {
             let node = &inner.arena[idx];

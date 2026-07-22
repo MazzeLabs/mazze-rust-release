@@ -1038,8 +1038,36 @@ impl SynchronizationProtocolHandler {
             // gates promotion, so request them directly and unconditionally.
             // `request_blocks_without_check` re-registers them in-flight, so
             // the `.difference()` drain below won't double-request them.
+            // §Item0 robust recovery: fan the stuck FRONTIER bodies out to
+            // EVERY connected peer, not just one round-robin pick via the
+            // waiting queue. Under a fork the body can exist on ONLY one peer
+            // (the node that raced ahead under spam and mined it); a
+            // single-peer request keeps missing that holder and the frontier
+            // wedges (observed live: 4-node subset frozen, the missing body
+            // present only on the forked peer). Clear both in-flight sets
+            // before each peer send so `with_inflight` / the net-inflight gate
+            // don't strip the hash after the first request. The stuck set is
+            // the frontier (tiny), so fanning out to all peers is cheap; the
+            // last send leaves the hashes in-flight, so the `.difference()`
+            // drain below still won't double-request them.
+            let all_peers: Vec<NodeId> =
+                self.syn.peers.read().keys().cloned().collect();
             for chunk in stuck.chunks(MAX_BLOCKS_TO_SEND as usize) {
-                self.request_blocks_without_check(io, None, chunk.to_vec());
+                if all_peers.is_empty() {
+                    self.request_blocks_without_check(io, None, chunk.to_vec());
+                } else {
+                    for peer in &all_peers {
+                        self.request_manager
+                            .remove_net_inflight_blocks(chunk.iter());
+                        self.request_manager
+                            .remove_inflight_blocks(chunk.iter());
+                        self.request_blocks_without_check(
+                            io,
+                            Some(*peer),
+                            chunk.to_vec(),
+                        );
+                    }
+                }
             }
         }
 

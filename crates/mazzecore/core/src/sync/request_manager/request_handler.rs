@@ -15,6 +15,7 @@ use crate::{
 use malloc_size_of::MallocSizeOf;
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_parameters::sync::FAILED_REQUEST_RESEND_WAIT;
+use mazze_types::H256;
 use network::{
     node_table::NodeId, ErrorKind as NetworkErrorKind, NetworkContext,
     UpdateNodeOperation,
@@ -154,6 +155,25 @@ impl RequestHandler {
             }
         }
         timeout_requests
+    }
+
+    /// Collect every block hash backed by a LIVE tracked GetBlocks /
+    /// GetCompactBlocks request across all peers. Used by the request manager
+    /// to reconcile away ORPHANED in-flight keys — hashes stuck in
+    /// `inflight_keys[GET_BLOCKS]` with no live request behind them, which
+    /// never time out and permanently starve the body-request drain.
+    pub fn live_block_request_hashes(&self) -> HashSet<H256> {
+        let mut hashes = HashSet::new();
+        for container in self.peers.lock().values() {
+            for peer_req in container.inflight_requests.values() {
+                if let Some(hs) =
+                    super::try_get_block_hashes(&peer_req.message.request)
+                {
+                    hashes.extend(hs.iter().cloned());
+                }
+            }
+        }
+        hashes
     }
 
     pub fn process_timeout_requests(

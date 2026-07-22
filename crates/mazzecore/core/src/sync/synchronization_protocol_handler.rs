@@ -1071,6 +1071,29 @@ impl SynchronizationProtocolHandler {
             }
         }
 
+        let max_inflight = if self.should_backpressure_block_requests() {
+            BLOCK_SYNC_MAX_INFLIGHT_BACKPRESSURE
+        } else {
+            BLOCK_SYNC_MAX_INFLIGHT
+        };
+        // If the in-flight window is already full while bodies still need
+        // fetching, orphaned in-flight keys (leaked in without `on_removed`,
+        // never timed out) may be permanently starving the drain — the classic
+        // archive body-fetch wedge (node idle, `missing_bodies` frozen while
+        // peers hold the bodies, 0 outgoing GetBlocks). Reconcile them away so
+        // the drain resumes. Only removes hashes with no live request behind
+        // them, so genuinely in-flight requests are untouched.
+        if self.request_manager.in_flight_blocks().len() >= max_inflight {
+            let cleared =
+                self.request_manager.reconcile_inflight_block_orphans();
+            if cleared > 0 {
+                warn!(
+                    "request_block_bodies: reconciled {} orphaned in-flight \
+                     block request(s) that were starving the body drain",
+                    cleared
+                );
+            }
+        }
         let in_flight_blocks = self.request_manager.in_flight_blocks();
         let to_request_blocks: Vec<_> = self
             .graph
@@ -1080,11 +1103,6 @@ impl SynchronizationProtocolHandler {
             .difference(&in_flight_blocks)
             .copied()
             .collect();
-        let max_inflight = if self.should_backpressure_block_requests() {
-            BLOCK_SYNC_MAX_INFLIGHT_BACKPRESSURE
-        } else {
-            BLOCK_SYNC_MAX_INFLIGHT
-        };
         let n_blocks_to_request = min(
             max_inflight.saturating_sub(in_flight_blocks.len()),
             to_request_blocks.len(),

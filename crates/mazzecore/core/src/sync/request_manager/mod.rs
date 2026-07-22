@@ -1108,6 +1108,36 @@ impl RequestManager {
             inflight_blocks.remove(&Key::Hash(*block_hash));
         }
     }
+
+    /// Reconcile the `GET_BLOCKS` in-flight key set against the requests that
+    /// are ACTUALLY live in the request handler, removing ORPHANS — hashes in
+    /// `inflight_keys` not backed by any live tracked request. Such orphans
+    /// leak in when a request is dropped/emptied without `on_removed` firing;
+    /// they never time out (nothing in the per-peer timeout tracking references
+    /// them) yet keep occupying the in-flight window, so once they accumulate
+    /// to `max_inflight` the body-request drain computes
+    /// `n_blocks_to_request == 0` and stops requesting — the node goes idle and
+    /// wedges with `missing_bodies` frozen while peers hold the bodies. This is
+    /// the ROOT of the recurring archive body-fetch wedge class (§5.18–5.26/C
+    /// patched only the frontier manifestations; this clears the general
+    /// body-backlog orphans too). Returns the number cleared. Only ever removes
+    /// hashes with no live request behind them, so genuinely in-flight requests
+    /// are untouched and the normal drain simply re-requests the freed hashes.
+    pub fn reconcile_inflight_block_orphans(&self) -> usize {
+        let live = self.request_handler.live_block_request_hashes();
+        let mut inflight = self.inflight_keys.write(msgid::GET_BLOCKS);
+        let orphans: Vec<H256> = inflight
+            .iter()
+            .filter_map(|k| match k {
+                Key::Hash(h) if !live.contains(h) => Some(*h),
+                _ => None,
+            })
+            .collect();
+        for h in &orphans {
+            inflight.remove(&Key::Hash(*h));
+        }
+        orphans.len()
+    }
 }
 
 /// Return block hashes in `request` if it's requesting blocks.

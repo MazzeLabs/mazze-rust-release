@@ -662,11 +662,24 @@ impl SynchronizationProtocolHandler {
     }
 
     pub fn preferred_peer_node_type_for_get_block(&self) -> Option<NodeType> {
-        if self.need_block_from_archive_node() {
-            Some(NodeType::Archive)
-        } else {
-            None
-        }
+        // Layer-5 archive body-fetch wedge (docs/internal/
+        // archive-bodyfetch-investigation.md §3b): biasing GetBlocks toward
+        // Archive peers during catch-up confined every body request to the
+        // OTHER archive peer. `PeerFilter::select_all` only falls back to
+        // non-archive peers when ZERO archive peers exist, so two mutually
+        // peered archives (m1<->m2) each kept asking the other — never the
+        // full/full-fast miner that actually mined and holds the recent body —
+        // and both wedged together while miners advanced. The preference's only
+        // real purpose is deep-history sync (non-archive nodes prune block
+        // bodies below the era boundary — configuration.rs sets
+        // additional_maintained_block_body_epoch_count = Some(0) for them), but
+        // it was applied to ALL body requests including recent/frontier bodies
+        // that every node holds. Treat all peers equally for block-body
+        // requests: whoever has the body answers. Deep-history fetches may cost
+        // a few extra rounds hitting pruned full nodes, but that self-heals via
+        // re-request and never wedges. Also neutralize the batcher's re-stamp
+        // (see remove_expired_flying_request).
+        None
     }
 
     pub fn get_synchronization_graph(&self) -> SharedSynchronizationGraph {
@@ -1586,6 +1599,37 @@ impl SynchronizationProtocolHandler {
             }
         }
 
+        // D) Sync-graph arena bloated => checkpoint formation-bound. Even with
+        //    execution caught up (Guard B satisfied, lag small),
+        //    `make_checkpoint_at` is O(blocks-above-checkpoint): once the
+        //    checkpoint falls behind era production the arena holds the whole
+        //    tail, each formation gets O(N)-slower, and the arena collapses
+        //    past its hard cap while the tip crawls (observed live: m3 arena
+        //    378k/200k, CPU thrashing 426%, execution lag only ~4 so Guard B
+        //    never fired). Throttle mining on the LOCAL arena size — like the
+        //    isolation guard C', this reads only this node's own state, never
+        //    peer-reported state, so it cannot be manipulated by a slow or
+        //    malicious minority (unlike the removed median guardrail). All
+        //    miners share the same bloated arena, so they back off together
+        //    and production slows until GC / checkpoint formation catches up
+        //    and the arena shrinks below the threshold.
+        {
+            let arena_len = self.graph.arena_len();
+            // Back off well before the hard cap so the arena never reaches the
+            // O(N)-collapse regime; the hard cap is the last-ditch admission
+            // guard, this is the steady-state brake.
+            let backpressure_at = self.graph.arena_hard_cap() * 3 / 4;
+            if arena_len >= backpressure_at {
+                warn!(
+                    "Dropping mined block {:?} — sync-graph arena {} >= mining \
+                     backpressure threshold {} (checkpoint formation lagging \
+                     era production); pausing mining so old-era GC catches up.",
+                    hash, arena_len, backpressure_at
+                );
+                return false;
+            }
+        }
+
         info!("Mined block {:?} header={:?}", hash, block.block_header);
         let parent_hash = *block.block_header.parent_hash();
 
@@ -2008,7 +2052,14 @@ impl SynchronizationProtocolHandler {
         let cancelled_requests = self.request_manager.resend_waiting_requests(
             io,
             !self.catch_up_mode(),
-            self.need_block_from_archive_node(),
+            // Layer-5 fix: do NOT bias re-batched GetBlocks toward Archive
+            // peers. `RequestBatcher::insert` discards the per-request
+            // preferred_node_type and `get_batched_requests` re-stamps it from
+            // this flag, so leaving it true would reinstate the archive
+            // confinement that `preferred_peer_node_type_for_get_block` now
+            // avoids. Treat all peers equally for body fetch. See §3b in
+            // docs/internal/archive-bodyfetch-investigation.md.
+            false,
         );
         self.handle_cancelled_requests(cancelled_requests);
     }

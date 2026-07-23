@@ -2342,6 +2342,24 @@ impl SynchronizationGraph {
         self.data_man.cached_block_count()
     }
 
+    /// Current number of nodes in the sync-graph arena. Grows with blocks
+    /// admitted above the current era genesis and shrinks as
+    /// `try_clear_old_era_blocks` GCs old-era blocks after a checkpoint forms.
+    /// Used as a LOCAL mining-backpressure signal (Guard D in `on_mined_block`):
+    /// when checkpoint formation (`make_checkpoint_at`, O(arena)) falls behind
+    /// era production, the arena bloats past its hard cap and every subsequent
+    /// formation gets O(N)-slower — a collapse. Throttling mining on this local
+    /// size lets GC catch up. Reading it takes the inner read lock.
+    pub fn arena_len(&self) -> usize {
+        self.inner.read().arena.len()
+    }
+
+    /// The sync-graph arena hard cap, exposed so callers (mining backpressure)
+    /// can size their thresholds relative to it.
+    pub fn arena_hard_cap(&self) -> usize {
+        SYNC_GRAPH_ARENA_HARD_CAP
+    }
+
     /// Remove all blocks which have not been updated for a long time. We
     /// maintain a set `not_ready_blocks_frontier` which is the root nodes in
     /// the parental tree formed by not graph ready blocks. Find all expire

@@ -1599,36 +1599,17 @@ impl SynchronizationProtocolHandler {
             }
         }
 
-        // D) Sync-graph arena bloated => checkpoint formation-bound. Even with
-        //    execution caught up (Guard B satisfied, lag small),
-        //    `make_checkpoint_at` is O(blocks-above-checkpoint): once the
-        //    checkpoint falls behind era production the arena holds the whole
-        //    tail, each formation gets O(N)-slower, and the arena collapses
-        //    past its hard cap while the tip crawls (observed live: m3 arena
-        //    378k/200k, CPU thrashing 426%, execution lag only ~4 so Guard B
-        //    never fired). Throttle mining on the LOCAL arena size — like the
-        //    isolation guard C', this reads only this node's own state, never
-        //    peer-reported state, so it cannot be manipulated by a slow or
-        //    malicious minority (unlike the removed median guardrail). All
-        //    miners share the same bloated arena, so they back off together
-        //    and production slows until GC / checkpoint formation catches up
-        //    and the arena shrinks below the threshold.
-        {
-            let arena_len = self.graph.arena_len();
-            // Back off well before the hard cap so the arena never reaches the
-            // O(N)-collapse regime; the hard cap is the last-ditch admission
-            // guard, this is the steady-state brake.
-            let backpressure_at = self.graph.arena_hard_cap() * 3 / 4;
-            if arena_len >= backpressure_at {
-                warn!(
-                    "Dropping mined block {:?} — sync-graph arena {} >= mining \
-                     backpressure threshold {} (checkpoint formation lagging \
-                     era production); pausing mining so old-era GC catches up.",
-                    hash, arena_len, backpressure_at
-                );
-                return false;
-            }
-        }
+        // NOTE: The former Guard D (arena-size mining backpressure) was REMOVED.
+        // It paused mining once the sync-graph arena reached 3/4 of the hard cap,
+        // waiting for old-era GC to drain the arena. But GC only drains below the
+        // stable checkpoint, and the real defect was that the checkpoint could not
+        // form at all (force-confirm trail = 3.65x era, see parameters/src/lib.rs).
+        // With the arena unable to drain, Guard D paused mining forever and froze
+        // the whole fleet (observed: all miners at arena=150k dropping every mined
+        // block, chain halted at epoch 126131). The proper fix is the timer-chain
+        // parameter change that keeps the arena bounded and forms checkpoints
+        // promptly; with that in place this backpressure is unnecessary and its
+        // failure mode (self-inflicted halt) is unacceptable.
 
         info!("Mined block {:?} header={:?}", hash, block.block_header);
         let parent_hash = *block.block_header.parent_hash();

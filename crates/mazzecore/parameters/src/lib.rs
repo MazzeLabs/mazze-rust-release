@@ -16,8 +16,18 @@ pub mod consensus {
 
     pub const ADAPTIVE_WEIGHT_DEFAULT_BETA: u64 = 1000;
     pub const HEAVY_BLOCK_DEFAULT_DIFFICULTY_RATIO: u64 = 250;
-    pub const TIMER_CHAIN_BLOCK_DEFAULT_DIFFICULTY_RATIO: u64 = 180;
-    pub const TIMER_CHAIN_DEFAULT_BETA: u64 = 240;
+    // NOTE(checkpoint-stall fix): the force-confirm point (accumulative timer-chain
+    // LCA) trails the tip by ~2*TIMER_CHAIN_BETA timer blocks, and a block's
+    // force_confirm is fixed at creation. A checkpoint at era boundary E can only
+    // form once the stable block's force_confirm >= E, so the steady-state arena
+    // working set is ~2 * (2*beta timer-block trail in epochs). With the old
+    // (beta=240, ratio=180) the trail was ~73k epochs = 3.65x ERA (20k): checkpoints
+    // could not form until ~epoch 166k while the arena bloated to the hard cap and
+    // wedged. Reduced to (beta=100, ratio=120) => trail ~20k epochs (~1 era) =>
+    // arena working set ~48k blocks, checkpoints form from ~epoch 60k. Consensus-
+    // critical: all nodes must share these values (from-genesis relaunch required).
+    pub const TIMER_CHAIN_BLOCK_DEFAULT_DIFFICULTY_RATIO: u64 = 120;
+    pub const TIMER_CHAIN_DEFAULT_BETA: u64 = 100;
     // The number of epochs per era. Each era is a potential checkpoint
     // position. The parent_edge checking and adaptive checking are defined
     // relative to the era start blocks.

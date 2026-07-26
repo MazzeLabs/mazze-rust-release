@@ -207,7 +207,7 @@ build_config! {
         (udp_port, (Option<u16>), Some(55555))
 
         // Network parameters section.
-        (blocks_request_timeout_ms, (u64), 15_000)
+        (blocks_request_timeout_ms, (u64), 5_000)
         (check_request_period_ms, (u64), 500)
         (chunk_size_byte, (u64), DEFAULT_CHUNK_SIZE)
         (demote_peer_for_timeout, (bool), false)
@@ -1130,7 +1130,11 @@ impl Configuration {
             max_trans_count_per_peer_normal: self
                 .raw_conf
                 .max_trans_count_per_peer_normal
-                .unwrap_or(500_000),
+                // Phase-0: this is a LIFETIME cap per peer, reset only on phase
+                // change, so at a few hundred TPS a link hits it and is
+                // force-disconnected (TooManyTrans) in ~16 min, desyncing pools.
+                // Raise 100x as a stopgap until it becomes a per-sec token bucket.
+                .unwrap_or(50_000_000),
             min_peers_tx_propagation: self.raw_conf.min_peers_tx_propagation,
             max_peers_tx_propagation: self.raw_conf.max_peers_tx_propagation,
             max_downloading_chunks: self.raw_conf.max_downloading_chunks,

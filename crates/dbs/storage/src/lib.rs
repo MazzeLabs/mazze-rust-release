@@ -148,9 +148,15 @@ pub enum MdbxSyncMode {
 
 impl Default for MdbxSyncMode {
     fn default() -> Self {
-        // Match libmdbx's default so behaviour is unchanged for
-        // any operator who does not opt in.
-        MdbxSyncMode::Durable
+        // Phase-0 throughput: default to SafeNoSync. Durable fsync's every
+        // commit, and block-data writes are one-commit-per-put (bodies, tx-index
+        // per tx, receipts), so at a few hundred TPS a full-state node does
+        // hundreds of serialized fsyncs/s and falls behind block production ->
+        // body debt -> arena cap -> fork. SafeNoSync keeps the mmap async
+        // (~10x commit throughput); the only exposure is that a hard crash may
+        // lose the most recent commits, which are trivially re-synced from peers.
+        // Appropriate for this PoW testnet fleet. See docs/internal/throughput-plan-3000tps.md.
+        MdbxSyncMode::SafeNoSync
     }
 }
 

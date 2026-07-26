@@ -2228,13 +2228,45 @@ impl ConsensusGraphInner {
         &mut self, referee_bound: usize,
     ) -> Vec<H256> {
         let best_block_arena_index = *self.main_chain.last().unwrap();
-        if self.terminal_hashes.len() > referee_bound {
+        let candidates: Vec<H256> = if self.terminal_hashes.len() > referee_bound
+        {
             self.best_terminals(best_block_arena_index, referee_bound)
         } else {
             self.terminal_hashes
                 .iter()
                 .map(|hash| hash.clone())
                 .collect()
+        };
+
+        // Difficulty floor for referee selection: drop terminals whose difficulty
+        // is far below our own current adjusted target. A thin diverged fork
+        // retargets its difficulty down to near-nothing and mints cheap blocks;
+        // referencing those tips pulls the foreign low-difficulty flood into our
+        // epochs (inflating the retarget and swamping the body pipeline until the
+        // fleet wedges). This reads ONLY local state (self.current_difficulty),
+        // never peer-reported state, so a slow/malicious minority cannot use it to
+        // hold the network back. See REFEREE_DIFFICULTY_FLOOR_DIVISOR.
+        let diff_floor = self.current_difficulty
+            / U256::from(
+                mazze_parameters::block::REFEREE_DIFFICULTY_FLOOR_DIVISOR,
+            );
+        let filtered: Vec<H256> = candidates
+            .into_iter()
+            .filter(|h| match self.hash_to_arena_indices.get(h) {
+                Some(idx) => self.arena[*idx].difficulty >= diff_floor,
+                // Not in the consensus arena (shouldn't happen for a terminal):
+                // keep it rather than silently drop a possibly-valid tip.
+                None => true,
+            })
+            .collect();
+
+        // Our own pivot tip is a terminal at ~current_difficulty and always clears
+        // the floor, so `filtered` is non-empty in practice; guard the degenerate
+        // case anyway so we never emit an empty referee/terminal set.
+        if filtered.is_empty() {
+            vec![self.arena[best_block_arena_index].hash]
+        } else {
+            filtered
         }
     }
 
@@ -3195,17 +3227,23 @@ impl ConsensusGraphInner {
                     }
                     lca = self.lca(lca, self.timer_chain[j]);
                 }
-                // Note that we have the assumption that the force
-                // confirmation point will always move
-                // along parental edges, i.e., it is not possible for the
-                // point to move to a sibling tree. This
-                // assumption is true if the timer_chain_beta
-                // and the timer_chain_difficulty_ratio are set to large
-                // enough values.
-                //
-                // It is therefore safe here to use the height to compare.
+                // The force-confirm point must only ever move DOWN the same
+                // lineage. The old code trusted an assumption ("cannot move to a
+                // sibling tree, true if timer_chain_beta / difficulty_ratio are
+                // large enough") and compared height ONLY. Under a partition
+                // longer than ~timer_chain_beta timer blocks that assumption
+                // breaks: the window LCA can land in a SIBLING subtree at greater
+                // height, and a height-only ratchet silently jumps forks. Because
+                // the ratchet chains from its own previous value, the jump is
+                // permanent and LOCAL -> two nodes holding the same blocks then
+                // carry different force_confirm forever and can never reconcile
+                // (root cause of the ~180k spontaneous fork). Guard the advance
+                // with an ancestry check: only accept the new point if the current
+                // point is its ancestor. Otherwise hold position until the graph
+                // reconciles. Uses only local graph structure, no peer state.
                 if lca != NULL
                     && self.arena[last_lca].height < self.arena[lca].height
+                    && self.lca(last_lca, lca) == last_lca
                 {
                     last_lca = lca;
                 }
@@ -3267,14 +3305,13 @@ impl ConsensusGraphInner {
                     // Note that we have the assumption that the force
                     // confirmation point will always move
                     // along parental edges, i.e., it is not possible for the
-                    // point to move to a sibling tree. This
-                    // assumption is true if the timer_chain_beta
-                    // and the timer_chain_difficulty_ratio are set to large
-                    // enough values.
-                    //
-                    // It is therefore safe here to use the height to compare.
+                    // point to move to a sibling tree. Ancestry-guard the advance
+                    // (see the detailed note on the first tmp_lca loop above): only
+                    // move the force-confirm point to a descendant of the current
+                    // one, never a sibling fork; else hold position.
                     if lca != NULL
                         && self.arena[last_lca].height < self.arena[lca].height
+                        && self.lca(last_lca, lca) == last_lca
                     {
                         last_lca = lca;
                     }
@@ -3353,16 +3390,17 @@ impl ConsensusGraphInner {
                         self.cur_era_genesis_block_arena_index
                     };
                 // Note that we have the assumption that the force confirmation
-                // point will always move along parental edges,
-                // i.e., it is not possible for the point
-                // to move to a sibling tree. This assumption is true if the
-                // timer_chain_beta
-                // and the timer_chain_difficulty_ratio are set to large enough
-                // values.
-                //
-                // It is therefore safe here to use the height to compare.
+                // point will always move along parental edges. Ancestry-guard the
+                // advance (see the detailed note on the first tmp_lca loop): only
+                // push the new point if the current one is its ancestor (moving
+                // down the same lineage), never a sibling fork -- otherwise the
+                // accumulative-LCA ratchet can silently and permanently jump forks,
+                // making force_confirm view-dependent and splitting nodes that hold
+                // the same blocks. On a sibling candidate, re-push the current
+                // point and wait for the graph to reconcile.
                 if lca != NULL
                     && self.arena[last_lca].height < self.arena[lca].height
+                    && self.lca(last_lca, lca) == last_lca
                 {
                     self.timer_chain_accumulative_lca.push(lca);
                 } else {

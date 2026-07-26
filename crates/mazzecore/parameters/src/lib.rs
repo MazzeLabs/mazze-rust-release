@@ -258,6 +258,19 @@ pub mod block {
     pub const ESTIMATED_MAX_BLOCK_SIZE_IN_TRANSACTION_COUNT: usize = 4096;
     // The maximum number of referees allowed for each block
     pub const REFEREE_DEFAULT_BOUND: usize = 200;
+    // Referee-selection difficulty floor divisor. A block's required difficulty
+    // is a pure function of its parent lineage, so a thin diverged fork can
+    // retarget its own difficulty down to near-nothing and mint blocks almost
+    // for free. If honest nodes reference those low-difficulty tips, that foreign
+    // flood is pulled into our epochs -- it is counted by the difficulty retarget
+    // (driving the main difficulty up) and swamps the body pipeline until the
+    // fleet wedges (observed live: a diverged node at difficulty ~7 injected ~185
+    // blocks/epoch, driving the main difficulty 36 -> 1447). A terminal whose
+    // difficulty is below `current_difficulty / REFEREE_DIFFICULTY_FLOOR_DIVISOR`
+    // is treated as such a fork tip and NOT referenced. K=4 leaves ample room for
+    // the legitimate +-50%-per-period retarget drift (a valid recent tip is always
+    // >= current/2). Uses only LOCAL state, never peer-reported state.
+    pub const REFEREE_DIFFICULTY_FLOOR_DIVISOR: u64 = 4;
     // The maximal length of custom data in block header
     pub const HEADER_CUSTOM_LENGTH_BOUND: usize = 64;
     // If a new block is more than valid_time_drift ahead of the current system

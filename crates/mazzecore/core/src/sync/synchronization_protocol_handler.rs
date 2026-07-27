@@ -127,6 +127,16 @@ const BLOCK_SYNC_MAX_INFLIGHT_BACKPRESSURE: usize = 256;
 // Engage backpressure when sync is 256 blocks (~64s) ahead of consensus.
 const SYNC_CONSENSUS_BACKPRESSURE_BLOCK_GAP: usize = 256;
 const ACTIVE_FRONTIER_RESCUE_BATCH_SIZE: usize = 128;
+// §B5 (Phase-1 throughput): pause epoch/header discovery once the body-fill debt
+// (blocks known-by-header but still awaiting bodies -- held in the sync-graph arena
+// and NOT era-GC-able until filled) reaches this many blocks. Header/epoch intake
+// otherwise races far ahead of body fetch and inflates the arena to
+// SYNC_GRAPH_ARENA_HARD_CAP (200k), where orphan headers are dropped, desyncing DAG
+// views and seeding the ~180k pivot fork. Set to 3/4 of that cap: discovery stops
+// well before the drop threshold, the (parallel, §B3) body drain catches up, then
+// discovery resumes -- pacing intake to body-fill capacity so the orphan-drop path
+// stays pure DoS defense. Throttles only our own download schedule, not mining/peers.
+const BODY_DEBT_EPOCH_THROTTLE: usize = 150_000;
 
 #[derive(Debug, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
 pub enum SyncHandlerWorkType {
@@ -1128,12 +1138,29 @@ impl SynchronizationProtocolHandler {
             return;
         }
 
-        // Use `MAX_BLOCKS_TO_SEND` as the batch size so the peer can respond
-        // with all blocks.
-        for block_chunk in to_request_blocks[0..n_blocks_to_request]
+        // §B3 (Phase-1 throughput): partition the body-fetch batch across ALL
+        // connected peers and send DIRECTLY (`Some(peer)`) instead of deferring
+        // every batch to the waiting queue (>=1s delay + linear backoff) to be sent
+        // to ONE random peer. During deep catch-up `block_to_fill_set` holds 100k+
+        // hashes, so a single-random-peer drain fetches far slower than the tip
+        // advances and a lagging node never catches up (observed live: m5/m6 stuck
+        // ~200k epochs behind for 16h with zero progress). Round-robin across peers
+        // parallelizes the pipe; a peer lacking a requested body silently omits it
+        // and those hashes are simply re-requested next drain cycle (now bounded by
+        // the 5s, not 15s, timeout). `MAX_BLOCKS_TO_SEND` batch size lets each peer
+        // return all blocks in the batch.
+        let body_peers: Vec<NodeId> =
+            self.syn.peers.read().keys().cloned().collect();
+        for (i, block_chunk) in to_request_blocks[0..n_blocks_to_request]
             .chunks(MAX_BLOCKS_TO_SEND as usize)
+            .enumerate()
         {
-            self.request_blocks_without_check(io, None, block_chunk.to_vec());
+            let peer = if body_peers.is_empty() {
+                None
+            } else {
+                Some(body_peers[i % body_peers.len()])
+            };
+            self.request_blocks_without_check(io, peer, block_chunk.to_vec());
         }
     }
 
@@ -1155,6 +1182,21 @@ impl SynchronizationProtocolHandler {
                 );
                 return;
             }
+        }
+
+        // §B5: body-debt backpressure. Stop pulling more of the chain into the
+        // arena once we already owe more bodies than the (§B3) drain can fill
+        // before the arena would hit its hard cap and start dropping orphan
+        // headers -- the trigger for the ~180k pivot fork. Let the fill set drain
+        // first; discovery resumes automatically once it falls back below the
+        // threshold.
+        let fill_debt = self.graph.inner.read().block_to_fill_set.len();
+        if fill_debt >= BODY_DEBT_EPOCH_THROTTLE {
+            debug!(
+                "request_epochs throttled: body-fill debt {} >= {} (arena-cap guard)",
+                fill_debt, BODY_DEBT_EPOCH_THROTTLE
+            );
+            return;
         }
 
         // make sure only one thread can request new epochs at a time

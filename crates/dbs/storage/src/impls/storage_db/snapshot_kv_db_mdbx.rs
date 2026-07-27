@@ -188,20 +188,44 @@ impl SnapshotKvDbMdbx {
                     "mazze_null_snapshot_mdbx_{}",
                     std::process::id()
                 ));
-                MdbxEnv::open_with_map_size(&null_path, NULL_SNAPSHOT_MAP_BYTES)
-                    .unwrap_or_else(|_| {
-                        // Last-ditch: reuse the same path with an
-                        // alternate suffix. Only fires on outright
-                        // OS-level failures (disk full in tmp, etc.).
-                        let alt = null_path.with_extension("alt");
-                        MdbxEnv::open_with_map_size(
-                            &alt,
-                            NULL_SNAPSHOT_MAP_BYTES,
-                        )
-                        .expect(
-                            "null snapshot env open must not fail twice",
-                        )
-                    })
+                let alt_path = null_path.with_extension("alt");
+                // Retry with backoff instead of panicking. `mdbx: Resource
+                // temporarily unavailable` (EAGAIN) has been observed opening
+                // this env during snapshot fast-sync on a freshly-wiped node
+                // even when NO resource is exhausted (map_count 580/65530,
+                // RLIMIT_AS unlimited, tmp 272G free) -- a TRANSIENT failure
+                // under the burst of concurrent MDBX opens while fetching a
+                // snapshot. The old code panicked after two tries, which killed
+                // the Consensus Execution Worker and cascaded into a full node
+                // crash + crash-loop, breaking fast-sync entirely (observed:
+                // m3 wipe test, 4 cascading panics before it happened to
+                // stabilize). Alternate primary/alt paths, back off, and only
+                // give up (fatal) after many attempts -- ~7.5s total, which a
+                // transient EAGAIN clears long before.
+                let mut attempt = 0usize;
+                loop {
+                    let path =
+                        if attempt % 2 == 0 { &null_path } else { &alt_path };
+                    match MdbxEnv::open_with_map_size(
+                        path,
+                        NULL_SNAPSHOT_MAP_BYTES,
+                    ) {
+                        Ok(env) => break env,
+                        Err(e) => {
+                            attempt += 1;
+                            if attempt >= 30 {
+                                panic!(
+                                    "null snapshot env open failed after {} \
+                                     attempts (last: {:?})",
+                                    attempt, e
+                                );
+                            }
+                            std::thread::sleep(
+                                std::time::Duration::from_millis(250),
+                            );
+                        }
+                    }
+                }
             };
         }
         Self {

@@ -479,6 +479,14 @@ impl SynchronizationGraphInner {
             self.old_era_blocks_frontier_set.remove(&index);
             self.arena.remove(index);
             self.hash_to_arena_indices.remove(&hash);
+            // Purge from the body-fill set too. Old-era GC used to drop the
+            // arena/header state but leave the hash in `block_to_fill_set`
+            // forever; a later body arrival for the GC'd block then hits the
+            // `Ignored` early-return in `insert_block` (also non-removing), so
+            // the entry was immortal. Accumulated across a run this bloated the
+            // fill set to ~every block since genesis and starved the body drain
+            // (0-tx desync root cause).
+            self.block_to_fill_set.remove(&hash);
             // only remove block header in memory cache
             self.data_man
                 .remove_block_header(&hash, false /* remove_db */);
@@ -2203,8 +2211,11 @@ impl SynchronizationGraph {
             if let Some(index) = inner.hash_to_arena_indices.get(&hash) {
                 inner.arena[*index].block_ready
             } else {
-                // Sync graph is cleaned after inserting the header, so we can
-                // ignore the block body
+                // Sync graph is cleaned after inserting the header (old-era
+                // GC), so we can ignore the block body. Drop the hash from the
+                // body-fill set as well: the block no longer exists here, so the
+                // drain must stop re-requesting its body forever.
+                inner.block_to_fill_set.remove(&hash);
                 return BlockInsertionResult::Ignored;
             };
 
@@ -2255,6 +2266,20 @@ impl SynchronizationGraph {
                 _ => {}
             };
         }
+
+        // The body has now arrived and passed the tx-root check (the
+        // RequestAgain path returned above, keeping its hash for refetch), so
+        // this block no longer needs filling. Drop it from `block_to_fill_set`
+        // unconditionally. THIS is the core 0-tx-desync fix: the Normal-phase
+        // path below (propagate_graph_status -> set_graph_ready) never removed
+        // the hash, so the set grew to ~every block since genesis and the
+        // body-request drain -- picking <=400 of an UNORDERED set-difference --
+        // selected the one frontier body a node actually needed with
+        // probability ~400/260k, freezing consensus for tens of minutes. (The
+        // locked-for-catchup branch below already removed it; this covers the
+        // Normal path. Invalid blocks are additionally purged via
+        // process_invalid_blocks.)
+        inner.block_to_fill_set.remove(&hash);
 
         let block = Arc::new(block);
         if inner.arena[me].graph_status != BLOCK_INVALID {

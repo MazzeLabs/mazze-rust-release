@@ -215,6 +215,25 @@ impl SimpleBackend {
     ) -> mazze_storage::Result<Option<Box<[u8]>>> {
         self.kvdb.get(k)
     }
+
+    /// §B1: apply many puts/deletes in ONE MDBX rw_txn (one begin/commit,
+    /// one grab of the global writer lock) instead of one transaction per
+    /// put. Collapses e.g. a block's ~hundreds of tx-index writes into a
+    /// single commit — the biggest write-amplification win under load.
+    fn write_batch(
+        &self, ops: &[mazze_storage::BatchOp],
+    ) -> mazze_storage::Result<()> {
+        match self.kvdb.write_batch(ops) {
+            Ok(_) => {
+                self.metrics.put_ok.inc(ops.len());
+                Ok(())
+            }
+            Err(e) => {
+                self.metrics.put_fail.inc(1);
+                Err(e)
+            }
+        }
+    }
 }
 
 /// A compound MDBX-backed store — one [`SimpleBackend`] per logical
@@ -270,6 +289,38 @@ impl CompoundBackend {
     ) -> mazze_storage::Result<Option<Box<[u8]>>> {
         self.dispatch(k).get(k)
     }
+
+    /// §B1: batched write. Ops fan out to sub-backends by the router, then
+    /// each sub commits its slice in a single rw_txn. A batch spanning subs
+    /// is not globally atomic across columns, but callers batch a single
+    /// logical unit (e.g. one block's tx-index) that routes to one sub, so
+    /// in practice each batch lands in a single sub / one commit.
+    fn write_batch(
+        &self, ops: &[mazze_storage::BatchOp],
+    ) -> mazze_storage::Result<()> {
+        use mazze_storage::BatchOp;
+        let mut by_sub: HashMap<u8, Vec<BatchOp>> = HashMap::new();
+        for op in ops {
+            let (route_key, cloned) = match op {
+                BatchOp::Put(k, v) => ((self.route)(*k), BatchOp::Put(*k, *v)),
+                BatchOp::Delete(k) => ((self.route)(*k), BatchOp::Delete(*k)),
+            };
+            by_sub.entry(route_key).or_default().push(cloned);
+        }
+        for (sub_key, sub_ops) in &by_sub {
+            self.subs
+                .get(sub_key)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "CompoundBackend batch routing hole: table={} \
+                         route={:#x} — no sub-backend registered",
+                        self.table_name, sub_key
+                    )
+                })
+                .write_batch(sub_ops)?;
+        }
+        Ok(())
+    }
 }
 
 /// One DBTable's live storage. `Simple` for 1:1 mappings to a
@@ -285,6 +336,16 @@ impl TableBackend {
         match self {
             TableBackend::Simple(b) => b.put(k, v),
             TableBackend::Compound(c) => c.put(k, v),
+        }
+    }
+
+    /// §B1: batched write, dispatched to the concrete backend.
+    fn write_batch(
+        &self, ops: &[mazze_storage::BatchOp],
+    ) -> mazze_storage::Result<()> {
+        match self {
+            TableBackend::Simple(b) => b.write_batch(ops),
+            TableBackend::Compound(c) => c.write_batch(ops),
         }
     }
 
@@ -872,6 +933,39 @@ impl DBManager {
                 table,
                 db_key.len(),
                 value.len(),
+                e
+            );
+        }
+    }
+
+    /// §B1: batch many `(key, value)` puts for one table into a SINGLE MDBX
+    /// commit (via `write_batch`) instead of one commit per put. The caller
+    /// owns the buffers; we borrow them to build the ops. Same
+    /// CACHE/DB-divergence logging as `insert_to_db` on failure (no panic).
+    /// Intended for the executor's per-block tx-index / per-epoch block-data
+    /// writes, which otherwise do hundreds of separate commits under load.
+    pub fn insert_batch_to_db(
+        &self, table: DBTable, pairs: &[(Vec<u8>, Vec<u8>)],
+    ) {
+        if pairs.is_empty() {
+            return;
+        }
+        let backend = self.table_backends.get(&table).expect(
+            "DBManager: no backend registered for the DBTable",
+        );
+        let ops: Vec<mazze_storage::BatchOp> = pairs
+            .iter()
+            .map(|(k, v)| {
+                mazze_storage::BatchOp::Put(k.as_slice(), v.as_slice())
+            })
+            .collect();
+        if let Err(e) = backend.write_batch(&ops) {
+            DB_WRITE_FAILURES.inc(1);
+            error!(
+                "db batch insertion failed for table {:?} n_ops={}: {:?}. \
+                 CACHE/DB DIVERGENCE",
+                table,
+                ops.len(),
                 e
             );
         }

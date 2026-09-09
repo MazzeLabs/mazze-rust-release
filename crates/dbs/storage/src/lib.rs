@@ -367,7 +367,7 @@ pub use self::{
         snapshot_sync::{FullSyncVerifier, MptSlicer},
         state_proof::StateProof,
         storage_db::{
-            kvdb_mdbx::{KvdbMdbx, KvdbMdbxStats, MdbxEnv},
+            kvdb_mdbx::{BatchOp, KvdbMdbx, KvdbMdbxStats, MdbxEnv},
             mdbx_columns::{Column as MdbxColumn, NUM_COLUMNS as MDBX_NUM_COLUMNS},
             snapshot_db_manager_mdbx::SnapshotDbManagerMdbx,
         },

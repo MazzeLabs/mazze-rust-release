@@ -199,17 +199,26 @@ pub mod pow {
     // where D is the old difficulty.
     pub const DIFFICULTY_ADJUSTMENT_FACTOR: usize = 2;
 
-    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD: u64 = 25;
-    // Time unit is micro-second (usec)
-    // We target two blocks per second. This strikes a good balance between the
-    // growth of the metadata, the memory consumption of the consensus graph,
-    // and the confirmation speed
-    // Current value is 0.250 seconds (250000 usec), lowered from 0.5 seconds (500000 usec)
-    // This value is being used to compute the number of blocks per hour, day, year.
-    // One second is 1000000 usec
-
+    // Difficulty retarget window. Raised 25 -> 100 to fix a noise-dominated
+    // controller: at the old 0.25s block target a 25-epoch window spanned only
+    // ~2-6 real seconds, measured with SECOND-granularity header timestamps
+    // (max_time - min_time), so the +-30% timestamp noise swamped the signal and
+    // difficulty stayed pinned near the floor (5-6). The pinned-low difficulty
+    // let the tip race at ~7 epochs/s; any node that briefly fell behind crossed
+    // the 200-epoch catch-up threshold (~30s) and could never catch a tip moving
+    // faster than its body-fetch pipeline -> nodes wedged one by one. A 100-epoch
+    // window at the new 1s target spans ~100 real s, so second-granularity noise
+    // is <1% and the retarget tracks the true rate.
+    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD: u64 = 100;
+    // Time unit is micro-second (usec). One second is 1000000 usec.
+    // Target: ~1 block/second. Raised from 0.25s (250000) to 1s (1000000): the
+    // 0.25s target outran the single-threaded consensus/execution pipeline
+    // (bursts of 8-12 epochs/s vs ~5-7 eps sustainable), which is why lagging
+    // nodes could never catch up. 1s gives a ~4x larger per-block processing
+    // budget while still supporting ~4000 TPS at the 200KB block-size limit.
+    // Used to compute blocks per hour/day/year.
     pub const ONE_SECOND_IN_USEC: u64 = 1000000;
-    pub const TARGET_AVERAGE_BLOCK_GENERATION_PERIOD: u64 = 250000;
+    pub const TARGET_AVERAGE_BLOCK_GENERATION_PERIOD: u64 = 1000000;
 
     // TODO: compute a more appropriate initial difficulty
     // previous initial difficulty: 20_000_000_000;

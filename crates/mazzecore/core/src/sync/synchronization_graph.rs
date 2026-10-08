@@ -38,7 +38,7 @@ use crate::{
     channel::Channel,
     consensus::SharedConsensusGraph,
     error::{BlockError, Error, ErrorKind},
-    pow::{PowComputer, ProofOfWorkConfig},
+    pow::{asert_difficulty, PowComputer, ProofOfWorkConfig},
     state_exposer::{SyncGraphBlockState, STATE_EXPOSER},
     statistics::SharedStatistics,
     sync::synchronization_protocol_handler::FutureBlockContainer,
@@ -277,10 +277,18 @@ impl SynchronizationGraphInner {
             genesis_hash, genesis_block_index
         );
 
-        // inner.old_era_blocks_frontier.push_back(genesis_block_index);
-        // inner
-        //     .old_era_blocks_frontier_set
-        //     .insert(genesis_block_index);
+        // Seed old-era GC with genesis. This was commented out in 9e8dddb
+        // (PoS removal), which left `old_era_blocks_frontier` empty on every
+        // from-genesis start: `try_clear_old_era_blocks` then never reclaimed
+        // anything, the arena grew by every block ever produced (4.7M vs the
+        // 200k cap after 72 days), and outside catch-up every orphan header
+        // was dropped at the H-2 cap — fragmenting the fleet node by node.
+        // (Restarts from DB masked it: there the era genesis enters with
+        // `parent_reclaimed` and seeds the frontier.)
+        inner.old_era_blocks_frontier.push_back(genesis_block_index);
+        inner
+            .old_era_blocks_frontier_set
+            .insert(genesis_block_index);
 
         inner
     }
@@ -405,6 +413,11 @@ impl SynchronizationGraphInner {
             .expect("local_block_info for genesis must exist")
             .get_seq_num();
         let mut era_genesis_in_frontier = false;
+        // Frontier entries not yet persisted by consensus. They must be
+        // re-queued, not dropped: a popped-and-skipped entry stays in the
+        // arena and `old_era_blocks_frontier_set` but is never revisited, so
+        // its whole child subtree would become uncollectable.
+        let mut not_ready_yet = Vec::new();
 
         while let Some(index) = self.old_era_blocks_frontier.pop_front() {
             if index == era_genesis {
@@ -428,6 +441,7 @@ impl SynchronizationGraphInner {
                 // The blocks pushed to `old_era_blocks_frontier` are all
                 // BlockGraphReady, so it's ensured that they will be inserted
                 // into consensus and their local block infos will be persisted.
+                not_ready_yet.push(index);
                 continue;
             }
 
@@ -497,6 +511,7 @@ impl SynchronizationGraphInner {
             }
         }
 
+        self.old_era_blocks_frontier.extend(not_ready_yet);
         if era_genesis_in_frontier {
             self.old_era_blocks_frontier.push_front(era_genesis);
         }
@@ -837,6 +852,42 @@ impl SynchronizationGraphInner {
         )
     }
 
+    /// Header-only bounds for the ASERT difficulty of block `index`. See
+    /// `verify_header_graph_ready_block`.
+    fn asert_header_bounds(
+        &self, index: usize, parent_difficulty: U256,
+    ) -> (U256, U256) {
+        let initial: U256 = self.pow_config.initial_difficulty.into();
+        let parent_hash = *self.arena[index].block_header.parent_hash();
+        let parent_header = match self.data_man.block_header_by_hash(&parent_hash)
+        {
+            Some(h) => h,
+            None => return (initial, U256::max_value()),
+        };
+        let dt = self
+            .data_man
+            .block_header_by_hash(parent_header.parent_hash())
+            .map(|gp| parent_header.timestamp().saturating_sub(gp.timestamp()))
+            // Unknown grandparent: allow any decrease.
+            .unwrap_or(u64::MAX / 2_000_000);
+        let t = self.pow_config.block_generation_period;
+        let h = mazze_parameters::pow::ASERT_HALF_LIFE_SECS;
+        let lower = asert_difficulty(&parent_difficulty, 0, dt, t, h, &initial);
+        let upper = asert_difficulty(
+            &parent_difficulty,
+            mazze_parameters::consensus_internal::EPOCH_EXECUTED_BLOCK_BOUND as u64,
+            0,
+            t,
+            h,
+            &initial,
+        );
+        let lower = lower
+            .saturating_sub(lower / 50 + 2)
+            .max(initial);
+        let upper = upper.saturating_add(upper / 50 + 2);
+        (lower, upper)
+    }
+
     fn verify_header_graph_ready_block(
         &self, index: usize,
     ) -> Result<(), Error> {
@@ -925,33 +976,26 @@ impl SynchronizationGraphInner {
             let initial_difficulty: U256 =
                 self.pow_config.initial_difficulty.into();
 
-            if parent_height
-                < self.pow_config.difficulty_adjustment_epoch_period()
-            {
+            if self.pow_config.test_mode || parent_height == 0 {
                 if my_diff != initial_difficulty {
                     difficulty_invalid = true;
                     min_diff = initial_difficulty;
                     max_diff = initial_difficulty;
                 }
             } else {
-                let last_period_upper = (parent_height
-                    / self.pow_config.difficulty_adjustment_epoch_period())
-                    * self.pow_config.difficulty_adjustment_epoch_period();
-                if last_period_upper != parent_height {
-                    // parent_epoch should not trigger difficulty adjustment
-                    if my_diff != parent_difficulty {
-                        difficulty_invalid = true;
-                        min_diff = parent_difficulty;
-                        max_diff = parent_difficulty;
-                    }
-                } else {
-                    let (lower, upper) =
-                        self.pow_config.get_adjustment_bound(parent_difficulty);
-                    min_diff = lower;
-                    max_diff = upper;
-                    if my_diff < min_diff || my_diff > max_diff {
-                        difficulty_invalid = true;
-                    }
+                // Per-block ASERT. The exact value needs DAG past-block
+                // counts and is checked in consensus (wrong difficulty =>
+                // partial invalid). Here we bound it from header data only,
+                // as a cheap pre-filter: relative to the parent, a child moves
+                // by 2^((n*T - dt)/H) where dt = ts(parent) - ts(grandparent)
+                // and n = parent's executed epoch size in [0, bound]. The
+                // margin absorbs integer rounding of both difficulties.
+                let (lower, upper) =
+                    self.asert_header_bounds(index, parent_difficulty);
+                min_diff = lower;
+                max_diff = upper;
+                if my_diff < min_diff || my_diff > max_diff {
+                    difficulty_invalid = true;
                 }
             }
 

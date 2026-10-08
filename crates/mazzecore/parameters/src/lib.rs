@@ -150,7 +150,7 @@ pub mod sync {
     /// CATCH_UP_EPOCH_LAG_THRESHOLD behind the median of the epoch
     /// numbers of peers.
     //200 instead of 20
-    pub const CATCH_UP_EPOCH_LAG_THRESHOLD: u64 = 200;
+    pub const CATCH_UP_EPOCH_LAG_THRESHOLD: u64 = 800;
     /// This threshold controlling whether a node should request missing
     /// terminals from peers when the node is in catch-up mode.
     //400 instead of 40
@@ -218,7 +218,16 @@ pub mod pow {
     // budget while still supporting ~4000 TPS at the 200KB block-size limit.
     // Used to compute blocks per hour/day/year.
     pub const ONE_SECOND_IN_USEC: u64 = 1000000;
-    pub const TARGET_AVERAGE_BLOCK_GENERATION_PERIOD: u64 = 1000000;
+    // Back to 0.25s (4 blocks/s). The earlier 0.25s failure was driven by bugs
+    // (fill-set leak, sync-arena GC never seeded, RandomX seed thrash) plus the
+    // noise-dominated period retarget, which ASERT below replaces.
+    pub const TARGET_AVERAGE_BLOCK_GENERATION_PERIOD: u64 = 250000;
+
+    // ASERT half-life: if the DAG falls one half-life behind (or ahead of) its
+    // block schedule, difficulty halves (or doubles). At 4 blocks/s that is
+    // ~3600 blocks of signal per half-life (<2% noise), and a sudden 100x
+    // hashrate loss recovers in ~log2(100) * 15 min without stalling.
+    pub const ASERT_HALF_LIFE_SECS: u64 = 900;
 
     // TODO: compute a more appropriate initial difficulty
     // previous initial difficulty: 20_000_000_000;

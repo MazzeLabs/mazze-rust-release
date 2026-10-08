@@ -17,7 +17,7 @@ use crate::{
         debug_recompute::log_invalid_state_root, outlier_cache::OutlierCache,
         pastset_cache::PastSetCache, MaybeExecutedTxExtraInfo, TransactionInfo,
     },
-    pow::{target_difficulty, PowComputer, ProofOfWorkConfig},
+    pow::{asert_difficulty, PowComputer, ProofOfWorkConfig},
     state_exposer::{ConsensusGraphBlockExecutionState, STATE_EXPOSER},
     verification::VerificationConfig,
 };
@@ -1926,86 +1926,70 @@ impl ConsensusGraphInner {
         epoch_blocks
     }
 
-    /// Compute the expected difficulty of a new block given its parent.
-    /// Assume the difficulty adjustment period being p.
-    /// The period boundary is [i*p+1, (i+1)*p].
-    /// Genesis block does not belong to any period, and the first
-    /// period is [1, p]. Then, if parent height is less than p, the
-    /// current block belongs to the first period, and its difficulty
-    /// should be the initial difficulty. Otherwise, we need to consider
-    /// 2 cases:
-    ///
-    /// 1. The parent height is at the period boundary, i.e., the height
-    /// is exactly divisible by p. In this case, the new block and its
-    /// parent do not belong to the same period. The expected difficulty
-    /// of the new block should be computed based on the situation of
-    /// parent's period.
-    ///
-    /// 2. The parent height is not at the period boundary. In this case,
-    /// the new block and its parent belong to the same period, and hence,
-    /// its difficulty should be same as its parent's.
+    /// Compute the expected difficulty of a new block given its parent:
+    /// ASERT over the DAG blocks and time elapsed since the era-genesis
+    /// anchor on the parent's lineage (see `pow::asert_difficulty`).
     pub fn expected_difficulty(&self, parent_hash: &H256) -> U256 {
-        let parent_arena_index =
-            *self.hash_to_arena_indices.get(parent_hash).unwrap();
-        let parent_epoch = self.arena[parent_arena_index].height;
-        if parent_epoch < self.pow_config.difficulty_adjustment_epoch_period() {
-            // Use initial difficulty for early epochs
-            self.pow_config.initial_difficulty.into()
-        } else {
-            let last_period_upper = (parent_epoch
-                / self.pow_config.difficulty_adjustment_epoch_period())
-                * self.pow_config.difficulty_adjustment_epoch_period();
-            if last_period_upper != parent_epoch {
-                self.arena[parent_arena_index].difficulty
-            } else {
-                target_difficulty(
-                    &self.data_man,
-                    &self.pow_config,
-                    &self.arena[parent_arena_index].hash,
-                    |h| {
-                        let index = self.hash_to_arena_indices.get(h).unwrap();
-                        let parent = self.arena[*index].parent;
-                        (self.arena[*index].past_num_blocks
-                            - self.arena[parent].past_num_blocks)
-                            as usize
-                    },
-                )
-            }
+        let parent = *self.hash_to_arena_indices.get(parent_hash).unwrap();
+        let initial: U256 = self.pow_config.initial_difficulty.into();
+        let parent_height = self.arena[parent].height;
+        if self.pow_config.test_mode || parent_height == 0 {
+            return initial;
         }
+        if self.arena[parent].era_block == NULL {
+            // Outside the current era subtree: no anchor in the arena. Such
+            // blocks are not processed as part of the current era anyway.
+            return self.arena[parent].difficulty;
+        }
+        // ASERT anchor: the era-genesis block on the parent's own lineage
+        // (deterministic for every lineage, re-anchored once per era). The
+        // first era anchors at height 1 because genesis has timestamp 0.
+        let anchor_height =
+            std::cmp::max(1, self.get_era_genesis_height(parent_height));
+        let anchor = self.ancestor_at(parent, anchor_height);
+        let blocks = self.arena[parent].past_num_blocks
+            - self.arena[anchor].past_num_blocks;
+        let ts = |idx: usize| {
+            self.data_man
+                .block_header_by_hash(&self.arena[idx].hash)
+                .expect("header of arena block must exist")
+                .timestamp()
+        };
+        // Timestamps are non-decreasing along the parent chain (verified
+        // in the sync graph), so this never underflows.
+        let secs = ts(parent).saturating_sub(ts(anchor));
+        asert_difficulty(
+            &self.arena[anchor].difficulty,
+            blocks,
+            secs,
+            self.pow_config.block_generation_period,
+            mazze_parameters::pow::ASERT_HALF_LIFE_SECS,
+            &initial,
+        )
     }
 
     fn adjust_difficulty(&mut self, new_best_arena_index: usize) {
-        let new_best_hash = self.arena[new_best_arena_index].hash.clone();
-        let new_best_difficulty = self.arena[new_best_arena_index].difficulty;
-        let old_best_arena_index = *self.main_chain.last().expect("not empty");
-        if old_best_arena_index == self.arena[new_best_arena_index].parent {
-            // main chain prolonged
-            assert!(self.current_difficulty == new_best_difficulty);
-        }
-
+        // Difficulty is now per block (ASERT), so `current_difficulty` is
+        // simply what a block mined on top of the new best must carry.
         let epoch = self.arena[new_best_arena_index].height;
         if epoch == 0 {
             // This may happen since the block at height 1 may have wrong
             // state root and do not update the main chain.
             self.current_difficulty = self.pow_config.initial_difficulty.into();
-        } else if epoch
-            == (epoch / self.pow_config.difficulty_adjustment_epoch_period())
-                * self.pow_config.difficulty_adjustment_epoch_period()
-        {
-            self.current_difficulty = target_difficulty(
-                &self.data_man,
-                &self.pow_config,
-                &new_best_hash,
-                |h| {
-                    let index = self.hash_to_arena_indices.get(h).unwrap();
-                    let parent = self.arena[*index].parent;
-                    (self.arena[*index].past_num_blocks
-                        - self.arena[parent].past_num_blocks)
-                        as usize
-                },
-            );
         } else {
-            self.current_difficulty = new_best_difficulty;
+            let new_best_hash = self.arena[new_best_arena_index].hash;
+            self.current_difficulty = self.expected_difficulty(&new_best_hash);
+        }
+        // The next RandomX epoch's seed is the block at the start of the
+        // current one, so it is known a full epoch early: build its dataset
+        // in the background now. Checked sparsely; prewarm is idempotent.
+        if epoch % 1000 == 0 {
+            let next = epoch + mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
+            if let Some(seed) =
+                self.data_man.db_manager.try_get_current_seed_hash(next)
+            {
+                self.pow.prewarm_seed(&seed);
+            }
         }
     }
 

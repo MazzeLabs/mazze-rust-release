@@ -343,6 +343,11 @@ impl PowComputer {
     pub fn get_seed_hash(&self) -> H256 {
         self.cache_builder.get_seed_hash().into()
     }
+
+    /// See `RandomXCacheBuilder::prewarm`.
+    pub fn prewarm_seed(&self, seed_hash: &H256) {
+        self.cache_builder.prewarm(seed_hash.as_fixed_bytes());
+    }
 }
 
 pub fn validate(
@@ -357,6 +362,59 @@ pub fn validate(
         &nonce,
         &problem.boundary,
     )
+}
+
+/// ASERT difficulty (aserti3-2d style, Bitcoin Cash since 2020), expressed
+/// on difficulty instead of target:
+///
+///   D = D_anchor * 2^((blocks * T - secs) / H)
+///
+/// `blocks` / `secs` are the DAG blocks and the seconds between the anchor
+/// and the parent. Ahead of schedule (more blocks than time allows) raises
+/// difficulty, behind lowers it, exponentially with half-life H. There is no
+/// window to fall out of (no oscillation) and no period boundary to wait for
+/// (no stall when hashrate disappears). Integer-only so every node computes
+/// the same value; 2^frac uses the aserti3-2d cubic (error < 0.013%).
+pub fn asert_difficulty(
+    anchor_difficulty: &U256, blocks: u64, secs: u64,
+    target_block_period_us: u64, half_life_secs: u64, min_difficulty: &U256,
+) -> U256 {
+    let ideal_us = blocks as i128 * target_block_period_us as i128;
+    let actual_us = secs as i128 * 1_000_000;
+    let half_life_us = half_life_secs as i128 * 1_000_000;
+    // Exponent in 16.16 fixed point, floored.
+    let exponent = ((ideal_us - actual_us) * 65536).div_euclid(half_life_us);
+    let shifts = exponent >> 16;
+    let frac = (exponent & 0xffff) as u128;
+    let factor = 65536u128
+        + ((195_766_423_245_049u128 * frac
+            + 971_821_376u128 * frac * frac
+            + 5_127u128 * frac * frac * frac
+            + (1u128 << 47))
+            >> 48);
+
+    let mut d = U512::from(*anchor_difficulty) * U512::from(factor);
+    if shifts >= 0 {
+        if shifts > 256 {
+            return U256::max_value();
+        }
+        d = d << (shifts as usize);
+    } else if -shifts >= 512 {
+        d = U512::zero();
+    } else {
+        d = d >> ((-shifts) as usize);
+    }
+    d = d >> 16;
+
+    if d > U512::from(U256::max_value()) {
+        return U256::max_value();
+    }
+    let d = U256::try_from(d).unwrap();
+    if d < *min_difficulty {
+        *min_difficulty
+    } else {
+        d
+    }
 }
 
 /// This function computes the target difficulty of the next period
@@ -562,4 +620,81 @@ fn test_pow() {
 
     let start_nonce = 0x2333333333u64 & (!0x1f);
     pow.compute(&U256::from(start_nonce), &block_hash, &H256::default());
+}
+
+/// Regression for the 2026-10-08 seed race: threads alternating between two
+/// seeds on one shared `PowComputer` must always get the hash for the seed
+/// they asked for (the old single-context builder could hand out a VM bound
+/// to the other seed).
+#[test]
+fn test_pow_multi_seed_concurrent() {
+    let seed_a = H256::from_low_u64_be(1);
+    let seed_b = H256::from_low_u64_be(2);
+    let block_hash = H256::from_low_u64_be(0xabcdef);
+    let nonces: Vec<U256> = (0..8u64).map(U256::from).collect();
+
+    // Reference hashes from independent light-mode computers.
+    let reference = |seed: &H256, nonce: &U256| -> H256 {
+        let ctx = std::sync::Arc::new(rust_randomx::Context::new(
+            seed.as_bytes(),
+            false,
+        ));
+        let vm = rust_randomx::Hasher::new(ctx);
+        let mut buf = [0u8; 64];
+        buf[..32].copy_from_slice(block_hash.as_bytes());
+        nonce.to_little_endian(&mut buf[32..64]);
+        H256::from_slice(vm.hash(&buf).as_ref())
+    };
+    let expected: Vec<(H256, H256)> = nonces
+        .iter()
+        .map(|n| (reference(&seed_a, n), reference(&seed_b, n)))
+        .collect();
+
+    let pow = std::sync::Arc::new(PowComputer::new(seed_a));
+    let handles: Vec<_> = (0..4)
+        .map(|t| {
+            let pow = pow.clone();
+            let nonces = nonces.clone();
+            let expected = expected.clone();
+            std::thread::spawn(move || {
+                for (i, n) in nonces.iter().enumerate() {
+                    let (seed, want) = if (i + t) % 2 == 0 {
+                        (seed_a, expected[i].0)
+                    } else {
+                        (seed_b, expected[i].1)
+                    };
+                    assert_eq!(pow.compute(n, &block_hash, &seed), want);
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+}
+
+#[test]
+fn test_asert_difficulty() {
+    let min = U256::from(5);
+    let d0 = U256::from(1_000_000);
+    let t = 250_000; // 0.25 s
+    let h = 900;
+    // On schedule: unchanged.
+    assert_eq!(asert_difficulty(&d0, 3600, 900, t, h, &min), d0);
+    // One half-life ahead of schedule: doubles; behind: halves.
+    assert_eq!(asert_difficulty(&d0, 3600, 0, t, h, &min), d0 * 2);
+    assert_eq!(asert_difficulty(&d0, 0, 900, t, h, &min), d0 / 2);
+    // Half a half-life ahead: ~sqrt(2).
+    let r = asert_difficulty(&d0, 1800, 0, t, h, &min).low_u64();
+    assert!((1_413_900..=1_414_400).contains(&r), "{}", r);
+    // Monotonic in elapsed time, and floored at the minimum.
+    let a = asert_difficulty(&d0, 1000, 300, t, h, &min);
+    let b = asert_difficulty(&d0, 1000, 301, t, h, &min);
+    assert!(b <= a);
+    assert_eq!(asert_difficulty(&d0, 0, 1_000_000, t, h, &min), min);
+    // Saturates instead of overflowing.
+    assert_eq!(
+        asert_difficulty(&U256::max_value(), 1_000_000, 0, t, h, &min),
+        U256::max_value()
+    );
 }

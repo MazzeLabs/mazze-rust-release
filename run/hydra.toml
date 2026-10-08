@@ -73,7 +73,7 @@ stratum_port = 32525
 
 # Window size for PoW manager
 #
-pow_problem_window_size = 1
+pow_problem_window_size = 8
 
 # Secret key for stratum.
 # The value is a 64-digit hex string.

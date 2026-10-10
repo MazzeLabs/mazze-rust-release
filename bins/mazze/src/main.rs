@@ -29,6 +29,27 @@ use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
 
 fn main() -> Result<(), String> {
+    // A panic in a consensus thread used to leave a zombie node: RPC and
+    // sync kept running, consensus silently stopped, and the node looked
+    // "stuck" (m2, 2026-10-10). Exit instead so it is obvious and can be
+    // restarted. Panics in other threads keep the default behaviour.
+    {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            default_hook(info);
+            let name = std::thread::current()
+                .name()
+                .unwrap_or_default()
+                .to_string();
+            if name.starts_with("Consensus") {
+                eprintln!(
+                    "fatal: critical thread '{}' panicked; exiting node",
+                    name
+                );
+                std::process::exit(101);
+            }
+        }));
+    }
     #[cfg(feature = "deadlock-detection")]
     {
         // only for #[cfg]

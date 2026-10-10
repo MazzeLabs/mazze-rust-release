@@ -2476,6 +2476,10 @@ impl SynchronizationGraph {
         inner.remove_blocks(&index_set_and_future);
     }
 
+    pub fn consensus_unprocessed_count(&self) -> usize {
+        self.consensus_unprocessed_count.load(Ordering::SeqCst)
+    }
+
     pub fn is_consensus_worker_busy(&self) -> bool {
         self.consensus_unprocessed_count.load(Ordering::SeqCst) != 0
     }

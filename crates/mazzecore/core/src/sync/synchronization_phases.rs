@@ -620,18 +620,23 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
         self.has_state.store(false, AtomicOrdering::SeqCst);
         *sync_handler.synced_epoch_id.lock() = None;
         sync_handler.graph.inner.write().locked_for_catchup = true;
-        // Let the consensus worker drain before picking the sync target. This
-        // runs under the phase lock, which header handling also takes, so
-        // never wait unboundedly: a leaked busy count once froze the whole
-        // node here (m2, 2026-10-10).
+        // The consensus worker MUST drain before picking the sync target: the
+        // body-fill set is derived from consensus state, so headers still
+        // queued would never get their bodies requested and the executor
+        // later panics on a missing body (m2, 2026-10-10, when this wait was
+        // capped at 30 s). Waiting is unbounded; the only way it hangs is a
+        // leaked busy count (see the consensus worker), so log loudly.
         let wait_start = time::Instant::now();
+        let mut next_warn = time::Duration::from_secs(30);
         while sync_handler.graph.is_consensus_worker_busy() {
-            if wait_start.elapsed() > time::Duration::from_secs(30) {
+            if wait_start.elapsed() > next_warn {
                 warn!(
-                    "CatchUpCheckpointPhase: consensus worker still reports \
-                     busy after 30s; proceeding"
+                    "CatchUpCheckpointPhase: waiting {:?} for the consensus \
+                     worker to drain ({} unprocessed)",
+                    wait_start.elapsed(),
+                    sync_handler.graph.consensus_unprocessed_count()
                 );
-                break;
+                next_warn += time::Duration::from_secs(30);
             }
             thread::sleep(time::Duration::from_millis(1));
         }

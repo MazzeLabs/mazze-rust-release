@@ -337,6 +337,17 @@ impl BlockDataManager {
                 data_man.true_genesis.clone(),
                 true, /* persistent */
             );
+            // Remember which block is the genesis (block number 0) so a
+            // restart loads it instead of recomputing it; see
+            // `DBManager::genesis_block_from_env`. Written regardless of
+            // `persist_block_number_index`, and never overwritten.
+            if data_man.db_manager.hash_by_block_number_from_db(&0).is_none()
+            {
+                data_man.db_manager.insert_hash_by_block_number_to_db(
+                    0,
+                    &cur_era_genesis_hash,
+                );
+            }
             for (index, tx) in
                 data_man.true_genesis.transactions.iter().enumerate()
             {

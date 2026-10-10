@@ -296,8 +296,17 @@ pub fn initialize_common_modules(
     let machine = Arc::new(new_machine_with_builtin(conf.common_params(), vm));
 
     let mut need_to_execute_genesis = conf.raw_conf.execute_genesis;
+    // The legacy ledger (ParityDB) is no longer written since the MDBX
+    // cutover (Phase 5a), so a node created by a current build only finds
+    // its genesis in MDBX. Without this fallback a restart recomputed the
+    // genesis with `execute_genesis = false`, got a different hash, and was
+    // rejected by every peer ("genesis hash mismatches").
     let mut genesis_block_from_db =
-        load_genesis_block_from_db(ledger_db.as_ref());
+        load_genesis_block_from_db(ledger_db.as_ref()).or_else(|| {
+            use mazzecore::block_data_manager::db_manager::DBManager;
+            let env = storage_manager.get_storage_manager().mdbx_env()?;
+            DBManager::genesis_block_from_env(&env)
+        });
     let has_block_terminals = ledger_db
         .key_value()
         .get(COL_MISC, BLOCK_TERMINAL_KEY)

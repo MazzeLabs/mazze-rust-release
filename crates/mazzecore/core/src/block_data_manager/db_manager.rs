@@ -504,6 +504,32 @@ impl DBManager {
             genesis_hash,
         }
     }
+
+    /// Load the persisted true genesis block (the hash stored at block
+    /// number 0, see `BlockDataManager::new`) straight from the MDBX env,
+    /// before a `DBManager`/`PowComputer` exists. Used at startup so a
+    /// restarted node keeps the genesis it was created with instead of
+    /// recomputing one (with `execute_genesis = false` the recomputed
+    /// genesis skips the genesis txs and gets a different hash).
+    pub fn genesis_block_from_env(env: &Arc<MdbxEnv>) -> Option<Block> {
+        let backends = Self::build_table_backends(env);
+        let get = |table: DBTable, key: &[u8]| -> Option<Box<[u8]>> {
+            backends.get(&table)?.get(key).ok().flatten()
+        };
+        let hash = H256::db_decode(&get(
+            DBTable::HashByBlockNumber,
+            &0u64.to_be_bytes(),
+        )?)
+        .ok()?;
+        let header =
+            BlockHeader::db_decode(&get(DBTable::Blocks, hash.as_bytes())?)
+                .ok()?;
+        let body = get(DBTable::Blocks, &block_body_key(&hash))?;
+        let transactions =
+            Block::decode_body_with_tx_public(&Rlp::new(&body)).ok()?;
+        let block = Block::new(header, transactions);
+        (block.hash() == hash).then_some(block)
+    }
 }
 
 impl DBManager {

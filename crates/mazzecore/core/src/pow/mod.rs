@@ -344,9 +344,12 @@ impl PowComputer {
         self.cache_builder.get_seed_hash().into()
     }
 
-    /// See `RandomXCacheBuilder::prewarm`.
-    pub fn prewarm_seed(&self, seed_hash: &H256) {
-        self.cache_builder.prewarm(seed_hash.as_fixed_bytes());
+    /// See `RandomXCacheBuilder::set_chain_seeds`.
+    pub fn set_chain_seeds(&self, current: &H256, next: Option<&H256>) {
+        self.cache_builder.set_chain_seeds(
+            current.as_fixed_bytes(),
+            next.map(|n| n.as_fixed_bytes()),
+        );
     }
 }
 

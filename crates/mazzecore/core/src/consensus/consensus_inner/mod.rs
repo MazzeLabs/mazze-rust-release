@@ -1980,15 +1980,18 @@ impl ConsensusGraphInner {
             let new_best_hash = self.arena[new_best_arena_index].hash;
             self.current_difficulty = self.expected_difficulty(&new_best_hash);
         }
-        // The next RandomX epoch's seed is the block at the start of the
-        // current one, so it is known a full epoch early: build its dataset
-        // in the background now. Checked sparsely; prewarm is idempotent.
-        if epoch % 1000 == 0 {
-            let next = epoch + mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
-            if let Some(seed) =
-                self.data_man.db_manager.try_get_current_seed_hash(next)
-            {
-                self.pow.prewarm_seed(&seed);
+        // Pin the seeds the chain needs: the tip's and the next RandomX
+        // epoch's (the block at the start of the current epoch, so known a
+        // full epoch early). Their full datasets are built in the background
+        // and RPC lookups of old blocks can never demote them. Checked
+        // sparsely; idempotent.
+        if epoch % 100 == 0 {
+            let db = &self.data_man.db_manager;
+            if let Some(current) = db.try_get_current_seed_hash(epoch + 1) {
+                let next = db.try_get_current_seed_hash(
+                    epoch + 1 + mazze_parameters::pow::RANDOMX_EPOCH_LENGTH,
+                );
+                self.pow.set_chain_seeds(&current, next.as_ref());
             }
         }
     }

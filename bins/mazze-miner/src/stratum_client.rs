@@ -1,6 +1,6 @@
 use futures::{SinkExt, StreamExt};
 use log::{debug, error, info, trace, warn};
-use mazze_types::U256;
+use mazze_types::{H256, U256};
 use mazzecore::pow::{ProofOfWorkProblem, ProofOfWorkSolution};
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
@@ -15,7 +15,7 @@ pub struct StratumClient {
     current_job: Option<ProofOfWorkProblem>,
     stratum_secret: String,
     solution_receiver:
-        tokio::sync::broadcast::Receiver<(ProofOfWorkSolution, u64)>,
+        tokio::sync::broadcast::Receiver<(ProofOfWorkSolution, H256, u64)>,
 }
 
 impl StratumClient {
@@ -23,6 +23,7 @@ impl StratumClient {
         addr: &str, stratum_secret: &str, miner: Miner,
         solution_receiver: tokio::sync::broadcast::Receiver<(
             ProofOfWorkSolution,
+            H256,
             u64,
         )>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -137,13 +138,11 @@ impl StratumClient {
                         }
                     }
                 }
-                Ok((solution, block_height)) = solution_receiver.recv() => {
+                Ok((solution, pow_hash, block_height)) = solution_receiver.recv() => {
                     info!("Received solution: {:?}, block_height: {}", solution.nonce, block_height);
-                    if let Some(problem) = &self.current_job {
-                        if block_height == problem.block_height {
-                            self.submit_share(&solution).await?;
-                        }
-                    }
+                    // Submit under the job the nonce was found for; the node
+                    // keeps a window of recent problems and rejects stale ones.
+                    self.submit_share(&solution, &pow_hash, block_height).await?;
                 }
             }
         }
@@ -162,28 +161,25 @@ impl StratumClient {
     }
 
     async fn submit_share(
-        &mut self, solution: &ProofOfWorkSolution,
+        &mut self, solution: &ProofOfWorkSolution, pow_hash: &H256,
+        block_height: u64,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(problem) = &self.current_job {
-            info!("Submitting share for job: {}", problem.block_height);
-            let request = json!({
-                "id": format!("{}-{}", solution.nonce, problem.block_height),
-                "method": "mining.submit",
-                "params": [
-                    self.miner.worker_name, // Worker names
-                    problem.block_height.to_string(), // Job ID (assuming block height is used as job ID)
-                    format!("0x{:x}", solution.nonce), // Nonce
-                    format!("0x{:x}", problem.block_hash), // PoW Hash
-                ]
-            });
-            let request_json = serde_json::to_string(&request)?;
-            trace!("Submit share request JSON: {}", request_json);
-            self.framed.send(request_json).await?;
-            info!("Share submission sent: worker_id={}, job_id={}, nonce={}, pow_hash={}",
-                self.miner.worker_name, problem.block_height, solution.nonce, problem.block_hash);
-        } else {
-            warn!("Attempted to submit share without a current job");
-        }
+        info!("Submitting share for job: {}", block_height);
+        let request = json!({
+            "id": format!("{}-{}", solution.nonce, block_height),
+            "method": "mining.submit",
+            "params": [
+                self.miner.worker_name, // Worker names
+                block_height.to_string(), // Job ID (block height)
+                format!("0x{:x}", solution.nonce), // Nonce
+                format!("0x{:x}", pow_hash), // PoW hash of the solved job
+            ]
+        });
+        let request_json = serde_json::to_string(&request)?;
+        trace!("Submit share request JSON: {}", request_json);
+        self.framed.send(request_json).await?;
+        info!("Share submission sent: worker_id={}, job_id={}, nonce={}, pow_hash={}",
+            self.miner.worker_name, block_height, solution.nonce, pow_hash);
         Ok(())
     }
 }

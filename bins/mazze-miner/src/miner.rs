@@ -36,7 +36,7 @@ pub struct Miner {
     pub worker_id: usize,
     pub worker_name: String,
     num_threads: usize,
-    solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
+    solution_sender: mpsc::Sender<(ProofOfWorkSolution, H256, u64)>,
     vm_manager: Arc<VMManager>,
 }
 
@@ -44,7 +44,7 @@ impl Miner {
     pub fn new_numa(
         num_threads: usize, worker_id: usize,
     ) -> Result<
-        (Self, broadcast::Receiver<(ProofOfWorkSolution, u64)>),
+        (Self, broadcast::Receiver<(ProofOfWorkSolution, H256, u64)>),
         NumaError,
     > {
         let (stratum_tx, stratum_rx) = broadcast::channel(32);
@@ -211,7 +211,7 @@ impl Miner {
 
     fn run_mining_thread_numa(
         assignment: &ThreadAssignment, worker_name: String,
-        solution_sender: mpsc::Sender<(ProofOfWorkSolution, u64)>,
+        solution_sender: mpsc::Sender<(ProofOfWorkSolution, H256, u64)>,
         vm_manager: Arc<VMManager>, num_threads: usize, barrier: Arc<Barrier>,
         client_seed: H256,
     ) {
@@ -360,7 +360,15 @@ impl Miner {
                             hex::encode(hash)
                         );
                         let solution = ProofOfWorkSolution { nonce: current_nonce };
-                        if let Err(e) = solution_sender.send((solution, vm.get_current_height())) {
+                        // Carry the pow hash of the job this nonce solves: the
+                        // stratum client's current job may already be a newer
+                        // template at the same height, and submitting the nonce
+                        // under that hash is rejected as "Incorrect Nonce".
+                        if let Err(e) = solution_sender.send((
+                            solution,
+                            vm.get_current_block_hash(),
+                            vm.get_current_height(),
+                        )) {
                             warn!("[{}] Failed to send solution: {}", worker_name, e);
                         }
                         // Wait for new block
@@ -395,13 +403,17 @@ impl Miner {
     }
 
     fn spawn_solution_handler(
-        solution_rx: mpsc::Receiver<(ProofOfWorkSolution, u64)>,
-        stratum_tx: broadcast::Sender<(ProofOfWorkSolution, u64)>,
+        solution_rx: mpsc::Receiver<(ProofOfWorkSolution, H256, u64)>,
+        stratum_tx: broadcast::Sender<(ProofOfWorkSolution, H256, u64)>,
         worker_name: String,
     ) {
         thread::spawn(move || {
-            while let Ok((solution, solution_height)) = solution_rx.recv() {
-                if let Err(e) = stratum_tx.send((solution, solution_height)) {
+            while let Ok((solution, pow_hash, solution_height)) =
+                solution_rx.recv()
+            {
+                if let Err(e) =
+                    stratum_tx.send((solution, pow_hash, solution_height))
+                {
                     warn!(
                         "[{}] Failed to send solution to stratum: {}",
                         worker_name, e

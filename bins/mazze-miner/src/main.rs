@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
+use mazze_types::H256;
 use log::{error, info};
 use mazzecore::pow::ProofOfWorkSolution;
 use miner_config::MinerConfig;
@@ -21,6 +22,7 @@ async fn connect_with_retry(
     config: &MinerConfig, miner: Miner,
     solution_receiver: tokio::sync::broadcast::Receiver<(
         ProofOfWorkSolution,
+        H256,
         u64,
     )>,
 ) -> Result<StratumClient, Box<dyn std::error::Error>> {

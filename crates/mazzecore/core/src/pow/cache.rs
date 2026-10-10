@@ -36,12 +36,17 @@ use std::{
 
 pub type H256 = [u8; 32];
 
-/// Seeds kept resident (current tip seed, previous one for stragglers across
-/// the rotation boundary, plus one spare for catch-up).
-const MAX_SEEDS: usize = 3;
-/// Full datasets (~2 GB each) kept resident: the tip seed and the previous
-/// one, so heavy use on both sides of a rotation never ping-pongs.
-const MAX_FULL_DATASETS: usize = 2;
+/// Seeds kept resident: the pinned chain seeds (tip + next) plus room for the
+/// previous seed (stragglers) and RPC lookups of old blocks.
+const MAX_SEEDS: usize = 4;
+/// Full datasets (~2 GB each) kept resident: the pinned chain seeds plus ONE
+/// floating slot shared by everything else.
+///
+/// Pinning exists because of 2026-10-09: the explorer's RPC lookups of old
+/// blocks recompute pow_quality with an old seed; once that seed crossed the
+/// promotion threshold it took the full-dataset budget and demoted the TIP
+/// seed, so tip verification ping-ponged between full and light mode.
+const MAX_FULL_DATASETS: usize = 3;
 /// Hashes on a light-mode seed before it is promoted to a full dataset.
 /// Stragglers from the previous seed epoch stay well below this; the tip seed
 /// (or the seed being replayed in catch-up) crosses it within seconds.
@@ -78,6 +83,9 @@ pub struct RandomXCacheBuilder {
     create_lock: Mutex<()>,
     /// Seed of the most recently created slot; reported by `get_seed_hash`.
     latest_seed: RwLock<H256>,
+    /// Seeds the chain needs now (tip seed, next seed). Never demoted or
+    /// evicted; set by consensus via `set_chain_seeds`.
+    pinned: RwLock<Vec<H256>>,
     tick: AtomicU64,
 }
 
@@ -92,6 +100,7 @@ impl RandomXCacheBuilder {
             slots: RwLock::new(HashMap::new()),
             create_lock: Mutex::new(()),
             latest_seed: RwLock::new(seed_hash),
+            pinned: RwLock::new(vec![seed_hash]),
             tick: AtomicU64::new(0),
         });
         // The startup seed is the tip seed in steady state: build it full.
@@ -161,6 +170,28 @@ impl RandomXCacheBuilder {
             });
     }
 
+    /// Pin the seeds the chain currently needs and build their full datasets
+    /// in the background. Unpinned seeds keep working, just in light mode or
+    /// in the single floating full slot.
+    pub fn set_chain_seeds(self: &Arc<Self>, current: &H256, next: Option<&H256>) {
+        {
+            let mut pinned = self.pinned.write();
+            pinned.clear();
+            pinned.push(*current);
+            if let Some(n) = next {
+                pinned.push(*n);
+            }
+        }
+        self.prewarm(current);
+        if let Some(n) = next {
+            self.prewarm(n);
+        }
+    }
+
+    fn is_pinned(&self, seed: &H256) -> bool {
+        self.pinned.read().contains(seed)
+    }
+
     fn slot_for(&self, seed_hash: &H256) -> Arc<SeedSlot> {
         if let Some(slot) = self.slots.read().get(seed_hash) {
             return slot.clone();
@@ -178,11 +209,16 @@ impl RandomXCacheBuilder {
         while slots.len() >= MAX_SEEDS {
             let lru = slots
                 .values()
+                .filter(|s| !self.is_pinned(&s.seed))
                 .min_by_key(|s| s.last_used.load(Ordering::Relaxed))
-                .map(|s| s.seed)
-                .expect("non-empty");
-            // In-flight VMHandles keep their slot alive via Arc.
-            slots.remove(&lru);
+                .map(|s| s.seed);
+            match lru {
+                // In-flight VMHandles keep their slot alive via Arc.
+                Some(lru) => {
+                    slots.remove(&lru);
+                }
+                None => break,
+            }
         }
         slots.insert(*seed_hash, slot.clone());
         *self.latest_seed.write() = *seed_hash;
@@ -199,38 +235,51 @@ impl RandomXCacheBuilder {
             .name("randomx-dataset".into())
             .spawn(move || {
                 let slot = target;
-                info!(
-                    "Promoting RandomX seed {:?} to full dataset",
-                    slot.seed
-                );
-                let full = Arc::new(RandomXContext::new(&slot.seed, true));
-                {
-                    // Demote other full seeds beyond the budget (LRU first)
-                    // so at most MAX_FULL_DATASETS ~2 GB datasets live.
+                let pinned = builder.is_pinned(&slot.seed);
+                // Make room: only UNPINNED full seeds can be demoted (LRU
+                // first). An unpinned seed that would need a pinned one
+                // demoted stays light instead.
+                let victims: Vec<Arc<SeedSlot>> = {
                     let slots = builder.slots.read();
-                    let mut fulls: Vec<&Arc<SeedSlot>> = slots
+                    let fulls = slots
                         .values()
                         .filter(|s| {
                             s.seed != slot.seed
                                 && s.is_full.load(Ordering::Acquire)
                         })
+                        .count();
+                    let mut unpinned: Vec<Arc<SeedSlot>> = slots
+                        .values()
+                        .filter(|s| {
+                            s.seed != slot.seed
+                                && s.is_full.load(Ordering::Acquire)
+                                && !builder.is_pinned(&s.seed)
+                        })
+                        .cloned()
                         .collect();
-                    fulls.sort_by_key(|s| s.last_used.load(Ordering::Relaxed));
-                    let excess =
-                        (fulls.len() + 1).saturating_sub(MAX_FULL_DATASETS);
-                    for s in fulls.into_iter().take(excess) {
-                        info!(
-                            "Demoting RandomX seed {:?} to light mode",
-                            s.seed
-                        );
-                        let light =
-                            Arc::new(RandomXContext::new(&s.seed, false));
-                        *s.context.write() = light;
-                        s.vms.lock().clear();
-                        s.is_full.store(false, Ordering::Release);
-                        s.hashes.store(0, Ordering::Relaxed);
-                        s.promoting.store(false, Ordering::Release);
+                    unpinned
+                        .sort_by_key(|s| s.last_used.load(Ordering::Relaxed));
+                    let excess = (fulls + 1).saturating_sub(MAX_FULL_DATASETS);
+                    if !pinned && excess > unpinned.len() {
+                        slot.hashes.store(0, Ordering::Relaxed);
+                        slot.promoting.store(false, Ordering::Release);
+                        return;
                     }
+                    unpinned.into_iter().take(excess).collect()
+                };
+                info!(
+                    "Promoting RandomX seed {:?} to full dataset (pinned={})",
+                    slot.seed, pinned
+                );
+                let full = Arc::new(RandomXContext::new(&slot.seed, true));
+                for s in victims {
+                    info!("Demoting RandomX seed {:?} to light mode", s.seed);
+                    let light = Arc::new(RandomXContext::new(&s.seed, false));
+                    *s.context.write() = light;
+                    s.vms.lock().clear();
+                    s.is_full.store(false, Ordering::Release);
+                    s.hashes.store(0, Ordering::Relaxed);
+                    s.promoting.store(false, Ordering::Release);
                 }
                 *slot.context.write() = full;
                 slot.vms.lock().clear();
@@ -264,5 +313,59 @@ impl Drop for VMHandle {
                 self.slot.vms.lock().push(vm);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn seed(b: u8) -> H256 { [b; 32] }
+
+    fn is_full(builder: &RandomXCacheBuilder, s: &H256) -> bool {
+        builder
+            .slots
+            .read()
+            .get(s)
+            .map_or(false, |slot| slot.is_full.load(Ordering::Acquire))
+    }
+
+    fn wait_until(mut f: impl FnMut() -> bool) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(300) {
+            if f() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+        false
+    }
+
+    fn hammer(builder: &Arc<RandomXCacheBuilder>, s: &H256) {
+        for i in 0..(PROMOTE_AFTER_HASHES * 2) {
+            let h = builder.get_vm_handler(s);
+            h.get_vm().hash(&[i as u8; 64]);
+        }
+    }
+
+    /// Regression for 2026-10-09: RPC lookups of old blocks (unpinned seeds)
+    /// must never demote the pinned tip/next seeds.
+    #[test]
+    fn pinned_seeds_survive_old_seed_traffic() {
+        let (tip, next, old1, old2) = (seed(1), seed(2), seed(3), seed(4));
+        let builder = RandomXCacheBuilder::new(tip);
+        builder.set_chain_seeds(&tip, Some(&next));
+        assert!(wait_until(|| is_full(&builder, &tip) && is_full(&builder, &next)));
+
+        // First old seed takes the floating full slot.
+        hammer(&builder, &old1);
+        assert!(wait_until(|| is_full(&builder, &old1)));
+        // Second old seed may only displace the first, never a pinned one.
+        hammer(&builder, &old2);
+        assert!(wait_until(|| is_full(&builder, &old2) && !is_full(&builder, &old1)));
+        assert!(is_full(&builder, &tip), "tip seed was demoted");
+        assert!(is_full(&builder, &next), "next seed was demoted");
+        assert!(builder.slots.read().len() <= MAX_SEEDS);
     }
 }

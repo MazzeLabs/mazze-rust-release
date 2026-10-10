@@ -590,6 +590,18 @@ impl Configuration {
         // canonical snapshot cadence.
         raw.dev_snapshot_epoch_count = raw.snapshot_epoch_count;
 
+        // Leave header catch-up once headers are within one snapshot window
+        // of the peers, for every profile (full-fast already did this). With
+        // no gap, `catch_up_completed` also demands that the snapshot target
+        // -- the stable checkpoint rounded down to a 20k boundary -- be within
+        // 20k epochs of the peer median. The live fleet's own checkpoint lags
+        // the tip by 2-3 eras, so a restarted archive/full node stayed in
+        // CatchUpSyncBlockHeader forever even with headers at the tip
+        // (m1/m2, 2026-10-10).
+        if raw.sync_state_epoch_gap.is_none() {
+            raw.sync_state_epoch_gap = Some(raw.snapshot_epoch_count as u64);
+        }
+
         raw.additional_maintained_snapshot_count = raw
             .additional_maintained_snapshot_count
             .max(DEFAULT_SERVING_SNAPSHOT_COUNT);

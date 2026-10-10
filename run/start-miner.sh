@@ -65,8 +65,14 @@ fi
 # RANDOMX_FULL_MEM can be exported by the user to control miner memory usage.
 pushd "$REPO_ROOT" >/dev/null
 
+# The miner must never starve the node it mines for. At the same priority and
+# with ~1 thread per core, the node got 13-37% of one core: enough to follow
+# the tip, but peers catching up from it saw requests time out for minutes
+# (2026-10-10, m1 restart could not catch up). Lowest priority + 2 free cores.
+DEFAULT_THREADS=$(( $(nproc) - 2 )); [ "$DEFAULT_THREADS" -lt 1 ] && DEFAULT_THREADS=1
 RANDOMX_FULL_MEM="${RANDOMX_FULL_MEM:-0}" RUST_LOG=info \
-"$EXECUTABLE" --config "$TEMP_CONF" --worker-id "${WORKER_ID:-1}" --num-threads "${NUM_THREADS:-16}" \
+nice -n "${MINER_NICE:-19}" \
+"$EXECUTABLE" --config "$TEMP_CONF" --worker-id "${WORKER_ID:-1}" --num-threads "${NUM_THREADS:-$DEFAULT_THREADS}" \
   >> "$LOG_FILE" 2>&1 &
 
 PID=$!

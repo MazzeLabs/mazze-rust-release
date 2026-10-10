@@ -13,6 +13,8 @@ pub struct StratumClient {
     framed: Framed<TcpStream, LinesCodec>,
     miner: Miner,
     current_job: Option<ProofOfWorkProblem>,
+    /// Pow hashes of jobs already solved (bounded); see the solution arm.
+    submitted_jobs: std::collections::VecDeque<H256>,
     stratum_secret: String,
     solution_receiver:
         tokio::sync::broadcast::Receiver<(ProofOfWorkSolution, H256, u64)>,
@@ -35,6 +37,7 @@ impl StratumClient {
             framed,
             miner,
             current_job: None,
+            submitted_jobs: std::collections::VecDeque::new(),
             stratum_secret: stratum_secret.to_string(),
             solution_receiver,
         })
@@ -140,8 +143,20 @@ impl StratumClient {
                 }
                 Ok((solution, pow_hash, block_height)) = solution_receiver.recv() => {
                     info!("Received solution: {:?}, block_height: {}", solution.nonce, block_height);
-                    // Submit under the job the nonce was found for; the node
-                    // keeps a window of recent problems and rejects stale ones.
+                    // One solution per job: every worker thread can find its
+                    // own nonce for the same template, and submitting them all
+                    // makes the node mine identical sibling blocks (same parent
+                    // and contents) -- it widened the DAG and pushed the block
+                    // rate to ~7/s on 2026-10-10. Submit under the job the nonce
+                    // was found for (the node rejects stale ones).
+                    if self.submitted_jobs.contains(&pow_hash) {
+                        debug!("Skipping extra solution for already-solved job {:?}", pow_hash);
+                        continue;
+                    }
+                    if self.submitted_jobs.len() >= 64 {
+                        self.submitted_jobs.pop_front();
+                    }
+                    self.submitted_jobs.push_back(pow_hash);
                     self.submit_share(&solution, &pow_hash, block_height).await?;
                 }
             }

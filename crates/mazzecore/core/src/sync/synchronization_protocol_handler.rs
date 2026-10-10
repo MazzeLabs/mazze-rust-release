@@ -1164,6 +1164,26 @@ impl SynchronizationProtocolHandler {
         }
     }
 
+    /// Rate-limited (10 s) trace of why `request_epochs` stopped. Diagnoses
+    /// the restart-from-DB catch-up wedge (m1, 2026-10-10: stuck at its old
+    /// tip with peers ~17k epochs ahead, never sending epoch requests).
+    fn log_request_epochs_exit(&self, reason: &str, detail: String) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LAST: AtomicU64 = AtomicU64::new(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let last = LAST.load(Ordering::Relaxed);
+        if now >= last + 10
+            && LAST
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            info!("request_epochs exit: {} {}", reason, detail);
+        }
+    }
+
     pub fn request_epochs(&self, io: &dyn NetworkContext) {
         // Download↔execution backpressure. The consensus executor's epoch
         // queue is unbounded and each entry pins a reward-window of
@@ -1180,6 +1200,10 @@ impl SynchronizationProtocolHandler {
                     "request_epochs throttled: execution backlog {} >= cap {}",
                     backlog, exec_cap
                 );
+                self.log_request_epochs_exit(
+                    "exec_backlog",
+                    format!("backlog={} cap={}", backlog, exec_cap),
+                );
                 return;
             }
         }
@@ -1195,6 +1219,10 @@ impl SynchronizationProtocolHandler {
             debug!(
                 "request_epochs throttled: body-fill debt {} >= {} (arena-cap guard)",
                 fill_debt, BODY_DEBT_EPOCH_THROTTLE
+            );
+            self.log_request_epochs_exit(
+                "fill_debt",
+                format!("fill_debt={}", fill_debt),
             );
             return;
         }
@@ -1236,6 +1264,14 @@ impl SynchronizationProtocolHandler {
             if latest_request_time.elapsed()
                 < Duration::from_secs(EPOCH_SYNC_RESTART_TIMEOUT_S)
             {
+                self.log_request_epochs_exit(
+                    "max_gap_wait",
+                    format!(
+                        "latest_requested={} my_best={} gap={} since_last={:?} retry={}",
+                        latest_requested_epoch, my_best_epoch, sync_max_gap,
+                        latest_request_time.elapsed(), retry_count
+                    ),
+                );
                 return;
             } else {
                 // Restart from `my_best_epoch` to fix possible problems.
@@ -1284,6 +1320,10 @@ impl SynchronizationProtocolHandler {
 
             // no peer has the epoch we need; try later
             if peer.is_none() {
+                self.log_request_epochs_exit(
+                    "no_peer",
+                    format!("from={} median={}", from, median_peer_epoch),
+                );
                 break;
             }
 
@@ -1320,6 +1360,18 @@ impl SynchronizationProtocolHandler {
                 .request_epoch_hashes(io, peer, epochs, None);
             latest_requested_epoch = until - 1;
         }
+        self.log_request_epochs_exit(
+            "loop_done",
+            format!(
+                "latest_requested={} my_best={} median={} gap={} inflight={} retry={}",
+                latest_requested_epoch,
+                my_best_epoch,
+                median_peer_epoch,
+                sync_max_gap,
+                self.request_manager.num_epochs_in_flight(),
+                retry_count
+            ),
+        );
         *latest_requested = (
             latest_requested_epoch,
             Instant::now(),

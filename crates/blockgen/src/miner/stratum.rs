@@ -158,6 +158,21 @@ impl JobDispatcher for StratumJobDispatcher {
             let mut found = false;
             for (pow_prob, solved_nonce) in probs.iter_mut() {
                 if pow_prob.block_hash == payload.pow_hash {
+                    // One block per problem. A second valid nonce for an
+                    // already-solved template would make blockgen mine an
+                    // identical sibling block (same parent and contents),
+                    // widening the DAG for nothing: a multi-threaded miner
+                    // submitting every thread's nonce pushed the fleet to ~7
+                    // blocks/s on 2026-10-10.
+                    if !solved_nonce.is_empty() && !solved_nonce.contains(&sol.nonce) {
+                        STRATUM_SHARE_DUPLICATE.inc(1);
+                        return Err(StratumServiceError::InvalidSolution(
+                            format!(
+                                "Problem already solved! worker_id = {}",
+                                payload.worker_id
+                            ).into(),
+                        ));
+                    }
                     if solved_nonce.contains(&sol.nonce) {
                         STRATUM_SHARE_DUPLICATE.inc(1);
                         return Err(StratumServiceError::InvalidSolution(

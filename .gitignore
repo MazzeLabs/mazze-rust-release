@@ -109,3 +109,5 @@ run/hydra.devtest.toml
 # MUST never be committed. Lives in-repo only so it survives a /tmp wipe.
 fleet-ops/
 docs/internal
+# Local multi-node restart harness (scripts/local-restart-repro.sh)
+run/local-repro/

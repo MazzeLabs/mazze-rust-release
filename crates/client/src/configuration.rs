@@ -151,6 +151,11 @@ build_config! {
         // `snapshot_epoch_count`.
         (dev_snapshot_epoch_count, (u32), SNAPSHOT_EPOCHS_CAPACITY)
         (era_epoch_count, (u64), ERA_DEFAULT_EPOCH_COUNT)
+        // TEST-ONLY (honoured only with `mode = "test"`): keep a
+        // `snapshot_epoch_count` below RANDOMX_EPOCH_LENGTH so a local
+        // multi-node harness (scripts/local-restart-repro.sh) can pass
+        // several eras in minutes. Never set in production.
+        (test_allow_small_snapshot_epoch_count, (bool), false)
         (heavy_block_difficulty_ratio, (u64), HEAVY_BLOCK_DEFAULT_DIFFICULTY_RATIO)
         (genesis_accounts, (Option<String>), None)
         (genesis_secrets, (Option<String>), None)
@@ -582,8 +587,12 @@ impl Configuration {
     }
 
     fn apply_snapshot_serving_defaults(&mut self) {
+        let test_small_snapshots = self.is_test_mode()
+            && self.raw_conf.test_allow_small_snapshot_epoch_count;
         let raw = &mut self.raw_conf;
-        if raw.snapshot_epoch_count < RANDOMX_EPOCH_LENGTH as u32 {
+        if raw.snapshot_epoch_count < RANDOMX_EPOCH_LENGTH as u32
+            && !test_small_snapshots
+        {
             raw.snapshot_epoch_count = RANDOMX_EPOCH_LENGTH as u32;
         }
         // Keep the legacy field aligned so test mode cannot diverge from the

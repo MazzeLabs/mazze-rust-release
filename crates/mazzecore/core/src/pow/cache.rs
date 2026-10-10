@@ -52,6 +52,18 @@ const MAX_FULL_DATASETS: usize = 3;
 /// (or the seed being replayed in catch-up) crosses it within seconds.
 const PROMOTE_AFTER_HASHES: u64 = 64;
 
+/// TEST-ONLY: `MAZZE_RANDOMX_LIGHT_ONLY=1` keeps every seed in light mode
+/// (no ~2 GB full datasets). Used by the local multi-node harness
+/// (scripts/local-restart-repro.sh) so several nodes fit on one machine.
+/// Hashes are identical; only speed differs. Never set this in production.
+fn light_only() -> bool {
+    static LIGHT_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LIGHT_ONLY.get_or_init(|| {
+        std::env::var("MAZZE_RANDOMX_LIGHT_ONLY")
+            .map_or(false, |v| v == "1" || v == "true")
+    })
+}
+
 struct SeedSlot {
     seed: H256,
     context: RwLock<Arc<RandomXContext>>,
@@ -104,7 +116,7 @@ impl RandomXCacheBuilder {
             tick: AtomicU64::new(0),
         });
         // The startup seed is the tip seed in steady state: build it full.
-        let slot = Arc::new(SeedSlot::new(seed_hash, true));
+        let slot = Arc::new(SeedSlot::new(seed_hash, !light_only()));
         builder.slots.write().insert(seed_hash, slot);
         builder
     }
@@ -226,6 +238,9 @@ impl RandomXCacheBuilder {
     }
 
     fn maybe_promote(self: &Arc<Self>, slot: &Arc<SeedSlot>) {
+        if light_only() {
+            return;
+        }
         if slot.promoting.swap(true, Ordering::AcqRel) {
             return;
         }

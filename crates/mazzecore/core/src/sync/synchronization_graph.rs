@@ -1307,6 +1307,13 @@ impl SynchronizationGraph {
                                     "Ignore duplicate consensus worker notification for {}",
                                     hash
                                 );
+                                // Every notification was counted by the
+                                // sender; a dropped duplicate must be
+                                // uncounted too, or `is_consensus_worker_busy`
+                                // stays true forever and
+                                // CatchUpCheckpointPhase::start spins holding
+                                // the phase lock (m2 froze, 2026-10-10).
+                                consensus_unprocessed_count.fetch_sub(1, Ordering::SeqCst);
                             },
                             Err(TryRecvError::Empty) => break 'inner,
                             Err(TryRecvError::Closed) => break 'outer,
@@ -1347,6 +1354,7 @@ impl SynchronizationGraph {
                                             "consensus worker: missing header for successor {}, dropping from queue",
                                             succ
                                         );
+                                        consensus_unprocessed_count.fetch_sub(1, Ordering::SeqCst);
                                         continue;
                                     }
                                 };

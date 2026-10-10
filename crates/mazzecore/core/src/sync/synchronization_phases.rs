@@ -620,8 +620,19 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
         self.has_state.store(false, AtomicOrdering::SeqCst);
         *sync_handler.synced_epoch_id.lock() = None;
         sync_handler.graph.inner.write().locked_for_catchup = true;
+        // Let the consensus worker drain before picking the sync target. This
+        // runs under the phase lock, which header handling also takes, so
+        // never wait unboundedly: a leaked busy count once froze the whole
+        // node here (m2, 2026-10-10).
+        let wait_start = time::Instant::now();
         while sync_handler.graph.is_consensus_worker_busy() {
-            //Thread sleep for 10ms to avoid busy-waiting
+            if wait_start.elapsed() > time::Duration::from_secs(30) {
+                warn!(
+                    "CatchUpCheckpointPhase: consensus worker still reports \
+                     busy after 30s; proceeding"
+                );
+                break;
+            }
             thread::sleep(time::Duration::from_millis(1));
         }
         let current_era_genesis = sync_handler

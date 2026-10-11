@@ -2541,6 +2541,10 @@ impl ConsensusGraphTrait for ConsensusGraph {
     /// bodies of other blocks in the consensus graph will never be needed
     /// for executions after this stable genesis, as long as the checkpoint
     /// is not reverted.
+    fn contains_block(&self, hash: &H256) -> bool {
+        self.inner.read().hash_to_arena_indices.contains_key(hash)
+    }
+
     fn get_blocks_needing_bodies(&self) -> HashSet<H256> {
         let inner = self.inner.read();
         // TODO: This may not be stable genesis with other configurations.

@@ -125,6 +125,11 @@ pub trait ConsensusGraphTrait: Send + Sync {
 
     fn get_blocks_needing_bodies(&self) -> HashSet<H256>;
 
+    /// Whether `hash` is a block of the in-memory consensus graph (the
+    /// current era subtree). Unlike `get_block_epoch_number`, this never
+    /// falls back to the DB.
+    fn contains_block(&self, hash: &H256) -> bool;
+
     fn catch_up_completed(&self, peer_median_epoch: u64) -> bool;
 
     /// Number of epochs enqueued for execution but not yet executed.

@@ -284,9 +284,38 @@ impl SnapshotManifestManager {
             }
         }
 
+        // The server ships the commitment of `trusted_blame - DEFERRED`,
+        // whose aux info describes THAT epoch's storage layout (e.g.
+        // snapshot=4000/intermediate=5000), not the synced snapshot's. Stored
+        // as the synced epoch's commitment it makes the first post-snapshot
+        // execution shift to a snapshot that does not exist locally ("shift
+        // snapshot, special case, snapshot merkel root not found"), the
+        // epoch is skipped and construct_main_state waits for it forever.
+        // Rebuild it exactly as the V4 `validate_blame_states` does: the
+        // snapshot epoch's own state root, intermediate = parent snapshot.
+        let true_state_root_by_blame_info =
+            match response.state_root_vec.get(blame_vec_offset) {
+                Some(root) => StateRootWithAuxInfo {
+                    state_root: root.clone(),
+                    aux_info: StateRootAuxInfo {
+                        snapshot_epoch_id: *self
+                            .snapshot_candidate
+                            .get_snapshot_epoch_id(),
+                        delta_mpt_key_padding:
+                            StorageKeyWithSpace::delta_mpt_padding(
+                                &root.snapshot_root,
+                                &root.intermediate_delta_root,
+                            ),
+                        intermediate_epoch_id: snapshot_info
+                            .parent_snapshot_epoch_id,
+                        maybe_intermediate_mpt_key_padding: None,
+                        state_root_hash: root.compute_state_root_hash(),
+                    },
+                },
+                None => pre_computed.state_root_with_aux_info,
+            };
         self.related_data = Some(RelatedData {
-            true_state_root_by_blame_info: pre_computed
-                .state_root_with_aux_info,
+            true_state_root_by_blame_info,
             blame_vec_offset,
             receipt_blame_vec: response.receipt_blame_vec,
             bloom_blame_vec: response.bloom_blame_vec,

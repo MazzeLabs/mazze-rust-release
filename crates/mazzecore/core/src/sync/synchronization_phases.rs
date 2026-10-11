@@ -583,7 +583,30 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
             // `BlockDataManager::insert_checkpoint_hashes_to_db`
             // accepts this because snapshot height (>0) is strictly
             // greater than the previous true-genesis height (0).
-            if let Some(snapshot_height) =
+            //
+            // Re-anchor ONLY when consensus does not already hold the
+            // snapshot block, i.e. a fresh trusted-checkpoint bootstrap.
+            // A node restarted with its DB (or escaping a block-sync wedge)
+            // picked `epoch_to_sync` from its OWN main chain: consensus
+            // already contains it and every header after it. `reset()`
+            // would throw that graph away while the sync graph keeps the
+            // headers as HEADER_GRAPH_READY, so `get_blocks_needing_bodies`
+            // comes back empty, CatchUpFillBlockBody "completes" without
+            // fetching anything, `complete_filling_block_bodies` marks the
+            // headers GRAPH_READY without ever re-sending them to consensus,
+            // and best_epoch stays pinned at the snapshot height forever
+            // (archive m2, 2026-10-10: stuck at 380000). Without the reset,
+            // a downloaded snapshot is handled exactly like a local one
+            // (the "commitment exists, skip state sync" branch in start()).
+            let already_in_consensus =
+                sync_handler.graph.consensus.contains_block(&epoch_to_sync);
+            if already_in_consensus {
+                info!(
+                    "fast-sync: snapshot {:?} is already on the local \
+                     consensus graph; keeping the graph (no re-anchor)",
+                    epoch_to_sync
+                );
+            } else if let Some(snapshot_height) =
                 self.state_sync.completed_snapshot_height()
             {
                 sync_handler.graph.data_man.set_cur_consensus_era_genesis_hash(

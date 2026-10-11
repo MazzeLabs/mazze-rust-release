@@ -23,6 +23,7 @@
 #
 # Usage:
 #   scripts/local-restart-repro.sh run              # full scenario
+#   scripts/local-restart-repro.sh replay           # redo only the restart
 #   scripts/local-restart-repro.sh status | timeline <n> | clean
 #   scripts/local-restart-repro.sh start-node <n> | stop-node <n>
 #
@@ -34,6 +35,15 @@
 #   STOP_AT_EPOCH=2.5*ERA    stop the archives at this epoch
 #   ADVANCE=2*ERA            restart ARCHIVES after the chain moved this far
 #   EARLY_ADVANCE=ERA/8      restart EARLY_ARCHIVES after this many epochs
+#   FREEZE=1                 before restarting ARCHIVES, wait until n4 serves
+#                            the snapshot at the next era boundary, then stop
+#                            the miners until the archives reach Normal (the
+#                            restarted node's header ingest is slower than
+#                            local block production, so without this it never
+#                            catches up); miners restart before the STAY_S check
+#   CLONE="3:5"              before the restart, replace n3's DB with a copy of
+#                            n5's (fresh node key), so two binaries restart from
+#                            the IDENTICAL database (A/B of baseline vs fix)
 #   NORMAL_TIMEOUT_S=1800    wait this long for the archives to reach Normal
 #   STAY_S=300               then check they keep up for this long
 #   LOG_EXTRA_<n>            extra log.yaml loggers, "target: level;..."
@@ -55,6 +65,8 @@ EARLY_ADVANCE="${EARLY_ADVANCE:-$(( ERA / 8 ))}"
 ARCHIVES="${ARCHIVES:-3}"
 EARLY_ARCHIVES="${EARLY_ARCHIVES:-}"
 NORMAL_TIMEOUT_S="${NORMAL_TIMEOUT_S:-1800}"
+FREEZE="${FREEZE:-0}"
+CLONE="${CLONE:-}"
 STAY_S="${STAY_S:-300}"
 AUTHOR="mazze:aamzbekyhkk2ag8rzwvyetyecrvncyg0hjpw84k5yr"
 PERMANENT="1 2 4"
@@ -81,8 +93,9 @@ epoch() { # latest_mined epoch of node, or -1
   r="$(sed -nE 's/.*"result":"0x([0-9a-fA-F]+)".*/\1/p' <<<"$r")"
   [[ -n "$r" ]] && echo $((16#$r)) || echo -1
 }
-phase() { { grep -ohE 'start phase "?[A-Za-z]+' "$(ndir "$1")/mazze.log" 2>/dev/null || true; } \
-  | tail -1 | awk '{print $3}' | tr -d '"'; }
+phase() { # sync phase of the CURRENT process (since its last start marker)
+  { awk '/^------- start/{p=""} /start phase "/{p=$0} END{print p}' "$(ndir "$1")/mazze.log" 2>/dev/null || true; } \
+    | { grep -oE 'start phase "[A-Za-z]+' || true; } | awk '{print $3}' | tr -d '"'; }
 # The launcher may wrap the process, so find it by its unique config path.
 pid_of() { pgrep -f -- "--config $(ndir "$1")/hydra.toml" | head -1 || true; }
 alive() { [[ -n "$(pid_of "$1")" ]]; }
@@ -191,6 +204,7 @@ start_node() { # start_node <node>
     (( $(grep -c 'Self node id' "$d/mazze.log" || true) >= n_starts )) && break
     alive "$i" || { log "n$i failed to start:"; tail -5 "$d/stdout.log"; return 1; }
   done
+  alive "$i" || { log "n$i failed to start:"; tail -3 "$d/stdout.log"; return 1; }
   log "started n$i pid=$(pid_of "$i") rpc=$(rpc_port "$i") bin=$(bin_of "$i")"
 }
 
@@ -257,8 +271,12 @@ check_archives() { # check_archives <ids...>: wait for Normal, then in-sync
     sleep 15
     log "$(status | tr '\n' ' ')"
   done
+  if [[ "$FREEZE" == 1 ]]; then
+    start_node 1 || { sleep 30; start_node 1; }   # port may still be held
+    start_node 2 || { sleep 30; start_node 2; }
+  fi
   if (( STAY_S > 0 )); then log "checking the archives keep up for ${STAY_S}s"; sleep "$STAY_S"; fi
-  local tip; tip="$(epoch 1)"
+  local tip; tip="$(epoch 4)"
   for i in "$@"; do
     echo "=== n$i ($(bin_of "$i")) timeline since restart ==="; timeline "$i" 30
     local e; e="$(epoch "$i")"
@@ -291,13 +309,53 @@ run() {
     check_archives $EARLY_ARCHIVES || rc=$?
   fi
   wait_epoch 1 $(( stop_e + ADVANCE ))
+  if [[ "$FREEZE" == 1 ]]; then
+    local want=$(( (stop_e / ERA + 1) * ERA )) snap
+    while :; do
+      snap="$(rpc 4 mazze_getStatus | grep -oE '"latestSnapshotEpochNumber":"0x[0-9a-f]+"' | grep -oE '0x[0-9a-f]+' || true)"
+      (( ${snap:-0} >= want )) && break
+      log "waiting for n4 to serve snapshot $want (latest ${snap:-none})"; sleep 30
+    done
+    log "freezing the chain: stopping miners at epoch $(epoch 1)"
+    stop_node 1; stop_node 2
+  fi
+  local pair
+  for pair in $CLONE; do
+    local dst="${pair%%:*}" src="${pair##*:}"
+    log "cloning n$src's DB into n$dst"
+    rm -rf "$(ndir "$dst")/data"
+    cp -a "$(ndir "$src")/data" "$(ndir "$dst")/data"
+    rm -rf "$(ndir "$dst")/data/net_config"
+  done
+  for i in $ARCHIVES; do
+    rm -rf "$(ndir "$i")/data.pre-restart"
+    cp -a "$(ndir "$i")/data" "$(ndir "$i")/data.pre-restart"
+  done
   for i in $ARCHIVES; do restart_archive "$i"; done
   check_archives $ARCHIVES || rc=$?
   return $rc
 }
 
+# Re-run only the restart step from the DB copies `run` saved right before
+# it restarted the archives (data.pre-restart), e.g. with a new binary.
+# Honours FREEZE (miners must be stopped again; the chain must not have
+# moved much, or the archives are no longer "N eras behind").
+replay() {
+  local i
+  [[ "$FREEZE" == 1 ]] && { stop_node 1; stop_node 2; }
+  for i in $ARCHIVES; do
+    stop_node "$i"
+    [[ -d "$(ndir "$i")/data.pre-restart" ]] || { echo "no pre-restart copy for n$i" >&2; exit 1; }
+    rm -rf "$(ndir "$i")/data"
+    cp -a "$(ndir "$i")/data.pre-restart" "$(ndir "$i")/data"
+  done
+  for i in $ARCHIVES; do restart_archive "$i"; done
+  check_archives $ARCHIVES
+}
+
 case "${1:-run}" in
   run) run ;;
+  replay) replay ;;
   start) for i in $PERMANENT $ARCHIVES $EARLY_ARCHIVES; do start_node "$i"; done ;;
   stop) for i in $EARLY_ARCHIVES $ARCHIVES 4 2 1; do stop_node "$i"; done ;;
   start-node) start_node "$2" ;;

@@ -3,7 +3,7 @@ description = "Mazze core library"
 homepage = "https://www.mazze.io"
 license = "GPL-3.0"
 name = "mazzecore"
-version = "2.0.2"
+version.workspace = true
 edition = "2021"
 
 [dependencies]

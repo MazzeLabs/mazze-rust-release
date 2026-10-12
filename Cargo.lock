@@ -1551,7 +1551,7 @@ dependencies = [
 
 [[package]]
 name = "client"
-version = "2.0.2"
+version = "2.2.0"
 dependencies = [
  "alloy-rpc-types-trace",
  "anyhow",
@@ -4704,7 +4704,7 @@ dependencies = [
 
 [[package]]
 name = "mazzecore"
-version = "2.0.2"
+version = "2.2.0"
 dependencies = [
  "alloy-rpc-types-trace",
  "anyhow",

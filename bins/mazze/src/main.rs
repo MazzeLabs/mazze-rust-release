@@ -167,8 +167,13 @@ MM  MM  A     A      Z       Z  E
 M MM M  AAAAAAA     Z       Z   EEEE 
 M    M  A     A    Z       Z    E    
 M    M  A     A  ZZZZZ   ZZZZZ  EEEEE
-Current Version: 1.0.0
-"
+Node version: {} (commit {}), consensus v{}
+{}
+",
+        crate_version!(),
+        parity_version::commit(),
+        mazze_parameters::consensus::CONSENSUS_VERSION,
+        version,
     );
 
     let client_handle: Box<dyn ClientTrait>;

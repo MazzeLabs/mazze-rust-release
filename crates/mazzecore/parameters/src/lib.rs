@@ -11,6 +11,12 @@ pub mod genesis;
 pub mod internal_contract_addresses;
 
 pub mod consensus {
+    /// Version of the consensus rules (block validity, difficulty, rewards,
+    /// header/body format). Bump ONLY with a hard fork: peers that announce a
+    /// different non-zero value are rejected at handshake. Node-software
+    /// changes that keep the rules identical must NOT bump this.
+    pub const CONSENSUS_VERSION: u32 = 1;
+
     pub const DEFERRED_STATE_EPOCH_COUNT: u64 = 5;
     pub const EPOCH_SET_PERSISTENCE_DELAY: u64 = DEFERRED_STATE_EPOCH_COUNT;
 

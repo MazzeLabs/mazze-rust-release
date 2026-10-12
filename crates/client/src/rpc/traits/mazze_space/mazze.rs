@@ -235,6 +235,12 @@ pub trait Mazze {
     #[rpc(name = "mazze_clientVersion")]
     fn get_client_version(&self) -> JsonRpcResult<String>;
 
+    /// Return the node's version as structured data: node software version,
+    /// build commit and consensus version (peers with a different non-zero
+    /// consensus version are rejected at handshake).
+    #[rpc(name = "mazze_nodeVersion")]
+    fn get_node_version(&self) -> JsonRpcResult<JsonValue>;
+
     /// Return information about total token supply.
     #[rpc(name = "mazze_getSupplyInfo")]
     fn get_supply_info(

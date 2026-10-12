@@ -19,10 +19,47 @@ use crate::{
 };
 use mazze_internal_common::ChainIdParamsDeprecated;
 use mazze_types::H256;
-use network::{NODE_TAG_ARCHIVE, NODE_TAG_FULL, NODE_TAG_NODE_TYPE};
+use network::{
+    NODE_TAG_ARCHIVE, NODE_TAG_FULL, NODE_TAG_NODE_TYPE, NODE_TAG_NODE_VERSION,
+};
 use rlp_derive::{RlpDecodable, RlpEncodable};
 use std::{collections::HashSet, time::Instant};
 use throttling::token_bucket::TokenBucketManager;
+
+/// What software a peer runs. Appended to `StatusV3` as an optional trailing
+/// field: older nodes ignore it (the RLP decoder reads fields by index) and
+/// newer nodes see `Default` (consensus_version 0 = unknown) from older ones,
+/// so mixed-version fleets keep working during a rolling deploy.
+#[derive(Debug, Clone, Default, PartialEq, RlpDecodable, RlpEncodable)]
+pub struct NodeVersionInfo {
+    /// `mazze_parameters::consensus::CONSENSUS_VERSION`; 0 = not announced.
+    pub consensus_version: u32,
+    /// Node software version, e.g. "2.2.0".
+    pub node_version: String,
+    /// Short commit the binary was built from.
+    pub commit: String,
+}
+
+impl NodeVersionInfo {
+    pub fn local() -> Self {
+        NodeVersionInfo {
+            consensus_version: mazze_parameters::consensus::CONSENSUS_VERSION,
+            node_version: env!("CARGO_PKG_VERSION").to_string(),
+            commit: parity_version::commit().to_string(),
+        }
+    }
+
+    pub fn display(&self) -> String {
+        if self.consensus_version == 0 {
+            "unknown (pre-2.2.0)".into()
+        } else {
+            format!(
+                "{}-{} (consensus v{})",
+                self.node_version, self.commit, self.consensus_version
+            )
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, RlpDecodable, RlpEncodable)]
 pub struct StatusV3 {
@@ -31,6 +68,8 @@ pub struct StatusV3 {
     pub best_epoch: u64,
     pub node_type: NodeType,
     pub terminal_block_hashes: Vec<H256>,
+    #[rlp(default)]
+    pub version: NodeVersionInfo,
 }
 
 impl Handleable for StatusV3 {
@@ -66,6 +105,30 @@ impl Handleable for StatusV3 {
                 ));
             }
         }
+
+        // Different consensus rules = different chain: refuse the peer with a
+        // clear reason instead of failing later on invalid blocks. 0 means the
+        // peer predates version announcements and is accepted.
+        let ours = mazze_parameters::consensus::CONSENSUS_VERSION;
+        if self.version.consensus_version != 0
+            && self.version.consensus_version != ours
+        {
+            warn!(
+                "Peer {:?} runs consensus v{} ({}), ours is v{}; rejecting",
+                ctx.node_id,
+                self.version.consensus_version,
+                self.version.display(),
+                ours
+            );
+            bail!(ErrorKind::InvalidStatus(
+                "consensus version mismatches".into()
+            ));
+        }
+        ctx.insert_peer_node_tag(
+            ctx.node_id(),
+            NODE_TAG_NODE_VERSION,
+            &self.version.display(),
+        );
 
         let latest: HashSet<H256> =
             self.terminal_block_hashes.iter().cloned().collect();
@@ -150,5 +213,65 @@ impl Handleable for StatusV3 {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `StatusV3` exactly as nodes before 2.2.0 encode/decode it.
+    #[derive(Debug, PartialEq, RlpDecodable, RlpEncodable)]
+    struct StatusV3Pre220 {
+        chain_id: ChainIdParamsDeprecated,
+        genesis_hash: H256,
+        best_epoch: u64,
+        node_type: NodeType,
+        terminal_block_hashes: Vec<H256>,
+    }
+
+    fn sample_new() -> StatusV3 {
+        StatusV3 {
+            chain_id: ChainIdParamsDeprecated { chain_id: 1990 },
+            genesis_hash: H256::from_low_u64_be(7),
+            best_epoch: 123,
+            node_type: NodeType::Archive,
+            terminal_block_hashes: vec![H256::from_low_u64_be(9)],
+            version: NodeVersionInfo::local(),
+        }
+    }
+
+    #[test]
+    fn old_node_decodes_new_status() {
+        let bytes = rlp::encode(&sample_new());
+        let old: StatusV3Pre220 = rlp::decode(&bytes).expect("old decoder");
+        assert_eq!(old.best_epoch, 123);
+        assert_eq!(old.terminal_block_hashes.len(), 1);
+    }
+
+    #[test]
+    fn new_node_decodes_old_status() {
+        let n = sample_new();
+        let old = StatusV3Pre220 {
+            chain_id: n.chain_id.clone(),
+            genesis_hash: n.genesis_hash,
+            best_epoch: n.best_epoch,
+            node_type: n.node_type,
+            terminal_block_hashes: n.terminal_block_hashes.clone(),
+        };
+        let decoded: StatusV3 = rlp::decode(&rlp::encode(&old)).expect("new decoder");
+        assert_eq!(decoded.version, NodeVersionInfo::default());
+        assert_eq!(decoded.version.consensus_version, 0);
+    }
+
+    #[test]
+    fn new_status_roundtrip_keeps_version() {
+        let n = sample_new();
+        let decoded: StatusV3 = rlp::decode(&rlp::encode(&n)).unwrap();
+        assert_eq!(decoded, n);
+        assert_eq!(
+            decoded.version.consensus_version,
+            mazze_parameters::consensus::CONSENSUS_VERSION
+        );
     }
 }

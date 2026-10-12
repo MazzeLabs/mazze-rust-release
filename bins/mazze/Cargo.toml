@@ -59,6 +59,7 @@ tempdir = "0.3.7"
 hex = "0.3.0"
 base64ct = "=1.1.1"
 parity-version = {path = "../../crates/util/version" }
+mazze-parameters = { path = "../../crates/mazzecore/parameters" }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies.jemallocator]
 version = "0.3.2"

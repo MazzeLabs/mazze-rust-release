@@ -14,7 +14,7 @@ use crate::{
         message::{
             handle_rlp_message, msgid, Context, DynamicCapability,
             GetBlockHeadersResponse, Heartbeat, NewBlock, NewBlockHashes,
-            StatusV3, TransactionDigests,
+            NodeVersionInfo, StatusV3, TransactionDigests,
         },
         request_manager::{try_get_block_hashes, Request},
         state::SnapshotChunkSync,
@@ -1813,6 +1813,7 @@ impl SynchronizationProtocolHandler {
             genesis_hash: self.graph.data_man.true_genesis.hash(),
             best_epoch: best_info.best_epoch_number,
             terminal_block_hashes: terminal_hashes,
+            version: NodeVersionInfo::local(),
         }
     }
 

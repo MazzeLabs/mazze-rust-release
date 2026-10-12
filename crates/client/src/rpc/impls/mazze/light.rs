@@ -1054,6 +1054,7 @@ impl Mazze for MazzeHandler {
             fn best_block_hash(&self) -> JsonRpcResult<H256>;
             fn confirmation_risk_by_hash(&self, block_hash: H256) -> JsonRpcResult<Option<U256>>;
             fn get_client_version(&self) -> JsonRpcResult<String>;
+            fn get_node_version(&self) -> JsonRpcResult<serde_json::Value>;
             fn get_status(&self) -> JsonRpcResult<RpcStatus>;
             fn skipped_blocks_by_epoch(&self, num: EpochNumber) -> JsonRpcResult<Vec<H256>>;
             fn account_pending_info(&self, addr: RpcAddress) -> BoxFuture<Option<AccountPendingInfo>>;

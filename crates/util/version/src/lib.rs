@@ -31,9 +31,19 @@ pub fn platform() -> String {
     format!("{}-{}{}{}", Target::arch(), Target::os(), env_dash, env)
 }
 
+/// Short commit this binary was built from. Remote fleet builds get their
+/// source by rsync and see a stale `.git`, so the build scripts pass the real
+/// commit in `MAZZE_BUILD_COMMIT`; vergen's value is only the fallback.
+pub fn commit() -> &'static str {
+    match option_env!("MAZZE_BUILD_COMMIT") {
+        Some(c) if !c.is_empty() => c,
+        _ => env!("VERGEN_GIT_SHA_SHORT"),
+    }
+}
+
 /// Get the standard version string for this software.
 pub fn version(crate_version: &str) -> String {
-    let sha3 = env!("VERGEN_GIT_SHA_SHORT");
+    let sha3 = commit();
     let sha3_dash = if sha3.is_empty() { "" } else { "-" };
     let commit_date = env!("VERGEN_GIT_COMMIT_DATE").replace("-", "");
     let date_dash = if commit_date.is_empty() { "" } else { "-" };

@@ -7,6 +7,7 @@ version = "2.0.2"
 edition = "2021"
 
 [dependencies]
+parity-version = { path = "../../util/version" }
 bit-set = "0.4"
 substrate-bn = { git = "https://github.com/paritytech/bn", default-features = false, rev="63f8c587356a67b33c7396af98e065b66fca5dda" }
 byteorder = "1.0"

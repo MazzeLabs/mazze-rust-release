@@ -1204,6 +1204,15 @@ impl RpcImpl {
         Ok(parity_version::version(crate_version!()))
     }
 
+    pub fn get_node_version(&self) -> JsonRpcResult<serde_json::Value> {
+        Ok(serde_json::json!({
+            "nodeVersion": crate_version!(),
+            "commit": parity_version::commit(),
+            "consensusVersion": mazze_parameters::consensus::CONSENSUS_VERSION,
+            "full": parity_version::version(crate_version!()),
+        }))
+    }
+
     pub fn txpool_pending_nonce_range(
         &self, address: RpcAddress,
     ) -> RpcResult<TxPoolPendingNonceRange> {

@@ -62,7 +62,7 @@ pub use self::{
     },
     state_sync_candidate_request::StateSyncCandidateRequest,
     state_sync_candidate_response::StateSyncCandidateResponse,
-    status::StatusV3,
+    status::{NodeVersionInfo, StatusV3},
     throttling::Throttled,
     transactions::{
         GetTransactions, GetTransactionsFromTxHashes,

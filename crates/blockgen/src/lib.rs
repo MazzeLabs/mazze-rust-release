@@ -357,11 +357,15 @@ impl BlockGenerator {
         ))
     }
 
-    /// Assemble a new block without nonce
+    /// Assemble a new block without nonce. Returns `None` while the deferred
+    /// state of the best block is not available yet ("parent is too old for
+    /// computing the deferred state", e.g. right after a restart or while
+    /// execution catches up); callers retry later. This used to `unwrap()`,
+    /// which on the stratum path killed the mining thread silently.
     pub fn assemble_new_block(
         &self, num_txs: usize, block_size_limit: usize,
         additional_transactions: Vec<Arc<SignedTransaction>>,
-    ) -> Block {
+    ) -> Option<Block> {
         let consensus_graph = self.consensus_graph();
 
         let (best_info, block_gas_limit, transactions, maybe_base_price) =
@@ -381,18 +385,23 @@ impl BlockGenerator {
         }
         PACKED_ACCOUNT_SIZE.update(sender_accounts.len());
 
-        let state_blame_info = consensus_graph
+        let state_blame_info = match consensus_graph
             .get_blame_and_deferred_state_for_generation(
                 &best_info.best_block_hash,
-            )
-            .unwrap();
+            ) {
+            Ok(info) => info,
+            Err(e) => {
+                debug!("Cannot assemble a block yet: {}", e);
+                return None;
+            }
+        };
 
         let best_block_hash = best_info.best_block_hash.clone();
         let mut referee = best_info.bounded_terminal_block_hashes.clone();
 
         referee.retain(|r| *r != best_block_hash);
 
-        self.assemble_new_block_impl(
+        Some(self.assemble_new_block_impl(
             best_block_hash,
             referee,
             state_blame_info,
@@ -401,7 +410,7 @@ impl BlockGenerator {
             0,
             None,
             maybe_base_price,
-        )
+        ))
     }
 
     /// Assemble a new block without nonce and with options to override the
@@ -514,11 +523,13 @@ impl BlockGenerator {
         &self, num_txs: usize, block_size_limit: usize,
         additional_transactions: Vec<Arc<SignedTransaction>>,
     ) -> H256 {
-        let block = self.assemble_new_block(
-            num_txs,
-            block_size_limit,
-            additional_transactions,
-        );
+        let block = self
+            .assemble_new_block(
+                num_txs,
+                block_size_limit,
+                additional_transactions,
+            )
+            .expect("deferred state of the best block is not available yet");
         self.generate_block_impl(block)
     }
 
@@ -823,20 +834,14 @@ impl BlockGenerator {
                 current_mining_block.as_ref(),
                 &last_assemble,
             ) {
-                let new_block = match std::panic::catch_unwind(
-                    std::panic::AssertUnwindSafe(|| {
-                        bg.assemble_new_block(
-                            MAX_TRANSACTION_COUNT_PER_BLOCK,
-                            bg.graph
-                                .verification_config
-                                .max_block_size_in_bytes,
-                            vec![],
-                        )
-                    }),
+                let new_block = match bg.assemble_new_block(
+                    MAX_TRANSACTION_COUNT_PER_BLOCK,
+                    bg.graph.verification_config.max_block_size_in_bytes,
+                    vec![],
                 ) {
-                    Ok(block) => block,
-                    Err(_) => {
-                        warn!("Failed to assemble new block, execution results not ready. Retrying...");
+                    Some(block) => block,
+                    None => {
+                        // Execution results not ready yet; retry next tick.
                         thread::sleep(sleep_duration);
                         continue;
                     }
@@ -954,11 +959,19 @@ impl BlockGenerator {
                     continue;
                 }
 
-                current_mining_block = Some(bg.assemble_new_block(
+                current_mining_block = match bg.assemble_new_block(
                     MAX_TRANSACTION_COUNT_PER_BLOCK,
                     bg.graph.verification_config.max_block_size_in_bytes,
                     vec![],
-                ));
+                ) {
+                    Some(block) => Some(block),
+                    None => {
+                        // Execution results not ready yet; retry next tick
+                        // instead of killing the stratum mining thread.
+                        thread::sleep(sleep_duration);
+                        continue;
+                    }
+                };
 
                 if recent_mining_blocks.len()
                     == bg.pow_config.pow_problem_window_size

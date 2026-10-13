@@ -234,6 +234,10 @@ pub mod pow {
     // ~3600 blocks of signal per half-life (<2% noise), and a sudden 100x
     // hashrate loss recovers in ~log2(100) * 15 min without stalling.
     pub const ASERT_HALF_LIFE_SECS: u64 = 900;
+    // Cap on one block's contribution to the ASERT block counter
+    // (`1 + #referees`). Normal blocks reference a handful of tips; the cap
+    // stops a miner from inflating difficulty with padded referee lists.
+    pub const ASERT_MAX_BLOCK_CONTRIBUTION: u64 = 8;
 
     // TODO: compute a more appropriate initial difficulty
     // previous initial difficulty: 20_000_000_000;

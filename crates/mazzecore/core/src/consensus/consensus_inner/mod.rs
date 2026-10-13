@@ -551,6 +551,14 @@ pub struct ConsensusGraphNode {
     is_timer: bool,
     /// The total number of *executed* blocks in its past (not including self)
     past_num_blocks: u64,
+    /// ASERT block counter: cumulative `min(1 + #referees, cap)` along the
+    /// parent chain, relative to the arena root. Only differences between a
+    /// block and one of its ancestors are used, and those depend on nothing
+    /// but the headers on that chain -- unlike `past_num_blocks`, whose
+    /// epoch sets come from a node's own view (pivot, caches, era) and once
+    /// made a restarted node disagree on difficulty and fork itself off
+    /// (m2, 2026-10-12).
+    asert_count: u64,
     adaptive: bool,
 
     /// The genesis arena index of the era that `self` is in.
@@ -1604,6 +1612,7 @@ impl ConsensusGraphInner {
             is_heavy: true,
             difficulty: *block_header.difficulty(),
             past_num_blocks: 0,
+            asert_count: 0,
             is_timer: false,
             // Block header contains an adaptive field, we will verify with our
             // own computation
@@ -1753,6 +1762,7 @@ impl ConsensusGraphInner {
             is_heavy,
             difficulty: *block_header.difficulty(),
             past_num_blocks: 0,
+            asert_count: 0,
             is_timer,
             // Block header contains an adaptive field, we will verify with our
             // own computation
@@ -1777,6 +1787,19 @@ impl ConsensusGraphInner {
         for referee in referees {
             self.arena[referee].referrers.push(index);
         }
+
+        // Header-only ASERT counter (see `ConsensusGraphNode::asert_count`).
+        // Counts the header's referees, not the arena's resolved ones, so
+        // the value cannot depend on which blocks this node holds.
+        let contribution = std::cmp::min(
+            1 + block_header.referee_hashes().len() as u64,
+            mazze_parameters::pow::ASERT_MAX_BLOCK_CONTRIBUTION,
+        );
+        self.arena[index].asert_count = if parent != NULL {
+            self.arena[parent].asert_count + contribution
+        } else {
+            contribution
+        };
 
         self.compute_blockset_in_own_view_of_epoch(index);
         let executed_epoch_len =
@@ -1933,7 +1956,9 @@ impl ConsensusGraphInner {
         let parent = *self.hash_to_arena_indices.get(parent_hash).unwrap();
         let initial: U256 = self.pow_config.initial_difficulty.into();
         let parent_height = self.arena[parent].height;
-        if self.pow_config.test_mode || parent_height == 0 {
+        if (self.pow_config.test_mode && !self.pow_config.asert_in_test_mode)
+            || parent_height == 0
+        {
             return initial;
         }
         if self.arena[parent].era_block == NULL {
@@ -1947,8 +1972,11 @@ impl ConsensusGraphInner {
         let anchor_height =
             std::cmp::max(1, self.get_era_genesis_height(parent_height));
         let anchor = self.ancestor_at(parent, anchor_height);
-        let blocks = self.arena[parent].past_num_blocks
-            - self.arena[anchor].past_num_blocks;
+        // Header-only count of DAG blocks merged along the chain since the
+        // anchor (see `asert_count`), not `past_num_blocks`.
+        let blocks = self.arena[parent]
+            .asert_count
+            .saturating_sub(self.arena[anchor].asert_count);
         let ts = |idx: usize| {
             self.data_man
                 .block_header_by_hash(&self.arena[idx].hash)
@@ -1992,16 +2020,18 @@ impl ConsensusGraphInner {
                 .unwrap_or(0)
         };
         format!(
-            "parent={:?} h={} past_num_blocks={} epoch_len={} | anchor={:?} \
-             h={} diff={} past_num_blocks={} ts={} | parent_ts={} | \
-             cur_era_genesis_h={} expected={}",
+            "parent={:?} h={} asert_count={} past_num_blocks={} epoch_len={} \
+             | anchor={:?} h={} diff={} asert_count={} past_num_blocks={} \
+             ts={} | parent_ts={} | cur_era_genesis_h={} expected={}",
             self.arena[parent].hash,
             parent_height,
+            self.arena[parent].asert_count,
             self.arena[parent].past_num_blocks,
             self.get_ordered_executable_epoch_blocks(parent).len(),
             self.arena[anchor].hash,
             self.arena[anchor].height,
             self.arena[anchor].difficulty,
+            self.arena[anchor].asert_count,
             self.arena[anchor].past_num_blocks,
             ts(anchor),
             ts(parent),

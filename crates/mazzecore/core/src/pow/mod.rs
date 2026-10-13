@@ -133,6 +133,10 @@ pub struct ProofOfWorkConfig {
     pub stratum_port: u16,
     pub stratum_secret: Option<H256>,
     pub pow_problem_window_size: usize,
+    /// TEST-ONLY: run per-block ASERT even in test mode (test mode otherwise
+    /// pins every block to the initial difficulty). Lets the local harness
+    /// (scripts/local-restart-repro.sh) exercise difficulty agreement.
+    pub asert_in_test_mode: bool,
 }
 
 impl ProofOfWorkConfig {
@@ -151,6 +155,7 @@ impl ProofOfWorkConfig {
                 stratum_port,
                 stratum_secret,
                 pow_problem_window_size,
+                asert_in_test_mode: false,
             }
         } else {
             ProofOfWorkConfig {
@@ -162,6 +167,7 @@ impl ProofOfWorkConfig {
                 stratum_port,
                 stratum_secret,
                 pow_problem_window_size,
+                asert_in_test_mode: false,
             }
         }
     }

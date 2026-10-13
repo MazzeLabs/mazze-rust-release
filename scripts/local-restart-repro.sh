@@ -47,6 +47,8 @@
 #   NORMAL_TIMEOUT_S=1800    wait this long for the archives to reach Normal
 #   STAY_S=300               then check they keep up for this long
 #   LOG_EXTRA_<n>            extra log.yaml loggers, "target: level;..."
+#   ASERT=true               run per-block ASERT (test_enable_asert) instead of
+#                            the pinned test-mode difficulty
 #
 # Example (baseline vs fix in one run, plus the covered-target variant):
 #   BIN_3=/path/old/mazze ARCHIVES="3 5" EARLY_ARCHIVES=6 \
@@ -142,6 +144,9 @@ write_conf() { # write_conf <node> <bootnodes>
   set_kv era_epoch_count "$ERA"
   set_kv snapshot_epoch_count "$ERA"
   set_kv test_allow_small_snapshot_epoch_count true
+  # ASERT=true: per-block ASERT in test mode (test_enable_asert), to check
+  # that restarted nodes agree with the network on every block's difficulty.
+  set_kv test_enable_asert "${ASERT:-false}"
   set_kv timer_chain_beta "$(( 100 * ERA / 20000 > 2 ? 100 * ERA / 20000 : 2 ))"
   set_kv bootnodes "\"$boot\""
   set_kv public_address '"127.0.0.1"'

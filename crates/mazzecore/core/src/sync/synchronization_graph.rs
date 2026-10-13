@@ -875,7 +875,7 @@ impl SynchronizationGraphInner {
         let lower = asert_difficulty(&parent_difficulty, 0, dt, t, h, &initial);
         let upper = asert_difficulty(
             &parent_difficulty,
-            mazze_parameters::consensus_internal::EPOCH_EXECUTED_BLOCK_BOUND as u64,
+            mazze_parameters::pow::ASERT_MAX_BLOCK_CONTRIBUTION,
             0,
             t,
             h,
@@ -976,7 +976,10 @@ impl SynchronizationGraphInner {
             let initial_difficulty: U256 =
                 self.pow_config.initial_difficulty.into();
 
-            if self.pow_config.test_mode || parent_height == 0 {
+            if (self.pow_config.test_mode
+                && !self.pow_config.asert_in_test_mode)
+                || parent_height == 0
+            {
                 if my_diff != initial_difficulty {
                     difficulty_invalid = true;
                     min_diff = initial_difficulty;
@@ -988,7 +991,7 @@ impl SynchronizationGraphInner {
                 // partial invalid). Here we bound it from header data only,
                 // as a cheap pre-filter: relative to the parent, a child moves
                 // by 2^((n*T - dt)/H) where dt = ts(parent) - ts(grandparent)
-                // and n = parent's executed epoch size in [0, bound]. The
+                // and n = the parent's ASERT contribution in [1, cap]. The
                 // margin absorbs integer rounding of both difficulties.
                 let (lower, upper) =
                     self.asert_header_bounds(index, parent_difficulty);

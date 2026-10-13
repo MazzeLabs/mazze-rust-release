@@ -156,6 +156,10 @@ build_config! {
         // multi-node harness (scripts/local-restart-repro.sh) can pass
         // several eras in minutes. Never set in production.
         (test_allow_small_snapshot_epoch_count, (bool), false)
+        // TEST-ONLY (honoured only in test/dev mode): run per-block ASERT
+        // instead of pinning every block to the initial difficulty, so the
+        // local harness can check that nodes agree on difficulty.
+        (test_enable_asert, (bool), false)
         (heavy_block_difficulty_ratio, (u64), HEAVY_BLOCK_DEFAULT_DIFFICULTY_RATIO)
         (genesis_accounts, (Option<String>), None)
         (genesis_secrets, (Option<String>), None)
@@ -988,7 +992,7 @@ impl Configuration {
             },
             |s| s.as_str(),
         );
-        ProofOfWorkConfig::new(
+        let mut pow_config = ProofOfWorkConfig::new(
             self.is_test_or_dev_mode(),
             mining_type,
             self.raw_conf.initial_difficulty,
@@ -996,7 +1000,10 @@ impl Configuration {
             self.raw_conf.stratum_port,
             stratum_secret,
             self.raw_conf.pow_problem_window_size,
-        )
+        );
+        pow_config.asert_in_test_mode =
+            self.is_test_or_dev_mode() && self.raw_conf.test_enable_asert;
+        pow_config
     }
 
     pub fn verification_config(

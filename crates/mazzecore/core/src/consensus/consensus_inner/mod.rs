@@ -1968,6 +1968,48 @@ impl ConsensusGraphInner {
         )
     }
 
+    /// Diagnostic: every input of `expected_difficulty(parent)`, so a node
+    /// that disagrees with the network on a block's difficulty can be
+    /// compared field by field with a healthy one.
+    pub fn explain_expected_difficulty(&self, parent: usize) -> String {
+        let parent_height = self.arena[parent].height;
+        if parent_height == 0 || self.arena[parent].era_block == NULL {
+            return format!(
+                "parent={:?} h={} era_block_null={} expected={}",
+                self.arena[parent].hash,
+                parent_height,
+                self.arena[parent].era_block == NULL,
+                self.expected_difficulty(&self.arena[parent].hash)
+            );
+        }
+        let anchor_height =
+            std::cmp::max(1, self.get_era_genesis_height(parent_height));
+        let anchor = self.ancestor_at(parent, anchor_height);
+        let ts = |idx: usize| {
+            self.data_man
+                .block_header_by_hash(&self.arena[idx].hash)
+                .map(|h| h.timestamp())
+                .unwrap_or(0)
+        };
+        format!(
+            "parent={:?} h={} past_num_blocks={} epoch_len={} | anchor={:?} \
+             h={} diff={} past_num_blocks={} ts={} | parent_ts={} | \
+             cur_era_genesis_h={} expected={}",
+            self.arena[parent].hash,
+            parent_height,
+            self.arena[parent].past_num_blocks,
+            self.get_ordered_executable_epoch_blocks(parent).len(),
+            self.arena[anchor].hash,
+            self.arena[anchor].height,
+            self.arena[anchor].difficulty,
+            self.arena[anchor].past_num_blocks,
+            ts(anchor),
+            ts(parent),
+            self.cur_era_genesis_height,
+            self.expected_difficulty(&self.arena[parent].hash)
+        )
+    }
+
     fn adjust_difficulty(&mut self, new_best_arena_index: usize) {
         // Difficulty is now per block (ASERT), so `current_difficulty` is
         // simply what a block mined on top of the new best must carry.

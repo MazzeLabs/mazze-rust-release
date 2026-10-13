@@ -696,8 +696,10 @@ impl ConsensusNewBlockHandler {
             != inner.expected_difficulty(&inner.arena[parent].hash)
         {
             warn!(
-                "Partially invalid due to wrong difficulty. {:?}",
-                inner.arena[new].hash
+                "Partially invalid due to wrong difficulty. {:?} block_diff={} {}",
+                inner.arena[new].hash,
+                inner.arena[new].difficulty,
+                inner.explain_expected_difficulty(parent)
             );
             return false;
         }

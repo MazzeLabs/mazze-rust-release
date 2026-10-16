@@ -125,7 +125,7 @@ loggers:
   network: { level: info }
   mazzecore: { level: info }
 EOF
-    tr ';' '\n' <<<"${!v:-}" | sed -nE 's/^ *([^:]+): *([a-z]+) *$/  "\1": { level: \2 }/p'
+    tr ';' '\n' <<<"${!v:-}" | sed -nE 's/^ *(.+[^:]): *([a-z]+) *$/  "\1": { level: \2 }/p'
   } > "$d/log.yaml"
 }
 

@@ -234,6 +234,12 @@ pub mod pow {
     // ~3600 blocks of signal per half-life (<2% noise), and a sudden 100x
     // hashrate loss recovers in ~log2(100) * 15 min without stalling.
     pub const ASERT_HALF_LIFE_SECS: u64 = 900;
+    // How long `full` nodes keep block bodies behind their checkpoint, so an
+    // archive (or any node) that was down for up to this long can still
+    // re-fetch the blocks it missed. Before, non-archive nodes dropped bodies
+    // at the checkpoint (~2-3 eras), and two archives that were down longer
+    // lost the history between for good (2026-10-11).
+    pub const FULL_NODE_BLOCK_BODY_RETENTION_SECS: u64 = 3 * 24 * 3600;
     // Cap on one block's contribution to the ASERT block counter
     // (`1 + #referees`). Normal blocks reference a handful of tips; the cap
     // stops a miner from inflating difficulty with padded referee lists.

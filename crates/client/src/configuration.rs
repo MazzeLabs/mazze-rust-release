@@ -1274,7 +1274,21 @@ impl Configuration {
         // but `node_type = "archive"` is a shortcut for keeping all them.
         if !matches!(self.raw_conf.node_type, Some(NodeType::Archive)) {
             if conf.additional_maintained_block_body_epoch_count.is_none() {
-                conf.additional_maintained_block_body_epoch_count = Some(0);
+                // `full` keeps FULL_NODE_BLOCK_BODY_RETENTION_SECS of bodies
+                // (in epochs at one block per epoch, an upper bound, so it is
+                // at least that long for any DAG width). `full-fast` (miners)
+                // stays lean. Receipts/traces/results stay pruned: an archive
+                // rebuilding history only needs headers + bodies.
+                conf.additional_maintained_block_body_epoch_count =
+                    Some(match self.node_type() {
+                        NodeType::Full => {
+                            (mazze_parameters::pow::FULL_NODE_BLOCK_BODY_RETENTION_SECS
+                                * mazze_parameters::pow::ONE_SECOND_IN_USEC
+                                / self.pow_config().block_generation_period)
+                                as usize
+                        }
+                        _ => 0,
+                    });
             }
             if conf
                 .additional_maintained_execution_result_epoch_count

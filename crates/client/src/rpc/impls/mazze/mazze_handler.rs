@@ -2136,6 +2136,7 @@ impl Mazze for MazzeHandler {
             fn get_status(&self) -> JsonRpcResult<RpcStatus>;
             fn get_client_version(&self) -> JsonRpcResult<String>;
             fn get_node_version(&self) -> JsonRpcResult<serde_json::Value>;
+            fn get_consensus_debug(&self) -> JsonRpcResult<serde_json::Value>;
             fn account_pending_info(&self, addr: RpcAddress) -> BoxFuture<Option<AccountPendingInfo>>;
             fn account_pending_transactions(&self, address: RpcAddress, maybe_start_nonce: Option<U256>, maybe_limit: Option<U64>) -> BoxFuture<AccountPendingTransactions>;
             fn fee_history(&self, block_count: HexU64, newest_block: EpochNumber, reward_percentiles: Vec<f64>) -> BoxFuture<MazzeFeeHistory>;

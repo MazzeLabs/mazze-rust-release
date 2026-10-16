@@ -1204,6 +1204,19 @@ impl RpcImpl {
         Ok(parity_version::version(crate_version!()))
     }
 
+    pub fn get_consensus_debug(&self) -> JsonRpcResult<serde_json::Value> {
+        let fields = self
+            .consensus_graph()
+            .inner
+            .read()
+            .debug_checkpoint_status();
+        let map: serde_json::Map<String, serde_json::Value> = fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), serde_json::Value::String(v)))
+            .collect();
+        Ok(serde_json::Value::Object(map))
+    }
+
     pub fn get_node_version(&self) -> JsonRpcResult<serde_json::Value> {
         Ok(serde_json::json!({
             "nodeVersion": crate_version!(),

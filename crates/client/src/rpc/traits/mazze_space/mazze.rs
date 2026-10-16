@@ -241,6 +241,12 @@ pub trait Mazze {
     #[rpc(name = "mazze_nodeVersion")]
     fn get_node_version(&self) -> JsonRpcResult<JsonValue>;
 
+    /// Diagnostic: checkpoint machinery state (era / stable heights, timer
+    /// chain and force-confirm point), to see why checkpoints do or do not
+    /// form on a node.
+    #[rpc(name = "mazze_consensusDebug")]
+    fn get_consensus_debug(&self) -> JsonRpcResult<JsonValue>;
+
     /// Return information about total token supply.
     #[rpc(name = "mazze_getSupplyInfo")]
     fn get_supply_info(

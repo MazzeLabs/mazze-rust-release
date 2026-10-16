@@ -1996,6 +1996,40 @@ impl ConsensusGraphInner {
         )
     }
 
+    /// Diagnostic snapshot of the checkpoint machinery (served by RPC
+    /// `mazze_consensusDebug`): why the stable height / checkpoint do or do
+    /// not move. `acc_lca_on_main` = the last force-confirm point is an
+    /// ancestor of the current best block.
+    pub fn debug_checkpoint_status(&self) -> Vec<(&'static str, String)> {
+        let best = *self.main_chain.last().expect("not empty");
+        let stable_idx = self.get_main_block_arena_index(self.cur_era_stable_height);
+        let last_acc = self.timer_chain_accumulative_lca.last().copied();
+        let acc_height = last_acc.map(|i| self.arena[i].height);
+        let acc_on_main = last_acc.map(|i| self.lca(i, best) == i);
+        vec![
+            ("best_epoch", self.arena[best].height.to_string()),
+            ("cur_era_genesis_height", self.cur_era_genesis_height.to_string()),
+            ("cur_era_stable_height", self.cur_era_stable_height.to_string()),
+            (
+                "stable_hash_matches_main",
+                (self.arena[stable_idx].hash == self.cur_era_stable_block_hash)
+                    .to_string(),
+            ),
+            ("timer_chain_len", self.timer_chain.len().to_string()),
+            (
+                "cur_era_genesis_timer_chain_height",
+                self.cur_era_genesis_timer_chain_height.to_string(),
+            ),
+            (
+                "acc_lca_len",
+                self.timer_chain_accumulative_lca.len().to_string(),
+            ),
+            ("acc_lca_last_height", format!("{:?}", acc_height)),
+            ("acc_lca_on_main", format!("{:?}", acc_on_main)),
+            ("header_only", self.header_only.to_string()),
+        ]
+    }
+
     /// Diagnostic: every input of `expected_difficulty(parent)`, so a node
     /// that disagrees with the network on a block's difficulty can be
     /// compared field by field with a healthy one.

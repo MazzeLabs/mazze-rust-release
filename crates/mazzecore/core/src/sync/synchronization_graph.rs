@@ -2676,6 +2676,43 @@ impl SynchronizationGraph {
                 inner.not_ready_blocks_frontier.remove(idx);
             }
 
+            // A block promoted here becomes GRAPH_READY in the sync graph,
+            // so its children will be handed to consensus -- but nothing
+            // guaranteed the block itself ever reached consensus (e.g. its
+            // header became ready while the graph was locked for catch-up).
+            // Consensus then inserts every descendant as an out-era stub
+            // and stops growing for good (local harness: archive frozen at
+            // epoch 162 after FillBlockBody). Hand the missing ones to the
+            // consensus worker now, parents first, exactly like
+            // `set_graph_ready` does.
+            let missing: HashSet<usize> = promoted_here
+                .iter()
+                .copied()
+                .filter(|i| {
+                    inner.arena.contains(*i)
+                        && !self
+                            .consensus
+                            .contains_block(&inner.arena[*i].block_header.hash())
+                })
+                .collect();
+            if !missing.is_empty() {
+                warn!(
+                    "complete_filling_block_bodies: {} promoted block(s) were \
+                     not in consensus; sending them now",
+                    missing.len()
+                );
+                for i in inner.topological_sort(missing) {
+                    CONSENSUS_WORKER_QUEUE.enqueue(1);
+                    self.consensus_unprocessed_count
+                        .fetch_add(1, Ordering::SeqCst);
+                    assert!(
+                        self.new_block_hashes
+                            .send(inner.arena[i].block_header.hash()),
+                        "consensus receiver dropped"
+                    );
+                }
+            }
+
             // Check if we skip some block bodies. It's either because they are
             // never retrieved after a long time, or they have invalid
             // bodies.

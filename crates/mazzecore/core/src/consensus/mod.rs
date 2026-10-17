@@ -2619,6 +2619,22 @@ impl ConsensusGraphTrait for ConsensusGraph {
                 return false;
             }
         }
+        // CatchUpCheckpoint needs a trusted blame block at least
+        // `snapshot_blame_plus_depth` epochs above the sync target (plus the
+        // deferred-state lag) to validate a downloaded snapshot, and it does
+        // not fetch more headers itself. Leaving header sync before the
+        // headers reach that far wedged a restarted archive in
+        // CatchUpCheckpoint forever ("trusted blame block is unavailable",
+        // local harness: target 6000, plus depth 1001, headers only to 7004).
+        let blame_cover = sync_target_height
+            + self.data_man.get_snapshot_blame_plus_depth() as u64
+            + DEFERRED_STATE_EPOCH_COUNT
+            + 10;
+        if self.best_epoch_number() < blame_cover
+            && blame_cover <= peer_median_epoch
+        {
+            return false;
+        }
 
         // Once the remaining history after the chosen snapshot target fits in
         // one snapshot window, checkpoint sync can start. The old

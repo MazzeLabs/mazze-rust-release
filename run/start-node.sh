@@ -71,15 +71,15 @@ fi
 # hydra.toml); the co-located miner connects over localhost only. The miner
 # still keeps its own stratum_secret entry (start-miner.sh) since the binary
 # requires the field to be present.
+# net_config (the node key) alone is not chain data: a wiped node keeps it to
+# preserve its identity, and must still build the genesis WITH its transactions
+# (execute_genesis), or it derives a different genesis hash and no peer accepts it.
 has_chain_data() {
   local base="$1"
   if compgen -G "$base/blockchain_db/*" > /dev/null; then
     return 0
   fi
   if compgen -G "$base/storage_db/*" > /dev/null; then
-    return 0
-  fi
-  if compgen -G "$base/net_config/*" > /dev/null; then
     return 0
   fi
   return 1

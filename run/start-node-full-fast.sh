@@ -92,11 +92,13 @@ if ! grep -qE '^[[:space:]]*mining_author[[:space:]]*=[[:space:]]*"[^"]+"' "$TEM
   echo "         Set 'mining_author = \"mazze:...\"' in $CONFIG_FILE." >&2
 fi
 
+# net_config (the node key) alone is not chain data: a wiped node keeps it to
+# preserve its identity, and must still build the genesis WITH its transactions
+# (execute_genesis), or it derives a different genesis hash and no peer accepts it.
 has_chain_data() {
   local base="$1"
   compgen -G "$base/blockchain_db/*" > /dev/null && return 0
   compgen -G "$base/storage_db/*"    > /dev/null && return 0
-  compgen -G "$base/net_config/*"    > /dev/null && return 0
   return 1
 }
 if has_chain_data "$REPO_ROOT/blockchain_data"; then

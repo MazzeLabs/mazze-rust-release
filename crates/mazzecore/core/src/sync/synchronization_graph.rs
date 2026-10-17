@@ -155,6 +155,13 @@ pub struct SynchronizationGraphNode {
     pub referrers: Vec<usize>,
     /// the timestamp in seconds when graph_status updated
     pub last_update_timestamp: u64,
+    /// Whether this block has been handed to the consensus worker. A block
+    /// can become deliverable twice -- at BLOCK_HEADER_GRAPH_READY in a
+    /// header-to-consensus phase and again at BLOCK_GRAPH_READY when its
+    /// body arrives (body sync runs in every phase, §5.20) -- but consensus
+    /// must see it exactly once, and only after its parent and referees.
+    /// See `SynchronizationGraph::send_to_consensus`.
+    pub sent_to_consensus: bool,
 }
 
 #[derive(DeriveMallocSizeOf)]
@@ -526,6 +533,7 @@ impl SynchronizationGraphInner {
         let me = self.arena.insert(SynchronizationGraphNode {
             graph_status: BLOCK_INVALID,
             block_ready: false,
+            sent_to_consensus: false,
             parent_reclaimed: false,
             parent: NULL,
             children: Vec::new(),
@@ -575,6 +583,8 @@ impl SynchronizationGraphInner {
                 BLOCK_HEADER_ONLY
             },
             block_ready: is_genesis,
+            // The era genesis is consensus' own root.
+            sent_to_consensus: is_genesis,
             parent_reclaimed: false,
             parent: NULL,
             children: Vec::new(),
@@ -1689,15 +1699,7 @@ impl SynchronizationGraph {
                     );
                 }
                 if insert_to_consensus {
-                    CONSENSUS_WORKER_QUEUE.enqueue(1);
-
-                    self.consensus_unprocessed_count
-                        .fetch_add(1, Ordering::SeqCst);
-                    assert!(
-                        self.new_block_hashes
-                            .send(inner.arena[index].block_header.hash(),),
-                        "consensus receiver dropped"
-                    );
+                    self.send_to_consensus(inner, index);
 
                     // maintain not_ready_blocks_frontier
                     inner.not_ready_blocks_frontier.remove(&index);
@@ -2154,6 +2156,102 @@ impl SynchronizationGraph {
         }
     }
 
+    /// Hand block `index` to the consensus worker -- at most once per
+    /// sync-graph node, and only after every predecessor (parent, referees)
+    /// in the sync graph that is header-graph-ready but was not handed over
+    /// yet.
+    ///
+    /// Two invariants of the consensus side depend on this:
+    ///
+    /// * Exactly-once. A block becomes deliverable at
+    ///   BLOCK_HEADER_GRAPH_READY in a header-to-consensus phase and again at
+    ///   BLOCK_GRAPH_READY when its body arrives (body sync runs in every
+    ///   phase since §5.20). The consensus worker only drops a repeat while
+    ///   the first copy is still queued, and `ConsensusGraphInner::insert`
+    ///   has no duplicate guard: each repeat became a second ("shadow") arena
+    ///   node and `hash_to_arena_indices` was re-pointed at it, so later
+    ///   children hung off the shadow copy. An era checkpoint on the original
+    ///   lineage then turned the whole shadow into out-era legacy
+    ///   (era_block = NULL) while the hashes still mapped to it, and every
+    ///   later block was inserted as an out-era stub: the pivot froze for
+    ///   good (reproduced in sync::tests).
+    /// * Parent first. A block whose parent is not in consensus when the
+    ///   worker processes it is inserted as an out-era stub, permanently,
+    ///   together with all its descendants. A block can reach
+    ///   BLOCK_HEADER_GRAPH_READY through a call that does not insert into
+    ///   consensus (`insert_to_consensus = false`, e.g. a body response for a
+    ///   header-less block) while its child is then handed over by a call
+    ///   that does. Either path fits the m6 freeze (2026-10-17, epoch
+    ///   484767: every block after the pivot child e2f5b15f was a stub);
+    ///   no checkpoint formed during that run, so the second is the likelier.
+    fn send_to_consensus(
+        &self, inner: &mut SynchronizationGraphInner, index: usize,
+    ) {
+        if inner.arena[index].sent_to_consensus {
+            return;
+        }
+        // Iterative post-order DFS over not-yet-sent predecessors. A node
+        // pushed twice (diamond) is skipped once it has been marked sent.
+        let mut stack = vec![(index, false)];
+        let mut order = Vec::new();
+        while let Some((i, expanded)) = stack.pop() {
+            if inner.arena[i].sent_to_consensus {
+                continue;
+            }
+            if expanded {
+                inner.arena[i].sent_to_consensus = true;
+                order.push(i);
+                continue;
+            }
+            stack.push((i, true));
+            let node = &inner.arena[i];
+            for p in std::iter::once(node.parent)
+                .chain(node.referees.iter().copied())
+            {
+                if p != NULL
+                    && !inner.arena[p].sent_to_consensus
+                    && inner.arena[p].graph_status >= BLOCK_HEADER_GRAPH_READY
+                {
+                    stack.push((p, false));
+                }
+            }
+        }
+        for i in order {
+            let h = inner.arena[i].block_header.hash();
+            if i != index {
+                // Keep `not_ready_blocks_frontier` as the header-to-consensus
+                // send path does (for `index` the caller maintains it).
+                inner.not_ready_blocks_frontier.remove(&i);
+                let children: Vec<usize> = inner.arena[i]
+                    .children
+                    .iter()
+                    .copied()
+                    .filter(|c| {
+                        inner.arena[*c].graph_status < BLOCK_HEADER_GRAPH_READY
+                    })
+                    .collect();
+                for c in children {
+                    inner.not_ready_blocks_frontier.insert(c);
+                }
+                warn!(
+                    "send_to_consensus: {:?} (height {}) had not been handed \
+                     to consensus before its descendant {:?}; sending it \
+                     first",
+                    h,
+                    inner.arena[i].block_header.height(),
+                    inner.arena[index].block_header.hash(),
+                );
+            }
+            CONSENSUS_WORKER_QUEUE.enqueue(1);
+            self.consensus_unprocessed_count
+                .fetch_add(1, Ordering::SeqCst);
+            assert!(
+                self.new_block_hashes.send(h),
+                "consensus receiver dropped"
+            );
+        }
+    }
+
     fn set_graph_ready(
         &self, inner: &mut SynchronizationGraphInner, index: usize,
     ) {
@@ -2169,11 +2267,9 @@ impl SynchronizationGraph {
 
         let h = inner.arena[index].block_header.hash();
         debug!("Block {:?} is graph ready", h);
-        CONSENSUS_WORKER_QUEUE.enqueue(1);
-
-        self.consensus_unprocessed_count
-            .fetch_add(1, Ordering::SeqCst);
-        assert!(self.new_block_hashes.send(h), "consensus receiver dropped");
+        // In a header-to-consensus phase the block was usually handed to
+        // consensus already, at BLOCK_HEADER_GRAPH_READY; this is then a no-op.
+        self.send_to_consensus(inner, index);
 
         if inner.config.enable_state_expose {
             STATE_EXPOSER.sync_graph.lock().ready_block_vec.push(
@@ -2699,16 +2795,23 @@ impl SynchronizationGraph {
             // epoch 162 after FillBlockBody). Hand the missing ones to the
             // consensus worker now, parents first, exactly like
             // `set_graph_ready` does.
-            let missing: HashSet<usize> = promoted_here
-                .iter()
-                .copied()
-                .filter(|i| {
-                    inner.arena.contains(*i)
-                        && !self
-                            .consensus
-                            .contains_block(&inner.arena[*i].block_header.hash())
-                })
-                .collect();
+            let mut missing: HashSet<usize> = HashSet::new();
+            for i in promoted_here.iter().copied() {
+                if !inner.arena.contains(i) || inner.arena[i].sent_to_consensus
+                {
+                    continue;
+                }
+                if self
+                    .consensus
+                    .contains_block(&inner.arena[i].block_header.hash())
+                {
+                    // Delivered through an earlier sync-graph node for the
+                    // same hash; never deliver it twice.
+                    inner.arena[i].sent_to_consensus = true;
+                } else {
+                    missing.insert(i);
+                }
+            }
             if !missing.is_empty() {
                 warn!(
                     "complete_filling_block_bodies: {} promoted block(s) were \
@@ -2716,14 +2819,7 @@ impl SynchronizationGraph {
                     missing.len()
                 );
                 for i in inner.topological_sort(missing) {
-                    CONSENSUS_WORKER_QUEUE.enqueue(1);
-                    self.consensus_unprocessed_count
-                        .fetch_add(1, Ordering::SeqCst);
-                    assert!(
-                        self.new_block_hashes
-                            .send(inner.arena[i].block_header.hash()),
-                        "consensus receiver dropped"
-                    );
+                    self.send_to_consensus(inner, i);
                 }
             }
 
@@ -2747,6 +2843,7 @@ impl SynchronizationGraph {
                 // Send blocks in topological order.
                 let sorted_blocks = inner.topological_sort(all_block_indices);
                 for i in sorted_blocks {
+                    inner.arena[i].sent_to_consensus = true;
                     self.consensus
                         .on_new_block(&inner.arena[i].block_header.hash());
                 }

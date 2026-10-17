@@ -204,6 +204,7 @@ impl ConsensusNewBlockHandler {
                 inner.arena[me].data.force_confirm = new_era_block_arena_index;
             }
         }
+        let legacy_block_count = new_era_legacy_block_arena_index_set.len();
         // reassign the parent for outside era blocks
         for v in new_era_legacy_block_arena_index_set {
             let me = *v;
@@ -316,9 +317,13 @@ impl ConsensusNewBlockHandler {
         inner.cur_era_genesis_height = new_era_height;
         ERA_TRANSITIONS.inc(1);
         CUR_ERA_GENESIS_HEIGHT.update(new_era_height as usize);
+        // `legacy_blocks`: blocks kept in the arena but outside the new era
+        // genesis' subtree, now out-era (era_block = NULL); any child of one
+        // is inserted as an out-era stub. Normally a handful of forks.
         info!(
-            "era advanced: new_era_height={}, new_era_arena_index={}",
-            new_era_height, new_era_block_arena_index
+            "era advanced: new_era_height={}, new_era_arena_index={}, \
+             legacy_blocks={}",
+            new_era_height, new_era_block_arena_index, legacy_block_count
         );
 
         let cur_era_hash = inner.arena[new_era_block_arena_index].hash.clone();
@@ -1725,6 +1730,61 @@ impl ConsensusNewBlockHandler {
         );
     }
 
+    /// WARN (rate-limited) when a block is about to be inserted as an
+    /// out-era stub although its parent sits above the current era genesis.
+    /// That is either a legacy fork (a branch forked below the era genesis,
+    /// rare) or a block delivered before its parent / under a parent that
+    /// was wrongly turned into a stub -- the failure that freezes the pivot
+    /// for good, since every descendant is stubbed too. The first stub's
+    /// details are logged right away, the volume after it is summarised.
+    fn report_stub_above_era_genesis(
+        &self, inner: &ConsensusGraphInner, hash: &H256,
+        block_header: &primitives::BlockHeader, parent_index: Option<usize>,
+    ) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LAST_REPORT_SECS: AtomicU64 = AtomicU64::new(0);
+        static SUPPRESSED: AtomicU64 = AtomicU64::new(0);
+
+        let parent_hash = block_header.parent_hash();
+        let parent_height = match parent_index {
+            Some(i) => inner.arena[i].height,
+            None => match self.data_man.block_header_by_hash(parent_hash) {
+                Some(h) => h.height(),
+                None => return,
+            },
+        };
+        if parent_height <= inner.cur_era_genesis_height {
+            return;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let last = LAST_REPORT_SECS.load(Ordering::Relaxed);
+        if now < last + 60 {
+            SUPPRESSED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        LAST_REPORT_SECS.store(now, Ordering::Relaxed);
+        let suppressed = SUPPRESSED.swap(0, Ordering::Relaxed);
+        warn!(
+            "consensus: inserting block {:?} (height {}) as an out-era stub \
+             although its parent {:?} (height {}) is above the era genesis \
+             (height {}): parent {}. Every descendant will be stubbed too. \
+             {} similar stub(s) in the last minute.",
+            hash,
+            block_header.height(),
+            parent_hash,
+            parent_height,
+            inner.cur_era_genesis_height,
+            match parent_index {
+                None => "is not in consensus (delivered out of order?)",
+                Some(_) => "is itself an out-era stub/legacy block",
+            },
+            suppressed,
+        );
+    }
+
     /// The top level function invoked by ConsensusGraph to insert a new block.
     pub fn on_new_block(
         &self, inner: &mut ConsensusGraphInner, meter: &ConfirmationMeter,
@@ -1738,6 +1798,27 @@ impl ConsensusNewBlockHandler {
             "insert new block into consensus: header_only={:?} block={:?}",
             inner.header_only, &block_header
         );
+        // A block must enter the arena once. A second `inner.insert` for the
+        // same hash creates a shadow node and re-points
+        // `hash_to_arena_indices` at it; later children hang off the shadow
+        // and, once an era checkpoint lands on the original lineage, the
+        // shadow becomes out-era legacy and every later block is stubbed
+        // (m6, 2026-10-17). The sync graph delivers each block once
+        // (`SynchronizationGraph::send_to_consensus`); this is the backstop.
+        if let Some(&existing) = inner.hash_to_arena_indices.get(hash) {
+            if *hash != self.data_man.get_cur_consensus_era_genesis_hash() {
+                warn!(
+                    "consensus: ignoring duplicate delivery of block {:?} \
+                     (height {}): already in the arena at index {} \
+                     (out-era stub: {})",
+                    hash,
+                    block_header.height(),
+                    existing,
+                    inner.arena[existing].era_block == NULL,
+                );
+            }
+            return;
+        }
         let parent_hash = block_header.parent_hash();
         let parent_index = inner.hash_to_arena_indices.get(&parent_hash);
         let me = if parent_index.is_none()
@@ -1747,6 +1828,12 @@ impl ConsensusNewBlockHandler {
             debug!(
                 "parent={:?} not in consensus graph or not in the genesis subtree, inserted as an out-era block stub",
                 parent_hash
+            );
+            self.report_stub_above_era_genesis(
+                inner,
+                hash,
+                &block_header,
+                parent_index.copied(),
             );
             let block_status_in_db = self
                 .data_man

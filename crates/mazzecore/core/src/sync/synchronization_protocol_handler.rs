@@ -1121,8 +1121,8 @@ impl SynchronizationProtocolHandler {
                 );
             }
         }
-        let in_flight_blocks = self.request_manager.in_flight_blocks();
-        let to_request_blocks: Vec<_> = self
+        let mut in_flight_blocks = self.request_manager.in_flight_blocks();
+        let mut to_request_blocks: Vec<_> = self
             .graph
             .inner
             .read()
@@ -1130,6 +1130,35 @@ impl SynchronizationProtocolHandler {
             .difference(&in_flight_blocks)
             .copied()
             .collect();
+        // The window-full check above misses the tail of a body fill: when
+        // the last few hashes are all orphaned in flight (their peers were
+        // disconnected on request timeouts without `on_removed`), the window
+        // is nearly empty, nothing is left to request, and the stuck-frontier
+        // rescue is off while the graph is locked for catch-up. m6 sat in
+        // CatchUpFillBlockBody with missing_bodies = 10 and 0 requests for
+        // 30+ min (2026-10-17). Reconcile here too.
+        if to_request_blocks.is_empty()
+            && !self.graph.inner.read().block_to_fill_set.is_empty()
+        {
+            let cleared =
+                self.request_manager.reconcile_inflight_block_orphans();
+            if cleared > 0 {
+                warn!(
+                    "request_block_bodies: reconciled {} orphaned in-flight \
+                     block request(s) holding the last missing bodies",
+                    cleared
+                );
+                in_flight_blocks = self.request_manager.in_flight_blocks();
+                to_request_blocks = self
+                    .graph
+                    .inner
+                    .read()
+                    .block_to_fill_set
+                    .difference(&in_flight_blocks)
+                    .copied()
+                    .collect();
+            }
+        }
         let n_blocks_to_request = min(
             max_inflight.saturating_sub(in_flight_blocks.len()),
             to_request_blocks.len(),

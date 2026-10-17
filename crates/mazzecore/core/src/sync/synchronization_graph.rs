@@ -491,6 +491,10 @@ impl SynchronizationGraphInner {
             }
 
             self.old_era_blocks_frontier_set.remove(&index);
+            // Drop it from the not-ready frontier too: a GC'd index left there
+            // made every later frontier walk index a freed arena slot
+            // ("invalid key" panics in IO workers on a restarted m3).
+            self.not_ready_blocks_frontier.remove(&index);
             self.arena.remove(index);
             self.hash_to_arena_indices.remove(&hash);
             // Purge from the body-fill set too. Old-era GC used to drop the
@@ -2454,7 +2458,11 @@ impl SynchronizationGraph {
         let all_not_ready: HashSet<_> = inner.get_future(frontier);
         let mut expire_set = HashSet::new();
         for index in all_not_ready {
-            if inner.arena[index].last_update_timestamp + expire_time < now {
+            let ts = match inner.arena.get(index) {
+                Some(node) => node.last_update_timestamp,
+                None => continue,
+            };
+            if ts + expire_time < now {
                 expire_set.insert(index);
             }
         }
@@ -2523,7 +2531,10 @@ impl SynchronizationGraph {
             .collect();
 
         for index in frontier_snapshot {
-            let node = &inner.arena[index];
+            let node = match inner.arena.get(index) {
+                Some(node) => node,
+                None => continue,
+            };
 
             if node.parent == NULL
                 && !node.parent_reclaimed
@@ -2596,7 +2607,10 @@ impl SynchronizationGraph {
         // 1 not-ready frontier body present only on a forked peer.
         let mut stuck = Vec::new();
         for &idx in inner.not_ready_blocks_frontier.get_frontier().iter() {
-            let node = &inner.arena[idx];
+            let node = match inner.arena.get(idx) {
+                Some(node) => node,
+                None => continue,
+            };
             if !node.block_ready {
                 stuck.push(node.block_header.hash());
             }
@@ -2818,7 +2832,10 @@ impl SynchronizationGraph {
                 .iter()
                 .copied()
                 .filter(|&b| {
-                    inner.arena[b].graph_status == BLOCK_GRAPH_READY
+                    inner
+                        .arena
+                        .get(b)
+                        .map_or(false, |n| n.graph_status == BLOCK_GRAPH_READY)
                 })
                 .collect();
             if !stale.is_empty() {

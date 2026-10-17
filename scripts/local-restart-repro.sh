@@ -77,7 +77,7 @@ export MAZZE_RANDOMX_LIGHT_ONLY=1
 export MAZZE_SHIELDED_VK_HEX="${MAZZE_SHIELDED_VK_HEX:-$REPO_ROOT/run/shielded_vk.hex}"
 ulimit -n 200000 2>/dev/null || true
 
-port() { echo $((40000 + $1 * 100 + $2)); }   # port <node> <offset>
+port() { echo $((20000 + $1 * 100 + $2)); }   # port <node> <offset>; below the ephemeral range (32768+) so outgoing connections cannot steal a listen port
 rpc_port() { port "$1" 39; }
 ndir() { echo "$WORK/n$1"; }
 log() { echo "[$(date '+%H:%M:%S')] $*"; }

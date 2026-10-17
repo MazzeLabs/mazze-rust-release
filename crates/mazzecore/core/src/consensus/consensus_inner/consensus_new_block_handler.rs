@@ -1554,6 +1554,18 @@ impl ConsensusNewBlockHandler {
             }
         }
 
+        // `capped_fork_at` was computed before the stable height and the
+        // checkpoint moved above. In steady state they move one era at a
+        // time and the new era genesis stays below it, but during catch-up
+        // they can jump past it (two checkpoints in the same second on a
+        // restarted archive), and every height-indexed lookup below then
+        // underflowed `height - cur_era_genesis_height` ("attempt to subtract
+        // with overflow" in height_to_main_index, consensus worker panic).
+        // Re-apply the same cap against the updated stable height: epochs
+        // that just became stable need no reprocessing here.
+        let capped_fork_at =
+            max(inner.cur_era_stable_height + 1, capped_fork_at);
+
         // send updated main chain to pubsub
         let from = capped_fork_at;
         let to = inner.main_index_to_height(inner.main_chain.len());

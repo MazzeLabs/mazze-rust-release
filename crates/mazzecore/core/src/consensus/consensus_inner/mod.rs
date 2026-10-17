@@ -3659,6 +3659,16 @@ impl ConsensusGraphInner {
         //let state_boundary_height =
         //    self.data_man.state_availability_boundary.read().lower_bound;
         loop {
+            if cur == NULL {
+                // Walked past the era genesis without finding a block with a
+                // known state_valid; nothing further back can be computed.
+                warn!(
+                    "compute_state_valid_and_blame_info: no known state_valid \
+                     up to the era genesis for block {:?}",
+                    self.arena[me].hash
+                );
+                break;
+            }
             if self.arena[cur].data.state_valid.is_some() {
                 break;
             }
@@ -3788,10 +3798,22 @@ impl ConsensusGraphInner {
             }
         } else {
             if start_epoch_hash != self.data_man.true_genesis.hash() {
-                error!(
-                    "Fail to recover state_valid: start_epoch_hash={:?}",
+                // No block with an agreed state was found right above the
+                // start of the available state. The start block itself is
+                // the local checkpoint/snapshot whose state this node holds,
+                // so anchor `state_valid` there; otherwise every main block
+                // keeps `state_valid = None` and the parent walk in
+                // `compute_state_valid_and_blame_info` runs past the era
+                // genesis ("invalid key" panic on m3, 2026-10-17).
+                warn!(
+                    "Fail to recover state_valid: start_epoch_hash={:?}; \
+                     anchoring state_valid at the start of the available state",
                     start_epoch_hash
                 );
+                let start = self.main_chain[start_main_index];
+                if self.arena[start].data.state_valid.is_none() {
+                    self.arena[start].data.state_valid = Some(true);
+                }
             }
         }
     }

@@ -29,10 +29,11 @@ use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
 
 fn main() -> Result<(), String> {
-    // A panic in a consensus thread used to leave a zombie node: RPC and
-    // sync kept running, consensus silently stopped, and the node looked
-    // "stuck" (m2, 2026-10-10). Exit instead so it is obvious and can be
-    // restarted. Panics in other threads keep the default behaviour.
+    // A panic in a consensus or sync worker thread used to leave a zombie
+    // node: RPC kept answering while consensus or sync had silently stopped,
+    // and the node only looked "stuck" (m2 2026-10-10, m3 2026-10-17). Exit
+    // instead so it is obvious and can be restarted. Panics in other threads
+    // (RPC, mining, ...) keep the default behaviour.
     {
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
@@ -41,7 +42,14 @@ fn main() -> Result<(), String> {
                 .name()
                 .unwrap_or_default()
                 .to_string();
-            if name.starts_with("Consensus") {
+            // Consensus threads and the sync/network workers that drive
+            // phase changes and block processing: a panic there leaves a
+            // node that still answers RPC but no longer follows the chain
+            // (m3, 2026-10-17: IO workers panicked in CatchUpFillBlockBody).
+            if name.starts_with("Consensus")
+                || name.starts_with("IO Worker")
+                || name.starts_with("Socket IO Worker")
+            {
                 eprintln!(
                     "fatal: critical thread '{}' panicked; exiting node",
                     name

@@ -46,11 +46,6 @@ use unexpected::{Mismatch, OutOfBounds};
 lazy_static! {
     static ref POW_VERIFIED_METER: Arc<dyn Meter> =
         register_meter_with_group("pow", "verification_verified");
-    /// Bumped when `verify_pow()` returns `Ok(())` because catch-up
-    /// mode is enabled. Expected to fire during initial sync; an
-    /// elevated rate on a synced node indicates a stuck phase manager.
-    static ref POW_SKIPPED_CATCH_UP: Arc<dyn Meter> =
-        register_meter_with_group("pow", "verification_skipped_catch_up");
     /// Bumped when the RandomX seed for this block's epoch is not yet
     /// known (early-epoch case). Should only fire in the first
     /// `RANDOMX_EPOCH_LENGTH` blocks of a fresh chain.
@@ -369,14 +364,13 @@ impl VerificationConfig {
     pub fn verify_pow(
         &self, pow: &PowComputer, header: &mut BlockHeader, seed_hash: &H256,
     ) -> Result<(), Error> {
-        // PoW bypass A: catch-up mode (bulk sync). See
-        // docs/chain-model.md §3. Counter is intentional — operators
-        // can observe sync progress + spot stuck catch-up modes.
-        if self.catch_up_mode() {
-            POW_SKIPPED_CATCH_UP.mark(1);
-            return Ok(());
-        }
-
+        // Catch-up (bulk sync) no longer skips PoW: the headers come from
+        // untrusted peers -- for a fast-sync node rooted at a trusted
+        // checkpoint, PoW is what binds the header chain above it to the
+        // network (docs/fast-sync-design.md §5.17/§5.19). The hash is needed
+        // anyway: consensus classifies heavy/timer blocks by it, and it is
+        // cached in the header (`get_or_fill_header_pow_hash`), so verifying
+        // it here costs nothing extra.
         // PoW bypass B: zero seed hash. The RandomX seed for a block's
         // epoch lives at `block(RANDOMX_EPOCH_LENGTH * (N - 1))`. For
         // the first epoch no seed exists yet, so the validator can't
@@ -397,9 +391,8 @@ impl VerificationConfig {
             .into());
         }
 
-        let nonce = header.nonce();
-        let hash = pow.compute(&nonce, &header.problem_hash(), seed_hash);
-        let quality = pow::pow_hash_to_quality(&hash, &nonce);
+        let hash = Self::get_or_fill_header_pow_hash(pow, header, seed_hash);
+        let quality = pow::pow_hash_to_quality(&hash, &header.nonce());
         let boundary = pow::difficulty_to_boundary(&difficulty);
 
         if quality <= boundary {

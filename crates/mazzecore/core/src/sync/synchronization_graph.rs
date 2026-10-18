@@ -1863,6 +1863,22 @@ impl SynchronizationGraph {
             }
         }
 
+        // Compute the RandomX hash before taking the graph lock: it is the
+        // expensive part of verifying a header (and consensus reuses it), so
+        // IO workers inserting headers in parallel must not serialize on it.
+        if need_to_verify && header.pow_hash.is_none() && !self.is_consortium()
+        {
+            if let Some(seed) = self
+                .data_man
+                .db_manager
+                .try_get_current_seed_hash(header.height())
+            {
+                VerificationConfig::get_or_fill_header_pow_hash(
+                    &self.pow, header, &seed,
+                );
+            }
+        }
+
         let inner = &mut *self.inner.write();
         if inner.locked_for_catchup {
             // Ignore received headers when we are downloading block bodies.

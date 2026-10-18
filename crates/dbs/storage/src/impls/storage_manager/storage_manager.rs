@@ -2046,7 +2046,18 @@ impl StorageManager {
         // snapshot itself, and the executor then hit `.expect("State exists")`
         // at epoch 360,005 — killing the mining leader and halting the chain.
         // `snapshots` is sorted ascending by height, so the base = min height.
-        let base_height = snapshots.first().map(|s| s.height);
+        //
+        // The genesis snapshot (height 0) does not count as the base: a node
+        // that fast-synced from a trusted checkpoint keeps the genesis
+        // snapshot it started with below the restored snapshot, whose parent
+        // it never had. Counting genesis as the base deleted the restored
+        // snapshot and, by cascade, every later one on the first restart --
+        // all state gone (local fast-sync joiner, 2026-10-18).
+        let base_height = snapshots
+            .iter()
+            .map(|s| s.height)
+            .find(|h| *h > 0)
+            .or_else(|| snapshots.first().map(|s| s.height));
         for snapshot_info in snapshots.iter() {
             if Some(snapshot_info.height) == base_height {
                 // Base of the retention window: its pruned parent is expected;

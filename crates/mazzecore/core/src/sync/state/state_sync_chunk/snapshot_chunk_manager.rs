@@ -66,6 +66,9 @@ lazy_static! {
         );
 }
 
+/// Consecutive chunk timeouts after which a peer is no longer asked.
+const MAX_PEER_TIMEOUTS: usize = 3;
+
 pub struct SnapshotChunkManager {
     pub snapshot_candidate: SnapshotSyncCandidate,
     snapshot_info: SnapshotInfo,
@@ -74,6 +77,9 @@ pub struct SnapshotChunkManager {
     pending_chunks: VecDeque<ChunkKey>,
     downloading_chunks: HashMap<ChunkKey, DownloadingChunkStatus>,
     downloading_attempts: HashMap<ChunkKey, usize>,
+    /// Consecutive chunk-request timeouts per peer, reset by a delivered
+    /// chunk. A peer is dropped only after `MAX_PEER_TIMEOUTS` of them.
+    peer_timeouts: HashMap<NodeId, usize>,
     num_downloaded: usize,
     /// Wall-clock of the last forward progress (a chunk accepted into the
     /// restorer). Used to detect a wedged download — e.g. the manifest
@@ -162,6 +168,7 @@ impl SnapshotChunkManager {
             pending_chunks: chunks.into(),
             downloading_chunks: Default::default(),
             downloading_attempts: Default::default(),
+            peer_timeouts: Default::default(),
             num_downloaded: 0,
             last_progress: Instant::now(),
             config,
@@ -198,9 +205,21 @@ impl SnapshotChunkManager {
         // 1. received a out-of-date snapshot chunk, e.g. new era started.
         // 2. Chunks are received after timeout.
         if self.downloading_chunks.remove(&chunk_key).is_none() {
-            info!("Snapshot chunk received, but not in downloading queue, progess is {:?}", self);
-            return Ok(false);
+            // A chunk that timed out and went back to the queue is still
+            // wanted: a slow peer's late answer is as good as a re-request
+            // (dropping it made a slow serving node's chunks time out over
+            // and over until the candidate was abandoned).
+            match self.pending_chunks.iter().position(|k| *k == chunk_key) {
+                Some(pos) => {
+                    self.pending_chunks.remove(pos);
+                }
+                None => {
+                    info!("Snapshot chunk received, but not in downloading queue, progess is {:?}", self);
+                    return Ok(false);
+                }
+            }
         }
+        self.peer_timeouts.remove(&ctx.node_id);
 
         // D.1 — Fail-fast: verify the chunk's keccak256 content hash
         // against the manifest-committed expected hash before passing
@@ -293,17 +312,42 @@ impl SnapshotChunkManager {
         Some(chunk_key)
     }
 
-    /// Request multiple chunks from random peers.
+    /// Keep up to `max_downloading_chunks` chunk requests in flight, spread
+    /// evenly over the active peers. One request per peer at a time (the
+    /// former behaviour) left a single serving peer with one chunk in
+    /// flight, so the download ran at one chunk per round trip.
     fn request_chunks(&mut self, ctx: &Context) {
-        let chosen_peers = PeerFilter::new(msgid::GET_SNAPSHOT_CHUNK)
+        let peers = PeerFilter::new(msgid::GET_SNAPSHOT_CHUNK)
             .choose_from(&self.active_peers)
-            .select_n(
-                self.config.max_downloading_chunks
-                    - self.downloading_chunks.len(),
-                &ctx.manager.syn,
-            );
-        for peer in chosen_peers {
-            if self.request_chunk_from_peer(ctx, &peer).is_none() {
+            .select_all(&ctx.manager.syn);
+        if peers.is_empty() {
+            return;
+        }
+        let per_peer = (self.config.max_downloading_chunks + peers.len() - 1)
+            / peers.len();
+        let mut in_flight: HashMap<NodeId, usize> = HashMap::new();
+        for status in self.downloading_chunks.values() {
+            *in_flight.entry(status.peer).or_insert(0) += 1;
+        }
+        'fill: loop {
+            let mut requested = false;
+            for peer in &peers {
+                if self.downloading_chunks.len()
+                    >= self.config.max_downloading_chunks
+                {
+                    break 'fill;
+                }
+                let n = in_flight.entry(*peer).or_insert(0);
+                if *n >= per_peer {
+                    continue;
+                }
+                if self.request_chunk_from_peer(ctx, peer).is_none() {
+                    break 'fill;
+                }
+                *n += 1;
+                requested = true;
+            }
+            if !requested {
                 break;
             }
         }
@@ -312,10 +356,31 @@ impl SnapshotChunkManager {
     /// Remove timeout chunks and request new chunks.
     pub fn check_timeout(&mut self, ctx: &Context) -> bool {
         let mut timeout_chunks = Vec::new();
+        let mut timed_out_peers = HashSet::new();
         for (chunk_key, status) in &self.downloading_chunks {
             if status.start_time.elapsed() > self.config.chunk_request_timeout {
-                self.active_peers.remove(&status.peer);
+                timed_out_peers.insert(status.peer);
                 timeout_chunks.push(chunk_key.clone());
+            }
+        }
+        // A slow peer is not a dead one: drop it only after repeated
+        // timeouts, and never the last one (the candidate stall deadline
+        // in `SnapshotChunkSync::update_status` catches a dead download).
+        // Dropping on the first timeout emptied the active set of a
+        // candidate served by one or two nodes within a minute, so the FSM
+        // abandoned it and restarted from scratch on the next candidate
+        // (m6, 2026-10-18: "download = 18/3/26" then "current sync
+        // candidate becomes inactive", flipping between two anchors).
+        for peer in timed_out_peers {
+            let n = self.peer_timeouts.entry(peer).or_insert(0);
+            *n += 1;
+            if *n >= MAX_PEER_TIMEOUTS && self.active_peers.len() > 1 {
+                warn!(
+                    "snapshot chunk: dropping peer {:?} after {} consecutive \
+                     chunk timeouts",
+                    peer, n
+                );
+                self.active_peers.remove(&peer);
             }
         }
         for timeout_key in timeout_chunks {

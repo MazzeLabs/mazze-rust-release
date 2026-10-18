@@ -841,11 +841,24 @@ impl ConsensusNewBlockHandler {
             // joining). Only a known-invalid stable block constrains it.
             if inner.arena[stable_main_block].data.state_valid == Some(false)
             {
-                if inner.arena[stable_main_block]
+                // recover_state_valid marks blocks invalid from the header
+                // blames of a trusted block without filling blame_info; a
+                // fast-synced node never computes it for them (m6). The
+                // header blame is the same quantity.
+                let stable_blame = match inner.arena[stable_main_block]
                     .data
                     .blame_info
-                    .unwrap()
-                    .blame as u64
+                {
+                    Some(info) => info.blame as u64,
+                    None => self
+                        .data_man
+                        .block_header_by_hash(
+                            &inner.arena[stable_main_block].hash,
+                        )
+                        .map(|h| h.blame() as u64)
+                        .unwrap_or(0),
+                };
+                if stable_blame
                     + new_genesis_height
                     + DEFERRED_STATE_EPOCH_COUNT
                     >= inner.cur_era_stable_height

@@ -109,7 +109,7 @@ impl Restorer {
             )?;
 
         if let Some(parent_snapshot) = parent_snapshot {
-            storage_manager.register_new_snapshot(
+            storage_manager.register_restored_parent_snapshot(
                 parent_snapshot,
                 &mut snapshot_info_map_locked,
             )?;

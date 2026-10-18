@@ -1073,6 +1073,35 @@ impl StorageManager {
         self: &Arc<Self>, new_snapshot_info: SnapshotInfo,
         snapshot_info_map_locked: &mut PersistedSnapshotInfoMap,
     ) -> Result<()> {
+        self.register_new_snapshot_impl(
+            new_snapshot_info,
+            snapshot_info_map_locked,
+            true,
+        )
+    }
+
+    /// Register the parent of a snapshot restored by full-sync. The node
+    /// never had that parent's data or its own parent: the entry only
+    /// anchors the restored snapshot's delta chain. C.4 would reject it
+    /// for its missing grandparent, failing every fast-sync restore at the
+    /// last step (m6, 2026-10-18: 560000 restored, its parent 540000
+    /// rejected for parent 520000, retried in a loop).
+    pub fn register_restored_parent_snapshot(
+        self: &Arc<Self>, parent_snapshot_info: SnapshotInfo,
+        snapshot_info_map_locked: &mut PersistedSnapshotInfoMap,
+    ) -> Result<()> {
+        self.register_new_snapshot_impl(
+            parent_snapshot_info,
+            snapshot_info_map_locked,
+            false,
+        )
+    }
+
+    fn register_new_snapshot_impl(
+        self: &Arc<Self>, new_snapshot_info: SnapshotInfo,
+        snapshot_info_map_locked: &mut PersistedSnapshotInfoMap,
+        check_parent_linkage: bool,
+    ) -> Result<()> {
         debug!("register_new_snapshot: info={:?}", new_snapshot_info);
         let snapshot_epoch_id = new_snapshot_info.get_snapshot_epoch_id();
 
@@ -1115,7 +1144,8 @@ impl StorageManager {
         // and the snapshot can't be served to peers. Either parent
         // pruning raced ahead, or the producer mis-computed the parent
         // linkage. Either way, refuse the registration.
-        if new_snapshot_info.parent_snapshot_epoch_id != NULL_EPOCH
+        if check_parent_linkage
+            && new_snapshot_info.parent_snapshot_epoch_id != NULL_EPOCH
             && snapshot_info_map_locked
                 .get(&new_snapshot_info.parent_snapshot_epoch_id)
                 .is_none()

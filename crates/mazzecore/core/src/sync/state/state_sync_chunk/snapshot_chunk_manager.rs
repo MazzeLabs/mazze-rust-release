@@ -68,6 +68,10 @@ lazy_static! {
 
 /// Consecutive chunk timeouts after which a peer is no longer asked.
 const MAX_PEER_TIMEOUTS: usize = 3;
+/// Chunk requests kept in flight per serving peer. A chunk is up to
+/// 2 x chunk_size_byte read from the server's snapshot DB; more in parallel
+/// only slows a busy server down until every request times out.
+const MAX_CHUNKS_IN_FLIGHT_PER_PEER: usize = 4;
 
 pub struct SnapshotChunkManager {
     pub snapshot_candidate: SnapshotSyncCandidate,
@@ -313,9 +317,10 @@ impl SnapshotChunkManager {
     }
 
     /// Keep up to `max_downloading_chunks` chunk requests in flight, spread
-    /// evenly over the active peers. One request per peer at a time (the
-    /// former behaviour) left a single serving peer with one chunk in
-    /// flight, so the download ran at one chunk per round trip.
+    /// evenly over the active peers (at most MAX_CHUNKS_IN_FLIGHT_PER_PEER
+    /// each). One request per peer at a time (the former behaviour) left a
+    /// single serving peer with one chunk in flight, so the download ran
+    /// at one chunk per round trip.
     fn request_chunks(&mut self, ctx: &Context) {
         let peers = PeerFilter::new(msgid::GET_SNAPSHOT_CHUNK)
             .choose_from(&self.active_peers)
@@ -323,8 +328,9 @@ impl SnapshotChunkManager {
         if peers.is_empty() {
             return;
         }
-        let per_peer = (self.config.max_downloading_chunks + peers.len() - 1)
-            / peers.len();
+        let per_peer = ((self.config.max_downloading_chunks + peers.len() - 1)
+            / peers.len())
+        .min(MAX_CHUNKS_IN_FLIGHT_PER_PEER);
         let mut in_flight: HashMap<NodeId, usize> = HashMap::new();
         for status in self.downloading_chunks.values() {
             *in_flight.entry(status.peer).or_insert(0) += 1;

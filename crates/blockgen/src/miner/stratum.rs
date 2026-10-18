@@ -59,6 +59,20 @@ lazy_static! {
         CounterUsize::register_with_group("stratum", "shares_stale");
 }
 
+/// A share accepted by the stratum dispatcher, tagged with the `pow_hash`
+/// (`ProofOfWorkProblem::block_hash`) of the job it solves.
+///
+/// The nonce alone does not identify the job: at low difficulty a nonce that
+/// meets the boundary of the job the miner solved also meets the boundary of
+/// other jobs in the window with probability ~1/difficulty each, so matching
+/// by re-validating the nonce against the window picks the wrong (oldest)
+/// template most of the time. Blockgen matches on `pow_hash` instead.
+#[derive(Debug, Copy, Clone)]
+pub struct StratumSolution {
+    pub pow_hash: H256,
+    pub solution: ProofOfWorkSolution,
+}
+
 /// Configures stratum server options.
 #[derive(Debug, PartialEq, Clone)]
 pub struct Options {
@@ -132,7 +146,7 @@ impl fmt::Display for PayloadError {
 /// Job dispatcher for stratum service
 pub struct StratumJobDispatcher {
     recent_problems: Mutex<Vec<(ProofOfWorkProblem, HashSet<U256>)>>,
-    solution_sender: Mutex<mpsc::Sender<ProofOfWorkSolution>>,
+    solution_sender: Mutex<mpsc::Sender<StratumSolution>>,
     pow: Arc<PowComputer>,
     window_size: usize,
 }
@@ -212,7 +226,10 @@ impl JobDispatcher for StratumJobDispatcher {
                 ));
             }
 
-            match self.solution_sender.lock().send(sol) {
+            match self.solution_sender.lock().send(StratumSolution {
+                pow_hash: payload.pow_hash,
+                solution: sol,
+            }) {
                 Ok(_) => {}
                 Err(e) => {
                     warn!("{}", e);
@@ -227,7 +244,7 @@ impl JobDispatcher for StratumJobDispatcher {
 impl StratumJobDispatcher {
     /// New stratum job dispatcher given the miner and client
     fn new(
-        solution_sender: mpsc::Sender<ProofOfWorkSolution>,
+        solution_sender: mpsc::Sender<StratumSolution>,
         pow: Arc<PowComputer>, pow_window_size: usize,
     ) -> StratumJobDispatcher {
         StratumJobDispatcher {
@@ -320,7 +337,7 @@ impl Stratum {
     /// stratum service
     pub fn start(
         options: &Options, pow: Arc<PowComputer>, pow_window_size: usize,
-        solution_sender: mpsc::Sender<ProofOfWorkSolution>,
+        solution_sender: mpsc::Sender<StratumSolution>,
     ) -> Result<Stratum, Error> {
         use std::net::IpAddr;
 

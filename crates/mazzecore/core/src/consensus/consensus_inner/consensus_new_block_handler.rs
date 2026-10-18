@@ -835,7 +835,12 @@ impl ConsensusNewBlockHandler {
         if !inner.header_only && !self.conf.bench_mode {
             // Stable block must have a blame vector that does not stretch
             // beyond the new genesis
-            if !inner.arena[stable_main_block].data.state_valid.unwrap() {
+            // `None`: a fast-synced node assumes the blocks between its two
+            // trusted checkpoints valid without computing a verdict (m6,
+            // 2026-10-18: unwrap panicked at the first checkpoint after
+            // joining). Only a known-invalid stable block constrains it.
+            if inner.arena[stable_main_block].data.state_valid == Some(false)
+            {
                 if inner.arena[stable_main_block]
                     .data
                     .blame_info

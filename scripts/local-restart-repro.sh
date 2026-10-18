@@ -26,8 +26,17 @@
 #   scripts/local-restart-repro.sh replay           # redo only the restart
 #   scripts/local-restart-repro.sh status | timeline <n> | clean
 #   scripts/local-restart-repro.sh start-node <n> | stop-node <n>
+#   JOINERS=5 scripts/local-restart-repro.sh fastsync   # fast-sync joiner(s)
+#   JOINERS=6 scripts/local-restart-repro.sh pick-anchors && \
+#     JOINERS=6 scripts/local-restart-repro.sh start-node 6  # one more joiner
 #
 # Knobs (env):
+#   PORT_BASE=20000          node n listens on PORT_BASE + 100*n + offset
+#   JOINERS="5"              fresh nodes started with only trusted_checkpoints
+#                            ($WORK/anchors, see pick-anchors); JOINER_TYPE
+#                            (default full), JOINER_MINE (default 1)
+#   FS_EPOCHS=6*ERA          fastsync: chain length before the joiners start
+#   MDBX_SYNC_MODE=          e.g. safenosync / utterlynosync for a shared disk
 #   WORK=<dir>               data/log root (default run/local-repro)
 #   BIN=<path>               mazze binary (default target/release/mazze);
 #   BIN_<n>=<path>           per-node override, e.g. BIN_3=/tmp/old/mazze

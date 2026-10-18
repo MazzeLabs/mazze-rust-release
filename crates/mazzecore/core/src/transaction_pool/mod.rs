@@ -181,7 +181,6 @@ impl TransactionPool {
         config: TxPoolConfig, verification_config: VerificationConfig,
         data_man: Arc<BlockDataManager>, machine: Arc<Machine>,
     ) -> Self {
-        let genesis_hash = data_man.true_genesis.hash();
         let inner = TransactionPoolInner::new(
             config.capacity,
             config.max_packing_batch_gas_limit as usize,
@@ -191,12 +190,12 @@ impl TransactionPool {
         let best_executed_state = Mutex::new(
             Self::best_executed_state(
                 &data_man,
-                StateIndex::new_for_readonly(
-                    &genesis_hash,
-                    &data_man.true_genesis_state_root(),
+                data_man.initial_txpool_state_index().expect(
+                    "neither the genesis state nor the era genesis state \
+                     is available",
                 ),
             )
-            .expect("The genesis state is guaranteed to exist."),
+            .expect("The initial state is guaranteed to exist."),
         );
         TransactionPool {
             config,

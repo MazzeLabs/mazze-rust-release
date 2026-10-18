@@ -1466,17 +1466,22 @@ impl SynchronizationGraph {
         true
     }
 
-    /// Rebuild the in-memory graph rooted at the current consensus era
-    /// genesis, dropping every block in it. Used when a fast-sync node
-    /// re-anchors its (still empty) chain at a trusted checkpoint; the
-    /// headers above it are then synced again like after a restart.
-    pub fn reset_to_cur_era_genesis(&self) {
+    /// Run `switch` (which moves the consensus era genesis) and rebuild the
+    /// in-memory graph rooted at the new era genesis, dropping every block
+    /// in it, all under the graph lock so no reader sees an era genesis
+    /// that is not in the graph. Used when a fast-sync node re-roots its
+    /// (still empty) chain at a trusted checkpoint; the headers above it are
+    /// then synced again like after a restart.
+    pub fn reroot_at_era_genesis(
+        &self, switch: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let inner = &mut *self.inner.write();
+        switch()?;
         let genesis_hash = self.data_man.get_cur_consensus_era_genesis_hash();
         let genesis_header = self
             .data_man
             .block_header_by_hash(&genesis_hash)
-            .expect("era genesis header is persisted before re-rooting");
-        let inner = &mut *self.inner.write();
+            .ok_or("era genesis header missing")?;
         *inner = SynchronizationGraphInner::with_genesis_block(
             genesis_header,
             inner.pow_config.clone(),
@@ -1485,6 +1490,7 @@ impl SynchronizationGraph {
             self.data_man.clone(),
             inner.machine.clone(),
         );
+        Ok(())
     }
 
     /// Compute the expected difficulty for a block given its

@@ -342,17 +342,23 @@ impl FastSyncAnchorBootstrap {
                 data_man.get_instance_id(),
             ),
         );
-        data_man.set_cur_consensus_era_genesis_hash(
-            &hash,
-            &pair.stable.checkpoint_hash,
-            height,
-        );
-        if data_man.get_cur_consensus_era_genesis_hash() != hash {
-            return Err("the database refused the root checkpoint".into());
-        }
-        graph.consensus.reset();
-        graph.consensus.set_initial_sequence_number(ANCHOR_SEQ_NUM);
-        graph.reset_to_cur_era_genesis();
+        // Switch the era genesis, consensus and the sync graph together:
+        // IO workers look the era genesis up in the sync graph, and between
+        // the first step and the last one it would not be there (panic in
+        // get_genesis_in_current_era, local joiner 2026-10-18).
+        graph.reroot_at_era_genesis(|| {
+            data_man.set_cur_consensus_era_genesis_hash(
+                &hash,
+                &pair.stable.checkpoint_hash,
+                height,
+            );
+            if data_man.get_cur_consensus_era_genesis_hash() != hash {
+                return Err("the database refused the root checkpoint".into());
+            }
+            graph.consensus.reset();
+            graph.consensus.set_initial_sequence_number(ANCHOR_SEQ_NUM);
+            Ok(())
+        })?;
         *graph.fast_sync_anchor.lock() = None;
         info!(
             "fast-sync anchor: consensus rooted at checkpoint height={} \

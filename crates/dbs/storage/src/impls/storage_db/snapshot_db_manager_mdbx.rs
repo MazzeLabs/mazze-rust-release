@@ -1036,6 +1036,26 @@ impl SnapshotDbManagerTrait for SnapshotDbManagerMdbx {
         if !self.snapshot_has_any_data(snapshot_epoch_id)? {
             return Ok(None);
         }
+        // A snapshot whose merge is still running has data but is not a
+        // snapshot yet. Reporting it present made
+        // `StorageManager::wait_for_snapshot` skip joining the in-progress
+        // merge, so the next epoch's state found no snapshot info, the
+        // executor gave up after 8 x 50 ms and skipped the epoch -- and
+        // every later one ("Consensus state init failed, skipping epoch"),
+        // whenever a merge took longer than the executor needed to reach
+        // the next snapshot boundary (local cluster on a busy disk: merges
+        // of 3-15 min vs a 400-epoch period). The paritydb/sqlite backends
+        // returned None here because the snapshot did not exist until the
+        // merge renamed it into place.
+        if matches!(
+            self.read_marker(snapshot_epoch_id)?,
+            Some(MergeMarker {
+                kind: MergeMarkerKind::Merge,
+                ..
+            })
+        ) {
+            return Ok(None);
+        }
         // Fast-path check the in-memory set — if the snapshot
         // is known and has data, hand out a handle.
         self.acquire_open_permit(try_open)?;

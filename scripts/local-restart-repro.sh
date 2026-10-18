@@ -72,18 +72,21 @@ CLONE="${CLONE:-}"
 STAY_S="${STAY_S:-300}"
 AUTHOR="mazze:aamzbekyhkk2ag8rzwvyetyecrvncyg0hjpw84k5yr"
 PERMANENT="1 2 4"
+JOINERS="${JOINERS:-}"
 
 export MAZZE_RANDOMX_LIGHT_ONLY=1
 export MAZZE_SHIELDED_VK_HEX="${MAZZE_SHIELDED_VK_HEX:-$REPO_ROOT/run/shielded_vk.hex}"
 ulimit -n 200000 2>/dev/null || true
 
-port() { echo $((20000 + $1 * 100 + $2)); }   # port <node> <offset>; below the ephemeral range (32768+) so outgoing connections cannot steal a listen port
+PORT_BASE="${PORT_BASE:-20000}"
+port() { echo $((PORT_BASE + $1 * 100 + $2)); }   # port <node> <offset>; below the ephemeral range (32768+) so outgoing connections cannot steal a listen port
 rpc_port() { port "$1" 39; }
 ndir() { echo "$WORK/n$1"; }
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 is_archive() { [[ " $ARCHIVES $EARLY_ARCHIVES " == *" $1 "* ]]; }
+is_joiner() { [[ " $JOINERS " == *" $1 "* ]]; }
 bin_of() { local v="BIN_$1"; echo "${!v:-$BIN}"; }
-all_nodes() { echo "$PERMANENT $ARCHIVES $EARLY_ARCHIVES"; }
+all_nodes() { echo "$PERMANENT $ARCHIVES $EARLY_ARCHIVES $JOINERS"; }
 
 rpc() { # rpc <node> <method> [params-json]
   curl -s -m 5 -H 'Content-Type: application/json' \
@@ -165,6 +168,13 @@ write_conf() { # write_conf <node> <bootnodes>
   set_kv log_conf "\"$d/log.yaml\""
   set_kv max_outgoing_peers 6
   set_kv mdbx_map_size_mb 16384
+  # MDBX_SYNC_MODE=safenosync: no fsync per commit. On a disk shared with
+  # other clusters, durable commits made a tiny snapshot merge take ~9 min,
+  # longer than a 500-epoch snapshot period: the executor then skipped
+  # epochs ('Consensus state init failed, skipping epoch') and halted.
+  if [[ -n "${MDBX_SYNC_MODE:-}" ]]; then
+    set_kv mdbx_sync_mode "\"$MDBX_SYNC_MODE\""
+  fi
   # On restart the genesis is looked up by block number. With
   # persist_block_number_index=false (run/hydra.toml) it is not found, and
   # with execute_genesis=false (required once chain data exists) the node
@@ -176,7 +186,17 @@ write_conf() { # write_conf <node> <bootnodes>
   else
     set_kv execute_genesis true
   fi
-  if is_archive "$i"; then
+  if is_joiner "$i"; then
+    # Fresh fast-sync joiner: nothing but the trusted checkpoints.
+    set_kv node_type "\"${JOINER_TYPE:-full}\""
+    set_kv trusted_checkpoints "\"$(cat "$WORK/anchors")\""
+    if [[ "${JOINER_MINE:-1}" == 1 ]]; then
+      set_kv mining_type '"cpu"'
+      set_kv mining_author "\"$AUTHOR\""
+    else
+      set_kv mining_type '"disable"'
+    fi
+  elif is_archive "$i"; then
     set_kv node_type '"archive"'
     set_kv mining_type '"disable"'
   elif [[ "$i" == 4 ]]; then
@@ -202,7 +222,7 @@ start_node() { # start_node <node>
   [[ "$i" != 1 && -z "$boot" ]] && { echo "no bootnode ids yet; start n1 first" >&2; exit 1; }
   write_conf "$i" "$boot"
   echo "------- start $(date '+%F %T') bin=$(bin_of "$i") -------" | tee -a "$d/stdout.log" >> "$d/mazze.log"
-  (cd "$d" && nohup "$(bin_of "$i")" --config "$d/hydra.toml" >> "$d/stdout.log" 2>&1 &)
+  (cd "$d" && setsid nohup "$(bin_of "$i")" --config "$d/hydra.toml" >> "$d/stdout.log" 2>&1 &)
   local n_starts; n_starts="$(grep -c -- '------- start' "$d/mazze.log" || true)"
   for _ in $(seq 1 120); do
     sleep 1
@@ -341,6 +361,58 @@ run() {
   return $rc
 }
 
+status_field() { # status_field <node> <camelCaseField>: first numeric hit
+  local v; v="$(rpc "$1" mazze_getStatus | grep -oE "\"$2\":\"0x[0-9a-f]+\"" | head -1 | grep -oE '0x[0-9a-f]+' || true)"
+  [[ -n "$v" ]] && echo $((v)) || echo -1
+}
+main_block() { # main_block <node> <epoch>: "<hash> <blockNumber>"
+  local r; r="$(rpc "$1" mazze_getBlockByEpochNumber "[\"$(printf '0x%x' "$2")\",false]")"
+  echo "$(grep -oE '"hash":"0x[0-9a-f]{64}"' <<<"$r" | head -1 | grep -oE '0x[0-9a-f]{64}')" \
+    "$(( $(grep -oE '"blockNumber":"0x[0-9a-f]+"' <<<"$r" | head -1 | grep -oE '0x[0-9a-f]+') ))"
+}
+
+# Write $WORK/anchors from archive n3, the way an operator harvests them:
+# the newest era checkpoint the network has made (latestCheckpoint) and the
+# era before it, each "height:hash:blockNumber". ANCHOR_FORMAT=legacy writes
+# the old "height:hash:blame_height:blame_hash" form (blame = height + ERA +
+# BLAME_MARGIN) for binaries before the consensus-anchored fast sync.
+pick_anchors() {
+  local cp list="" k a="${ARCHIVES%% *}"
+  cp="$(status_field "$a" latestCheckpoint)"
+  for k in 0 1 2; do
+    local c=$(( cp / ERA * ERA - k * ERA )) hash bn b bhash
+    (( c <= 0 )) && continue
+    read -r hash bn <<<"$(main_block "$a" "$c")"
+    if [[ "${ANCHOR_FORMAT:-}" == legacy ]]; then
+      b=$(( c + ERA + ${BLAME_MARGIN:-100} ))
+      read -r bhash _ <<<"$(main_block "$a" "$b")"
+      list="${list:+$list,}$c:$hash:$b:$bhash"
+    else
+      list="${list:+$list,}$c:$hash:$bn"
+    fi
+  done
+  echo "$list" > "$WORK/anchors"
+  log "anchors (checkpoint $cp): $list"
+}
+
+# Fast-sync scenario: a chain of FS_EPOCHS epochs served by archive n3,
+# then fresh joiners ($JOINERS) with only trusted_checkpoints must reach
+# Normal, follow the tip and (by default) mine.
+fastsync() {
+  mkdir -p "$WORK"
+  local i
+  for i in $PERMANENT; do alive "$i" || start_node "$i"; done
+  wait_epoch 1 50
+  for i in $ARCHIVES; do alive "$i" || start_node "$i"; done
+  wait_epoch "${ARCHIVES%% *}" "${FS_EPOCHS:-$(( ERA * 6 ))}"
+  [[ -s "$WORK/anchors" && "${REPICK:-1}" == 0 ]] || pick_anchors
+  for i in $JOINERS; do
+    stop_node "$i"; rm -rf "$(ndir "$i")"; mkdir -p "$(ndir "$i")"
+    start_node "$i"
+  done
+  check_archives $JOINERS
+}
+
 # Re-run only the restart step from the DB copies `run` saved right before
 # it restarted the archives (data.pre-restart), e.g. with a new binary.
 # Honours FREEZE (miners must be stopped again; the chain must not have
@@ -360,14 +432,16 @@ replay() {
 
 case "${1:-run}" in
   run) run ;;
+  fastsync) fastsync ;;
+  pick-anchors) pick_anchors ;;
   replay) replay ;;
   start) for i in $PERMANENT $ARCHIVES $EARLY_ARCHIVES; do start_node "$i"; done ;;
-  stop) for i in $EARLY_ARCHIVES $ARCHIVES 4 2 1; do stop_node "$i"; done ;;
+  stop) for i in $JOINERS $EARLY_ARCHIVES $ARCHIVES 4 2 1; do stop_node "$i"; done ;;
   start-node) start_node "$2" ;;
   restart-node) restart_archive "$2" ;;
   stop-node) stop_node "$2" ;;
   status) status ;;
   timeline) timeline "${2:-3}" "${3:-40}" ;;
-  clean) for i in $EARLY_ARCHIVES $ARCHIVES 4 2 1; do stop_node "$i"; done; rm -rf "$WORK" ;;
+  clean) for i in $JOINERS $EARLY_ARCHIVES $ARCHIVES 4 2 1; do stop_node "$i"; done; rm -rf "$WORK" ;;
   *) sed -n 2,44p "$0"; exit 1 ;;
 esac

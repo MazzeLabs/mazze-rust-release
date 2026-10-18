@@ -122,10 +122,16 @@ fn enumerate_forward_candidates(
     let mut height = primary_height.saturating_add(snapshot_epoch_count);
     let mut steps_remaining = D2_FORWARD_CANDIDATE_WINDOW;
     while steps_remaining > 0 {
-        // Trusted-blame headroom: the candidate must be at least one
-        // snapshot cadence below the chain tip we've already seen so
-        // we have a stable blame block to anchor against.
-        if height + snapshot_epoch_count > best_height {
+        // Trusted-blame headroom: validating a snapshot needs a trusted
+        // blame block `snapshot_blame_plus_depth` epochs above it (plus the
+        // deferred-state lag), which our header chain must already reach;
+        // the same margin `catch_up_completed` demands for the primary.
+        if height
+            + data_man.get_snapshot_blame_plus_depth() as u64
+            + mazze_parameters::consensus::DEFERRED_STATE_EPOCH_COUNT
+            + 10
+            > best_height
+        {
             break;
         }
         if let Ok(hash) = sync_handler
@@ -849,7 +855,17 @@ impl SnapshotChunkSync {
                             );
                         }
                         None => {
-                            error!("failed to start checkpoint sync, the trusted blame block is unavailable, epoch_to_sync={:?}", epoch_to_sync);
+                            // Retrying the same candidate never succeeds
+                            // (headers are not synced in this phase): try the
+                            // next one; with none left the status turns
+                            // Inactive and the candidates are re-enumerated.
+                            error!(
+                                "failed to start checkpoint sync, the trusted \
+                                 blame block is unavailable for candidate {:?} \
+                                 (epoch_to_sync={:?}); trying the next candidate",
+                                sync_candidate, epoch_to_sync
+                            );
+                            inner.sync_candidate_manager.set_active_candidate();
                         }
                     }
                 } else {

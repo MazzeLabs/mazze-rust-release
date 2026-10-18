@@ -2681,8 +2681,20 @@ impl ConsensusGraphTrait for ConsensusGraph {
             + self.data_man.get_snapshot_blame_plus_depth() as u64
             + DEFERRED_STATE_EPOCH_COUNT
             + 10;
+        // Without local state for the target the blame block is required,
+        // whatever the peers' median: when the peers themselves are below it
+        // (a young chain, or every node pausing for a snapshot merge) the
+        // target cannot be validated yet, and CatchUpCheckpoint, which syncs
+        // no headers, would wedge on "trusted blame block is unavailable"
+        // (local fast-sync joiner, 2026-10-18: peers paused at 2805, target
+        // 2400 needed headers to 2816).
+        let target_has_state = epoch_to_sync == self.data_man.true_genesis.hash()
+            || self
+                .data_man
+                .get_epoch_execution_commitment_with_db(&epoch_to_sync)
+                .is_some();
         if self.best_epoch_number() < blame_cover
-            && blame_cover <= peer_median_epoch
+            && (blame_cover <= peer_median_epoch || !target_has_state)
         {
             return false;
         }

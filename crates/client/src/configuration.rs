@@ -570,6 +570,27 @@ impl Configuration {
                     cp.blame_height, cp.checkpoint_height
                 ));
             }
+            // The manifest validator indexes the blame block's state-root
+            // vector at `blame - (checkpoint + DEFERRED_STATE_EPOCH_COUNT)
+            // - (snapshot_epoch_count + 1)`; a closer blame block cannot prove the
+            // checkpoint (m6, 2026-10-18: blame 2100 above with
+            // snapshot_epoch_count = 20000 underflowed and killed the node).
+            let min_blame_height = cp.checkpoint_height
+                + r.snapshot_epoch_count as u64
+                + DEFERRED_STATE_EPOCH_COUNT
+                + 1;
+            if cp.blame_height < min_blame_height {
+                return Err(format!(
+                    "trusted blame height ({}) is too close to the checkpoint \
+                     ({}): it must be at least checkpoint + \
+                     snapshot_epoch_count ({}) + {} + 1 = {}.",
+                    cp.blame_height,
+                    cp.checkpoint_height,
+                    r.snapshot_epoch_count,
+                    DEFERRED_STATE_EPOCH_COUNT,
+                    min_blame_height
+                ));
+            }
         }
 
         // De-duplicate by checkpoint hash (keep first occurrence), then
@@ -1811,7 +1832,7 @@ mod tests {
 
         // Parser: two valid era-aligned entries (order as written).
         let list =
-            format!("20000:{}:20100:{} , 40000:{}:40100:{}", h1, b1, h2, b2);
+            format!("20000:{}:22100:{} , 40000:{}:42100:{}", h1, b1, h2, b2);
         let parsed = parse_trusted_checkpoints_list(&list).unwrap();
         assert_eq!(parsed.len(), 2);
 
@@ -1826,7 +1847,7 @@ mod tests {
 
         // De-dup by checkpoint hash (same hash listed twice → one entry).
         let dup = parse_trusted_checkpoints_list(&format!(
-            "20000:{}:20100:{},20000:{}:20100:{}",
+            "20000:{}:22100:{},20000:{}:22100:{}",
             h1, b1, h1, b1
         ))
         .unwrap();
@@ -1857,6 +1878,19 @@ mod tests {
         conf3.raw_conf.trusted_checkpoints = bad2;
         assert!(conf3.assemble_trusted_checkpoints().is_err());
 
+        // A blame block closer than snapshot_epoch_count +
+        // DEFERRED_STATE_EPOCH_COUNT + 1 cannot prove the checkpoint.
+        let close = parse_trusted_checkpoints_list(&format!(
+            "20000:{}:20100:{}",
+            h1, b1
+        ))
+        .unwrap();
+        let mut conf5 = Configuration::default();
+        conf5.raw_conf.era_epoch_count = 20000;
+        conf5.raw_conf.snapshot_epoch_count = 2000;
+        conf5.raw_conf.trusted_checkpoints = close;
+        assert!(conf5.assemble_trusted_checkpoints().is_err());
+
         // Legacy scalars are all-or-nothing (1/4 set → error).
         let mut conf4 = Configuration::default();
         conf4.raw_conf.era_epoch_count = 20000;
@@ -1868,7 +1902,7 @@ mod tests {
         conf5.raw_conf.era_epoch_count = 20000;
         conf5.raw_conf.trusted_checkpoint_height = Some(20000);
         conf5.raw_conf.trusted_checkpoint_hash = Some(h1.to_string());
-        conf5.raw_conf.trusted_blame_height = Some(20100);
+        conf5.raw_conf.trusted_blame_height = Some(22100);
         conf5.raw_conf.trusted_blame_hash = Some(b1.to_string());
         let merged = conf5.assemble_trusted_checkpoints().unwrap();
         assert_eq!(merged.len(), 1);

@@ -601,6 +601,23 @@ impl SnapshotManifestManager {
             warn!("validate_blame_states: not enough state_root");
             return None;
         }
+        // The snapshot's merkle root is read `blame_plus_depth` entries
+        // below `offset` (see the returned SnapshotInfo); a blame block too
+        // close to the snapshot cannot prove it.
+        let blame_plus_depth =
+            ctx.manager.graph.data_man.get_snapshot_blame_plus_depth();
+        if offset < blame_plus_depth {
+            warn!(
+                "validate_blame_states: trusted blame block {:?} at height {} \
+                 is too close to snapshot height {}: need at least {} epochs \
+                 above it",
+                trusted_blame_block.hash(),
+                trusted_blame_block.height(),
+                snapshot_block_header.height(),
+                blame_plus_depth as u64 + DEFERRED_STATE_EPOCH_COUNT,
+            );
+            return None;
+        }
 
         let min_vec_len = if snapshot_block_header.height() == 0 {
             trusted_blame_block.height()

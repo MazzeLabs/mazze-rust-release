@@ -24,6 +24,65 @@ fn test_empty_genesis_block() {
         .unwrap();
 }
 
+/// Re-committing an epoch whose state is already committed must keep the
+/// committed state and report its root, also when the re-execution produced
+/// a different state (it used to `assert_eq!` and abort the node:
+/// construct_main_state's forced recompute after a restart, m3/m6
+/// 2026-10-18).
+#[test]
+fn test_recommit_with_different_state_keeps_committed_root() {
+    let state_manager = new_state_manager_for_unit_test();
+    let mut genesis_epoch_id = H256::default();
+    genesis_epoch_id.as_bytes_mut()[0] = 1;
+    {
+        let mut genesis_state = state_manager.get_state_for_genesis_write();
+        genesis_state.compute_state_root().unwrap();
+        genesis_state.commit(genesis_epoch_id).unwrap();
+    }
+    let mut epoch_id = H256::default();
+    epoch_id.as_bytes_mut()[0] = 2;
+    let execute = |value: &[u8]| {
+        let mut state = state_manager
+            .get_state_for_next_epoch(
+                StateIndex::new_for_test_only_delta_mpt(&genesis_epoch_id),
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        state
+            .set(
+                StorageKey::AccountKey(b"reward-recipient").with_native_space(),
+                value.into(),
+            )
+            .unwrap();
+        let computed = state.compute_state_root().unwrap();
+        (computed, state.commit(epoch_id).unwrap())
+    };
+    let (_, first) = execute(b"reward 1");
+    // Same execution again: the committed root, as before.
+    let (_, same) = execute(b"reward 1");
+    assert_eq!(same, first);
+    // A different result: no panic, the committed state is kept.
+    let (computed, again) = execute(b"reward 2");
+    assert_ne!(computed, first);
+    assert_eq!(again, first);
+    let state = state_manager
+        .get_state_no_commit(
+            StateIndex::new_for_test_only_delta_mpt(&epoch_id),
+            false,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        &*state
+            .get(StorageKey::AccountKey(b"reward-recipient").with_native_space())
+            .unwrap()
+            .unwrap(),
+        b"reward 1"
+    );
+}
+
 #[test]
 fn test_set_get() {
     let mut rng = get_rng_for_test();

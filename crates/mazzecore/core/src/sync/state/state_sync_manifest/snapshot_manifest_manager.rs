@@ -26,7 +26,8 @@ use mazze_storage::{
 use mazze_types::H256;
 use network::node_table::NodeId;
 use primitives::{
-    BlockHeaderBuilder, BlockReceipts, EpochId, EpochNumber, StateRoot,
+    BlockHeader, BlockHeaderBuilder, BlockReceipts, EpochId, EpochNumber,
+    StateRoot,
     StorageKey, StorageKeyWithSpace, NULL_EPOCH,
 };
 use rand::{seq::SliceRandom, thread_rng};
@@ -198,6 +199,45 @@ impl SnapshotManifestManager {
                  server is Byzantine)"
                     .into(),
             ));
+        }
+
+        // Bind the server's blame vectors -- and through them the snapshot
+        // merkle root the chunks are checked against -- to our own header
+        // chain whenever we have it, exactly as the V4 path does. A node
+        // that synced headers above its fast-sync root (§5.19) always has
+        // it; trusting the server's vectors there let one peer substitute
+        // any self-consistent snapshot.
+        let snapshot_epoch_id = *self.snapshot_candidate.get_snapshot_epoch_id();
+        let data_man = &ctx.manager.graph.data_man;
+        if data_man.block_header_by_hash(&snapshot_epoch_id).is_some()
+            && data_man.block_header_by_hash(&self.trusted_blame_block).is_some()
+        {
+            let depth = data_man.get_snapshot_blame_plus_depth();
+            let verified = Self::verify_blame_vectors(
+                ctx,
+                &snapshot_epoch_id,
+                &self.trusted_blame_block,
+                &response.state_root_vec,
+                &response.receipt_blame_vec,
+                &response.bloom_blame_vec,
+            )
+            .filter(|(offset, _)| *offset == blame_vec_offset)
+            .and_then(|(offset, _)| offset.checked_sub(depth))
+            .and_then(|i| response.state_root_vec.get(i))
+            .map_or(false, |root| root.snapshot_root == snapshot_info.merkle_root);
+            if !verified {
+                warn!(
+                    "V5 manifest for {:?}: blame vectors / snapshot merkle \
+                     root do not match our header chain (trusted blame \
+                     block {:?}); re-sync from another peer",
+                    snapshot_epoch_id, self.trusted_blame_block
+                );
+                self.resync_manifest(ctx);
+                bail!(ErrorKind::InvalidSnapshotManifest(
+                    "V5: blame vectors do not match the local header chain"
+                        .into(),
+                ));
+            }
         }
 
         // Reconstruct the per-epoch receipts list. V4's
@@ -535,16 +575,19 @@ impl SnapshotManifestManager {
         self.active_peers.is_empty()
     }
 
-    pub fn validate_blame_states(
+    /// Check the blame vectors of a manifest against our own header chain:
+    /// walk parents down from the trusted blame block and recompute the
+    /// deferred state/receipts/bloom roots its (and its trusted ancestors')
+    /// headers commit to. Header-only: needs the headers from
+    /// `REWARD_EPOCH_COUNT` epochs below the snapshot up to the blame
+    /// block, no consensus state. Returns the snapshot's offset in the
+    /// vectors and its header, or `None` if a header is missing or a root
+    /// does not match.
+    pub fn verify_blame_vectors(
         ctx: &Context, snapshot_epoch_id: &H256, trusted_blame_block: &H256,
         state_root_vec: &Vec<StateRoot>, receipt_blame_vec: &Vec<H256>,
         bloom_blame_vec: &Vec<H256>,
-    ) -> Option<(
-        usize,
-        StateRootWithAuxInfo,
-        SnapshotInfo,
-        Option<SnapshotInfo>,
-    )> {
+    ) -> Option<(usize, Arc<BlockHeader>)> {
         let mut state_blame_vec = vec![];
 
         // Normally these headers exist locally because we header-synced
@@ -645,7 +688,7 @@ impl SnapshotManifestManager {
                 .graph
                 .data_man
                 .block_header_by_hash(&block_hash)
-                .expect("block header must exist");
+                ?;
             // We've jump to another trusted block.
             if block.height() + blame_count as u64 + 1 == trusted_block_height {
                 trusted_block_height = block.height();
@@ -718,6 +761,28 @@ impl SnapshotManifestManager {
             }
             slice_begin = slice_end;
         }
+
+        Some((offset, snapshot_block_header))
+    }
+
+    pub fn validate_blame_states(
+        ctx: &Context, snapshot_epoch_id: &H256, trusted_blame_block: &H256,
+        state_root_vec: &Vec<StateRoot>, receipt_blame_vec: &Vec<H256>,
+        bloom_blame_vec: &Vec<H256>,
+    ) -> Option<(
+        usize,
+        StateRootWithAuxInfo,
+        SnapshotInfo,
+        Option<SnapshotInfo>,
+    )> {
+        let (offset, snapshot_block_header) = Self::verify_blame_vectors(
+            ctx,
+            snapshot_epoch_id,
+            trusted_blame_block,
+            state_root_vec,
+            receipt_blame_vec,
+            bloom_blame_vec,
+        )?;
 
         let snapshot_epoch_count =
             ctx.manager.graph.data_man.get_snapshot_epoch_count();

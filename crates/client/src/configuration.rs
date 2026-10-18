@@ -347,6 +347,7 @@ build_config! {
         (trusted_checkpoint_hash, (Option<String>), None)
         (trusted_blame_height, (Option<u64>), None)
         (trusted_blame_hash, (Option<String>), None)
+        (trusted_checkpoint_block_number, (Option<u64>), None)
         (target_difficulties_cache_size_in_count, (usize), DEFAULT_TARGET_DIFFICULTIES_CACHE_SIZE_IN_COUNT)
 
         // General/Unclassified section.
@@ -427,7 +428,10 @@ build_config! {
             vec![ProvideExtraSnapshotSyncConfig::StableCheckpoint],
             ProvideExtraSnapshotSyncConfig::parse_config_list)
         // Comma-separated list of fast-sync era checkpoints, each
-        // "checkpoint_height:checkpoint_hash:blame_height:blame_hash".
+        // "checkpoint_height:checkpoint_hash:block_number" or (legacy, with
+        // a blame anchor) "checkpoint_height:checkpoint_hash:blame_height:
+        // blame_hash:block_number"; block_number is the checkpoint block's
+        // `blockNumber` from mazze_getBlockByHash.
         // Listing several era checkpoints (e.g. the current + previous era
         // genesis) lets a fresh node fast-sync to whichever one peers still
         // serve, so a single stale anchor can't wedge the join.
@@ -516,23 +520,28 @@ impl Configuration {
             r.trusted_checkpoint_hash.is_some(),
             r.trusted_blame_height.is_some(),
             r.trusted_blame_hash.is_some(),
+            r.trusted_checkpoint_block_number.is_some(),
         ];
         let n_set = scalars.iter().filter(|x| **x).count();
-        if n_set != 0 && n_set != 4 {
+        if n_set != 0 && n_set != 5 {
             return Err(format!(
-                "trusted-checkpoint config is all-or-nothing: set all four of \
+                "trusted-checkpoint config is all-or-nothing: set all five of \
                  trusted_checkpoint_height / trusted_checkpoint_hash / \
-                 trusted_blame_height / trusted_blame_hash, or none, or use \
-                 the `trusted_checkpoints` list instead. (got {}/4)",
+                 trusted_blame_height / trusted_blame_hash / \
+                 trusted_checkpoint_block_number, or none, or use the \
+                 `trusted_checkpoints` list instead. (got {}/5)",
                 n_set
             ));
         }
-        if n_set == 4 {
+        if n_set == 5 {
             out.push(parse_trusted_checkpoint_parts(
                 r.trusted_checkpoint_height.unwrap(),
                 r.trusted_checkpoint_hash.as_ref().unwrap(),
-                r.trusted_blame_height.unwrap(),
-                r.trusted_blame_hash.as_ref().unwrap(),
+                Some((
+                    r.trusted_blame_height.unwrap(),
+                    r.trusted_blame_hash.as_ref().unwrap().as_str(),
+                )),
+                r.trusted_checkpoint_block_number.unwrap(),
             )?);
         }
 
@@ -562,12 +571,23 @@ impl Configuration {
                     (cp.checkpoint_height / era + 1) * era,
                 ));
             }
-            if cp.blame_height <= cp.checkpoint_height {
+            if cp.checkpoint_height == 0 {
+                return Err(
+                    "trusted checkpoint height 0 is the genesis; list a \
+                     later era checkpoint"
+                        .into(),
+                );
+            }
+            let blame_height = match cp.blame {
+                None => continue,
+                Some((h, _)) => h,
+            };
+            if blame_height <= cp.checkpoint_height {
                 return Err(format!(
                     "trusted blame height ({}) must be ABOVE the checkpoint \
                      height ({}): the blame anchor proves the checkpoint's \
                      state root and must sit a few hundred epochs higher.",
-                    cp.blame_height, cp.checkpoint_height
+                    blame_height, cp.checkpoint_height
                 ));
             }
             // The manifest validator indexes the blame block's state-root
@@ -579,12 +599,12 @@ impl Configuration {
                 + r.snapshot_epoch_count as u64
                 + DEFERRED_STATE_EPOCH_COUNT
                 + 1;
-            if cp.blame_height < min_blame_height {
+            if blame_height < min_blame_height {
                 return Err(format!(
                     "trusted blame height ({}) is too close to the checkpoint \
                      ({}): it must be at least checkpoint + \
                      snapshot_epoch_count ({}) + {} + 1 = {}.",
-                    cp.blame_height,
+                    blame_height,
                     cp.checkpoint_height,
                     r.snapshot_epoch_count,
                     DEFERRED_STATE_EPOCH_COUNT,
@@ -598,6 +618,23 @@ impl Configuration {
         let mut seen = std::collections::HashSet::new();
         out.retain(|c| seen.insert(c.checkpoint_hash));
         out.sort_by(|a, b| b.checkpoint_height.cmp(&a.checkpoint_height));
+        // A fast-sync node roots its chain at one era checkpoint with the
+        // next one as its stable checkpoint (docs/fast-sync-design.md
+        // §5.19), so it needs two consecutive ones.
+        if !out.is_empty()
+            && !out.iter().any(|s| {
+                out.iter().any(|r| r.checkpoint_height + era == s.checkpoint_height)
+            })
+        {
+            return Err(format!(
+                "trusted_checkpoints needs two consecutive era checkpoints \
+                 (heights H and H + era_epoch_count = H + {}), e.g. the \
+                 network's latest checkpoint and the one before it; got \
+                 heights {:?}",
+                era,
+                out.iter().map(|c| c.checkpoint_height).collect::<Vec<_>>()
+            ));
+        }
         Ok(out)
     }
 
@@ -1667,40 +1704,46 @@ fn parse_trusted_checkpoints_list(
 }
 
 /// Parse one `trusted_checkpoints` list entry:
-/// "checkpoint_height:checkpoint_hash:blame_height:blame_hash".
+/// "checkpoint_height:checkpoint_hash:block_number", or with the legacy blame
+/// anchor "checkpoint_height:checkpoint_hash:blame_height:blame_hash:
+/// block_number".
 fn parse_trusted_checkpoint_entry(
     s: &str,
 ) -> Result<TrustedCheckpoint, String> {
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 4 {
-        return Err(format!(
-            "expected 4 colon-separated fields \
-             (checkpoint_height:checkpoint_hash:blame_height:blame_hash), \
-             got {}",
-            parts.len()
-        ));
+    let parts: Vec<&str> = s.split(':').map(str::trim).collect();
+    let parse_u64 = |label: &str, v: &str| {
+        v.parse::<u64>()
+            .map_err(|e| format!("{} not a u64: {}", label, e))
+    };
+    match parts.len() {
+        3 => parse_trusted_checkpoint_parts(
+            parse_u64("checkpoint_height", parts[0])?,
+            parts[1],
+            None,
+            parse_u64("block_number", parts[2])?,
+        ),
+        5 => parse_trusted_checkpoint_parts(
+            parse_u64("checkpoint_height", parts[0])?,
+            parts[1],
+            Some((parse_u64("blame_height", parts[2])?, parts[3])),
+            parse_u64("block_number", parts[4])?,
+        ),
+        n => Err(format!(
+            "expected checkpoint_height:checkpoint_hash:block_number (or \
+             checkpoint_height:checkpoint_hash:blame_height:blame_hash:\
+             block_number), got {} colon-separated fields. block_number is \
+             the checkpoint block's `blockNumber` from mazze_getBlockByHash \
+             on a synced node; fast sync numbers every later block from it.",
+            n
+        )),
     }
-    let cp_h = parts[0]
-        .trim()
-        .parse::<u64>()
-        .map_err(|e| format!("checkpoint_height not a u64: {}", e))?;
-    let blame_h = parts[2]
-        .trim()
-        .parse::<u64>()
-        .map_err(|e| format!("blame_height not a u64: {}", e))?;
-    parse_trusted_checkpoint_parts(
-        cp_h,
-        parts[1].trim(),
-        blame_h,
-        parts[3].trim(),
-    )
 }
 
-/// Build a `TrustedCheckpoint` from already-split parts, parsing the two
+/// Build a `TrustedCheckpoint` from already-split parts, parsing the
 /// hashes as 32-byte hex (with or without a `0x` prefix).
 fn parse_trusted_checkpoint_parts(
-    checkpoint_height: u64, checkpoint_hash: &str, blame_height: u64,
-    blame_hash: &str,
+    checkpoint_height: u64, checkpoint_hash: &str,
+    blame: Option<(u64, &str)>, block_number: u64,
 ) -> Result<TrustedCheckpoint, String> {
     let parse_hash = |label: &str, s: &str| -> Result<H256, String> {
         let stripped = s.strip_prefix("0x").unwrap_or(s);
@@ -1710,8 +1753,11 @@ fn parse_trusted_checkpoint_parts(
     Ok(TrustedCheckpoint {
         checkpoint_height,
         checkpoint_hash: parse_hash("checkpoint_hash", checkpoint_hash)?,
-        blame_height,
-        blame_hash: parse_hash("blame_hash", blame_hash)?,
+        block_number,
+        blame: match blame {
+            None => None,
+            Some((h, hash)) => Some((h, parse_hash("blame_hash", hash)?)),
+        },
     })
 }
 
@@ -1832,7 +1878,7 @@ mod tests {
 
         // Parser: two valid era-aligned entries (order as written).
         let list =
-            format!("20000:{}:22100:{} , 40000:{}:42100:{}", h1, b1, h2, b2);
+            format!("20000:{}:22100:{}:41000 , 40000:{}:82000", h1, b1, h2);
         let parsed = parse_trusted_checkpoints_list(&list).unwrap();
         assert_eq!(parsed.len(), 2);
 
@@ -1843,23 +1889,40 @@ mod tests {
         let out = conf.assemble_trusted_checkpoints().unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].checkpoint_height, 40000);
+        assert_eq!(out[0].block_number, 82000);
+        assert_eq!(out[0].blame, None);
         assert_eq!(out[1].checkpoint_height, 20000);
+        assert_eq!(out[1].block_number, 41000);
+        assert_eq!(out[1].blame.map(|b| b.0), Some(22100));
 
         // De-dup by checkpoint hash (same hash listed twice → one entry).
         let dup = parse_trusted_checkpoints_list(&format!(
-            "20000:{}:22100:{},20000:{}:22100:{}",
-            h1, b1, h1, b1
+            "20000:{}:22100:{}:41000,20000:{}:41000,40000:{}:82000",
+            h1, b1, h1, h2
         ))
         .unwrap();
         let mut confd = Configuration::default();
         confd.raw_conf.era_epoch_count = 20000;
         confd.raw_conf.trusted_checkpoints = dup;
-        assert_eq!(confd.assemble_trusted_checkpoints().unwrap().len(), 1);
+        assert_eq!(confd.assemble_trusted_checkpoints().unwrap().len(), 2);
+
+        // A single checkpoint, or two that are not consecutive eras, cannot
+        // root a fast-sync node (it needs an era genesis and its stable).
+        for list in [
+            format!("40000:{}:82000", h2),
+            format!("20000:{}:41000,60000:{}:120000", h1, h2),
+        ] {
+            let mut c = Configuration::default();
+            c.raw_conf.era_epoch_count = 20000;
+            c.raw_conf.trusted_checkpoints =
+                parse_trusted_checkpoints_list(&list).unwrap();
+            assert!(c.assemble_trusted_checkpoints().is_err());
+        }
 
         // Non-era-aligned checkpoint height is rejected.
         let bad = parse_trusted_checkpoints_list(&format!(
-            "12345:{}:12400:{}",
-            h1, b1
+            "12345:{}:24000",
+            h1
         ))
         .unwrap();
         let mut conf2 = Configuration::default();
@@ -1869,7 +1932,7 @@ mod tests {
 
         // blame_height <= checkpoint_height is rejected.
         let bad2 = parse_trusted_checkpoints_list(&format!(
-            "20000:{}:19999:{}",
+            "20000:{}:19999:{}:41000",
             h1, b1
         ))
         .unwrap();
@@ -1881,7 +1944,7 @@ mod tests {
         // A blame block closer than snapshot_epoch_count +
         // DEFERRED_STATE_EPOCH_COUNT + 1 cannot prove the checkpoint.
         let close = parse_trusted_checkpoints_list(&format!(
-            "20000:{}:20100:{}",
+            "20000:{}:20100:{}:41000",
             h1, b1
         ))
         .unwrap();
@@ -1891,7 +1954,7 @@ mod tests {
         conf5.raw_conf.trusted_checkpoints = close;
         assert!(conf5.assemble_trusted_checkpoints().is_err());
 
-        // Legacy scalars are all-or-nothing (1/4 set → error).
+        // Legacy scalars are all-or-nothing (1/5 set → error).
         let mut conf4 = Configuration::default();
         conf4.raw_conf.era_epoch_count = 20000;
         conf4.raw_conf.trusted_checkpoint_height = Some(20000);
@@ -1904,13 +1967,33 @@ mod tests {
         conf5.raw_conf.trusted_checkpoint_hash = Some(h1.to_string());
         conf5.raw_conf.trusted_blame_height = Some(22100);
         conf5.raw_conf.trusted_blame_hash = Some(b1.to_string());
+        assert!(conf5.assemble_trusted_checkpoints().is_err());
+        conf5.raw_conf.trusted_checkpoint_block_number = Some(41000);
+        conf5.raw_conf.trusted_checkpoints =
+            parse_trusted_checkpoints_list(&format!("40000:{}:82000", h2))
+                .unwrap();
         let merged = conf5.assemble_trusted_checkpoints().unwrap();
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].checkpoint_height, 20000);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].checkpoint_height, 40000);
+        assert_eq!(merged[1].checkpoint_height, 20000);
+        assert_eq!(merged[1].block_number, 41000);
 
         // A malformed entry is a parse error.
         assert!(parse_trusted_checkpoints_list("20000:not-hex:20100:also-bad")
             .is_err());
         assert!(parse_trusted_checkpoints_list("missing:fields").is_err());
+        // The pre-§5.19 4-field form lacks the block number.
+        assert!(parse_trusted_checkpoints_list(&format!(
+            "20000:{}:42100:{}",
+            h1, b1
+        ))
+        .is_err());
+        // Height 0 is the genesis, not a checkpoint.
+        let zero =
+            parse_trusted_checkpoints_list(&format!("0:{}:0", h1)).unwrap();
+        let mut conf6 = Configuration::default();
+        conf6.raw_conf.era_epoch_count = 20000;
+        conf6.raw_conf.trusted_checkpoints = zero;
+        assert!(conf6.assemble_trusted_checkpoints().is_err());
     }
 }

@@ -930,6 +930,13 @@ impl SynchronizationProtocolHandler {
         {
             return;
         }
+        // A fresh fast-sync node roots its chain at a trusted checkpoint
+        // before syncing anything (§5.19); headers from the true genesis
+        // would only be thrown away (and their processing starves the
+        // phase-change timer of the phase lock).
+        if self.graph.consensus.fast_sync_bootstrap_pending() {
+            return;
+        }
 
         if current_phase_type != SyncPhaseType::Normal {
             self.request_epochs(io);

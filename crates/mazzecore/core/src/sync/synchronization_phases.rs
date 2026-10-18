@@ -4,6 +4,10 @@
 
 use crate::{
     sync::{
+        fast_sync_anchor::{
+            check_anchor_block_numbers, choose_anchor_pair,
+            FastSyncAnchorBootstrap,
+        },
         message::DynamicCapability,
         state::{SnapshotChunkSync, Status},
         synchronization_protocol_handler::SynchronizationProtocolHandler,
@@ -308,6 +312,12 @@ impl SynchronizationPhaseTrait for CatchUpSyncBlockHeaderPhase {
         &self, io: &dyn NetworkContext,
         sync_handler: &SynchronizationProtocolHandler,
     ) -> SyncPhaseType {
+        // A fresh fast-sync node first roots its chain at a trusted
+        // checkpoint (CatchUpCheckpointPhase), then comes back here to sync
+        // the headers above it. See docs/fast-sync-design.md §5.19.
+        if self.graph.consensus.fast_sync_bootstrap_pending() {
+            return SyncPhaseType::CatchUpCheckpoint;
+        }
         let median_epoch = match self.syn.median_epoch_from_normal_peers() {
             None => {
                 return if self.syn.allow_phase_change_without_peer() {
@@ -324,15 +334,6 @@ impl SynchronizationPhaseTrait for CatchUpSyncBlockHeaderPhase {
             median_epoch
         );
         if self.graph.consensus.catch_up_completed(median_epoch) {
-            // Fast-sync: under operator-configured trusted checkpoint
-            // we deliberately don't ingest peer headers (the seed
-            // bypass defers them as TemporarySkipped), so the terminal-
-            // share check would never succeed. Transition directly to
-            // CatchUpCheckpoint so the snapshot download can begin.
-            // See docs/fast-sync-design.md.
-            if self.graph.consensus.trusted_checkpoint().is_some() {
-                return SyncPhaseType::CatchUpCheckpoint;
-            }
             // §5.22 genesis-with-peers escape: if the whole fleet is at
             // genesis (peer_median == 0 && best_epoch == 0), the
             // terminal-share check will never succeed because peers'
@@ -361,6 +362,11 @@ impl SynchronizationPhaseTrait for CatchUpSyncBlockHeaderPhase {
         sync_handler: &SynchronizationProtocolHandler,
     ) {
         info!("start phase {:?}", self.name());
+        if self.graph.consensus.fast_sync_bootstrap_pending() {
+            // Nothing to sync from the true genesis: `next` moves on to
+            // anchoring at a trusted checkpoint.
+            return;
+        }
         let (_, cur_era_genesis_height) =
             self.graph.get_genesis_hash_and_height_in_current_era();
         *sync_handler.latest_epoch_requested.lock() =
@@ -378,13 +384,9 @@ pub struct CatchUpCheckpointPhase {
     /// checkpoints. Only set when the phase starts.
     has_state: AtomicBool,
 
-    /// Fast-sync chain-prefix walk state. Tracks the lowest epoch we've
-    /// already requested via `request_epoch_hashes` during the chain-
-    /// prefix prefetch (driven each tick by `prefetch_chain_prefix`).
-    /// `u64::MAX` means "not yet started" so the first tick computes
-    /// the right starting point from blame_height.
-    /// See docs/fast-sync-design.md §5.6 option 1.
-    fast_sync_next_request_epoch: Mutex<u64>,
+    /// Roots a fresh fast-sync node at a trusted checkpoint before
+    /// anything else (docs/fast-sync-design.md §5.19).
+    anchor_bootstrap: FastSyncAnchorBootstrap,
 }
 
 impl CatchUpCheckpointPhase {
@@ -392,97 +394,65 @@ impl CatchUpCheckpointPhase {
         CatchUpCheckpointPhase {
             state_sync,
             has_state: AtomicBool::new(false),
-            fast_sync_next_request_epoch: Mutex::new(u64::MAX),
+            anchor_bootstrap: Default::default(),
         }
     }
 
-    /// Walk blame_hash down via parent_hash, return true iff every
-    /// header from `lowest_required_height` to blame inclusive is
-    /// present in `data_man`. Stops walking at the first miss.
-    fn chain_prefix_complete(
-        &self,
+    /// Fresh node with `trusted_checkpoints`: pick an anchor, collect what
+    /// rooting the chain there needs, root it, then sync the headers above
+    /// it like a node restarted from that checkpoint.
+    fn drive_anchor_bootstrap(
+        &self, io: &dyn NetworkContext,
         sync_handler: &SynchronizationProtocolHandler,
-        blame_hash: H256,
-        lowest_required_height: u64,
-    ) -> bool {
-        let data_man = &sync_handler.graph.data_man;
-        let mut cursor = blame_hash;
-        loop {
-            let h = match data_man.block_header_by_hash(&cursor) {
-                Some(h) => h,
-                None => return false,
-            };
-            if h.height() <= lowest_required_height {
-                return true;
+    ) -> SyncPhaseType {
+        let graph = &sync_handler.graph;
+        let anchor = {
+            let mut chosen = graph.fast_sync_anchor.lock();
+            if chosen.is_none() {
+                // Wait for peers: the choice depends on their tip.
+                let median = match sync_handler.syn.median_epoch_from_normal_peers() {
+                    Some(m) => m,
+                    None => return self.phase_type(),
+                };
+                let config = graph.consensus.get_config();
+                *chosen = choose_anchor_pair(
+                    &config.trusted_checkpoints,
+                    median,
+                    config.inner_conf.era_epoch_count,
+                );
+                match &*chosen {
+                    Some(p) => info!(
+                        "fast-sync anchor: rooting at checkpoint height={} \
+                         hash={:?} block_number={}, stable checkpoint \
+                         height={} (peer median epoch {})",
+                        p.root.checkpoint_height,
+                        p.root.checkpoint_hash,
+                        p.root.block_number,
+                        p.stable.checkpoint_height,
+                        median
+                    ),
+                    None => error!(
+                        "fast-sync anchor: trusted_checkpoints has no two \
+                         consecutive era checkpoints"
+                    ),
+                }
             }
-            cursor = *h.parent_hash();
+            match &*chosen {
+                Some(a) => a.clone(),
+                None => return self.phase_type(),
+            }
+        };
+        if !self.anchor_bootstrap.collect(&anchor, io, sync_handler) {
+            return self.phase_type();
         }
-    }
-
-    /// Drives the chain-prefix walk. Each tick, while the prefix is
-    /// not yet complete, request the next batch of epoch hashes from
-    /// peers; the existing response handler then auto-fires
-    /// `request_block_headers` for each hash, and those headers
-    /// reach `data_man` via the trusted-anchor direct-persist bypass
-    /// in `synchronization_graph.rs::insert_block_header`.
-    fn prefetch_chain_prefix(
-        &self,
-        io: &dyn NetworkContext,
-        sync_handler: &SynchronizationProtocolHandler,
-    ) -> bool {
-        let (snapshot_height, _snapshot_hash, blame_height, blame_hash) =
-            match sync_handler.graph.consensus.trusted_checkpoint_anchors() {
-                Some(a) => a,
-                None => return true, // not in fast-sync; nothing to do
-            };
-        // `validate_blame_states` later walks parents from blame down
-        // to snapshot and ALSO calls `get_parent_epochs_for(snapshot, N)`
-        // and grandparent walks. Pre-fetch enough of the chain prefix
-        // to cover both: from `snapshot - 2 * snapshot_epoch_count` up
-        // to `blame`. The first ~12 below the snapshot are also needed
-        // by `validate_epoch_receipts`. The range `[lowest..=blame]`
-        // covers everything the downstream validation needs locally.
-        let snapshot_epoch_count = sync_handler
-            .graph
-            .data_man
-            .get_snapshot_epoch_count() as u64;
-        let lowest_required_height = snapshot_height
-            .saturating_sub(snapshot_epoch_count.saturating_mul(2));
-
-        if self.chain_prefix_complete(
-            sync_handler,
-            blame_hash,
-            lowest_required_height,
-        ) {
-            return true;
+        match self.anchor_bootstrap.anchor(&anchor, sync_handler) {
+            Ok(()) => SyncPhaseType::CatchUpSyncBlockHeader,
+            Err(e) => {
+                error!("fast-sync anchor: cannot root the chain: {}", e);
+                self.anchor_bootstrap.reset();
+                self.phase_type()
+            }
         }
-
-        // Request one batch per tick (default 30 epochs); the response
-        // handler chains into `request_block_headers` automatically.
-        const BATCH_SIZE: u64 = 30;
-        let mut next = self.fast_sync_next_request_epoch.lock();
-        if *next == u64::MAX {
-            // First tick: start one batch below the blame height.
-            *next = blame_height.saturating_sub(1);
-        }
-        if *next < lowest_required_height {
-            // We've already requested everything; just waiting for
-            // headers to arrive (or a previous request was lost — the
-            // request_manager has its own retry).
-            return false;
-        }
-        let to = *next;
-        let from = to.saturating_sub(BATCH_SIZE - 1).max(lowest_required_height);
-        let epochs: Vec<u64> = (from..=to).collect();
-        info!(
-            "Fast-sync: prefetching chain-prefix epochs [{}..={}] ({} headers)",
-            from,
-            to,
-            epochs.len(),
-        );
-        sync_handler.request_epoch_hashes_for_prefetch(io, epochs);
-        *next = from.saturating_sub(1);
-        false
     }
 }
 
@@ -502,6 +472,9 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
         if self.has_state.load(AtomicOrdering::SeqCst) {
             return SyncPhaseType::CatchUpFillBlockBodyPhase;
         }
+        if sync_handler.graph.consensus.fast_sync_bootstrap_pending() {
+            return self.drive_anchor_bootstrap(io, sync_handler);
+        }
         let epoch_to_sync = sync_handler.graph.consensus.get_to_sync_epoch_id();
         // Fresh-network bootstrap: the true genesis has no prior checkpoint to
         // state-sync. On a from-genesis launch every peer is also at genesis and
@@ -512,26 +485,6 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
         if epoch_to_sync == sync_handler.graph.data_man.true_genesis.hash() {
             self.has_state.store(true, AtomicOrdering::SeqCst);
             return SyncPhaseType::CatchUpFillBlockBodyPhase;
-        }
-
-        // Fast-sync chain-prefix prefetch (option 1, docs/fast-sync-design.md
-        // §5.6). When the operator has configured a trusted checkpoint, the
-        // local node has no chain history below the anchors. `validate_blame_states`
-        // and adjacent functions walk parent_hash from the blame block down
-        // through ~2*snapshot_epoch_count epochs (and `.expect()` the headers
-        // to exist), so before letting `update_status` fire we drive a batched
-        // walk that fetches the prefix into `data_man` via the direct-persist
-        // bypass in `synchronization_graph.rs::insert_block_header`. While the
-        // prefix is incomplete, skip `update_status` and stay in this phase;
-        // next tick re-checks.
-        if sync_handler
-            .graph
-            .consensus
-            .trusted_checkpoint_anchors()
-            .is_some()
-            && !self.prefetch_chain_prefix(io, sync_handler)
-        {
-            return self.phase_type();
         }
 
         let current_era_genesis = sync_handler
@@ -565,66 +518,35 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
         }
         if self.state_sync.status() == Status::Completed {
             self.state_sync.restore_execution_state(sync_handler);
-            *sync_handler.synced_epoch_id.lock() = Some(epoch_to_sync);
+            // The state now available is that of the snapshot actually
+            // restored, which is a newer forward candidate (D.2) when no
+            // peer served `epoch_to_sync`.
+            let synced = self
+                .state_sync
+                .completed_snapshot_epoch_id()
+                .unwrap_or(epoch_to_sync);
+            if synced != epoch_to_sync {
+                info!(
+                    "checkpoint sync restored forward candidate {:?} instead \
+                     of {:?}",
+                    synced, epoch_to_sync
+                );
+            }
+            *sync_handler.synced_epoch_id.lock() = Some(synced);
+            let epoch_to_sync = synced;
 
-            // Re-anchor the consensus graph on the verified snapshot
-            // block. Without this, `cur_consensus_era_genesis_hash`
-            // still points at the true genesis (height 0), so
-            // CatchUpSyncBlockPhase mis-derives its sync horizon and
-            // `latest_epoch` stays at 0 forever — peers' new blocks
-            // get gossiped in but never accepted because they're far
-            // above what consensus thinks is its frontier. During
-            // fast-sync bootstrap the snapshot block plays BOTH
-            // roles (era genesis = deferred-state origin, AND era
-            // stable = checkpoint-monotonicity floor) because there
-            // is no later stable elected yet; they separate naturally
-            // once the chain advances past the next stable election.
-            // The C.3 monotonicity gate in
-            // `BlockDataManager::insert_checkpoint_hashes_to_db`
-            // accepts this because snapshot height (>0) is strictly
-            // greater than the previous true-genesis height (0).
-            //
-            // Re-anchor ONLY when consensus does not already hold the
-            // snapshot block, i.e. a fresh trusted-checkpoint bootstrap.
-            // A node restarted with its DB (or escaping a block-sync wedge)
-            // picked `epoch_to_sync` from its OWN main chain: consensus
-            // already contains it and every header after it. `reset()`
-            // would throw that graph away while the sync graph keeps the
-            // headers as HEADER_GRAPH_READY, so `get_blocks_needing_bodies`
-            // comes back empty, CatchUpFillBlockBody "completes" without
-            // fetching anything, `complete_filling_block_bodies` marks the
-            // headers GRAPH_READY without ever re-sending them to consensus,
-            // and best_epoch stays pinned at the snapshot height forever
-            // (archive m2, 2026-10-10: stuck at 380000). Without the reset,
-            // a downloaded snapshot is handled exactly like a local one
-            // (the "commitment exists, skip state sync" branch in start()).
-            let already_in_consensus =
-                sync_handler.graph.consensus.contains_block(&epoch_to_sync);
-            if already_in_consensus {
-                info!(
-                    "fast-sync: snapshot {:?} is already on the local \
-                     consensus graph; keeping the graph (no re-anchor)",
-                    epoch_to_sync
-                );
-            } else if let Some(snapshot_height) =
-                self.state_sync.completed_snapshot_height()
-            {
-                sync_handler.graph.data_man.set_cur_consensus_era_genesis_hash(
-                    &epoch_to_sync,
-                    &epoch_to_sync,
-                    snapshot_height,
-                );
-                sync_handler.graph.consensus.reset();
-                info!(
-                    "fast-sync bootstrap: consensus re-anchored at \
-                     snapshot block height={} hash={:?}",
-                    snapshot_height, epoch_to_sync,
-                );
-            } else {
+            // The snapshot is a block of our own consensus graph: the stable
+            // checkpoint it elected (a fast-sync node rooted its graph at a
+            // trusted checkpoint below it first, §5.19). Never re-root the
+            // graph AT the snapshot: the epochs right above it reward epochs
+            // below it, which would no longer be in the graph (the former
+            // trusted-snapshot re-anchor computed a different state there),
+            // and the sync graph would keep its old root.
+            if !sync_handler.graph.consensus.contains_block(&epoch_to_sync) {
                 warn!(
-                    "fast-sync bootstrap: snapshot height unavailable \
-                     in state_sync; consensus stays anchored at old \
-                     genesis (chain will not advance until restart)"
+                    "checkpoint sync completed for {:?}, which is not in the \
+                     consensus graph",
+                    epoch_to_sync
                 );
             }
 
@@ -663,6 +585,13 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
             }
             thread::sleep(time::Duration::from_millis(1));
         }
+        self.anchor_bootstrap.reset();
+        if sync_handler.graph.consensus.fast_sync_bootstrap_pending() {
+            // `next` roots the chain at a trusted checkpoint first.
+            *sync_handler.graph.fast_sync_anchor.lock() = None;
+            return;
+        }
+        check_anchor_block_numbers(sync_handler);
         let current_era_genesis = sync_handler
             .graph
             .data_man
@@ -697,45 +626,6 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
                 *sync_handler.synced_epoch_id.lock() = Some(epoch_to_sync);
             }
             return;
-        }
-
-        // Fast-sync anchor pre-fetch (docs/fast-sync-design.md §5.6):
-        // when the operator has configured a trusted checkpoint AND
-        // the snapshot/blame anchor headers are not yet in our local
-        // graph, fire a targeted `GetBlockHeaders` for both hashes
-        // BEFORE issuing the manifest request. The sync-graph's
-        // seed-lookup gate accepts these two hashes with a zero seed
-        // (they're operator-vouched), so subsequent manifest-response
-        // validation in `snapshot_manifest_manager::validate_blame_states`
-        // will find them locally and proceed.
-        if let Some((_, snapshot_hash, _, blame_hash)) =
-            sync_handler.graph.consensus.trusted_checkpoint_anchors()
-        {
-            let mut to_fetch = Vec::new();
-            if !sync_handler.graph.contains_block_header(&snapshot_hash) {
-                to_fetch.push(snapshot_hash);
-            }
-            if !sync_handler.graph.contains_block_header(&blame_hash) {
-                to_fetch.push(blame_hash);
-            }
-            if !to_fetch.is_empty() {
-                info!(
-                    "CatchUpCheckpointPhase: fast-sync anchor pre-fetch \
-                     of {} header(s) (snapshot={:?} blame={:?})",
-                    to_fetch.len(),
-                    snapshot_hash,
-                    blame_hash,
-                );
-                sync_handler.request_block_headers(
-                    io,
-                    None,        // any peer
-                    to_fetch,
-                    true,        // ignore_db
-                );
-                // Stay in this phase; the next `next()` tick re-enters
-                // start() once the headers have landed in the graph.
-                return;
-            }
         }
 
         self.state_sync.update_status(

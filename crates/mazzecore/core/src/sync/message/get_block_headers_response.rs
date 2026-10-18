@@ -217,6 +217,10 @@ impl GetBlockHeadersResponse {
                     header.height(),
                     era_genesis_height
                 );
+                // Still record it as pre-checkpoint history, so in-era
+                // blocks referencing it stop waiting for it (a node rooted
+                // at a fast-sync anchor has no other record of it).
+                ctx.manager.graph.record_pre_era_header(header);
                 continue;
             }
 

@@ -4,7 +4,9 @@
 
 use crate::{
     block_data_manager::BlockDataManager,
-    consensus::{BestInformation, ConsensusConfig, TransactionInfo},
+    consensus::{
+        BestInformation, ConsensusConfig, TransactionInfo, TrustedCheckpoint,
+    },
     rpc_errors::Result as RpcResult,
     statistics::SharedStatistics,
     transaction_pool::SharedTransactionPool,
@@ -86,19 +88,14 @@ pub trait ConsensusGraphTrait: Send + Sync {
 
     fn get_to_sync_epoch_id(&self) -> EpochId;
 
-    /// Returns the operator-configured trusted-checkpoint pair when set.
-    /// `(height, hash)` is the anchor that fast-sync uses to skip the
-    /// pre-anchor header history. See docs/fast-sync-design.md.
-    fn trusted_checkpoint(&self) -> Option<(u64, H256)> { None }
+    /// All configured fast-sync anchors, sorted newest-first.
+    fn trusted_checkpoints(&self) -> Vec<TrustedCheckpoint> { Vec::new() }
 
-    /// Returns `(snapshot_height, snapshot_hash, blame_height, blame_hash)`
-    /// when a complete trusted checkpoint is configured. Used by the
-    /// seed-lookup gate to accept the two operator-vouched anchor
-    /// headers without a real seed, and by the chain-prefix prefetch
-    /// to drive the batched walk from blame_height down.
-    fn trusted_checkpoint_anchors(&self) -> Option<(u64, H256, u64, H256)> {
-        None
-    }
+    /// True while a fresh node with configured fast-sync anchors still has
+    /// to anchor its consensus graph at one of them (see
+    /// docs/fast-sync-design.md §5.19). False once anchored, for a node that
+    /// already holds chain data, and for a node without anchors.
+    fn fast_sync_bootstrap_pending(&self) -> bool { false }
 
     /// All configured fast-sync anchors as `(checkpoint_height,
     /// checkpoint_hash)`, sorted newest-first. The catch-up FSM proposes

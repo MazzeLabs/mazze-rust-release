@@ -819,6 +819,23 @@ impl DBManager {
         self.load_decodable_val(DBTable::Misc, b"checkpoint_epoch")
     }
 
+    /// Main-chain block at `height` (a multiple of `RANDOMX_EPOCH_LENGTH`)
+    /// below a fast-sync anchor, taken from the anchor's authenticated
+    /// parent chain. It is the RandomX seed of the epochs above it, which a
+    /// node anchored there never orders itself (no epoch set is stored for
+    /// heights below the anchor). See docs/fast-sync-design.md §5.19.
+    pub fn insert_anchored_seed_hash_to_db(&self, height: u64, hash: &H256) {
+        self.insert_encodable_val(
+            DBTable::Misc,
+            &anchored_seed_key(height),
+            hash,
+        );
+    }
+
+    pub fn anchored_seed_hash_from_db(&self, height: u64) -> Option<H256> {
+        self.load_decodable_val(DBTable::Misc, &anchored_seed_key(height))
+    }
+
     pub fn insert_executed_epoch_set_hashes_to_db(
         &self, epoch: u64, executed_hashes: &Vec<H256>,
     ) {
@@ -1133,7 +1150,8 @@ impl DBManager {
         let seed_height = (current_epoch - 1) * RANDOMX_EPOCH_LENGTH;
         let seed_hash = self
             .executed_epoch_set_hashes_from_db(seed_height)
-            .and_then(|hashes| hashes.last().cloned());
+            .and_then(|hashes| hashes.last().cloned())
+            .or_else(|| self.anchored_seed_hash_from_db(seed_height));
         trace!(
             "try_get_current_seed_hash: epoch={} seed_height={} result={:?}",
             current_epoch,
@@ -1163,6 +1181,12 @@ fn blamed_header_verified_roots_key(block_height: u64) -> [u8; 8] {
 
 fn block_body_key(block_hash: &H256) -> Vec<u8> {
     append_suffix(block_hash, BLOCK_BODY_SUFFIX_BYTE)
+}
+
+fn anchored_seed_key(height: u64) -> Vec<u8> {
+    let mut key = b"anchored_seed".to_vec();
+    key.extend_from_slice(&height.to_le_bytes());
+    key
 }
 
 fn executed_epoch_set_key(epoch_number: u64) -> [u8; 9] {

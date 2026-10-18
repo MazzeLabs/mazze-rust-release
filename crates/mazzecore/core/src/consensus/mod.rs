@@ -115,17 +115,26 @@ pub struct PhantomBlock {
     pub traces: Vec<TransactionExecTraces>,
 }
 
-/// One operator-vouched (or baked-in) fast-sync anchor: a snapshot
-/// checkpoint plus the blame block above it that proves the snapshot's
-/// state root. `checkpoint_height` MUST be an era boundary (a multiple of
-/// `era_epoch_count`) — those are the consensus-final checkpoints that
-/// serving nodes retain long-term (see docs/fast-sync-design.md §5.16).
+/// One operator-vouched (or baked-in) fast-sync anchor: an era checkpoint
+/// block. A fresh node anchors its consensus graph at it (as if it had been
+/// restarted with that checkpoint as its era genesis), header-syncs forward
+/// and then state-syncs the stable checkpoint its own consensus elects. See
+/// docs/fast-sync-design.md §5.19.
+///
+/// `checkpoint_height` MUST be an era boundary (a multiple of
+/// `era_epoch_count`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrustedCheckpoint {
     pub checkpoint_height: u64,
     pub checkpoint_hash: H256,
-    pub blame_height: u64,
-    pub blame_hash: H256,
+    /// `blockNumber` of the checkpoint block (`mazze_getBlockByHash`). Block
+    /// numbers are not derivable from headers; every block number (and so
+    /// the EVM `NUMBER` of every later transaction) is counted from it.
+    pub block_number: u64,
+    /// Optional `(blame_height, blame_hash)` proving a snapshot taken AT
+    /// the checkpoint (legacy anchor format; the consensus-anchored join
+    /// finds its own trusted blame block).
+    pub blame: Option<(u64, H256)>,
 }
 
 #[derive(Clone)]
@@ -308,6 +317,32 @@ impl MallocSizeOf for ConsensusGraph {
 }
 
 impl ConsensusGraph {
+    /// The first of the `REWARD_EPOCH_COUNT` epochs ending at `height`
+    /// that contains a block whose validity status we do not know (no epoch
+    /// set, or a block without a final `Valid`/`PartialInvalid` status).
+    fn unvalidated_reward_epoch(&self, height: u64) -> Option<u64> {
+        let start = height.saturating_sub(REWARD_EPOCH_COUNT - 1).max(1);
+        for h in start..=height {
+            let blocks = match self.data_man.executed_epoch_set_hashes_from_db(h)
+            {
+                Some(b) => b,
+                None => return Some(h),
+            };
+            for b in blocks {
+                match self
+                    .data_man
+                    .local_block_info_by_hash(&b)
+                    .map(|i| i.get_status())
+                {
+                    Some(crate::block_data_manager::BlockStatus::Valid)
+                    | Some(crate::block_data_manager::BlockStatus::PartialInvalid) => {}
+                    _ => return Some(h),
+                }
+            }
+        }
+        None
+    }
+
     /// Build the ConsensusGraph with a specific era genesis block and various
     /// other components. The execution will be skipped if bench_mode sets
     /// to true.
@@ -2433,10 +2468,12 @@ impl ConsensusGraphTrait for ConsensusGraph {
             // checkpoint by its snapshot hash, so the FSM can sync
             // whichever candidate a peer still serves (not only the
             // newest/primary one). See docs/fast-sync-design.md §5.16.
-            if let Some(cp) =
-                self.config.trusted_checkpoint_by_hash(snapshot_epoch_id)
+            if let Some((_, blame_hash)) = self
+                .config
+                .trusted_checkpoint_by_hash(snapshot_epoch_id)
+                .and_then(|cp| cp.blame)
             {
-                return Some(cp.blame_hash);
+                return Some(blame_hash);
             }
         }
         self.inner
@@ -2446,41 +2483,29 @@ impl ConsensusGraphTrait for ConsensusGraph {
 
     /// Return the epoch that we are going to sync the state.
     ///
-    /// Fast-sync: when an operator-provided `trusted_checkpoint_hash` is
-    /// configured AND the local node is fresh (no era-stable history yet),
-    /// return the trusted hash directly so the catch-up FSM jumps straight
-    /// to `CatchUpCheckpoint` with that anchor — bypassing a linear header
-    /// sync from genesis. The snapshot download itself still verifies the
-    /// state-root chain, so a wrong hash fails loudly in chunk verification
-    /// rather than silently corrupting state. See docs/fast-sync-design.md.
+    /// A fast-sync joiner first anchors its consensus graph at a trusted
+    /// era checkpoint (`fast_sync_bootstrap_pending`), so by the time it
+    /// state-syncs, this is the stable checkpoint its own consensus elected
+    /// from the header chain above the anchor -- like any restarted node.
     fn get_to_sync_epoch_id(&self) -> EpochId {
-        let inner = self.inner.read();
-        if inner.cur_era_stable_height() == 0 {
-            // Seed the FSM with the newest configured anchor; the
-            // candidate enumeration then proposes ALL of them and the
-            // newest peer-served one wins.
-            if let Some(cp) = self.config.newest_trusted_checkpoint() {
-                return cp.checkpoint_hash;
-            }
-        }
-        inner.get_to_sync_epoch_id()
+        self.inner.read().get_to_sync_epoch_id()
     }
 
-    fn trusted_checkpoint(&self) -> Option<(u64, H256)> {
-        self.config
-            .newest_trusted_checkpoint()
-            .map(|cp| (cp.checkpoint_height, cp.checkpoint_hash))
+    fn trusted_checkpoints(&self) -> Vec<TrustedCheckpoint> {
+        self.config.trusted_checkpoints.clone()
     }
 
-    fn trusted_checkpoint_anchors(&self) -> Option<(u64, H256, u64, H256)> {
-        self.config.newest_trusted_checkpoint().map(|cp| {
-            (
-                cp.checkpoint_height,
-                cp.checkpoint_hash,
-                cp.blame_height,
-                cp.blame_hash,
-            )
-        })
+    fn fast_sync_bootstrap_pending(&self) -> bool {
+        let newest = match self.config.newest_trusted_checkpoint() {
+            Some(cp) => cp.checkpoint_height,
+            None => return false,
+        };
+        // Still rooted at the true genesis (never anchored, never moved a
+        // checkpoint) and our own chain is below every anchor: anchoring
+        // loses nothing and skips the history below the anchor.
+        self.data_man.get_cur_consensus_era_genesis_hash()
+            == self.data_man.true_genesis.hash()
+            && self.best_epoch_number() < newest
     }
 
     fn trusted_checkpoint_candidates(&self) -> Vec<(u64, H256)> {
@@ -2595,9 +2620,7 @@ impl ConsensusGraphTrait for ConsensusGraph {
         // (so block_height_by_hash would panic), and we deliberately
         // *want* CatchUpCheckpoint to run with no local prefix — it will
         // pull the snapshot from a peer. See docs/fast-sync-design.md.
-        if self.config.has_trusted_checkpoint()
-            && self.inner.read().cur_era_stable_height() == 0
-        {
+        if self.fast_sync_bootstrap_pending() {
             return true;
         }
         let epoch_to_sync = self.get_to_sync_epoch_id();
@@ -2605,6 +2628,34 @@ impl ConsensusGraphTrait for ConsensusGraph {
             .data_man
             .block_height_by_hash(&epoch_to_sync)
             .expect("sync target exists");
+        // Executing the epochs above a downloaded checkpoint rewards the
+        // blocks of its last REWARD_EPOCH_COUNT epochs, whose partial
+        // validity must be known. A node restarted from its database has
+        // it for every block; a fast-sync node rooted at a trusted
+        // checkpoint (§5.19) has it only for the blocks it validated itself
+        // -- those in the future of its initial stable checkpoint -- and
+        // none below its root. Syncing a checkpoint whose reward window is
+        // not covered computes a state no other node has, so wait until the
+        // headers move the stable checkpoint far enough.
+        if self
+            .data_man
+            .get_epoch_execution_commitment_with_db(&epoch_to_sync)
+            .is_none()
+        {
+            if let Some(h) = self.unvalidated_reward_epoch(sync_target_height)
+            {
+                debug!(
+                    "catch_up_completed: sync target {} rewards epoch {} \
+                     whose block validity is unknown here; waiting for the \
+                     stable checkpoint to move (best epoch {}, peers {})",
+                    sync_target_height,
+                    h,
+                    self.best_epoch_number(),
+                    peer_median_epoch
+                );
+                return false;
+            }
+        }
         let snapshot_epoch_count =
             self.data_man.get_snapshot_epoch_count() as u64;
 
@@ -2680,24 +2731,30 @@ impl ConsensusGraphTrait for ConsensusGraph {
     /// Reset the information in consensus graph with only checkpoint
     /// information kept.
     fn reset(&self) {
-        let old_consensus_inner = &mut *self.inner.write();
+        {
+            let old_consensus_inner = &mut *self.inner.write();
 
-        let cur_era_genesis_hash =
-            self.data_man.get_cur_consensus_era_genesis_hash();
-        let cur_era_stable_hash =
-            self.data_man.get_cur_consensus_era_stable_hash();
-        let new_consensus_inner = ConsensusGraphInner::with_era_genesis(
-            old_consensus_inner.pow_config.clone(),
-            old_consensus_inner.pow.clone(),
-            self.data_man.clone(),
-            old_consensus_inner.inner_conf.clone(),
-            &cur_era_genesis_hash,
-            &cur_era_stable_hash,
-        );
-        *old_consensus_inner = new_consensus_inner;
-        debug!("Build new consensus graph for sync-recovery with identified genesis {} stable block {}", cur_era_genesis_hash, cur_era_stable_hash);
+            let cur_era_genesis_hash =
+                self.data_man.get_cur_consensus_era_genesis_hash();
+            let cur_era_stable_hash =
+                self.data_man.get_cur_consensus_era_stable_hash();
+            let new_consensus_inner = ConsensusGraphInner::with_era_genesis(
+                old_consensus_inner.pow_config.clone(),
+                old_consensus_inner.pow.clone(),
+                self.data_man.clone(),
+                old_consensus_inner.inner_conf.clone(),
+                &cur_era_genesis_hash,
+                &cur_era_stable_hash,
+            );
+            *old_consensus_inner = new_consensus_inner;
+            debug!("Build new consensus graph for sync-recovery with identified genesis {} stable block {}", cur_era_genesis_hash, cur_era_stable_hash);
+        }
 
         self.confirmation_meter.clear();
+        // The cached best epoch/block must describe the new graph: header
+        // sync requests epochs from it, and a fast-sync node re-rooted at a
+        // trusted checkpoint otherwise kept reporting epoch 0.
+        self.update_best_info(false);
     }
 
     fn to_arc_consensus(self: Arc<Self>) -> Arc<ConsensusGraph> {

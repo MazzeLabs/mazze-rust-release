@@ -45,12 +45,37 @@ impl Handleable for GetBlockHashesResponse {
             epoch_req.epochs.iter().cloned().collect::<HashSet<_>>();
         let mut received_epochs = HashSet::new();
         let mut hashes = Vec::new();
+        let anchor = ctx
+            .manager
+            .graph
+            .fast_sync_anchor
+            .lock()
+            .as_ref()
+            .map(|a| a.root.clone());
 
         for epoch_hashes in self.epoch_hashes {
             if !requested_epochs.contains(&epoch_hashes.epoch)
                 || !received_epochs.insert(epoch_hashes.epoch)
             {
                 bail!(ErrorKind::UnexpectedResponse);
+            }
+            // Fast-sync anchor bootstrap: keep the anchor's own epoch set
+            // (the pivot, i.e. the anchor, is its last block). Our
+            // consensus is rooted at the anchor and never orders that
+            // epoch itself. See docs/fast-sync-design.md §5.19.
+            if let Some(anchor) = &anchor {
+                if epoch_hashes.epoch == anchor.checkpoint_height
+                    && epoch_hashes.hashes.last()
+                        == Some(&anchor.checkpoint_hash)
+                {
+                    ctx.manager
+                        .graph
+                        .data_man
+                        .insert_executed_epoch_set_hashes_to_db(
+                            anchor.checkpoint_height,
+                            &epoch_hashes.hashes,
+                        );
+                }
             }
             hashes.extend(epoch_hashes.hashes);
         }

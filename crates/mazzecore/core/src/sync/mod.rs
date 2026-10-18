@@ -2,6 +2,7 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 mod error;
+pub mod fast_sync_anchor;
 pub mod message;
 pub mod request_manager;
 mod state;

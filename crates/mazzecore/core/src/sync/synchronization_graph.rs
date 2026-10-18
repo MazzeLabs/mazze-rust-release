@@ -15,7 +15,7 @@ use std::{
 };
 
 use futures::executor::block_on;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use slab::Slab;
 use tokio02::sync::mpsc::error::TryRecvError;
 use unexpected::{Mismatch, OutOfBounds};
@@ -41,7 +41,10 @@ use crate::{
     pow::{asert_difficulty, PowComputer, ProofOfWorkConfig},
     state_exposer::{SyncGraphBlockState, STATE_EXPOSER},
     statistics::SharedStatistics,
-    sync::synchronization_protocol_handler::FutureBlockContainer,
+    sync::{
+        fast_sync_anchor::AnchorPair,
+        synchronization_protocol_handler::FutureBlockContainer,
+    },
     verification::*,
     ConsensusGraph, Notifications,
 };
@@ -667,7 +670,20 @@ impl SynchronizationGraphInner {
                     || info.get_instance_id() == self.data_man.get_instance_id()
             }
         } else {
-            false
+            // A header persisted below the era genesis without a local block
+            // info is history below a fast-sync anchor (fetched by the
+            // anchor bootstrap): outside the genesis subtree, so it counts
+            // as processed exactly like a pre-checkpoint block.
+            match self.data_man.block_header_by_hash(parent_or_referee_hash) {
+                Some(h) => {
+                    let genesis =
+                        self.data_man.get_cur_consensus_era_genesis_hash();
+                    self.data_man
+                        .block_height_by_hash(&genesis)
+                        .map_or(false, |g| h.height() < g)
+                }
+                None => false,
+            }
         }
     }
 
@@ -1176,6 +1192,13 @@ pub struct SynchronizationGraph {
     pub future_blocks: FutureBlockContainer,
 
     machine: Arc<Machine>,
+
+    /// The trusted checkpoints a fresh fast-sync node is rooting its chain
+    /// at, while it collects what that needs (docs/fast-sync-design.md
+    /// §5.19). Headers up to the stable checkpoint's height are persisted
+    /// without entering the graph: the bootstrap authenticates the ones it
+    /// uses by hash, and the graph is rebuilt from the root afterwards.
+    pub fast_sync_anchor: Mutex<Option<AnchorPair>>,
 }
 
 impl MallocSizeOf for SynchronizationGraph {
@@ -1241,6 +1264,7 @@ impl SynchronizationGraph {
             consensus_unprocessed_count: consensus_unprocessed_count.clone(),
             new_block_hashes: notifications.new_block_hashes.clone(),
             machine,
+            fast_sync_anchor: Mutex::new(None),
         };
 
         // It receives `BLOCK_GRAPH_READY` blocks in order and handles them in
@@ -1403,6 +1427,64 @@ impl SynchronizationGraph {
         self.inner
             .read()
             .get_genesis_hash_and_height_in_current_era()
+    }
+
+    /// A header below the era genesis (or beside it) that we have no record
+    /// of cannot take part in our consensus: it is outside the genesis
+    /// subtree, so it could only become an out-era stub. Record it as a
+    /// pre-checkpoint block -- what a checkpointed node has for every block
+    /// it saw before its checkpoint -- so the blocks above the genesis that
+    /// reference it become graph-ready instead of waiting for its ancestors
+    /// forever. A node rooted at a fast-sync anchor has no other record of
+    /// the history below the anchor (docs/fast-sync-design.md §5.19).
+    /// Returns false (and records nothing) for a header in the era.
+    pub fn record_pre_era_header(&self, header: &BlockHeader) -> bool {
+        let genesis_hash = self.data_man.get_cur_consensus_era_genesis_hash();
+        let genesis_height =
+            match self.data_man.block_height_by_hash(&genesis_hash) {
+                Some(h) => h,
+                None => return false,
+            };
+        let hash = header.hash();
+        if header.height() > genesis_height
+            || (header.height() == genesis_height && hash == genesis_hash)
+        {
+            return false;
+        }
+        if self.data_man.local_block_info_by_hash(&hash).is_none() {
+            self.data_man
+                .insert_block_header(hash, Arc::new(header.clone()), true);
+            self.data_man.insert_local_block_info(
+                &hash,
+                LocalBlockInfo::new(
+                    BlockStatus::Valid,
+                    0, /* before every era genesis */
+                    self.data_man.get_instance_id(),
+                ),
+            );
+        }
+        true
+    }
+
+    /// Rebuild the in-memory graph rooted at the current consensus era
+    /// genesis, dropping every block in it. Used when a fast-sync node
+    /// re-anchors its (still empty) chain at a trusted checkpoint; the
+    /// headers above it are then synced again like after a restart.
+    pub fn reset_to_cur_era_genesis(&self) {
+        let genesis_hash = self.data_man.get_cur_consensus_era_genesis_hash();
+        let genesis_header = self
+            .data_man
+            .block_header_by_hash(&genesis_hash)
+            .expect("era genesis header is persisted before re-rooting");
+        let inner = &mut *self.inner.write();
+        *inner = SynchronizationGraphInner::with_genesis_block(
+            genesis_header,
+            inner.pow_config.clone(),
+            inner.pow.clone(),
+            inner.config,
+            self.data_man.clone(),
+            inner.machine.clone(),
+        );
     }
 
     /// Compute the expected difficulty for a block given its
@@ -1755,43 +1837,21 @@ impl SynchronizationGraph {
         let _timer = MeterTimer::time_func(SYNC_INSERT_HEADER.as_ref());
         self.statistics.inc_sync_graph_inserted_header_count();
 
-        // Fast-sync trusted anchor bypass. Operator-vouched headers
-        // arriving via `CatchUpCheckpointPhase::start()`'s pre-fetch
-        // must reach `data_man` so `validate_blame_states` can find
-        // them, but during `CatchUpCheckpoint` the normal
-        // `locked_for_catchup` gate immediately short-circuits this
-        // function. We also don't want the standard graph-insertion
-        // path to fire dependency requests for the missing chain
-        // prefix. Persist directly and return `TemporarySkipped` so
-        // the response-handler treats the header as a no-op for
-        // downstream graph/dep logic. PoW is intentionally not
-        // re-checked: the trust input is the operator's hash, and
-        // we verify the hash matches what was configured before
-        // accepting. See docs/fast-sync-design.md §5.6.
+        // Fast-sync anchor bootstrap (docs/fast-sync-design.md §5.19): the
+        // anchor, its epoch and the chain below it down to the RandomX seed
+        // it needs are only persisted. The bootstrap authenticates them by
+        // walking parent hashes down from the configured anchor hash; none
+        // is ever inserted into our graph or ordered by our consensus.
         if persistent {
-            if let Some((_, _, blame_height, _)) =
-                self.consensus.trusted_checkpoint_anchors()
-            {
-                // Fast-sync chain-prefix persistence. The
-                // `CatchUpCheckpointPhase::prefetch_chain_prefix` walk
-                // batch-requests every header from
-                // `snapshot - 2*snapshot_epoch_count` up to
-                // `blame_height` so the downstream
-                // `validate_blame_states` / `validate_epoch_receipts`
-                // / `get_parent_epochs_for` walks find their parents
-                // locally. We accept any header at-or-below
-                // `blame_height` (the trust-anchor ceiling) and
-                // persist it directly, bypassing both the
-                // `locked_for_catchup` gate and the orphan-not-ready
-                // dance. PoW is intentionally not re-checked: catch-up
-                // mode already skips PoW (verification.rs:371) and the
-                // operator's hash is the trust input — the snapshot
-                // chunks are still cryptographically verified against
-                // the snapshot_merkle_root downstream.
-                if header.height() <= blame_height {
-                    let h = header.hash();
+            let anchor_height = self
+                .fast_sync_anchor
+                .lock()
+                .as_ref()
+                .map(|a| a.stable.checkpoint_height);
+            if let Some(anchor_height) = anchor_height {
+                if header.height() <= anchor_height {
                     self.data_man.insert_block_header(
-                        h,
+                        header.hash(),
                         Arc::new(header.clone()),
                         true,
                     );
@@ -1875,24 +1935,23 @@ impl SynchronizationGraph {
             return (BlockHeaderInsertionResult::Invalid, Vec::new());
         }
 
+        if local_info_opt.is_none() && self.record_pre_era_header(header) {
+            return (
+                BlockHeaderInsertionResult::AlreadyProcessedInConsensus,
+                Vec::new(),
+            );
+        }
+
         // Resolve the RandomX seed for this block's epoch. If the
         // lookup misses (non-genesis epoch, seed not in DB), we
         // **reject** the block rather than fall back to a zero seed
         // — a zero seed bypasses PoW verification in `verify_pow`,
-        // which would silently accept invalid blocks. See
-        // docs/security-audit.md finding H-1.
-        //
-        // Fast-sync exception: when an operator-configured trusted
-        // checkpoint is set, headers below that height are pre-anchor
-        // history. Under the trusted-checkpoint model the operator has
-        // asserted the chain up to the anchor; we cannot have seeds
-        // for those heights yet (we never executed those blocks), so
-        // the seed-missed rejection would block legitimate pre-anchor
-        // headers that a peer might still send. Fall through with a
-        // zero seed — `verify_pow` independently bypasses PoW in
-        // catch-up mode (verification.rs:371), so this does NOT widen
-        // the H-1 attack surface beyond what catch-up already allows.
-        // See docs/fast-sync-design.md.
+        // which would silently accept invalid blocks, and it makes the
+        // PoW quality that classifies heavy/timer blocks (and so the
+        // consensus ordering) differ from every other node. See
+        // docs/security-audit.md finding H-1. A node anchored at a
+        // fast-sync checkpoint has the seeds below the anchor recorded
+        // by the anchor bootstrap (`anchored_seed_hash_from_db`).
         let block_seed_hash = match self
             .data_man
             .db_manager
@@ -1900,36 +1959,7 @@ impl SynchronizationGraph {
         {
             Some(h) => h,
             None => {
-                let trusted_anchor =
-                    self.consensus.trusted_checkpoint_anchors();
-                if let Some((trusted_h, snapshot_hash, _, blame_hash)) =
-                    trusted_anchor
-                {
-                    let hash = header.hash();
-                    if hash == snapshot_hash || hash == blame_hash {
-                        // The two operator-supplied anchor headers.
-                        // Accept with zero seed (PoW is already skipped
-                        // in catch-up mode); these must be in the local
-                        // graph for snapshot validation to find them.
-                        H256::zero()
-                    } else if header.height() < trusted_h {
-                        // Pre-anchor header under trusted-checkpoint
-                        // mode: accept with zero seed.
-                        H256::zero()
-                    } else {
-                        // Post-anchor header that isn't an anchor
-                        // itself: we can't validate it yet (we haven't
-                        // even downloaded the snapshot). Defer with
-                        // `TemporarySkipped` so the peer stays
-                        // connected.
-                        return (
-                            BlockHeaderInsertionResult::TemporarySkipped,
-                            Vec::new(),
-                        );
-                    }
-                } else if header.height()
-                    > self.consensus.best_epoch_number()
-                {
+                if header.height() > self.consensus.best_epoch_number() {
                     // "Falling behind shouldn't be fatal." The seed for
                     // this block's RandomX epoch lives ~RANDOMX_EPOCH_LENGTH
                     // blocks below it and is only available once we've

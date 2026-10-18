@@ -152,38 +152,21 @@ fn enumerate_forward_candidates(
     alternatives
 }
 
-/// Build the snapshot-sync candidate list for one `start_sync` round.
+/// Build the snapshot-sync candidate list for one `start_sync` round: the
+/// primary `epoch_to_sync` (the stable checkpoint our consensus elected)
+/// plus the header-derived forward alternatives (D.2).
 ///
-/// **Trusted-checkpoint (fast-sync) mode** — when one or more anchors are
-/// configured, propose those KNOWN anchors directly, newest-first. Their
-/// hashes come from config/baked-in defaults, so NO local header chain is
-/// needed (a fresh joiner has none). This is what lets a fast-sync joiner
-/// recover when its newest configured anchor has been pruned fleet-wide:
-/// it falls through to the next-newest configured era checkpoint that a
-/// peer still serves. Replaces the header-chain `enumerate_forward_candidates`
-/// walk, which returns nothing for a header-less joiner (§5.16).
-///
-/// **Normal mode** (a full node that fell behind, with a real header
-/// chain) — keep the original behaviour: the primary `epoch_to_sync` plus
-/// the header-derived forward alternatives (D.2).
+/// A fast-sync joiner gets here only after anchoring its consensus graph at
+/// a trusted era checkpoint and header-syncing above it, so its candidates
+/// come from its own header chain like any other node's. Proposing the
+/// configured anchors themselves (the former trusted-checkpoint mode) made
+/// it restore a snapshot AT the consensus root, whose first epochs cannot be
+/// executed (their reward epochs lie below the root). See
+/// docs/fast-sync-design.md §5.19.
 fn enumerate_sync_candidates(
     sync_handler: &SynchronizationProtocolHandler, epoch_to_sync: &EpochId,
     primary_height: u64,
 ) -> Vec<SnapshotSyncCandidate> {
-    let trusted =
-        sync_handler.graph.consensus.trusted_checkpoint_candidates();
-    if !trusted.is_empty() {
-        // Already newest-first; hashes are known so no header chain needed.
-        return trusted
-            .into_iter()
-            .map(|(height, snapshot_epoch_id)| {
-                SnapshotSyncCandidate::FullSync {
-                    height,
-                    snapshot_epoch_id,
-                }
-            })
-            .collect();
-    }
     let mut candidates = vec![SnapshotSyncCandidate::FullSync {
         height: primary_height,
         snapshot_epoch_id: *epoch_to_sync,
@@ -403,18 +386,16 @@ impl SnapshotChunkSync {
         self.inner.read().status
     }
 
-    /// Height of the snapshot whose chunks have been fully imported and
-    /// verified, taken from `RelatedData.snapshot_info.height`. Returns
-    /// `None` if no manifest has been processed yet OR the manifest
-    /// path never populated `related_data` (legacy fallback). Used by
-    /// `CatchUpCheckpointPhase` to re-anchor the consensus era genesis
-    /// at the snapshot block after `restore_execution_state` runs.
-    pub fn completed_snapshot_height(&self) -> Option<u64> {
+    /// Epoch of the snapshot whose chunks have been imported and verified
+    /// (`RelatedData.snapshot_info`), or `None` before a manifest was
+    /// accepted. It is not necessarily the requested `epoch_to_sync`: a
+    /// newer forward candidate (D.2) may have been synced instead.
+    pub fn completed_snapshot_epoch_id(&self) -> Option<H256> {
         self.inner
             .read()
             .related_data
             .as_ref()
-            .map(|r| r.snapshot_info.height)
+            .map(|r| *r.snapshot_info.get_snapshot_epoch_id())
     }
 
     /// Single-version manifest entry point. The response now always
@@ -888,27 +869,19 @@ impl SnapshotChunkSync {
             // offer us a newer snapshot. `set_active_candidate` walks
             // these newest-first, so a successful sync to a newer
             // epoch costs less catch-up afterward.
-            // Fast-sync exception: under an operator-configured trusted
-            // checkpoint we have NO local header for `epoch_to_sync` (it
-            // IS the anchor we're syncing to). Fall back to the
-            // operator-supplied height in that case; otherwise preserve
-            // the "checkpoint must have header" invariant.
             let height = match sync_handler
                 .graph
                 .data_man
                 .block_header_by_hash(&epoch_to_sync)
             {
                 Some(h) => h.height(),
-                None => sync_handler
-                    .graph
-                    .consensus
-                    .trusted_checkpoint()
-                    .filter(|(_, hash)| *hash == epoch_to_sync)
-                    .map(|(h, _)| h)
-                    .expect(
-                        "Syncing checkpoint should have available header \
-                         or trusted-checkpoint height matching epoch_to_sync",
-                    ),
+                None => {
+                    error!(
+                        "snapshot-sync: no header for the sync target {:?}",
+                        epoch_to_sync
+                    );
+                    return;
+                }
             };
             let candidates = enumerate_sync_candidates(
                 sync_handler,
@@ -916,15 +889,9 @@ impl SnapshotChunkSync {
                 height,
             );
             debug!(
-                "snapshot-sync: proposing {} candidate(s) for era_genesis={:?} \
-                 (trusted-checkpoint mode={})",
+                "snapshot-sync: proposing {} candidate(s) for era_genesis={:?}",
                 candidates.len(),
                 current_era_genesis,
-                !sync_handler
-                    .graph
-                    .consensus
-                    .trusted_checkpoint_candidates()
-                    .is_empty(),
             );
             inner.start_sync(current_era_genesis, candidates, io, sync_handler)
         }

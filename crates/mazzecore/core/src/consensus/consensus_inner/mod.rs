@@ -1691,32 +1691,40 @@ impl ConsensusGraphInner {
     }
 
     /// A header referee that this node's consensus does not hold is dropped
-    /// from the block's DAG edges. Below the era genesis that is expected (the
-    /// block is out of the era and would be filtered from every epoch
-    /// anyway). At or above it the referee should be here: dropping it
-    /// changes this node's past/epoch sets, block numbers and rewards, so its
-    /// state will differ from the network's from now on (the 2026-10-13 m2
-    /// incident: one block never reached consensus, every later block number
-    /// was one lower than the network's).
+    /// from the block's DAG edges. That is expected for blocks in the past of
+    /// the era genesis (out of the era, filtered from every epoch anyway):
+    /// they sit below the era genesis height or at most a few epochs above it
+    /// (side branches the era genesis merged; seen on every restart). Far
+    /// above it the referee should be here: dropping it changes this node's
+    /// past/epoch sets, block numbers and rewards, so its state will differ
+    /// from the network's from now on (2026-10-13 m2 incident: a block of
+    /// epoch 11,518 never reached consensus and every later block number was
+    /// one lower than the network's).
     fn report_missing_referee(
         &self, block_header: &BlockHeader, referee: &H256,
     ) {
+        const ERA_GENESIS_PAST_MARGIN: u64 = 100;
         let referee_height = self
             .data_man
             .block_header_by_hash(referee)
             .map(|h| h.height());
         match referee_height {
-            Some(h) if h < self.cur_era_genesis_height => debug!(
-                "referee {:?} (height {}) of block {:?} is below the era \
-                 genesis {}; not part of the DAG edges",
-                referee,
-                h,
-                block_header.hash(),
-                self.cur_era_genesis_height
-            ),
+            Some(h)
+                if h <= self.cur_era_genesis_height
+                    + ERA_GENESIS_PAST_MARGIN =>
+            {
+                debug!(
+                    "referee {:?} (height {}) of block {:?} is not in \
+                     consensus (era genesis height {}); not a DAG edge",
+                    referee,
+                    h,
+                    block_header.hash(),
+                    self.cur_era_genesis_height
+                )
+            }
             _ => error!(
                 "consensus: block {:?} (height {}) references {:?} (height \
-                 {:?}) which is not in consensus although it is not below \
+                 {:?}) which is not in consensus although it is far above \
                  the era genesis ({}). The edge is dropped, so this node's \
                  epoch sets and state will differ from the network's.",
                 block_header.hash(),

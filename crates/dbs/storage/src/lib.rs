@@ -201,6 +201,13 @@ pub struct MdbxConfig {
     /// [`MdbxSyncMode`]. Recommended: `SafeNoSync` on testnet
     /// miners, `Durable` on operator archives.
     pub sync_mode: MdbxSyncMode,
+    /// `SafeNoSync` only: make a steady (fsynced) point once this many
+    /// MB are unsynced (0 = no size threshold). Applies to the hot and
+    /// the snapshot env.
+    pub autosync_mb: u64,
+    /// `SafeNoSync` only: make a steady point once the oldest unsynced
+    /// commit is this old, checked at the next commit (0 = no period).
+    pub autosync_period_ms: u64,
 }
 
 impl Default for MdbxConfig {
@@ -208,6 +215,9 @@ impl Default for MdbxConfig {
         Self {
             map_size_mb: Some(crate::impls::defaults::DEFAULT_MDBX_MAP_SIZE_MB),
             sync_mode: MdbxSyncMode::default(),
+            autosync_mb: crate::impls::defaults::DEFAULT_MDBX_AUTOSYNC_MB,
+            autosync_period_ms:
+                crate::impls::defaults::DEFAULT_MDBX_AUTOSYNC_PERIOD_MS,
         }
     }
 }
@@ -367,7 +377,10 @@ pub use self::{
         snapshot_sync::{FullSyncVerifier, MptSlicer},
         state_proof::StateProof,
         storage_db::{
-            kvdb_mdbx::{BatchOp, KvdbMdbx, KvdbMdbxStats, MdbxEnv},
+            kvdb_mdbx::{
+                rw_stats as mdbx_rw_stats, BatchOp, KvdbMdbx, KvdbMdbxStats,
+                MdbxEnv,
+            },
             mdbx_columns::{Column as MdbxColumn, NUM_COLUMNS as MDBX_NUM_COLUMNS},
             snapshot_db_manager_mdbx::SnapshotDbManagerMdbx,
         },

@@ -110,6 +110,155 @@ lazy_static! {
         );
 }
 
+/// Process-wide accounting of MDBX read-write transactions (profiling only;
+/// no effect on what is written). Every rw txn this module opens is
+/// recorded by kind with its wall time from `begin_rw_txn` to `commit`,
+/// so the executor can report how many commits (and how much time in
+/// them) one epoch costs. `snapshot` adds libmdbx's own page-operation
+/// counters (explicit write ops / msync / fsync) summed over every env
+/// this process opened.
+pub mod rw_stats {
+    use lazy_static::lazy_static;
+    use std::sync::{
+        atomic::{AtomicU64, Ordering::Relaxed},
+        Arc, Mutex, Weak,
+    };
+
+    pub const PUT: usize = 0;
+    pub const DELETE: usize = 1;
+    pub const BATCH: usize = 2;
+    pub const TXN: usize = 3;
+    pub const CREATE_TABLE: usize = 4;
+    pub const RANGE: usize = 5;
+    pub const CHUNK: usize = 6;
+    pub const NUM_KINDS: usize = 7;
+    pub const KIND_NAMES: [&str; NUM_KINDS] =
+        ["put", "del", "batch", "txn", "mktable", "range", "chunk"];
+
+    static COUNT: [AtomicU64; NUM_KINDS] = [
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+    ];
+    static NANOS: [AtomicU64; NUM_KINDS] = [
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+    ];
+
+    pub(super) fn record(kind: usize, started: std::time::Instant) {
+        COUNT[kind].fetch_add(1, Relaxed);
+        NANOS[kind].fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
+    }
+
+    /// Time spent in `begin_rw_txn` waiting for the writer slot (part of
+    /// the per-kind times above).
+    static WAIT_NANOS: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn record_wait(started: std::time::Instant) {
+        WAIT_NANOS.fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Snapshot {
+        pub count: [u64; NUM_KINDS],
+        pub nanos: [u64; NUM_KINDS],
+        /// libmdbx explicit write operations, msyncs and fsyncs summed
+        /// over every open env.
+        pub wops: u64,
+        pub msync: u64,
+        pub fsync: u64,
+        /// Of `nanos`, the time spent waiting for the writer slot.
+        pub wait_nanos: u64,
+    }
+
+    impl Snapshot {
+        pub fn total_count(&self) -> u64 { self.count.iter().sum() }
+
+        pub fn total_nanos(&self) -> u64 { self.nanos.iter().sum() }
+
+        pub fn delta(&self, earlier: &Snapshot) -> Snapshot {
+            let mut d = Snapshot::default();
+            for i in 0..NUM_KINDS {
+                d.count[i] = self.count[i].saturating_sub(earlier.count[i]);
+                d.nanos[i] = self.nanos[i].saturating_sub(earlier.nanos[i]);
+            }
+            d.wops = self.wops.saturating_sub(earlier.wops);
+            d.msync = self.msync.saturating_sub(earlier.msync);
+            d.fsync = self.fsync.saturating_sub(earlier.fsync);
+            d.wait_nanos = self.wait_nanos.saturating_sub(earlier.wait_nanos);
+            d
+        }
+
+        /// "put=3/1.2ms del=1/0.3ms ..." over the kinds that occurred.
+        pub fn describe(&self) -> String {
+            let mut out = String::new();
+            for i in 0..NUM_KINDS {
+                if self.count[i] == 0 {
+                    continue;
+                }
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(&format!(
+                    "{}={}/{:.1}ms",
+                    KIND_NAMES[i],
+                    self.count[i],
+                    self.nanos[i] as f64 / 1e6
+                ));
+            }
+            if self.wait_nanos > 0 {
+                out.push_str(&format!(
+                    " (writer-wait {:.1}ms)",
+                    self.wait_nanos as f64 / 1e6
+                ));
+            }
+            out
+        }
+    }
+
+    lazy_static! {
+        static ref ENVS: Mutex<Vec<Weak<super::MdbxEnv>>> =
+            Mutex::new(Vec::new());
+    }
+
+    pub(super) fn register_env(env: &Arc<super::MdbxEnv>) {
+        if let Ok(mut envs) = ENVS.lock() {
+            envs.retain(|w| w.strong_count() > 0);
+            envs.push(Arc::downgrade(env));
+        }
+    }
+
+    pub fn snapshot() -> Snapshot {
+        let mut s = Snapshot::default();
+        for i in 0..NUM_KINDS {
+            s.count[i] = COUNT[i].load(Relaxed);
+            s.nanos[i] = NANOS[i].load(Relaxed);
+        }
+        s.wait_nanos = WAIT_NANOS.load(Relaxed);
+        let envs: Vec<Arc<super::MdbxEnv>> = match ENVS.lock() {
+            Ok(envs) => envs.iter().filter_map(|w| w.upgrade()).collect(),
+            Err(_) => Vec::new(),
+        };
+        for env in envs {
+            if let Some((wops, msync, fsync)) = env.pgop_stat() {
+                s.wops += wops;
+                s.msync += msync;
+                s.fsync += fsync;
+            }
+        }
+        s
+    }
+}
+
 /// Map size used when the caller does not specify one. Derived from
 /// [`crate::impls::defaults::DEFAULT_MDBX_MAP_SIZE_MB`] (64 GB by default).
 const DEFAULT_MAP_SIZE_BYTES: usize =
@@ -175,7 +324,9 @@ impl MdbxEnv {
             ..Default::default()
         });
         let db = builder.open(path).map_err(map_mdbx_error)?;
-        Ok(Arc::new(Self { db }))
+        let env = Arc::new(Self { db });
+        rw_stats::register_env(&env);
+        Ok(env)
     }
 
     /// Open (or create) an MDBX env with an explicit **growth-enabled**
@@ -248,7 +399,64 @@ impl MdbxEnv {
             ..Default::default()
         });
         let db = builder.open(path).map_err(map_mdbx_error)?;
-        Ok(Arc::new(Self { db }))
+        let env = Arc::new(Self { db });
+        rw_stats::register_env(&env);
+        Ok(env)
+    }
+
+    /// Set libmdbx's auto-sync thresholds (`MDBX_opt_sync_bytes`,
+    /// `MDBX_opt_sync_period`; 0 disables one). Only meaningful in the
+    /// `SafeNoSync` mode, where it bounds how far the last steady point
+    /// may lag. Crash (process kill) safety is unaffected: every commit is
+    /// written to the file before `commit` returns.
+    pub fn set_autosync(&self, bytes: u64, period_ms: u64) -> Result<()> {
+        // The period is in 1/65536 s.
+        let period = period_ms.saturating_mul(65536) / 1000;
+        for (opt, value) in [
+            (mdbx_sys::MDBX_opt_sync_bytes, bytes),
+            (mdbx_sys::MDBX_opt_sync_period, period),
+        ] {
+            let rc = unsafe {
+                mdbx_sys::mdbx_env_set_option(self.db.ptr(), opt, value)
+            };
+            if rc != 0 {
+                bail!("mdbx_env_set_option({:?}, {}) failed: {}", opt, value, rc);
+            }
+        }
+        Ok(())
+    }
+
+    /// Begin a rw txn, accounting the time spent waiting for the env's
+    /// single writer slot.
+    fn begin_rw(
+        &self,
+    ) -> Result<libmdbx::Transaction<'_, libmdbx::RW, NoWriteMap>> {
+        let t0 = std::time::Instant::now();
+        let txn = self.db.begin_rw_txn().map_err(map_mdbx_error)?;
+        rw_stats::record_wait(t0);
+        Ok(txn)
+    }
+
+    /// libmdbx page-operation counters `(write ops, msyncs, fsyncs)` of
+    /// this env since it was opened, or `None` if unavailable.
+    pub fn pgop_stat(&self) -> Option<(u64, u64, u64)> {
+        let mut info: mdbx_sys::MDBX_envinfo = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            mdbx_sys::mdbx_env_info_ex(
+                self.db.ptr(),
+                std::ptr::null(),
+                &mut info,
+                std::mem::size_of::<mdbx_sys::MDBX_envinfo>(),
+            )
+        };
+        if rc != 0 {
+            return None;
+        }
+        Some((
+            info.mi_pgop_stat.wops,
+            info.mi_pgop_stat.msync,
+            info.mi_pgop_stat.fsync,
+        ))
     }
 }
 
@@ -317,14 +525,319 @@ impl KvdbMdbx {
         Self { env, col }
     }
 
+    /// `delete_range` inside an active chunked write scope.
+    fn delete_range_in_scope(
+        &self, lower_bound_incl: &[u8], upper_bound_excl: Option<&[u8]>,
+    ) -> Option<Result<usize>> {
+        let keys = match in_write_scope(&self.env, 0, |txn| {
+            range_in(txn, self.col, lower_bound_incl, upper_bound_excl, None)
+        })? {
+            Ok(kvs) => kvs.into_iter().map(|(k, _)| k).collect::<Vec<_>>(),
+            Err(e) => return Some(Err(e)),
+        };
+        let n = keys.len();
+        in_write_scope(&self.env, n, |txn| {
+            delete_keys_in(txn, self.col, &keys)
+        })
+        .map(|r| r.map(|_| n))
+    }
+
     /// Ensure the named sub-table exists. Called lazily on first write.
     fn create_table(&self) -> Result<()> {
-        let txn = self.env.db.begin_rw_txn().map_err(map_mdbx_error)?;
+        if let Some(r) = in_write_scope(&self.env, 0, |txn| {
+            txn.create_table(
+                Some(&col_table_name(self.col)),
+                TableFlags::default(),
+            )
+            .map_err(map_mdbx_error)?;
+            Ok(())
+        }) {
+            return r;
+        }
+        // Tables are never dropped: once present, skip the rw txn (a
+        // `start_transaction` per delta-MPT commit used to pay one).
+        {
+            let txn = self.env.db.begin_ro_txn().map_err(map_mdbx_error)?;
+            match txn.open_table(Some(&col_table_name(self.col))) {
+                Ok(_) => return Ok(()),
+                Err(libmdbx::Error::NotFound) => {}
+                Err(e) => return Err(map_mdbx_error(e)),
+            }
+        }
+        let rw_t0 = std::time::Instant::now();
+        let txn = self.env.begin_rw()?;
         txn.create_table(Some(&col_table_name(self.col)), TableFlags::default())
             .map_err(map_mdbx_error)?;
         txn.commit().map_err(map_mdbx_error)?;
+        rw_stats::record(rw_stats::CREATE_TABLE, rw_t0);
         Ok(())
     }
+}
+
+// ------------------------ chunked write scope ------------------------
+//
+// `MdbxEnv::with_chunked_writes` runs a closure with every MDBX access
+// this thread makes to that env routed through one long-lived rw txn
+// that is committed every `chunk_ops` writes (and at the end), instead
+// of one rw txn per `put`. Reads inside the scope go through the same
+// txn, so they see the scope's own uncommitted writes.
+//
+// Only for writers whose partial output is harmless if the process dies
+// between two chunks (e.g. a snapshot merge, whose output is unreachable
+// until its marker is deleted). Other threads keep working: their reads
+// see the last committed chunk, their writes wait for at most one chunk.
+// The closure must not wait for another thread that writes to the same
+// env (it would wait for the scope's writer lock).
+
+struct ActiveWrite {
+    // Declared before `env`: dropped (aborted) before the env it borrows.
+    txn: Option<libmdbx::Transaction<'static, libmdbx::RW, NoWriteMap>>,
+    txn_started: Option<std::time::Instant>,
+    env: Arc<MdbxEnv>,
+    ops: usize,
+    chunk_ops: usize,
+}
+
+impl ActiveWrite {
+    fn txn(
+        &mut self,
+    ) -> Result<&libmdbx::Transaction<'static, libmdbx::RW, NoWriteMap>> {
+        if self.txn.is_none() {
+            self.txn_started = Some(std::time::Instant::now());
+            let txn = self.env.begin_rw()?;
+            // SAFETY: the txn borrows `self.env.db`; `self.env` keeps the
+            // env alive and the txn field is dropped/committed first.
+            let txn: libmdbx::Transaction<'static, libmdbx::RW, NoWriteMap> =
+                unsafe { std::mem::transmute(txn) };
+            self.txn = Some(txn);
+        }
+        Ok(self.txn.as_ref().unwrap())
+    }
+
+    fn commit(&mut self) -> Result<()> {
+        self.ops = 0;
+        if let Some(txn) = self.txn.take() {
+            txn.commit().map_err(map_mdbx_error)?;
+            if let Some(t0) = self.txn_started.take() {
+                rw_stats::record(rw_stats::CHUNK, t0);
+            }
+        }
+        Ok(())
+    }
+
+    fn wrote(&mut self, n: usize) -> Result<()> {
+        self.ops += n;
+        if self.ops >= self.chunk_ops {
+            self.commit()?;
+        }
+        Ok(())
+    }
+}
+
+thread_local! {
+    static ACTIVE_WRITE: std::cell::RefCell<Option<ActiveWrite>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Run `f` on the current thread's chunked write txn for `env`, if a
+/// [`MdbxEnv::with_chunked_writes`] scope for `env` is active. `writes`
+/// is the number of mutations `f` makes (counted towards the chunk).
+fn in_write_scope<R>(
+    env: &Arc<MdbxEnv>, writes: usize,
+    f: impl FnOnce(
+        &libmdbx::Transaction<'static, libmdbx::RW, NoWriteMap>,
+    ) -> Result<R>,
+) -> Option<Result<R>> {
+    ACTIVE_WRITE.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let aw = match guard.as_mut() {
+            Some(aw) if Arc::ptr_eq(&aw.env, env) => aw,
+            _ => return None,
+        };
+        let out = (|| {
+            let r = f(aw.txn()?)?;
+            if writes > 0 {
+                aw.wrote(writes)?;
+            }
+            Ok(r)
+        })();
+        Some(out)
+    })
+}
+
+impl MdbxEnv {
+    /// See the "chunked write scope" comment above. Not atomic: chunks
+    /// committed before an error (or a crash) stay. Nested calls (for any
+    /// env) run `f` inside the outer scope.
+    pub fn with_chunked_writes<T>(
+        self: &Arc<Self>, chunk_ops: usize, f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let installed = ACTIVE_WRITE.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            if guard.is_some() {
+                return false;
+            }
+            *guard = Some(ActiveWrite {
+                txn: None,
+                txn_started: None,
+                env: Arc::clone(self),
+                ops: 0,
+                chunk_ops: chunk_ops.max(1),
+            });
+            true
+        });
+        if !installed {
+            return f();
+        }
+        // Abort the open chunk if `f` panics.
+        struct Uninstall;
+        impl Drop for Uninstall {
+            fn drop(&mut self) {
+                let _ = ACTIVE_WRITE.try_with(|cell| {
+                    if let Ok(mut guard) = cell.try_borrow_mut() {
+                        guard.take();
+                    }
+                });
+            }
+        }
+        let uninstall = Uninstall;
+        let out = f();
+        let active = ACTIVE_WRITE.with(|cell| cell.borrow_mut().take());
+        std::mem::forget(uninstall);
+        let mut active = active.expect("chunked write scope vanished");
+        match out {
+            Ok(v) => {
+                active.commit()?;
+                Ok(v)
+            }
+            // Dropping `active` aborts the open chunk.
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl MdbxEnv {
+    /// Apply `(column, op)` writes spanning several columns of this env
+    /// in ONE rw txn: all of them land, or (on error) none.
+    pub fn write_multi(
+        self: &Arc<Self>, ops: &[(u32, BatchOp)],
+    ) -> Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        MDBX_BATCH_OPS_TOTAL.inc(ops.len());
+        fn apply(
+            txn: &libmdbx::Transaction<'_, libmdbx::RW, NoWriteMap>,
+            ops: &[(u32, BatchOp)],
+        ) -> Result<()> {
+            let mut tables = std::collections::HashMap::new();
+            for (col, op) in ops {
+                if !tables.contains_key(col) {
+                    let table = txn
+                        .create_table(
+                            Some(&col_table_name(*col)),
+                            TableFlags::default(),
+                        )
+                        .map_err(map_mdbx_error)?;
+                    tables.insert(*col, table);
+                }
+                let table = &tables[col];
+                match op {
+                    BatchOp::Put(k, v) => {
+                        txn.put(table, k, v, WriteFlags::empty())
+                            .map_err(map_mdbx_error)?;
+                    }
+                    BatchOp::Delete(k) => {
+                        let _ =
+                            txn.del(table, k, None).map_err(map_mdbx_error)?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        if let Some(r) = in_write_scope(self, ops.len(), |txn| apply(txn, ops))
+        {
+            return r;
+        }
+        let rw_t0 = std::time::Instant::now();
+        let txn = self.begin_rw()?;
+        apply(&txn, ops)?;
+        txn.commit().map_err(map_mdbx_error)?;
+        rw_stats::record(rw_stats::BATCH, rw_t0);
+        Ok(())
+    }
+}
+
+fn get_in<K: libmdbx::TransactionKind>(
+    txn: &libmdbx::Transaction<'_, K, NoWriteMap>, col: u32, key: &[u8],
+) -> Result<Option<Box<[u8]>>> {
+    let table = match txn.open_table(Some(&col_table_name(col))) {
+        Ok(t) => t,
+        // NotFound is normal — the sub-table is created on first write.
+        Err(libmdbx::Error::NotFound) => return Ok(None),
+        Err(e) => return Err(map_mdbx_error(e)),
+    };
+    match txn.get::<Vec<u8>>(&table, key).map_err(map_mdbx_error)? {
+        Some(v) => Ok(Some(v.into_boxed_slice())),
+        None => Ok(None),
+    }
+}
+
+fn range_in<K: libmdbx::TransactionKind>(
+    txn: &libmdbx::Transaction<'_, K, NoWriteMap>, col: u32,
+    lower_bound_incl: &[u8], upper_bound_excl: Option<&[u8]>,
+    limit: Option<usize>,
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    let table = match txn.open_table(Some(&col_table_name(col))) {
+        Ok(t) => t,
+        Err(libmdbx::Error::NotFound) => return Ok(Vec::new()),
+        Err(e) => return Err(map_mdbx_error(e)),
+    };
+    let mut cursor = txn.cursor(&table).map_err(map_mdbx_error)?;
+    let mut out = Vec::new();
+    for pair in cursor.iter_from::<Vec<u8>, Vec<u8>>(lower_bound_incl) {
+        let (k, v) = pair.map_err(map_mdbx_error)?;
+        if let Some(upper) = upper_bound_excl {
+            if k.as_slice() >= upper {
+                break;
+            }
+        }
+        out.push((k, v));
+        if limit.map_or(false, |l| out.len() >= l) {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+fn write_ops_in(
+    txn: &libmdbx::Transaction<'_, libmdbx::RW, NoWriteMap>, col: u32,
+    ops: &[BatchOp],
+) -> Result<()> {
+    let table = txn
+        .create_table(Some(&col_table_name(col)), TableFlags::default())
+        .map_err(map_mdbx_error)?;
+    for op in ops {
+        match op {
+            BatchOp::Put(k, v) => {
+                txn.put(&table, k, v, WriteFlags::empty())
+                    .map_err(map_mdbx_error)?;
+            }
+            BatchOp::Delete(k) => {
+                let _ = txn.del(&table, k, None).map_err(map_mdbx_error)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn delete_keys_in(
+    txn: &libmdbx::Transaction<'_, libmdbx::RW, NoWriteMap>, col: u32,
+    keys: &[Vec<u8>],
+) -> Result<()> {
+    let ops: Vec<BatchOp> =
+        keys.iter().map(|k| BatchOp::Delete(k.as_slice())).collect();
+    write_ops_in(txn, col, &ops)
 }
 
 // -------------------------- read path --------------------------
@@ -332,6 +845,11 @@ impl KvdbMdbx {
 impl KeyValueDbTraitRead for KvdbMdbx {
     fn get(&self, key: &[u8]) -> Result<Option<Box<[u8]>>> {
         MDBX_GET_CALLS.inc(1);
+        if let Some(r) =
+            in_write_scope(&self.env, 0, |txn| get_in(txn, self.col, key))
+        {
+            return r;
+        }
         let txn = self.env.db.begin_ro_txn().map_err(map_mdbx_error)?;
         let table = match txn.open_table(Some(&col_table_name(self.col))) {
             Ok(t) => t,
@@ -427,8 +945,14 @@ impl KvdbMdbx {
         let _timer =
             MeterTimer::time_func(MDBX_BATCH_COMMIT_TIMER.as_ref());
         MDBX_BATCH_OPS_TOTAL.inc(ops.len());
+        if let Some(r) = in_write_scope(&self.env, ops.len(), |txn| {
+            write_ops_in(txn, self.col, ops)
+        }) {
+            return r;
+        }
+        let rw_t0 = std::time::Instant::now();
         let txn =
-            self.env.db.begin_rw_txn().map_err(map_mdbx_error)?;
+            self.env.begin_rw()?;
         let table = txn
             .create_table(
                 Some(&col_table_name(self.col)),
@@ -449,6 +973,7 @@ impl KvdbMdbx {
             }
         }
         txn.commit().map_err(map_mdbx_error)?;
+        rw_stats::record(rw_stats::BATCH, rw_t0);
         Ok(())
     }
 
@@ -477,6 +1002,16 @@ impl KvdbMdbx {
     ) -> Result<Vec<(Box<[u8]>, Box<[u8]>)>> {
         let _timer =
             MeterTimer::time_func(MDBX_RANGE_SCAN_TIMER.as_ref());
+        if let Some(r) = in_write_scope(&self.env, 0, |txn| {
+            range_in(txn, self.col, lower_bound_incl, upper_bound_excl, None)
+        }) {
+            let out: Vec<(Box<[u8]>, Box<[u8]>)> = r?
+                .into_iter()
+                .map(|(k, v)| (k.into_boxed_slice(), v.into_boxed_slice()))
+                .collect();
+            MDBX_RANGE_SCAN_ROWS.inc(out.len());
+            return Ok(out);
+        }
         let txn = self.env.db.begin_ro_txn().map_err(map_mdbx_error)?;
         let table = match txn.open_table(Some(&col_table_name(self.col))) {
             Ok(t) => t,
@@ -522,7 +1057,14 @@ impl KvdbMdbx {
         &self, lower_bound_incl: &[u8],
         upper_bound_excl: Option<&[u8]>,
     ) -> Result<usize> {
-        let txn = self.env.db.begin_rw_txn().map_err(map_mdbx_error)?;
+        if let Some(r) = self.delete_range_in_scope(
+            lower_bound_incl,
+            upper_bound_excl,
+        ) {
+            return r;
+        }
+        let rw_t0 = std::time::Instant::now();
+        let txn = self.env.begin_rw()?;
         let table = match txn.open_table(Some(&col_table_name(self.col))) {
             Ok(t) => t,
             // Column doesn't exist yet — nothing to delete.
@@ -552,6 +1094,7 @@ impl KvdbMdbx {
             let _ = txn.del(&table, &k, None).map_err(map_mdbx_error)?;
         }
         txn.commit().map_err(map_mdbx_error)?;
+        rw_stats::record(rw_stats::RANGE, rw_t0);
         Ok(n)
     }
 
@@ -570,6 +1113,13 @@ impl KvdbMdbx {
         &self, lower_bound_incl: &[u8],
         upper_bound_excl: Option<&[u8]>,
     ) -> Result<Option<(Box<[u8]>, Box<[u8]>)>> {
+        if let Some(r) = in_write_scope(&self.env, 0, |txn| {
+            range_in(txn, self.col, lower_bound_incl, upper_bound_excl, Some(1))
+        }) {
+            return Ok(r?.into_iter().next().map(|(k, v)| {
+                (k.into_boxed_slice(), v.into_boxed_slice())
+            }));
+        }
         let txn = self.env.db.begin_ro_txn().map_err(map_mdbx_error)?;
         let table = match txn.open_table(Some(&col_table_name(self.col))) {
             Ok(t) => t,
@@ -628,6 +1178,12 @@ impl KvdbMdbx {
                     .to_string(),
             )));
         }
+        if let Some(r) = self.delete_range_in_scope(
+            lower_bound_incl,
+            upper_bound_excl,
+        ) {
+            return r;
+        }
         // Track the resumption point — the smallest key we haven't
         // yet processed. Starts at `lower_bound_incl`; after each
         // chunk we advance past the last deleted key.
@@ -635,7 +1191,8 @@ impl KvdbMdbx {
         let mut total_deleted: usize = 0;
 
         loop {
-            let txn = self.env.db.begin_rw_txn().map_err(map_mdbx_error)?;
+            let rw_t0 = std::time::Instant::now();
+            let txn = self.env.begin_rw()?;
             let table =
                 match txn.open_table(Some(&col_table_name(self.col))) {
                     Ok(t) => t,
@@ -665,6 +1222,7 @@ impl KvdbMdbx {
                 // No more work — commit an empty txn (releases the
                 // writer lock cleanly) and return.
                 txn.commit().map_err(map_mdbx_error)?;
+                rw_stats::record(rw_stats::RANGE, rw_t0);
                 return Ok(total_deleted);
             }
             // Set the resumption cursor to the byte-successor of the
@@ -683,6 +1241,7 @@ impl KvdbMdbx {
                     txn.del(&table, &k, None).map_err(map_mdbx_error)?;
             }
             txn.commit().map_err(map_mdbx_error)?;
+            rw_stats::record(rw_stats::RANGE, rw_t0);
             total_deleted += n;
         }
     }
@@ -698,12 +1257,19 @@ impl KeyValueDbTypes for KvdbMdbx {
 
 impl KeyValueDbTrait for KvdbMdbx {
     fn delete(&self, key: &[u8]) -> Result<Option<Option<Box<[u8]>>>> {
-        let txn = self.env.db.begin_rw_txn().map_err(map_mdbx_error)?;
+        if let Some(r) = in_write_scope(&self.env, 1, |txn| {
+            write_ops_in(txn, self.col, &[BatchOp::Delete(key)])
+        }) {
+            return r.map(|_| None);
+        }
+        let rw_t0 = std::time::Instant::now();
+        let txn = self.env.begin_rw()?;
         let table = txn
             .create_table(Some(&col_table_name(self.col)), TableFlags::default())
             .map_err(map_mdbx_error)?;
         let _ = txn.del(&table, key, None).map_err(map_mdbx_error)?;
         txn.commit().map_err(map_mdbx_error)?;
+        rw_stats::record(rw_stats::DELETE, rw_t0);
         Ok(None)
     }
 
@@ -711,13 +1277,20 @@ impl KeyValueDbTrait for KvdbMdbx {
         &self, key: &[u8], value: &[u8],
     ) -> Result<Option<Option<Box<[u8]>>>> {
         MDBX_PUT_CALLS.inc(1);
-        let txn = self.env.db.begin_rw_txn().map_err(map_mdbx_error)?;
+        if let Some(r) = in_write_scope(&self.env, 1, |txn| {
+            write_ops_in(txn, self.col, &[BatchOp::Put(key, value)])
+        }) {
+            return r.map(|_| None);
+        }
+        let rw_t0 = std::time::Instant::now();
+        let txn = self.env.begin_rw()?;
         let table = txn
             .create_table(Some(&col_table_name(self.col)), TableFlags::default())
             .map_err(map_mdbx_error)?;
         txn.put(&table, key, value, WriteFlags::empty())
             .map_err(map_mdbx_error)?;
         txn.commit().map_err(map_mdbx_error)?;
+        rw_stats::record(rw_stats::PUT, rw_t0);
         Ok(None)
     }
 }
@@ -790,8 +1363,25 @@ impl KeyValueDbTransactionTrait for KvdbMdbxTransaction {
 
         let mut pending = self.pending.lock().unwrap();
         if pending.is_empty() { return Ok(()); }
+        {
+            let ops: Vec<BatchOp> = pending
+                .iter()
+                .map(|op| match op {
+                    PendingOp::Put(k, v) => BatchOp::Put(k, v),
+                    PendingOp::Delete(k) => BatchOp::Delete(k),
+                })
+                .collect();
+            if let Some(r) = in_write_scope(&self.env, ops.len(), |txn| {
+                write_ops_in(txn, self.col, &ops)
+            }) {
+                drop(ops);
+                pending.clear();
+                return r;
+            }
+        }
 
-        let txn = self.env.db.begin_rw_txn().map_err(map_mdbx_error)?;
+        let rw_t0 = std::time::Instant::now();
+        let txn = self.env.begin_rw()?;
         let table = txn
             .create_table(Some(&col_table_name(self.col)), TableFlags::default())
             .map_err(map_mdbx_error)?;
@@ -809,6 +1399,7 @@ impl KeyValueDbTransactionTrait for KvdbMdbxTransaction {
             }
         }
         txn.commit().map_err(map_mdbx_error)?;
+        rw_stats::record(rw_stats::TXN, rw_t0);
         Ok(())
     }
 
@@ -857,6 +1448,74 @@ impl DeltaDbTrait for KvdbMdbx {}
 mod tests {
     use super::*;
     use std::any::Any;
+
+    /// Inside a chunked write scope, reads see the scope's own writes
+    /// (also across chunk commits), other threads see only committed
+    /// chunks, and everything is committed when the scope ends.
+    #[test]
+    fn chunked_write_scope_read_your_writes_and_commit() {
+        let dir = tempdir::TempDir::new("kvdb_mdbx_scope").unwrap();
+        let env = MdbxEnv::open(dir.path()).unwrap();
+        let db = KvdbMdbx::with_column(Arc::clone(&env), 3);
+        db.put(b"pre", b"0").unwrap();
+        env.with_chunked_writes(3, || {
+            for i in 0u8..10 {
+                db.put(&[b'k', i], &[i]).unwrap();
+                assert_eq!(db.get(&[b'k', i]).unwrap().as_deref(), Some(&[i][..]));
+            }
+            // Another thread sees committed chunks only: 10 writes so far
+            // -> 3 chunks of 3 committed, the 10th still open.
+            let db2 = db.clone();
+            let seen = std::thread::spawn(move || {
+                db2.iter_range_owned(b"k", Some(b"l")).unwrap().len()
+            })
+            .join()
+            .unwrap();
+            assert_eq!(seen, 9);
+            db.delete(b"pre").unwrap();
+            assert_eq!(db.get(b"pre").unwrap(), None);
+            // Range ops see uncommitted writes too.
+            assert_eq!(db.iter_range_owned(b"k", Some(b"l")).unwrap().len(), 10);
+            assert_eq!(
+                db.first_in_range(b"k", None).unwrap().unwrap().0.as_ref(),
+                &[b'k', 0][..]
+            );
+            assert_eq!(db.delete_range(&[b'k', 8], Some(b"l")).unwrap(), 2);
+            assert_eq!(db.iter_range_owned(b"k", Some(b"l")).unwrap().len(), 8);
+            let mut txn = db.start_transaction(false).unwrap();
+            txn.put(b"t", b"1").unwrap();
+            txn.commit(&db as &dyn Any).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(db.get(b"pre").unwrap(), None);
+        assert_eq!(db.iter_range_owned(b"k", Some(b"l")).unwrap().len(), 8);
+        assert_eq!(db.get(b"t").unwrap().as_deref(), Some(&b"1"[..]));
+        // Outside the scope writes are immediate again.
+        db.put(b"after", b"x").unwrap();
+        assert_eq!(db.get(b"after").unwrap().as_deref(), Some(&b"x"[..]));
+    }
+
+    /// An error ends the scope: the open chunk is aborted, earlier
+    /// chunks stay committed.
+    #[test]
+    fn chunked_write_scope_error_aborts_open_chunk() {
+        let dir = tempdir::TempDir::new("kvdb_mdbx_scope_err").unwrap();
+        let env = MdbxEnv::open(dir.path()).unwrap();
+        let db = KvdbMdbx::with_column(Arc::clone(&env), 0);
+        let r: Result<()> = env.with_chunked_writes(2, || {
+            db.put(b"a", b"1").unwrap();
+            db.put(b"b", b"1").unwrap(); // chunk committed
+            db.put(b"c", b"1").unwrap(); // open chunk
+            bail!("boom")
+        });
+        assert!(r.is_err());
+        assert!(db.get(b"a").unwrap().is_some());
+        assert!(db.get(b"b").unwrap().is_some());
+        assert!(db.get(b"c").unwrap().is_none());
+        db.put(b"d", b"1").unwrap();
+        assert!(db.get(b"d").unwrap().is_some());
+    }
 
     /// Open → write → reopen → read. Verifies the MDBX env survives a
     /// clean shutdown/restart and round-trips byte payloads byte-for-byte.

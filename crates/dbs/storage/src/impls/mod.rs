@@ -50,6 +50,14 @@ pub mod defaults {
     pub const DEFAULT_MAX_OPEN_MPT: u32 = 4;
     /// Default MDBX map size in MB to avoid hard failures at large state sizes.
     pub const DEFAULT_MDBX_MAP_SIZE_MB: u64 = 65_536;
+    /// `safenosync` auto-sync thresholds: make a steady (fsynced) point
+    /// once this much data or this much time is unsynced. Without any
+    /// threshold libmdbx makes a steady point whenever its page allocator
+    /// finds the GC blocked by the last steady point, which with one small
+    /// write transaction per key is almost every commit (measured ~0.9
+    /// fsync per commit), i.e. `safenosync` degenerated to `durable`.
+    pub const DEFAULT_MDBX_AUTOSYNC_MB: u64 = 64;
+    pub const DEFAULT_MDBX_AUTOSYNC_PERIOD_MS: u64 = 10_000;
 
     // -------------------- snapshot MDBX geometry (Phase 5c) --------------------
     //

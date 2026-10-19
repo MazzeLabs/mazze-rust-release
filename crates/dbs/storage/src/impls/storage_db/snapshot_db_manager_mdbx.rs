@@ -70,6 +70,11 @@ use std::{
 };
 use tokio::sync::Semaphore;
 
+/// Writes per rw txn while merging a snapshot (see
+/// `new_snapshot_by_merging`). Bounds both the dirty pages one txn holds
+/// and how long other writers of the snapshot env wait.
+const MERGE_CHUNK_OPS: usize = 50_000;
+
 // ---------------- 5c.e: aggregate-per-subsystem metrics ----------------
 //
 // Per design doc §6 Q#4 (option A confirmed by the user before 5c.a
@@ -793,13 +798,22 @@ impl SnapshotDbManagerTrait for SnapshotDbManagerMdbx {
         // Steps 2-5: run the merge. Any error here leaves the
         // marker in place — the next `scan_persist_state` will
         // range-delete the partial child.
-        let outcome = self.run_chunked_merge(
-            old_snapshot_epoch_id,
-            &snapshot_epoch_id,
-            delta_mpt,
-            recover_mpt_with_kv_snapshot_exist,
-            in_reconstruct_snapshot_state,
-        );
+        let merge_started = std::time::Instant::now();
+        let rw_before = super::kvdb_mdbx::rw_stats::snapshot();
+        // Every write of the merge lands under the child's prefix, which
+        // nothing reads before the marker is deleted below, and a crash
+        // mid-merge leaves the marker for `scan_persist_state` to GC the
+        // partial child. So commit the merge's writes in large chunks
+        // instead of one rw txn (and, in `safenosync`, ~one fsync) per key.
+        let outcome = self.env.with_chunked_writes(MERGE_CHUNK_OPS, || {
+            self.run_chunked_merge(
+                old_snapshot_epoch_id,
+                &snapshot_epoch_id,
+                delta_mpt,
+                recover_mpt_with_kv_snapshot_exist,
+                in_reconstruct_snapshot_state,
+            )
+        });
         let new_snapshot_root = match outcome {
             Ok(root) => root,
             Err(e) => {
@@ -810,6 +824,23 @@ impl SnapshotDbManagerTrait for SnapshotDbManagerMdbx {
             }
         };
         in_progress_snapshot_info.merkle_root = new_snapshot_root;
+        {
+            // Process-wide counters: other threads' writes in the same
+            // interval are included.
+            let rw = super::kvdb_mdbx::rw_stats::snapshot().delta(&rw_before);
+            info!(
+                "new_snapshot_by_merging (MDBX): merged {:?} in {:.2}s; \
+                 mdbx rw_txns={} rw_ms={:.0} wops={} fsync={} msync={} [{}]",
+                snapshot_epoch_id,
+                merge_started.elapsed().as_secs_f64(),
+                rw.total_count(),
+                rw.total_nanos() as f64 / 1e6,
+                rw.wops,
+                rw.fsync,
+                rw.msync,
+                rw.describe(),
+            );
+        }
 
         // Steps 6-8: commit under the info-map lock.
         let locked = snapshot_info_map_rwlock.write();

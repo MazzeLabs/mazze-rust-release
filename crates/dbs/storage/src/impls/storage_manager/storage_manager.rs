@@ -260,6 +260,26 @@ impl InProgressSnapshotTask {
 }
 
 impl StorageManager {
+    /// `safenosync`: bound the lag of the last steady point by size and
+    /// time instead of letting libmdbx fsync on (almost) every commit.
+    fn apply_mdbx_autosync(
+        env: &crate::impls::storage_db::kvdb_mdbx::MdbxEnv,
+        cfg: &crate::MdbxConfig, which: &str,
+    ) -> Result<()> {
+        if cfg.sync_mode != crate::MdbxSyncMode::SafeNoSync {
+            return Ok(());
+        }
+        env.set_autosync(
+            cfg.autosync_mb.saturating_mul(1024 * 1024),
+            cfg.autosync_period_ms,
+        )?;
+        info!(
+            "MDBX {} env: safenosync auto-sync at {} MB / {} ms unsynced",
+            which, cfg.autosync_mb, cfg.autosync_period_ms
+        );
+        Ok(())
+    }
+
     pub fn new_arc(
         /* TODO: Add node type, full node or archive node */
         storage_conf: StorageConfiguration,
@@ -326,6 +346,7 @@ impl StorageManager {
                 map_size_bytes / (1024 * 1024),
                 cfg.sync_mode
             );
+            Self::apply_mdbx_autosync(&env, cfg, "hot")?;
             Some(env)
         };
 
@@ -371,6 +392,7 @@ impl StorageManager {
                 snapshot_cfg.growth_step_mb,
                 hot_cfg.sync_mode
             );
+            Self::apply_mdbx_autosync(&env, hot_cfg, "snapshot")?;
             Some(env)
         };
         let snapshot_mdbx_max_bytes = snapshot_max_bytes as u64;

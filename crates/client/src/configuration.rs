@@ -327,6 +327,11 @@ build_config! {
         // testnet miners, `durable` on operator archives. See fleet
         // incident 2026-07-08 report §5 recommendation #6.
         (mdbx_sync_mode, (Option<String>), None)
+        // `safenosync` only: make an fsynced (steady) point once this many
+        // MB / this many ms are unsynced. 0 disables the threshold; with
+        // both 0 libmdbx fsyncs on almost every commit.
+        (mdbx_autosync_mb, (u64), mazze_storage::defaults::DEFAULT_MDBX_AUTOSYNC_MB)
+        (mdbx_autosync_period_ms, (u64), mazze_storage::defaults::DEFAULT_MDBX_AUTOSYNC_PERIOD_MS)
         (snapshot_mdbx_initial_mb, (u64), mazze_storage::defaults::DEFAULT_SNAPSHOT_MDBX_INITIAL_MB)
         (snapshot_mdbx_max_mb, (u64), mazze_storage::defaults::DEFAULT_SNAPSHOT_MDBX_MAX_MB)
         (snapshot_mdbx_growth_step_mb, (u64), mazze_storage::defaults::DEFAULT_SNAPSHOT_MDBX_GROWTH_STEP_MB)
@@ -783,6 +788,8 @@ impl Configuration {
                 StateDbBackend::Mdbx(MdbxConfig {
                     map_size_mb: self.raw_conf.mdbx_map_size_mb,
                     sync_mode,
+                    autosync_mb: self.raw_conf.mdbx_autosync_mb,
+                    autosync_period_ms: self.raw_conf.mdbx_autosync_period_ms,
                 })
             }
             other => panic!(

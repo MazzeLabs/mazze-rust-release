@@ -4605,6 +4605,7 @@ dependencies = [
  "mazze-db-errors",
  "mazze-internal-common",
  "mazze-types",
+ "mdbx-sys",
  "memoffset",
  "metrics",
  "once_cell",

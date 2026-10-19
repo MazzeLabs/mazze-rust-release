@@ -58,6 +58,19 @@
 #   LOG_EXTRA_<n>            extra log.yaml loggers, "target: level;..."
 #   ASERT=true               run per-block ASERT (test_enable_asert) instead of
 #                            the pinned test-mode difficulty
+#   INITIAL_DIFFICULTY=1     initial (and, without ASERT, pinned) difficulty;
+#                            ~30 with ASERT gives per-lineage difficulties
+#   PERMANENT="1 2 4"        always-on nodes; MINERS="1 2" of them CPU-mine
+#   AUTHOR_<n>=<addr>        per-miner mining_author (default: one shared)
+#   ARCHIVES=""              no archive nodes (plain multi-miner cluster)
+#   PORT_BASE=20000          ports are PORT_BASE + node*100 + offset (pick a
+#                            different base per concurrently running cluster)
+#   EXTRA_KV / EXTRA_KV_<n>  extra hydra.toml entries, "key=value;key=value"
+#
+# Multi-miner determinism check (3 miners + 1 observer, nothing restarted):
+#   PERMANENT="1 2 3 4" MINERS="1 2 3" ARCHIVES="" ASERT=true \
+#     INITIAL_DIFFICULTY=30 ERA=200 scripts/local-restart-repro.sh start
+#   ... then grep the logs for "state/blame is invalid" (expect none).
 #
 # Example (baseline vs fix in one run, plus the covered-target variant):
 #   BIN_3=/path/old/mazze ARCHIVES="3 5" EARLY_ARCHIVES=6 \
@@ -73,21 +86,22 @@ ERA="${ERA:-2000}"
 STOP_AT_EPOCH="${STOP_AT_EPOCH:-$(( ERA * 5 / 2 ))}"
 ADVANCE="${ADVANCE:-$(( ERA * 2 ))}"
 EARLY_ADVANCE="${EARLY_ADVANCE:-$(( ERA / 8 ))}"
-ARCHIVES="${ARCHIVES:-3}"
+ARCHIVES="${ARCHIVES-3}"   # set ARCHIVES="" for none
 EARLY_ARCHIVES="${EARLY_ARCHIVES:-}"
 NORMAL_TIMEOUT_S="${NORMAL_TIMEOUT_S:-1800}"
 FREEZE="${FREEZE:-0}"
 CLONE="${CLONE:-}"
 STAY_S="${STAY_S:-300}"
 AUTHOR="mazze:aamzbekyhkk2ag8rzwvyetyecrvncyg0hjpw84k5yr"
-PERMANENT="1 2 4"
+PERMANENT="${PERMANENT:-1 2 4}"
 JOINERS="${JOINERS:-}"
+MINERS="${MINERS:-1 2}"   # nodes that CPU-mine (must be in PERMANENT)
+PORT_BASE="${PORT_BASE:-20000}"   # ports are PORT_BASE + node*100 + offset
 
 export MAZZE_RANDOMX_LIGHT_ONLY=1
 export MAZZE_SHIELDED_VK_HEX="${MAZZE_SHIELDED_VK_HEX:-$REPO_ROOT/run/shielded_vk.hex}"
 ulimit -n 200000 2>/dev/null || true
 
-PORT_BASE="${PORT_BASE:-20000}"
 port() { echo $((PORT_BASE + $1 * 100 + $2)); }   # port <node> <offset>; below the ephemeral range (32768+) so outgoing connections cannot steal a listen port
 rpc_port() { port "$1" 39; }
 ndir() { echo "$WORK/n$1"; }
@@ -152,7 +166,7 @@ write_conf() { # write_conf <node> <bootnodes>
     else printf '\n%s = %s\n' "$1" "$2" >> "$c"; fi
   }
   set_kv mode '"test"'
-  set_kv initial_difficulty 1
+  set_kv initial_difficulty "${INITIAL_DIFFICULTY:-1}"
   set_kv era_epoch_count "$ERA"
   set_kv snapshot_epoch_count "$ERA"
   set_kv test_allow_small_snapshot_epoch_count true
@@ -208,14 +222,20 @@ write_conf() { # write_conf <node> <bootnodes>
   elif is_archive "$i"; then
     set_kv node_type '"archive"'
     set_kv mining_type '"disable"'
-  elif [[ "$i" == 4 ]]; then
-    set_kv node_type '"full"'
-    set_kv mining_type '"disable"'
-  else
+  elif [[ " $MINERS " == *" $i "* ]]; then
     set_kv node_type '"full"'
     set_kv mining_type '"cpu"'
-    set_kv mining_author "\"$AUTHOR\""
+    local av="AUTHOR_$i"
+    set_kv mining_author "\"${!av:-$AUTHOR}\""
+  else
+    set_kv node_type '"full"'
+    set_kv mining_type '"disable"'
   fi
+  # EXTRA_KV / EXTRA_KV_<n>: extra "key=value;key=value" config entries.
+  local ev="EXTRA_KV_$i" kv
+  while IFS= read -r kv; do
+    [[ -n "$kv" ]] && set_kv "${kv%%=*}" "${kv#*=}"
+  done < <(tr ';' '\n' <<<"${EXTRA_KV:-};${!ev:-}")
   write_log_yaml "$i"
 }
 
@@ -445,12 +465,12 @@ case "${1:-run}" in
   pick-anchors) pick_anchors ;;
   replay) replay ;;
   start) for i in $PERMANENT $ARCHIVES $EARLY_ARCHIVES; do start_node "$i"; done ;;
-  stop) for i in $JOINERS $EARLY_ARCHIVES $ARCHIVES 4 2 1; do stop_node "$i"; done ;;
+  stop) for i in $JOINERS $EARLY_ARCHIVES $ARCHIVES $PERMANENT; do stop_node "$i"; done ;;
   start-node) start_node "$2" ;;
   restart-node) restart_archive "$2" ;;
   stop-node) stop_node "$2" ;;
   status) status ;;
   timeline) timeline "${2:-3}" "${3:-40}" ;;
-  clean) for i in $JOINERS $EARLY_ARCHIVES $ARCHIVES 4 2 1; do stop_node "$i"; done; rm -rf "$WORK" ;;
-  *) sed -n 2,44p "$0"; exit 1 ;;
+  clean) for i in $JOINERS $EARLY_ARCHIVES $ARCHIVES $PERMANENT; do stop_node "$i"; done; rm -rf "$WORK" ;;
+  *) sed -n "2,$(( $(grep -n -m1 '^set ' "$0" | cut -d: -f1) - 1 ))p" "$0"; exit 1 ;;
 esac

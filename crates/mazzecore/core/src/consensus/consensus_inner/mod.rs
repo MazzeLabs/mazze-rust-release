@@ -6,6 +6,7 @@ mod blame_verifier;
 pub mod confirmation_meter;
 pub mod consensus_executor;
 pub mod consensus_new_block_handler;
+mod state_divergence;
 
 use crate::{
     block_data_manager::{
@@ -517,6 +518,10 @@ pub struct ConsensusGraphInner {
     /// `true` before we enter `CacheUpSyncBlock`. We need to execute
     /// transactions and process state if it's `false`.
     header_only: bool,
+
+    /// Reports when this node's own state disagrees with most of its main
+    /// chain (see `state_divergence`). Observation only.
+    state_divergence: state_divergence::StateDivergenceTracker,
 }
 
 impl MallocSizeOf for ConsensusGraphInner {
@@ -645,6 +650,7 @@ impl ConsensusGraphInner {
             best_terminals_reorg_height: NULLU64,
             has_timer_block_in_outlier_cache: Default::default(),
             header_only: true,
+            state_divergence: Default::default(),
         };
 
         // NOTE: Only genesis block will be first inserted into consensus graph
@@ -1684,8 +1690,53 @@ impl ConsensusGraphInner {
         timer_chain_choice
     }
 
-    #[inline]
+    /// A header referee that this node's consensus does not hold is dropped
+    /// from the block's DAG edges. That is expected for blocks in the past of
+    /// the era genesis (out of the era, filtered from every epoch anyway):
+    /// they sit below the era genesis height or at most a few epochs above it
+    /// (side branches the era genesis merged; seen on every restart). Far
+    /// above it the referee should be here: dropping it changes this node's
+    /// past/epoch sets, block numbers and rewards, so its state will differ
+    /// from the network's from now on (2026-10-13 m2 incident: a block of
+    /// epoch 11,518 never reached consensus and every later block number was
+    /// one lower than the network's).
+    fn report_missing_referee(
+        &self, block_header: &BlockHeader, referee: &H256,
+    ) {
+        const ERA_GENESIS_PAST_MARGIN: u64 = 100;
+        let referee_height = self
+            .data_man
+            .block_header_by_hash(referee)
+            .map(|h| h.height());
+        match referee_height {
+            Some(h)
+                if h <= self.cur_era_genesis_height
+                    + ERA_GENESIS_PAST_MARGIN =>
+            {
+                debug!(
+                    "referee {:?} (height {}) of block {:?} is not in \
+                     consensus (era genesis height {}); not a DAG edge",
+                    referee,
+                    h,
+                    block_header.hash(),
+                    self.cur_era_genesis_height
+                )
+            }
+            _ => error!(
+                "consensus: block {:?} (height {}) references {:?} (height \
+                 {:?}) which is not in consensus although it is far above \
+                 the era genesis ({}). The edge is dropped, so this node's \
+                 epoch sets and state will differ from the network's.",
+                block_header.hash(),
+                block_header.height(),
+                referee,
+                referee_height,
+                self.cur_era_genesis_height
+            ),
+        }
+    }
 
+    #[inline]
     fn insert(&mut self, block_header: &BlockHeader) -> (usize, usize) {
         let hash = block_header.hash();
 
@@ -1739,6 +1790,8 @@ impl ConsensusGraphInner {
         for hash in block_header.referee_hashes().iter() {
             if let Some(x) = self.hash_to_arena_indices.get(hash) {
                 self.insert_referee_if_not_duplicate(&mut referees, *x);
+            } else {
+                self.report_missing_referee(block_header, hash);
             }
         }
 
@@ -2027,6 +2080,14 @@ impl ConsensusGraphInner {
             ("acc_lca_last_height", format!("{:?}", acc_height)),
             ("acc_lca_on_main", format!("{:?}", acc_on_main)),
             ("header_only", self.header_only.to_string()),
+            (
+                "local_state_diverged_since",
+                format!("{:?}", self.state_divergence.diverged_since()),
+            ),
+            (
+                "main_chain_state_invalid",
+                self.state_divergence.invalid_share(),
+            ),
         ]
     }
 
@@ -2934,6 +2995,16 @@ impl ConsensusGraphInner {
         self.arena[me].data.state_valid = Some(state_valid);
         if !state_valid {
             self.arena[me].data.blame_info = Some(state_blame_info);
+        }
+        let main_index = self.height_to_main_index(block_height);
+        if main_index < self.main_chain.len()
+            && self.main_chain[main_index] == me
+        {
+            self.state_divergence.record(
+                block_height,
+                *block_header.author(),
+                state_valid,
+            );
         }
 
         if self.inner_conf.enable_state_expose {

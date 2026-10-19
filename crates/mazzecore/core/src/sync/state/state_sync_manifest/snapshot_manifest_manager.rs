@@ -158,6 +158,7 @@ impl SnapshotManifestManager {
             !pre_computed.parent_snapshot_info.is_empty(),
         );
 
+        self.reject_non_increasing_page(ctx, request, &response)?;
         if !request.is_initial_request() {
             // V5 only adds value on the initial manifest (the one that
             // would have run validate_blame_states + validate_epoch_receipts).
@@ -382,6 +383,49 @@ impl SnapshotManifestManager {
         }
     }
 
+    /// A manifest page's chunk boundaries must strictly increase, starting
+    /// after the key the page was requested from: chunks are the key ranges
+    /// between consecutive boundaries. A page that repeats a boundary (an
+    /// older server's slicer stuck on a key-value larger than the chunk
+    /// size names its own start as the next page) would make the requester
+    /// fetch it forever and append duplicate and inverted ranges; duplicate
+    /// upper keys also map two chunks to one restorer slot.
+    fn boundaries_increase(
+        start: &Option<Vec<u8>>, boundaries: &[Vec<u8>],
+    ) -> bool {
+        let mut previous = start.as_ref();
+        for boundary in boundaries {
+            if let Some(p) = previous {
+                if boundary <= p {
+                    return false;
+                }
+            }
+            previous = Some(boundary);
+        }
+        true
+    }
+
+    fn reject_non_increasing_page(
+        &mut self, ctx: &Context, request: &SnapshotManifestRequest,
+        response: &SnapshotManifestResponse,
+    ) -> Result<(), Error> {
+        if Self::boundaries_increase(
+            &request.start_chunk,
+            &response.manifest.chunk_boundaries,
+        ) {
+            return Ok(());
+        }
+        warn!(
+            "snapshot manifest page from {:?} (start {:?}) has chunk \
+             boundaries that do not increase; re-requesting it elsewhere",
+            ctx.node_id, request.start_chunk
+        );
+        self.request_manifest(ctx.io, ctx.manager, request.start_chunk.clone());
+        bail!(ErrorKind::InvalidSnapshotManifest(
+            "chunk boundaries do not increase".into(),
+        ))
+    }
+
     fn handle_snapshot_manifest_response_impl(
         &mut self, ctx: &Context, response: SnapshotManifestResponse,
         request: &SnapshotManifestRequest,
@@ -403,6 +447,7 @@ impl SnapshotManifestManager {
             request.start_chunk, response.manifest.next
         );
 
+        self.reject_non_increasing_page(ctx, request, &response)?;
         // validate blame state if requested
         if request.is_initial_request() {
             if !self.chunk_boundaries.is_empty() {

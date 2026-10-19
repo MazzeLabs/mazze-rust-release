@@ -598,6 +598,18 @@ impl VerificationConfig {
             )));
         }
 
+        // The shielded lane has no gas budget yet.
+        let shielded_gas_limit = U256::zero();
+        if total_gas[Shielded] > shielded_gas_limit {
+            return Err(From::from(BlockError::InvalidPackedGasLimit(
+                OutOfBounds {
+                    min: None,
+                    max: Some(shielded_gas_limit),
+                    found: total_gas[Shielded],
+                },
+            )));
+        }
+
         if total_gas[Native] > core_gas_limit {
             return Err(From::from(BlockError::InvalidPackedGasLimit(
                 OutOfBounds {
@@ -614,7 +626,8 @@ impl VerificationConfig {
             parent.base_price().unwrap()
         };
 
-        let gas_limit = SpaceMap::new(core_gas_limit, espace_gas_limit);
+        let gas_limit =
+            SpaceMap::new(core_gas_limit, espace_gas_limit, shielded_gas_limit);
         let gas_target = gas_limit.map_all(|x| x / ELASTICITY_MULTIPLIER);
         let min_base_price = params.min_base_price();
 

@@ -38,6 +38,12 @@ pub enum Space {
     Native,
     #[serde(rename(serialize = "evm", deserialize = "evm"))]
     Ethereum,
+    Shielded,
+}
+
+impl Space {
+    pub const ALL: [Space; 3] =
+        [Space::Native, Space::Ethereum, Space::Shielded];
 }
 
 impl From<Space> for String {
@@ -52,6 +58,7 @@ impl From<Space> for &'static str {
         match space {
             Space::Native => "native",
             Space::Ethereum => "evm",
+            Space::Shielded => "shielded",
         }
     }
 }
@@ -61,6 +68,7 @@ impl Encodable for Space {
         let type_int: u8 = match self {
             Space::Native => 1,
             Space::Ethereum => 2,
+            Space::Shielded => 3,
         };
         type_int.rlp_append(s)
     }
@@ -71,6 +79,7 @@ impl Decodable for Space {
         match u8::decode(rlp)? {
             1u8 => Ok(Space::Native),
             2u8 => Ok(Space::Ethereum),
+            3u8 => Ok(Space::Shielded),
             _ => Err(DecoderError::Custom("Unrecognized space byte.")),
         }
     }
@@ -82,17 +91,23 @@ impl Decodable for Space {
 pub struct AllChainID {
     native: u32,
     ethereum: u32,
+    shielded: u32,
 }
 
 impl AllChainID {
-    pub fn new(native: u32, ethereum: u32) -> Self {
-        Self { native, ethereum }
+    pub fn new(native: u32, ethereum: u32, shielded: u32) -> Self {
+        Self {
+            native,
+            ethereum,
+            shielded,
+        }
     }
 
     pub fn fake_for_virtual(chain_id: u32) -> Self {
         Self {
             native: chain_id,
             ethereum: chain_id,
+            shielded: chain_id,
         }
     }
 
@@ -100,6 +115,7 @@ impl AllChainID {
         match space {
             Space::Native => self.native,
             Space::Ethereum => self.ethereum,
+            Space::Shielded => self.shielded,
         }
     }
 
@@ -109,6 +125,10 @@ impl AllChainID {
 
     pub fn in_evm_space(&self) -> u32 {
         self.in_space(Space::Ethereum)
+    }
+
+    pub fn in_shielded_space(&self) -> u32 {
+        self.in_space(Space::Shielded)
     }
 }
 
@@ -135,11 +155,16 @@ impl AddressWithSpace {
 pub struct SpaceMap<T> {
     native: T,
     evm: T,
+    shielded: T,
 }
 
 impl<T> SpaceMap<T> {
-    pub const fn new(native: T, evm: T) -> Self {
-        SpaceMap { native, evm }
+    pub const fn new(native: T, evm: T, shielded: T) -> Self {
+        SpaceMap {
+            native,
+            evm,
+            shielded,
+        }
     }
 
     #[inline]
@@ -147,6 +172,7 @@ impl<T> SpaceMap<T> {
         match space {
             Space::Native => &self.native,
             Space::Ethereum => &self.evm,
+            Space::Shielded => &self.shielded,
         }
     }
 
@@ -155,6 +181,7 @@ impl<T> SpaceMap<T> {
         match space {
             Space::Native => &mut self.native,
             Space::Ethereum => &mut self.evm,
+            Space::Shielded => &mut self.shielded,
         }
     }
 
@@ -164,6 +191,7 @@ impl<T> SpaceMap<T> {
         SpaceMap {
             native: (a.native, b.native, c.native),
             evm: (a.evm, b.evm, c.evm),
+            shielded: (a.shielded, b.shielded, c.shielded),
         }
     }
 
@@ -173,23 +201,25 @@ impl<T> SpaceMap<T> {
         SpaceMap {
             native: (a.native, b.native, c.native, d.native),
             evm: (a.evm, b.evm, c.evm, d.evm),
+            shielded: (a.shielded, b.shielded, c.shielded, d.shielded),
         }
     }
 
     pub fn map_sum<F: FnMut(&T) -> U, U: Add<U, Output = U>>(
         &self, mut f: F,
     ) -> U {
-        f(&self.native) + f(&self.evm)
+        f(&self.native) + f(&self.evm) + f(&self.shielded)
     }
 
     pub const fn size(&self) -> usize {
-        2
+        3
     }
 
     pub fn map_all<U, F: Fn(T) -> U>(self, f: F) -> SpaceMap<U> {
         SpaceMap {
             native: f(self.native),
             evm: f(self.evm),
+            shielded: f(self.shielded),
         }
     }
 
@@ -199,6 +229,7 @@ impl<T> SpaceMap<T> {
         SpaceMap {
             native: f(&mut self.native),
             evm: f(&mut self.evm),
+            shielded: f(&mut self.shielded),
         }
     }
 }
@@ -225,6 +256,7 @@ impl<T: serde::Serialize> serde::Serialize for SpaceMap<T> {
         let mut map = serializer.serialize_map(Some(self.size()))?;
         map.serialize_entry("core", &self.native)?;
         map.serialize_entry("espace", &self.evm)?;
+        map.serialize_entry("shielded", &self.shielded)?;
         map.end()
     }
 }
@@ -239,6 +271,9 @@ pub mod space_util {
         }
         fn with_evm_space(self) -> AddressWithSpace {
             self.with_space(Space::Ethereum)
+        }
+        fn with_shielded_space(self) -> AddressWithSpace {
+            self.with_space(Space::Shielded)
         }
     }
 
@@ -401,5 +436,46 @@ pub mod address_util {
                 assert_eq!(address.address_type_bits(), type_bits);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod space_tests {
+    use super::{AllChainID, Space, SpaceMap};
+
+    #[test]
+    fn space_rlp_round_trip() {
+        for (space, byte) in Space::ALL.into_iter().zip([1u8, 2, 3]) {
+            let encoded = rlp::encode(&space);
+            assert_eq!(encoded, rlp::encode(&byte));
+            assert_eq!(rlp::decode::<Space>(&encoded).unwrap(), space);
+        }
+        assert!(rlp::decode::<Space>(&rlp::encode(&4u8)).is_err());
+        assert!(rlp::decode::<Space>(&rlp::encode(&0u8)).is_err());
+    }
+
+    #[test]
+    fn space_names() {
+        let names: Vec<&str> = Space::ALL.into_iter().map(Into::into).collect();
+        assert_eq!(names, ["native", "evm", "shielded"]);
+    }
+
+    #[test]
+    fn space_map_has_a_slot_per_space() {
+        let mut map = SpaceMap::new(1, 2, 3);
+        assert_eq!(map.size(), Space::ALL.len());
+        assert_eq!(Space::ALL.map(|s| map[s]), [1, 2, 3]);
+        map[Space::Shielded] = 30;
+        assert_eq!(map.map_sum(|x| *x), 33);
+        assert_eq!(map.map_all(|x| x * 2), SpaceMap::new(2, 4, 60));
+    }
+
+    #[test]
+    fn chain_id_per_space() {
+        let id = AllChainID::new(1, 2, 3);
+        assert_eq!(Space::ALL.map(|s| id.in_space(s)), [1, 2, 3]);
+        assert_eq!(id.in_shielded_space(), 3);
+        let virt = AllChainID::fake_for_virtual(9);
+        assert_eq!(Space::ALL.map(|s| virt.in_space(s)), [9, 9, 9]);
     }
 }

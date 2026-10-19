@@ -1962,6 +1962,8 @@ impl RpcImpl {
                     let receipt = &block_receipts[id];
 
                     match tx.space() {
+                        // Served by the shielded API, not the native view.
+                        Space::Shielded => {}
                         Space::Ethereum => {
                             let status = receipt
                                 .outcome_status
@@ -2063,6 +2065,8 @@ impl RpcImpl {
             None => {
                 for (_, tx) in b.transactions.iter().enumerate() {
                     match tx.space() {
+                        // Served by the shielded API, not the native view.
+                        Space::Shielded => {}
                         Space::Ethereum => {
                             res.push(WrapTransaction::EthTransaction(
                                 EthTransaction::from_signed(

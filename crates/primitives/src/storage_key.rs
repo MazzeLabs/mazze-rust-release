@@ -80,6 +80,10 @@ impl<'a> StorageKey<'a> {
         self.with_space(Space::Ethereum)
     }
 
+    pub const fn with_shielded_space(self) -> StorageKeyWithSpace<'a> {
+        self.with_space(Space::Shielded)
+    }
+
     pub const fn new_account_key(address: &'a Address) -> Self {
         StorageKey::AccountKey(&address.0)
     }
@@ -123,6 +127,7 @@ impl<'a> StorageKeyWithSpace<'a> {
     const CODE_HASH_PREFIX: &'static [u8] = b"code";
     const CODE_HASH_PREFIX_LEN: usize = 4;
     pub const EVM_SPACE_TYPE: &'static [u8] = b"\x81";
+    pub const SHIELDED_SPACE_TYPE: &'static [u8] = b"\x82";
     const STORAGE_PREFIX: &'static [u8] = b"data";
     const STORAGE_PREFIX_LEN: usize = 4;
 
@@ -180,16 +185,15 @@ impl<'a> StorageKeyWithSpace<'a> {
             ),
         };
 
-        return if self.space == Space::Native {
-            key_bytes
-        } else {
-            // Insert "0x81" at the position 32.
-            [
+        return match Self::space_type(self.space) {
+            None => key_bytes,
+            // Insert the space byte at the position 32.
+            Some(space_type) => [
                 &key_bytes[..ACCOUNT_KEYPART_BYTES],
-                Self::EVM_SPACE_TYPE,
+                space_type,
                 &key_bytes[ACCOUNT_KEYPART_BYTES..],
             ]
-            .concat()
+            .concat(),
         };
     }
 
@@ -251,17 +255,38 @@ impl<'a> StorageKeyWithSpace<'a> {
             }
         };
 
-        return if self.space == Space::Native {
-            key_bytes
-        } else {
-            // Insert "0x81" at the position 20.
-            [
+        return match Self::space_type(self.space) {
+            None => key_bytes,
+            // Insert the space byte at the position 20.
+            Some(space_type) => [
                 &key_bytes[..Self::ACCOUNT_BYTES],
-                Self::EVM_SPACE_TYPE,
+                space_type,
                 &key_bytes[Self::ACCOUNT_BYTES..],
             ]
-            .concat()
+            .concat(),
         };
+    }
+
+    /// The byte inserted after the account part of a key; native space keys
+    /// carry none.
+    pub const fn space_type(space: Space) -> Option<&'static [u8]> {
+        match space {
+            Space::Native => None,
+            Space::Ethereum => Some(Self::EVM_SPACE_TYPE),
+            Space::Shielded => Some(Self::SHIELDED_SPACE_TYPE),
+        }
+    }
+
+    /// Inverse of `space_type`. Native keys continue with an ASCII prefix
+    /// ("data"/"code"), so any byte with the high bit set is a space byte.
+    pub fn space_from_type(byte: u8) -> Option<Space> {
+        if byte == Self::EVM_SPACE_TYPE[0] {
+            Some(Space::Ethereum)
+        } else if byte == Self::SHIELDED_SPACE_TYPE[0] {
+            Some(Space::Shielded)
+        } else {
+            None
+        }
     }
 
     // from_key_bytes::<CheckInput>(...) returns Result<StorageKey, String>
@@ -273,29 +298,39 @@ impl<'a> StorageKeyWithSpace<'a> {
     where FromKeyBytesResult<ShouldCheckInput>: ConditionalReturnValue<'a>{
         let key = if bytes.len() <= Self::ACCOUNT_BYTES {
             StorageKey::AccountKey(bytes).with_native_space()
-        } else if bytes.len() == Self::ACCOUNT_BYTES + 1 {
-            StorageKey::AccountKey(&bytes[..Self::ACCOUNT_BYTES])
-                .with_evm_space()
         } else {
             let address_bytes = &bytes[0..Self::ACCOUNT_BYTES];
 
             let extension_bit: bool = bytes[Self::ACCOUNT_BYTES] & 0x80 != 0;
-            let bytes = if extension_bit {
-                // check for incorrect extension byte
-                if ShouldCheckInput::value() == CheckInput::value()
-                    && bytes[Self::ACCOUNT_BYTES] != Self::EVM_SPACE_TYPE[0]
-                {
-                    return <FromKeyBytesResult<ShouldCheckInput> as ConditionalReturnValue<'a>>::from_result(
-                        Err(format!("Unexpected extension byte: {:?}", bytes[Self::ACCOUNT_BYTES]))
-                    );
+            let space = if extension_bit {
+                match Self::space_from_type(bytes[Self::ACCOUNT_BYTES]) {
+                    Some(space) => space,
+                    // unknown extension byte => we report an error or crash
+                    // depending on the generic parameter
+                    None if ShouldCheckInput::value() == CheckInput::value() => {
+                        return <FromKeyBytesResult<ShouldCheckInput> as ConditionalReturnValue<'a>>::from_result(
+                            Err(format!("Unexpected extension byte: {:?}", bytes[Self::ACCOUNT_BYTES]))
+                        );
+                    }
+                    None => panic!(
+                        "Unexpected extension byte: {:?}",
+                        bytes[Self::ACCOUNT_BYTES]
+                    ),
                 }
-
-                // with `SkipInputCheck`, crash on incorrect extension byte
-                assert_eq!(bytes[Self::ACCOUNT_BYTES], Self::EVM_SPACE_TYPE[0]);
+            } else {
+                Space::Native
+            };
+            let bytes = if extension_bit {
                 &bytes[(Self::ACCOUNT_BYTES + 1)..]
             } else {
                 &bytes[Self::ACCOUNT_BYTES..]
             };
+
+            if bytes.is_empty() {
+                return <FromKeyBytesResult<ShouldCheckInput> as ConditionalReturnValue<'a>>::from_key(
+                    StorageKey::AccountKey(address_bytes).with_space(space)
+                );
+            }
 
             let storage_key_no_space = if bytes
                 .starts_with(Self::STORAGE_PREFIX)
@@ -335,12 +370,6 @@ impl<'a> StorageKeyWithSpace<'a> {
                 } else {
                     unsafe { unreachable_unchecked() }
                 }
-            };
-
-            let space = if extension_bit {
-                Space::Ethereum
-            } else {
-                Space::Native
             };
 
             storage_key_no_space.with_space(space)
@@ -593,22 +622,31 @@ mod delta_mpt_storage_key {
                     return StorageKey::AccountKey(address_bytes)
                         .with_native_space();
                 }
-                if bytes_len == ACCOUNT_KEYPART_BYTES + 1 {
-                    return StorageKey::AccountKey(address_bytes)
-                        .with_evm_space();
-                }
                 let extension_bit =
                     remaining_bytes[ACCOUNT_KEYPART_BYTES] & 0x80 != 0;
 
-                let remaining_bytes = if extension_bit {
-                    assert_eq!(
+                let space = if extension_bit {
+                    StorageKeyWithSpace::space_from_type(
                         remaining_bytes[ACCOUNT_KEYPART_BYTES],
-                        StorageKeyWithSpace::EVM_SPACE_TYPE[0]
-                    );
+                    )
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Unexpected extension byte: {:?}",
+                            remaining_bytes[ACCOUNT_KEYPART_BYTES]
+                        )
+                    })
+                } else {
+                    Space::Native
+                };
+                let remaining_bytes = if extension_bit {
                     &remaining_bytes[(ACCOUNT_KEYPART_BYTES + 1)..]
                 } else {
                     &remaining_bytes[ACCOUNT_KEYPART_BYTES..]
                 };
+                if remaining_bytes.is_empty() {
+                    return StorageKey::AccountKey(address_bytes)
+                        .with_space(space);
+                }
 
                 let storage_key_no_space = if remaining_bytes
                     .starts_with(StorageKeyWithSpace::STORAGE_PREFIX)
@@ -647,11 +685,6 @@ mod delta_mpt_storage_key {
                     }
                 };
 
-                let space = if extension_bit {
-                    Space::Ethereum
-                } else {
-                    Space::Native
-                };
                 storage_key_no_space.with_space(space)
             }
         }
@@ -674,8 +707,8 @@ use std::{
 #[cfg(test)]
 mod tests {
     use super::{delta_mpt_storage_key::*, DeltaMptKeyPadding, StorageKey};
-    use crate::StorageKeyWithSpace;
-    use mazze_types::{Address, H256};
+    use crate::{CheckInput, SkipInputCheck, StorageKeyWithSpace};
+    use mazze_types::{Address, Space, H256};
 
     #[test]
     fn test_delta_mpt_account_key() {
@@ -782,5 +815,88 @@ mod tests {
         let bytes = key.to_delta_mpt_key_bytes(&padding);
         let key2 = StorageKeyWithSpace::from_delta_mpt_key(&bytes[..]);
         assert_eq!(key, key2);
+    }
+
+    fn keys_in_every_space<'a>(
+        address: &'a Address, storage_key: &'a [u8], code_hash: &'a H256,
+    ) -> Vec<StorageKeyWithSpace<'a>> {
+        let keys = [
+            StorageKey::new_account_key(address),
+            StorageKey::new_storage_root_key(address),
+            StorageKey::new_storage_key(address, storage_key),
+            StorageKey::new_code_root_key(address),
+            StorageKey::new_code_key(address, code_hash),
+        ];
+        Space::ALL
+            .into_iter()
+            .flat_map(|space| keys.iter().map(move |k| k.with_space(space)))
+            .collect()
+    }
+
+    #[test]
+    fn test_every_space_round_trips() {
+        let padding = DeltaMptKeyPadding([7; KEY_PADDING_BYTES]);
+        let address = "0f572e5295c57f15886f9b263e2f6d2d6c7b5ec6"
+            .parse::<Address>()
+            .unwrap();
+        let code_hash = H256::repeat_byte(0x5e);
+
+        for key in keys_in_every_space(&address, &[99; 32], &code_hash) {
+            let bytes = key.to_key_bytes();
+            let decoded =
+                StorageKeyWithSpace::from_key_bytes::<CheckInput>(&bytes)
+                    .unwrap();
+            assert_eq!(key, decoded);
+            assert_eq!(
+                key,
+                StorageKeyWithSpace::from_key_bytes::<SkipInputCheck>(&bytes)
+            );
+
+            let bytes = key.to_delta_mpt_key_bytes(&padding);
+            assert_eq!(key, StorageKeyWithSpace::from_delta_mpt_key(&bytes));
+        }
+    }
+
+    #[test]
+    fn test_space_byte_layout() {
+        let address = "0f572e5295c57f15886f9b263e2f6d2d6c7b5ec6"
+            .parse::<Address>()
+            .unwrap();
+        let account = StorageKey::new_account_key(&address);
+
+        assert_eq!(account.with_native_space().to_key_bytes(), address.0);
+        for (space, byte) in
+            [(Space::Ethereum, 0x81u8), (Space::Shielded, 0x82)]
+        {
+            let bytes = account.with_space(space).to_key_bytes();
+            assert_eq!(&bytes[..20], &address.0);
+            assert_eq!(bytes[20..], [byte]);
+
+            let bytes = StorageKey::new_storage_root_key(&address)
+                .with_space(space)
+                .to_key_bytes();
+            assert_eq!(bytes[20], byte);
+            assert_eq!(&bytes[21..], b"data");
+        }
+        // Spaces never share a key.
+        let shielded = account.with_shielded_space().to_key_bytes();
+        let evm = account.with_evm_space().to_key_bytes();
+        assert_ne!(shielded, evm);
+    }
+
+    #[test]
+    fn test_unknown_space_byte_is_rejected() {
+        let address = "0f572e5295c57f15886f9b263e2f6d2d6c7b5ec6"
+            .parse::<Address>()
+            .unwrap();
+        for byte in [0x80u8, 0x83, 0xff] {
+            let mut bytes = address.0.to_vec();
+            bytes.push(byte);
+            assert!(StorageKeyWithSpace::from_key_bytes::<CheckInput>(&bytes)
+                .is_err());
+            bytes.extend_from_slice(b"data");
+            assert!(StorageKeyWithSpace::from_key_bytes::<CheckInput>(&bytes)
+                .is_err());
+        }
     }
 }

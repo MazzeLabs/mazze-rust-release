@@ -142,6 +142,7 @@ build_config! {
         (outlier_penalty_ratio, (u64), OUTLIER_PENALTY_RATIO)
         (chain_id, (Option<u32>), None)
         (evm_chain_id, (Option<u32>), None)
+        (shielded_chain_id, (Option<u32>), None)
         (execute_genesis, (bool), true)
         (default_transition_time, (Option<u64>), None)
         // Snapshot cadence controls the local checkpoint/snapshot grid used
@@ -930,8 +931,14 @@ impl Configuration {
                         .unwrap_or_else(|| rand::thread_rng().gen());
                     let evm_chain_id =
                         self.raw_conf.evm_chain_id.unwrap_or(chain_id);
+                    let shielded_chain_id =
+                        self.raw_conf.shielded_chain_id.unwrap_or(chain_id);
                     *to_init = Some(ChainIdParamsInner::new_simple(
-                        AllChainID::new(chain_id, evm_chain_id),
+                        AllChainID::new(
+                            chain_id,
+                            evm_chain_id,
+                            shielded_chain_id,
+                        ),
                     ));
                 }
             }
@@ -1609,14 +1616,18 @@ impl Configuration {
             params.early_set_internal_contracts_states = true;
         }
 
+        // A zero shielded base price keeps the shielded lane inactive and
+        // headers in their two-price encoding.
         let non_test_default = SpaceMap::new(
             INITIAL_1559_CORE_BASE_PRICE,
             INITIAL_1559_ETH_BASE_PRICE,
+            0,
         );
-        let test_default = SpaceMap::new(1u64, 1);
+        let test_default = SpaceMap::new(1u64, 1, 0);
         let config = SpaceMap::new(
             self.raw_conf.min_native_base_price,
             self.raw_conf.min_eth_base_price,
+            None,
         );
         let base_price = SpaceMap::zip3(non_test_default, test_default, config)
             .map_all(|(non_test, test, config)| {

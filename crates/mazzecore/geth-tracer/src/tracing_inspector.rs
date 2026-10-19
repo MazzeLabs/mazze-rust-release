@@ -187,6 +187,7 @@ impl TracingInspector {
         let is_precompile = match space {
             Space::Native => self.machine.builtins().contains_key(&to),
             Space::Ethereum => self.machine.builtins_evm().contains_key(&to),
+            Space::Shielded => false,
         };
 
         if is_precompile {

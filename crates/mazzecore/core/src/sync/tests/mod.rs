@@ -284,8 +284,9 @@ fn simple_chain(
         } else {
             U256::zero()
         };
-        let gas_target = SpaceMap::new(gas_limit * 9 / 10, espace_limit)
-            .map_all(|x| x / ELASTICITY_MULTIPLIER);
+        let gas_target =
+            SpaceMap::new(gas_limit * 9 / 10, espace_limit, U256::zero())
+                .map_all(|x| x / ELASTICITY_MULTIPLIER);
         let parent_base_price = if height == 1 {
             params.init_base_price()
         } else {

@@ -355,7 +355,7 @@ impl LocalizedBlockTrace {
             .enumerate()
             .filter_map(|(tx_pos, t)| match transactions[tx_pos].space() {
                 Space::Native => Some((transactions[tx_pos].hash(), t)),
-                Space::Ethereum => None,
+                Space::Ethereum | Space::Shielded => None,
             })
             .enumerate()
             .map(|(rpc_index, (tx_hash, t))| {

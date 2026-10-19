@@ -2128,6 +2128,8 @@ impl ConsensusGraph {
                             phantom_block.traces.push(block_traces[id].clone());
                         }
                     }
+                    // Shielded transactions are not part of the eSpace view.
+                    Space::Shielded => {}
                     Space::Native => {
                         // note: failing transactions will not produce any
                         // phantom txs or traces

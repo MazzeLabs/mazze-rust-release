@@ -142,7 +142,7 @@ impl Transaction {
             };
         let space = match t.space() {
             Space::Native => None,
-            Space::Ethereum => Some(Space::Ethereum),
+            space => Some(space),
         };
         Ok(Transaction {
             space,

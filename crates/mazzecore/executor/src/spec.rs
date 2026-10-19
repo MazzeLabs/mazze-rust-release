@@ -76,7 +76,7 @@ impl Default for CommonParams {
         CommonParams {
             maximum_extra_data_size: 0x20,
             network_id: 0x1,
-            chain_id: ChainIdParamsInner::new_simple(AllChainID::new(1, 1)),
+            chain_id: ChainIdParamsInner::new_simple(AllChainID::new(1, 1, 1)),
             subprotocol_name: "mazze".into(),
             min_gas_limit: 10_000_000.into(),
             gas_limit_bound_divisor: 0x0400.into(),

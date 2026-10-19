@@ -1833,6 +1833,9 @@ impl ConsensusExecutionHandler {
         let state_space = match tx.space() {
             Space::Native => None,
             Space::Ethereum => Some(Space::Ethereum),
+            Space::Shielded => {
+                bail!("shielded transactions cannot be virtually executed")
+            }
         };
         if !state_availability_boundary.check_read_availability(
             best_block_header.height(),

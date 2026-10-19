@@ -441,6 +441,7 @@ impl<'a> ContextTrait for Context<'a> {
             * match self.space {
                 Space::Native => 1,
                 Space::Ethereum => self.spec.evm_gas_ratio,
+                Space::Shielded => unreachable!("the shielded space has no VM"),
             };
         let return_cost = U256::from(data.len()) * create_data_gas;
         if return_cost > *gas || data.len() > self.spec.create_data_limit {

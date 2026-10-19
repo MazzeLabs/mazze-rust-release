@@ -37,6 +37,7 @@ impl Machine {
         let builtins = match address.space {
             Space::Native => &self.builtins,
             Space::Ethereum => &self.builtins_evm,
+            Space::Shielded => return None,
         };
         builtins.get(&address.address).and_then(|b| {
             if b.is_active(block_number) {
@@ -115,6 +116,7 @@ fn new_builtin_map(space: Space) -> BTreeMap<Address, Builtin> {
             match space {
                 Space::Native => builtin_factory("ecrecover"),
                 Space::Ethereum => builtin_factory("ecrecover_evm"),
+                Space::Shielded => unreachable!("the shielded space has no VM"),
             },
             0,
         ),

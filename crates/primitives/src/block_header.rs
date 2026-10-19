@@ -211,7 +211,14 @@ impl BlockHeader {
             |BasePrice {
                  core_base_price,
                  espace_base_price,
-             }| SpaceMap::new(core_base_price, espace_base_price),
+                 shielded_base_price,
+             }| {
+                SpaceMap::new(
+                    core_base_price,
+                    espace_base_price,
+                    shielded_base_price,
+                )
+            },
         )
     }
 
@@ -563,6 +570,7 @@ impl BlockHeaderBuilder {
         self.base_price = maybe_base_price.map(|x| BasePrice {
             core_base_price: x[Space::Native],
             espace_base_price: x[Space::Ethereum],
+            shielded_base_price: x[Space::Shielded],
         });
         self
     }
@@ -691,10 +699,54 @@ impl Decodable for BlockHeader {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, RlpDecodable, RlpEncodable, PartialEq)]
+/// Encoded as `[core, espace]` while the shielded base price is zero (before
+/// the shielded space activates) and `[core, espace, shielded]` after, so
+/// headers from before the activation keep their encoding and hash. An active
+/// shielded base price is never zero: it is floored at the minimum base price.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BasePrice {
     pub core_base_price: U256,
     pub espace_base_price: U256,
+    pub shielded_base_price: U256,
+}
+
+impl Encodable for BasePrice {
+    fn rlp_append(&self, s: &mut RlpStream) {
+        if self.shielded_base_price.is_zero() {
+            s.begin_list(2);
+        } else {
+            s.begin_list(3);
+        }
+        s.append(&self.core_base_price);
+        s.append(&self.espace_base_price);
+        if !self.shielded_base_price.is_zero() {
+            s.append(&self.shielded_base_price);
+        }
+    }
+}
+
+impl Decodable for BasePrice {
+    fn decode(r: &Rlp) -> Result<Self, DecoderError> {
+        let shielded_base_price = match r.item_count()? {
+            2 => U256::zero(),
+            3 => {
+                let price: U256 = r.val_at(2)?;
+                // Zero is encoded as the two-item form only.
+                if price.is_zero() {
+                    return Err(DecoderError::Custom(
+                        "Non-canonical shielded base price",
+                    ));
+                }
+                price
+            }
+            _ => return Err(DecoderError::RlpIncorrectListLen),
+        };
+        Ok(BasePrice {
+            core_base_price: r.val_at(0)?,
+            espace_base_price: r.val_at(1)?,
+            shielded_base_price,
+        })
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -706,6 +758,72 @@ mod tests {
     };
     use mazze_types::{Bloom, KECCAK_EMPTY_BLOOM, U256};
     use std::{str::FromStr, sync::Arc};
+
+    #[test]
+    fn test_base_price_keeps_two_price_encoding_while_shielded_is_zero() {
+        use super::BasePrice;
+        use rlp_derive::{RlpDecodable, RlpEncodable};
+
+        // The layout every header before the shielded space carries.
+        #[derive(RlpEncodable, RlpDecodable)]
+        struct TwoPrices {
+            core_base_price: U256,
+            espace_base_price: U256,
+        }
+
+        let inactive = BasePrice {
+            core_base_price: 100.into(),
+            espace_base_price: 200.into(),
+            shielded_base_price: U256::zero(),
+        };
+        let legacy = rlp::encode(&TwoPrices {
+            core_base_price: 100.into(),
+            espace_base_price: 200.into(),
+        });
+        assert_eq!(rlp::encode(&inactive), legacy);
+        assert_eq!(rlp::decode::<BasePrice>(&legacy).unwrap(), inactive);
+
+        let active = BasePrice {
+            shielded_base_price: 300.into(),
+            ..inactive
+        };
+        let encoded = rlp::encode(&active);
+        assert_eq!(rlp::Rlp::new(&encoded).item_count().unwrap(), 3);
+        assert_eq!(rlp::decode::<BasePrice>(&encoded).unwrap(), active);
+
+        // A zero third price has only one canonical form: two items.
+        let mut s = rlp::RlpStream::new_list(3);
+        s.append(&U256::from(100)).append(&U256::from(200));
+        s.append(&U256::zero());
+        assert!(rlp::decode::<BasePrice>(&s.out()).is_err());
+
+        let mut s = rlp::RlpStream::new_list(1);
+        s.append(&U256::from(100));
+        assert!(rlp::decode::<BasePrice>(&s.out()).is_err());
+    }
+
+    #[test]
+    fn test_header_base_price_round_trips_through_space_map() {
+        use mazze_types::{Space, SpaceMap};
+
+        for prices in [
+            SpaceMap::new(100, 200, 0).map_all(U256::from),
+            SpaceMap::new(100, 200, 300).map_all(U256::from),
+        ] {
+            let header = BlockHeaderBuilder::new()
+                .with_base_price(Some(prices))
+                .build();
+            let decoded: super::BlockHeader =
+                rlp::decode(&rlp::encode(&header)).unwrap();
+            assert_eq!(decoded.base_price(), Some(prices));
+            assert_eq!(decoded.hash(), header.hash());
+            assert_eq!(rlp::encode(&decoded), rlp::encode(&header));
+            assert_eq!(
+                decoded.base_price().unwrap()[Space::Shielded],
+                prices[Space::Shielded]
+            );
+        }
+    }
 
     #[test]
     fn test_logs_bloom_hash_no_receipts() {

@@ -61,6 +61,9 @@ impl FeeHistory {
         let gas_limit: U256 = match space {
             Space::Native => main_header.gas_limit() * 9 / 10,
             Space::Ethereum => main_header.gas_limit() * 5 / 10,
+            Space::Shielded => {
+                return Err("no fee history for the shielded space".into())
+            }
         };
 
         let gas_used = transactions

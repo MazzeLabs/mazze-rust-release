@@ -34,7 +34,7 @@ impl rlp::Encodable for LogEntry {
                 s.append_list(&self.topics);
                 s.append(&self.data);
             }
-            Space::Ethereum => {
+            Space::Ethereum | Space::Shielded => {
                 s.begin_list(4);
                 s.append(&self.address);
                 s.append_list(&self.topics);

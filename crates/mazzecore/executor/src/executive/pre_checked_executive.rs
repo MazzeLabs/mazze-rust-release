@@ -172,6 +172,7 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
                         CreateContractAddress::FromSenderNonceAndCodeHash
                     }
                     Space::Ethereum => CreateContractAddress::FromSenderNonce,
+                    Space::Shielded => unreachable!("the shielded space has no VM"),
                 };
                 let (new_address, code_hash) = contract_address(
                     address_scheme,

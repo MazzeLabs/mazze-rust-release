@@ -86,6 +86,7 @@ impl DeferredPool {
             packing_pool: SpaceMap::new(
                 PackingPool::new(config),
                 PackingPool::new(config),
+                PackingPool::new(config),
             ),
         }
     }
@@ -96,6 +97,7 @@ impl DeferredPool {
         DeferredPool {
             buckets: Default::default(),
             packing_pool: SpaceMap::new(
+                PackingPool::new(config),
                 PackingPool::new(config),
                 PackingPool::new(config),
             ),
@@ -1694,6 +1696,7 @@ mod tests {
                 data: Vec::new(),
             }
             .into(),
+            Space::Shielded => unreachable!("no shielded test transactions"),
         };
         Arc::new(tx.sign(sender.secret()))
     }
@@ -1930,7 +1933,7 @@ mod tests {
     fn pack_transactions_1559_checked(
         pool: &mut TransactionPoolInner, machine: &Machine,
     ) {
-        let parent_base_price = SpaceMap::new(100, 200).map_all(U256::from);
+        let parent_base_price = SpaceMap::new(100, 200, 0).map_all(U256::from);
         let block_gas_limit = U256::from(6000);
         let best_epoch_height = 20;
 
@@ -1955,11 +1958,15 @@ mod tests {
             };
 
         let gas_target =
-            SpaceMap::new(core_gas_limit, eth_gas_limit).map_all(|x| x / 2);
+            SpaceMap::new(core_gas_limit, eth_gas_limit, U256::zero())
+                .map_all(|x| x / 2);
 
         let mut gas_used = SpaceMap::default();
-        let mut min_gas_price =
-            SpaceMap::new(U256::max_value(), U256::max_value());
+        let mut min_gas_price = SpaceMap::new(
+            U256::max_value(),
+            U256::max_value(),
+            U256::max_value(),
+        );
 
         for tx in txs {
             gas_used[tx.space()] += *tx.gas_limit();
@@ -1991,11 +1998,11 @@ mod tests {
         let mut pool = TransactionPoolInner::new_for_test();
 
         let mut params = CommonParams::default();
-        params.min_base_price = SpaceMap::new(100, 200).map_all(U256::from);
+        params.min_base_price = SpaceMap::new(100, 200, 0).map_all(U256::from);
 
         let machine = Arc::new(new_machine(params, VmFactory::default()));
 
-        let test_block_limit = SpaceMap::new(5400, 3000);
+        let test_block_limit = SpaceMap::new(5400, 3000, 0);
 
         let senders: Vec<_> = (0..20)
             .into_iter()

@@ -210,7 +210,7 @@ pub fn initialize_synchronization_graph_with_data_manager(
     let notifications = Notifications::init();
     let consensus = Arc::new(ConsensusGraph::new(
         ConsensusConfig {
-            chain_id: ChainIdParamsInner::new_simple(AllChainID::new(1, 1)),
+            chain_id: ChainIdParamsInner::new_simple(AllChainID::new(1, 1, 1)),
             inner_conf: ConsensusInnerConfig {
                 adaptive_weight_beta: beta,
                 heavy_block_difficulty_ratio: h,

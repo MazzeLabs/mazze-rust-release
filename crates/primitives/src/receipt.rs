@@ -59,14 +59,14 @@ impl Default for TransactionStatus {
 impl TransactionStatus {
     pub fn in_space(&self, space: Space) -> u8 {
         match (space, self) {
-            // Mazze
-            (Space::Native, TransactionStatus::Success) => {
+            // Mazze and shielded share the native outcome codes.
+            (Space::Native | Space::Shielded, TransactionStatus::Success) => {
                 TRANSACTION_OUTCOME_SUCCESS
             }
-            (Space::Native, TransactionStatus::Failure) => {
+            (Space::Native | Space::Shielded, TransactionStatus::Failure) => {
                 TRANSACTION_OUTCOME_EXCEPTION_WITH_NONCE_BUMPING
             }
-            (Space::Native, TransactionStatus::Skipped) => {
+            (Space::Native | Space::Shielded, TransactionStatus::Skipped) => {
                 TRANSACTION_OUTCOME_EXCEPTION_WITHOUT_NONCE_BUMPING
             }
 

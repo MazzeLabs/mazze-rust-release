@@ -652,6 +652,7 @@ impl TransactionPool {
         let min_tx_price = match transaction.space() {
             Space::Native => self.config.min_native_tx_price,
             Space::Ethereum => self.config.min_eth_tx_price,
+            Space::Shielded => self.config.min_native_tx_price,
         };
         // check transaction gas price
         if !transaction.is_shielded()
@@ -812,8 +813,11 @@ impl TransactionPool {
         let params = self.machine.params();
 
         let mut gas_used = SpaceMap::default();
-        let mut min_gas_price =
-            SpaceMap::new(U256::max_value(), U256::max_value());
+        let mut min_gas_price = SpaceMap::new(
+            U256::max_value(),
+            U256::max_value(),
+            U256::max_value(),
+        );
         for tx in txs {
             gas_used[tx.space()] += *tx.gas_limit();
             min_gas_price[tx.space()] =
@@ -826,8 +830,12 @@ impl TransactionPool {
         } else {
             U256::zero()
         };
+        // The shielded lane has no gas budget yet, so its base price stays
+        // zero and headers keep the two-price encoding.
+        let shielded_gas_limit = U256::zero();
         let gas_target =
-            SpaceMap::new(core_gas_limit, eth_gas_limit).map_all(|x| x / 2);
+            SpaceMap::new(core_gas_limit, eth_gas_limit, shielded_gas_limit)
+                .map_all(|x| x / 2);
 
         let parent_base_price = if current_height == 0 {
             params.init_base_price()
@@ -845,7 +853,7 @@ impl TransactionPool {
         )
         .map_all(compute_next_price_tuple);
 
-        for space in [Space::Native, Space::Ethereum] {
+        for space in Space::ALL {
             if base_price[space] > min_gas_price[space] {
                 return Err(format!("Not sufficient min price in space {:?}, expected {:?}, actual {:?}", space, base_price[space], min_gas_price[space]));
             }

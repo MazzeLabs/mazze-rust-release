@@ -132,6 +132,10 @@ impl AddressPocket {
                 space: Space::Ethereum,
                 ..
             }) => 7,
+            Balance(AddressWithSpace {
+                space: Space::Shielded,
+                ..
+            }) => 8,
         }
     }
 }

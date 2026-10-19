@@ -31,6 +31,7 @@ impl VmFactory {
                 Box::new(RevmExec::new(params, gas, spec))
             }
             Space::Native => self.evm_factory.create(params, spec, depth),
+            Space::Shielded => unreachable!("the shielded space has no VM"),
         }
     }
 

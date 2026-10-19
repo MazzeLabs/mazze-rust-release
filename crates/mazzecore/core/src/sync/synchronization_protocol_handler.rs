@@ -2625,6 +2625,17 @@ impl NetworkProtocolHandler for SynchronizationProtocolHandler {
             CHECK_REQUEST_TIMER => {
                 self.remove_expired_flying_request(io);
                 self.rescue_missing_frontier_dependencies(io);
+                let seed_ready = self.graph.take_seed_ready_headers();
+                if !seed_ready.is_empty() {
+                    debug!(
+                        "re-requesting {} header(s) whose RandomX seed is \
+                         known now",
+                        seed_ready.len()
+                    );
+                    self.request_block_headers(
+                        io, None, seed_ready, true, /* ignore_db */
+                    );
+                }
                 // Body-sync unification (§5.20): drain `block_to_fill_set`
                 // regardless of phase. In CatchUpSyncBlock with backpressure
                 // engaged (sync_consensus_block_lag >= 256), no other path

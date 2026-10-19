@@ -83,7 +83,25 @@ impl Handleable for SnapshotManifestRequest {
                 Default::default()
             };
         let block_receipts = if self.is_initial_request() {
-            self.get_block_receipts(ctx).unwrap_or_default()
+            match self.get_block_receipts(ctx) {
+                Some(r) => r,
+                None => {
+                    // The receipts of the snapshot's reward window are gone
+                    // (a full node GCs execution results): the requester
+                    // cannot validate the snapshot, so do not offer it.
+                    // Shipping the manifest without them made every
+                    // requester reject it as invalid and drop this peer.
+                    debug!(
+                        "cannot serve snapshot {:?}: its reward-window \
+                         receipts are not available here",
+                        self.snapshot_to_sync.get_snapshot_epoch_id()
+                    );
+                    let mut response = SnapshotManifestResponse::default();
+                    response.request_id = self.request_id;
+                    ctx.send_response(&response)?;
+                    return Ok(());
+                }
+            }
         } else {
             Default::default()
         };

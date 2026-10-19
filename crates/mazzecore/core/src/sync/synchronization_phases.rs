@@ -497,9 +497,29 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
             io,
             sync_handler,
         );
+        // Body sync without a downloaded snapshot executes from the stable
+        // checkpoint, so it needs that state locally. A node rooted at a
+        // trusted checkpoint (§5.19) or one that lost its state has none: the
+        // fallback panicked in construct_main_state ("epoch_execution_
+        // commitment for stable hash must exist in disk", local joiner whose
+        // peers all sent unusable manifests and dropped). Keep trying the
+        // checkpoint sync instead.
+        let body_sync_possible = {
+            let stable = sync_handler
+                .graph
+                .data_man
+                .get_cur_consensus_era_stable_hash();
+            stable == sync_handler.graph.data_man.true_genesis.hash()
+                || sync_handler
+                    .graph
+                    .data_man
+                    .get_epoch_execution_commitment_with_db(&stable)
+                    .is_some()
+        };
         if sync_handler.syn.allow_phase_change_without_peer()
             && sync_handler.syn.peers.read().is_empty()
             && self.state_sync.status() == Status::Inactive
+            && body_sync_possible
         {
             warn!(
                 "No peers available for checkpoint sync at {:?}; continuing with local body sync",
@@ -509,6 +529,16 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
             return SyncPhaseType::CatchUpFillBlockBodyPhase;
         }
         if self.state_sync.status() == Status::Invalid {
+            if !body_sync_possible {
+                warn!(
+                    "Checkpoint sync is unavailable for {:?} and there is no \
+                     local state to body-sync from; retrying the checkpoint \
+                     sync",
+                    epoch_to_sync
+                );
+                self.state_sync.reset();
+                return self.phase_type();
+            }
             warn!(
                 "Checkpoint sync is unavailable for {:?}; falling back to legacy body sync",
                 epoch_to_sync

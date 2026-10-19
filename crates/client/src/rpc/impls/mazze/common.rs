@@ -822,7 +822,13 @@ impl RpcImpl {
 
         Ok(RpcStatus {
             best_hash: best_info.best_block_hash.into(),
-            block_number: processed_block_count.into(),
+            // The chain's block number of the best block, as on every
+            // other node. It was the count of blocks this node's consensus
+            // processed, which equals it only on a node that replayed the
+            // chain from genesis without a restart; on a fast-synced node it
+            // was the blocks since its trusted root (m6: 0x477bc vs 0x1e6b88).
+            // That count stays available as progress.processedBlockCount.
+            block_number: best_block_number.into(),
             chain_id: best_info.chain_id.in_native_space().into(),
             ethereum_space_chain_id: best_info
                 .chain_id

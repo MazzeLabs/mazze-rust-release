@@ -2169,7 +2169,7 @@ impl ConsensusNewBlockHandler {
                     .upper_bound += 1;
             }
 
-            info!(
+            debug!(
                 "construct_main_state: index {} height {} compute_epoch {}.",
                 main_index, height, compute_epoch,
             );
@@ -2185,7 +2185,7 @@ impl ConsensusNewBlockHandler {
                     max_snapshot_epoch_index_has_mpt.map_or(true, |idx| {
                         main_index > idx + snapshot_epoch_count as usize
                     });
-                info!(
+                debug!(
                     "compute epoch recovery flag {}",
                     recover_mpt_during_construct_main_state
                 );

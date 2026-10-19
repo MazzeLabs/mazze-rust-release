@@ -23,6 +23,7 @@ pub mod filter;
 pub mod is_default;
 pub mod log_entry;
 pub mod receipt;
+pub mod shielded;
 pub mod state_root;
 pub mod static_bool;
 pub mod storage;

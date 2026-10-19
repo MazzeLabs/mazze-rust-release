@@ -1,0 +1,20 @@
+[package]
+name = "shielded-notes-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Spike: statistically hiding note commitments + off-chain note delivery → claim → restore (docs/internal/privacy-pq-stark.md §4, §9)"
+
+[workspace]
+
+[dependencies]
+p3-field = "0.8.0"
+p3-koala-bear = "0.8.0"
+p3-symmetric = "0.8.0"
+sha3 = "0.10"
+ml-kem = { version = "0.2", features = ["deterministic"] }
+rand_chacha = "0.3"
+classic-mceliece-rust = { version = "3.1.0", features = ["mceliece460896", "zeroize"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+rand = "0.8"

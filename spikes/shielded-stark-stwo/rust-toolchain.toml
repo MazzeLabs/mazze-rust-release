@@ -1,0 +1,3 @@
+[toolchain]
+# Stwo v1.0.0 pins this nightly. (2.x cannot prove degree>=2 AIRs yet.)
+channel = "nightly-2025-04-06"

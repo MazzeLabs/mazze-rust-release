@@ -1,0 +1,33 @@
+[package]
+name = "shielded-air-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Spike M1: real Plonky3 AIR for the shielded spend statement (Merkle membership + nullifier)"
+
+[workspace]
+
+[dependencies]
+shielded-notes-spike = { path = "../shielded-notes" }
+p3-air = "0.8.0"
+p3-challenger = "0.8.0"
+p3-commit = "0.8.0"
+p3-dft = { version = "0.8.0", features = ["parallel"] }
+p3-field = "0.8.0"
+p3-fri = "0.8.0"
+p3-keccak = "0.8.0"
+p3-koala-bear = "0.8.0"
+p3-matrix = "0.8.0"
+p3-merkle-tree = "0.8.0"
+p3-poseidon2 = "0.8.0"
+p3-poseidon2-air = "0.8.0"
+p3-security = "0.8.0"
+p3-symmetric = "0.8.0"
+p3-uni-stark = "0.8.0"
+rand = { version = "0.10.1", default-features = false, features = ["std_rng"] }
+postcard = { version = "1", features = ["alloc"] }
+bincode = "1.3"
+serde = "1"
+
+[profile.release]
+debug = false

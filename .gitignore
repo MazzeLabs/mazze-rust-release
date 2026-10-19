@@ -111,3 +111,6 @@ fleet-ops/
 docs/internal
 # Local multi-node restart harness (scripts/local-restart-repro.sh)
 run/local-repro/
+
+# Spike build output
+spikes/*/target/

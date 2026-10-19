@@ -1,0 +1,40 @@
+[package]
+name = "shielded-stark-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "P0 spike: STARK proof size / verify time for the Shielded Space 2x2 statement (docs/internal/privacy-pq-stark.md)"
+
+# Standalone: not a member of the node workspace.
+[workspace]
+
+[dependencies]
+p3-air = "0.8.0"
+p3-challenger = "0.8.0"
+p3-commit = "0.8.0"
+p3-dft = { version = "0.8.0", features = ["parallel"] }
+p3-field = "0.8.0"
+p3-fri = "0.8.0"
+p3-keccak = "0.8.0"
+p3-koala-bear = "0.8.0"
+p3-matrix = "0.8.0"
+p3-merkle-tree = "0.8.0"
+p3-poseidon2-air = "0.8.0"
+p3-security = "0.8.0"
+p3-symmetric = "0.8.0"
+p3-uni-stark = "0.8.0"
+rand = { version = "0.10.1", default-features = false, features = ["std_rng"] }
+postcard = { version = "1", features = ["alloc"] }
+serde = "1"
+
+[profile.release]
+debug = false
+
+[features]
+# Default challenge field is KoalaBear^8 (248 bits).
+ext4 = []
+ext5 = []
+vec2 = []
+vec4 = []
+digest512 = []
+zk = []

@@ -1,0 +1,21 @@
+[package]
+name = "shielded-stark-stwo-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "P0 spike: Stwo (Circle STARK, M31) sizing for the Shielded Space 2x2 statement"
+
+[workspace]
+
+[dependencies]
+stwo = { git = "https://github.com/starkware-libs/stwo", tag = "v1.0.0", features = ["prover", "parallel"] }
+stwo-constraint-framework = { git = "https://github.com/starkware-libs/stwo", tag = "v1.0.0", features = ["prover", "parallel"] }
+itertools = "0.12"
+educe = "0.5.0"
+num-traits = "0.2.19"
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
+rayon = "1.10.0"
+rand = { version = "0.8.5", features = ["small_rng"] }
+serde = { version = "1.0", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }

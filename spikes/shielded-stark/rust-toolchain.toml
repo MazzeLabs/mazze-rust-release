@@ -1,0 +1,3 @@
+[toolchain]
+# Plonky3 0.8 needs Rust >= 1.93 (maybe_uninit_slice). Node pins 1.91 — bump is a P1 item.
+channel = "1.93.0"

@@ -1216,6 +1216,14 @@ impl SynchronizationProtocolHandler {
         // return all blocks in the batch.
         let body_peers: Vec<NodeId> =
             self.syn.peers.read().keys().cloned().collect();
+        // Rotate the first peer across calls. With one chunk left (the tail
+        // of a fill) `i` is always 0, so every retry went to the same peer;
+        // when that peer had pruned the body (a mining node), the archive
+        // that has it was never asked (m6 stuck on 3 bodies for hours,
+        // 2026-10-19).
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        static BODY_PEER_ROTATION: AtomicUsize = AtomicUsize::new(0);
+        let rotation = BODY_PEER_ROTATION.fetch_add(1, AtomicOrdering::Relaxed);
         for (i, block_chunk) in to_request_blocks[0..n_blocks_to_request]
             .chunks(MAX_BLOCKS_TO_SEND as usize)
             .enumerate()
@@ -1223,7 +1231,7 @@ impl SynchronizationProtocolHandler {
             let peer = if body_peers.is_empty() {
                 None
             } else {
-                Some(body_peers[i % body_peers.len()])
+                Some(body_peers[(rotation + i) % body_peers.len()])
             };
             self.request_blocks_without_check(io, peer, block_chunk.to_vec());
         }

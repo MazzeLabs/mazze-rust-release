@@ -27,9 +27,11 @@ use primitives::{
     transaction::{
         native_transaction::TypedNativeTransaction, TransactionError,
     },
+    shielded::ShieldedTxBody,
     Action, Block, BlockHeader, BlockReceipts, MerkleHash, Receipt,
     SignedTransaction, Transaction, TransactionWithSignature,
 };
+use keccak_hash::keccak;
 use lazy_static::lazy_static;
 use metrics::{register_meter_with_group, Meter};
 use rlp::Encodable;
@@ -113,6 +115,40 @@ pub fn compute_transaction_root(
 ) -> MerkleHash {
     simple_mpt_merkle_root(&mut transaction_trie(transactions))
 }
+
+fn shielded_trie(shielded: &[Arc<ShieldedTxBody>]) -> SimpleMpt {
+    make_simple_mpt(
+        shielded
+            .iter()
+            .map(|body| body.hash().as_bytes().into())
+            .collect(),
+    )
+}
+
+/// The `transactions_root` header field of a block. Without shielded
+/// transactions it is the account transaction root, unchanged. With them it
+/// also commits to the shielded section, whose bodies commit to their proofs.
+pub fn compute_block_transactions_root(
+    transactions: &Vec<Arc<SignedTransaction>>,
+    shielded: &[Arc<ShieldedTxBody>],
+) -> MerkleHash {
+    let account_root = compute_transaction_root(transactions);
+    if shielded.is_empty() {
+        return account_root;
+    }
+    let shielded_root = simple_mpt_merkle_root(&mut shielded_trie(shielded));
+    let mut preimage = Vec::with_capacity(SHIELDED_ROOT_DOMAIN.len() + 64);
+    preimage.extend_from_slice(SHIELDED_ROOT_DOMAIN);
+    preimage.extend_from_slice(account_root.as_bytes());
+    preimage.extend_from_slice(shielded_root.as_bytes());
+    keccak(&preimage)
+}
+
+const SHIELDED_ROOT_DOMAIN: &[u8] = b"mazze/transactions-root/shielded/v1";
+
+/// Shielded transactions allowed in a block. The shielded lane is not active
+/// yet.
+pub const MAX_SHIELDED_TRANSACTIONS_PER_BLOCK: usize = 0;
 
 /// Compute a proof for the `tx_index_in_block`-th transaction in a block.
 pub fn compute_transaction_proof(
@@ -505,7 +541,10 @@ impl VerificationConfig {
     /// Verify block data against header: transactions root
     #[inline]
     fn verify_block_integrity(&self, block: &Block) -> Result<(), Error> {
-        let expected_root = compute_transaction_root(&block.transactions);
+        let expected_root = compute_block_transactions_root(
+            &block.transactions,
+            &block.shielded,
+        );
         if &expected_root != block.block_header.transactions_root() {
             warn!("Invalid transaction root");
             bail!(BlockError::InvalidTransactionsRoot(Mismatch {
@@ -530,6 +569,16 @@ impl VerificationConfig {
         &self, block: &Block, chain_id: AllChainID,
     ) -> Result<(), Error> {
         self.verify_block_integrity(block)?;
+
+        if block.shielded.len() > MAX_SHIELDED_TRANSACTIONS_PER_BLOCK {
+            return Err(From::from(BlockError::TooManyShieldedTransactions(
+                OutOfBounds {
+                    min: None,
+                    max: Some(MAX_SHIELDED_TRANSACTIONS_PER_BLOCK),
+                    found: block.shielded.len(),
+                },
+            )));
+        }
 
         let block_height = block.block_header.height();
 
@@ -958,6 +1007,103 @@ impl<'a> VerifyTxMode<'a> {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod shielded_root_tests {
+    use super::{compute_block_transactions_root, compute_transaction_root};
+    use primitives::shielded::ShieldedTxBody;
+    use std::sync::Arc;
+
+    fn bodies(seeds: &[u32]) -> Vec<Arc<ShieldedTxBody>> {
+        seeds
+            .iter()
+            .map(|s| Arc::new(ShieldedTxBody::sample_for_tests(*s)))
+            .collect()
+    }
+
+    #[test]
+    fn root_is_unchanged_without_shielded_transactions() {
+        assert_eq!(
+            compute_block_transactions_root(&vec![], &[]),
+            compute_transaction_root(&vec![])
+        );
+    }
+
+    #[test]
+    fn root_commits_to_the_shielded_section() {
+        let plain = compute_block_transactions_root(&vec![], &[]);
+        let one = compute_block_transactions_root(&vec![], &bodies(&[1]));
+        let two = compute_block_transactions_root(&vec![], &bodies(&[1, 2]));
+        let swapped =
+            compute_block_transactions_root(&vec![], &bodies(&[2, 1]));
+        assert_ne!(one, plain);
+        assert_ne!(two, one);
+        assert_ne!(swapped, two, "order is committed");
+
+        // A different proof is a different body, so a different root.
+        let mut other = ShieldedTxBody::sample_for_tests(1);
+        other.proof_hash.0[0] ^= 1;
+        let other_root =
+            compute_block_transactions_root(&vec![], &[Arc::new(other)]);
+        assert_ne!(other_root, one);
+    }
+
+    #[test]
+    fn shielded_section_is_rejected_while_the_lane_is_inactive() {
+        use super::VerificationConfig;
+        use crate::error::{BlockError, ErrorKind};
+        use mazze_executor::{
+            machine::{new_machine_with_builtin, VmFactory},
+            spec::CommonParams,
+        };
+        use mazze_parameters::{
+            block::{MAX_BLOCK_SIZE_IN_BYTES, REFEREE_DEFAULT_BOUND},
+            consensus::TRANSACTION_DEFAULT_EPOCH_BOUND,
+            tx_pool::TXPOOL_DEFAULT_NONCE_BITS,
+        };
+        use mazze_types::AllChainID;
+        use primitives::{Block, BlockHeaderBuilder};
+
+        let machine = Arc::new(new_machine_with_builtin(
+            CommonParams::default(),
+            VmFactory::default(),
+        ));
+        let config = VerificationConfig::new(
+            true,
+            REFEREE_DEFAULT_BOUND,
+            MAX_BLOCK_SIZE_IN_BYTES,
+            TRANSACTION_DEFAULT_EPOCH_BOUND,
+            TXPOOL_DEFAULT_NONCE_BITS,
+            machine,
+        );
+        let block_with = |shielded: Vec<Arc<ShieldedTxBody>>| {
+            let header = BlockHeaderBuilder::new()
+                .with_transactions_root(compute_block_transactions_root(
+                    &vec![],
+                    &shielded,
+                ))
+                .build();
+            Block::new(header, vec![]).with_shielded(shielded)
+        };
+        let chain_id = AllChainID::new(1, 1, 1);
+
+        assert!(config
+            .verify_sync_graph_block_basic(&block_with(vec![]), chain_id)
+            .is_ok());
+
+        // The root matches, so this is an invalid block, not a bad body.
+        let err = config
+            .verify_sync_graph_block_basic(&block_with(bodies(&[1])), chain_id)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err.kind(),
+                ErrorKind::Block(BlockError::TooManyShieldedTransactions(_))
+            ),
+            "{err:?}"
+        );
     }
 }
 

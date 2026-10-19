@@ -14,7 +14,8 @@
 //! elements out of range). Every byte is paid for (lesson Z-4).
 
 use crate::hash::keccak;
-use mazze_types::{Address, Space, H256};
+use mazze_types::{Address, Space, H256, H512};
+use tiny_keccak::{Hasher, Shake};
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 
 /// The only body version.
@@ -28,6 +29,20 @@ pub const DIGEST_ELEMENTS: usize = 12;
 
 /// Bytes of an encoded digest: each element as 4 bytes little-endian.
 pub const DIGEST_BYTES: usize = DIGEST_ELEMENTS * 4;
+
+/// Domain of `proof_hash`. Fixed length, so domain and proof never overlap.
+pub const PROOF_HASH_DOMAIN: &[u8] = b"mazze/shielded/proof-hash/v1";
+
+/// The commitment to a proof carried in the witness sidecar: 512 bits of
+/// SHAKE256, in line with the spec's >= 372-bit digest rule.
+pub fn proof_hash(proof: &[u8]) -> H512 {
+    let mut shake = Shake::v256();
+    shake.update(PROOF_HASH_DOMAIN);
+    shake.update(proof);
+    let mut out = H512::zero();
+    shake.finalize(out.as_bytes_mut());
+    out
+}
 
 pub const RECOVERY_TAG_BYTES: usize = 32;
 pub const RECOVERY_SLOT_BYTES: usize = 64;
@@ -69,7 +84,10 @@ impl ShieldedDigest {
 }
 
 impl Encodable for ShieldedDigest {
-    fn rlp_append(&self, s: &mut RlpStream) { s.append(&&self.0[..]); }
+    fn rlp_append(&self, s: &mut RlpStream) {
+        // `encode_value`, not `append`: the caller's `append` counts the item.
+        s.encoder().encode_value(&self.0);
+    }
 }
 
 impl Decodable for ShieldedDigest {
@@ -144,11 +162,21 @@ pub struct ShieldedTxBody {
     /// Present iff `v_public_out > 0`.
     pub dest: Option<ShieldedDest>,
     pub fee: u64,
-    /// Keccak-256 of the proof carried in the witness sidecar.
-    pub proof_hash: H256,
+    /// `proof_hash(proof)` of the proof carried in the witness sidecar.
+    pub proof_hash: H512,
 }
 
 impl ShieldedTxBody {
+    /// Decodes a standalone body, rejecting trailing bytes. Use this, not
+    /// `rlp::decode`, for bodies received on their own.
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, DecoderError> {
+        let rlp = Rlp::new(bytes);
+        if rlp.payload_info()?.total() != bytes.len() {
+            return Err(DecoderError::RlpIsTooBig);
+        }
+        rlp.as_val()
+    }
+
     /// The transaction id. It covers `proof_hash`, so it commits to the proof.
     pub fn hash(&self) -> H256 { keccak(rlp::encode(self)) }
 
@@ -170,6 +198,38 @@ impl ShieldedTxBody {
                 ..
             }) => Err("the shielded space is not a destination"),
             _ => Ok(()),
+        }
+    }
+}
+
+impl ShieldedTxBody {
+    /// A structurally valid body, distinct per `seed`, for tests in any
+    /// crate. It carries no valid proof.
+    #[doc(hidden)]
+    pub fn sample_for_tests(seed: u32) -> Self {
+        let digest = |i: u32| {
+            ShieldedDigest::from_elements(std::array::from_fn(|j| {
+                (seed.wrapping_mul(0x9e37_79b9) ^ (i * 16 + j as u32))
+                    % KOALABEAR_P
+            }))
+            .expect("reduced below the prime")
+        };
+        ShieldedTxBody {
+            pool_version: 1,
+            proof_system_id: 1,
+            anchor: digest(1),
+            nf: [digest(2), digest(3)],
+            cm_out: [digest(4), digest(5)],
+            recovery: RecoverySlot {
+                tag: [seed as u8; RECOVERY_TAG_BYTES],
+                slot: [7; RECOVERY_SLOT_BYTES],
+                mac: [9; RECOVERY_MAC_BYTES],
+            },
+            v_public_in: 0,
+            v_public_out: 0,
+            dest: None,
+            fee: 1_000,
+            proof_hash: H512::from_low_u64_be(seed as u64),
         }
     }
 }
@@ -268,7 +328,7 @@ mod tests {
             v_public_out: 0,
             dest: None,
             fee: 1_000,
-            proof_hash: H256::repeat_byte(0xab),
+            proof_hash: H512::repeat_byte(0xab),
         }
     }
 
@@ -302,17 +362,61 @@ mod tests {
     fn round_trips() {
         for body in [body(), shield_out()] {
             let encoded = rlp::encode(&body);
-            let decoded: ShieldedTxBody = rlp::decode(&encoded).unwrap();
+            let decoded = ShieldedTxBody::decode_canonical(&encoded).unwrap();
             assert_eq!(decoded, body);
             assert_eq!(rlp::encode(&decoded), encoded);
         }
     }
 
     #[test]
+    fn encoding_is_one_self_contained_item() {
+        for body in [body(), shield_out()] {
+            let encoded = rlp::encode(&body);
+            let rlp = Rlp::new(&encoded);
+            assert_eq!(rlp.payload_info().unwrap().total(), encoded.len());
+            assert_eq!(rlp.item_count().unwrap(), 14);
+
+            // Nested, the body stays a single item.
+            let mut s = RlpStream::new_list(2);
+            s.append(&body).append(&body);
+            let list = s.out();
+            let rlp = Rlp::new(&list);
+            assert_eq!(rlp.payload_info().unwrap().total(), list.len());
+            assert_eq!(rlp.item_count().unwrap(), 2);
+            assert_eq!(rlp.val_at::<ShieldedTxBody>(0).unwrap(), body);
+            assert_eq!(rlp.val_at::<ShieldedTxBody>(1).unwrap(), body);
+        }
+    }
+
+    #[test]
+    fn proof_hash_is_512_bit_shake256_with_domain() {
+        let h = proof_hash(b"proof");
+        assert_eq!(h.as_bytes().len(), 64);
+        assert_ne!(h, proof_hash(b"proog"));
+        assert_ne!(h, proof_hash(b""));
+        // The domain is part of the input: plain SHAKE256 differs.
+        let mut plain = [0u8; 64];
+        let mut shake = Shake::v256();
+        shake.update(b"proof");
+        shake.finalize(&mut plain);
+        assert_ne!(h.as_bytes(), &plain);
+    }
+
+    #[test]
+    fn rejects_trailing_bytes() {
+        let mut encoded = rlp::encode(&body()).to_vec();
+        encoded.push(0x80);
+        assert!(ShieldedTxBody::decode_canonical(&encoded).is_err());
+    }
+
+    #[test]
     fn body_size_is_constant_for_a_given_shape() {
         // 5 digests, the recovery slot, the proof hash and small integers.
         let size = rlp::encode(&body()).len();
-        assert!(size < 450, "body is {size} bytes");
+        // 3 version bytes, 5 digests of 1+48, the recovery slot (118),
+        // v_public_in/out, an empty dest, the fee, a 2+64 proof hash, and the
+        // 3-byte list header.
+        assert_eq!(size, 441);
         let out = rlp::encode(&shield_out()).len();
         // The empty dest list (1 byte) becomes a list header, the space byte
         // and the 21-byte address.
@@ -323,7 +427,7 @@ mod tests {
     fn hash_commits_to_every_field() {
         let base = body().hash();
         let mut changed = body();
-        changed.proof_hash = H256::repeat_byte(0xac);
+        changed.proof_hash = H512::repeat_byte(0xac);
         assert_ne!(changed.hash(), base);
         let mut changed = body();
         changed.recovery.mac[0] ^= 1;
@@ -343,17 +447,17 @@ mod tests {
 
         raw[..4].copy_from_slice(&u32::MAX.to_le_bytes());
         let item = rlp::encode(&&raw[..]);
-        assert!(rlp::decode::<ShieldedTxBody>(&with_item(&body(), 3, &item))
+        assert!(ShieldedTxBody::decode_canonical(&with_item(&body(), 3, &item))
             .is_err());
     }
 
     #[test]
     fn rejects_wrong_lengths() {
         let short = rlp::encode(&&digest(1).as_bytes()[..DIGEST_BYTES - 1]);
-        assert!(rlp::decode::<ShieldedTxBody>(&with_item(&body(), 4, &short))
+        assert!(ShieldedTxBody::decode_canonical(&with_item(&body(), 4, &short))
             .is_err());
-        let short_hash = rlp::encode(&&[0u8; 31][..]);
-        assert!(rlp::decode::<ShieldedTxBody>(&with_item(
+        let short_hash = rlp::encode(&&[0u8; 32][..]);
+        assert!(ShieldedTxBody::decode_canonical(&with_item(
             &body(),
             13,
             &short_hash
@@ -371,27 +475,27 @@ mod tests {
             s.append_raw(rlp.at(i).unwrap().as_raw(), 1);
         }
         s.append(&0u8);
-        assert!(rlp::decode::<ShieldedTxBody>(&s.out()).is_err());
+        assert!(ShieldedTxBody::decode_canonical(&s.out()).is_err());
 
         let mut s = RlpStream::new_list(13);
         for i in 0..13 {
             s.append_raw(rlp.at(i).unwrap().as_raw(), 1);
         }
-        assert!(rlp::decode::<ShieldedTxBody>(&s.out()).is_err());
+        assert!(ShieldedTxBody::decode_canonical(&s.out()).is_err());
     }
 
     #[test]
     fn rejects_non_minimal_integers() {
         // 1000 with a leading zero byte.
         let item = rlp::encode(&&[0u8, 0x03, 0xe8][..]);
-        assert!(rlp::decode::<ShieldedTxBody>(&with_item(&body(), 12, &item))
+        assert!(ShieldedTxBody::decode_canonical(&with_item(&body(), 12, &item))
             .is_err());
     }
 
     #[test]
     fn rejects_unknown_version() {
         let item = rlp::encode(&2u8);
-        assert!(rlp::decode::<ShieldedTxBody>(&with_item(&body(), 0, &item))
+        assert!(ShieldedTxBody::decode_canonical(&with_item(&body(), 0, &item))
             .is_err());
     }
 
@@ -400,7 +504,7 @@ mod tests {
         let mut dup = body();
         dup.nf[1] = dup.nf[0];
         assert!(dup.check_structure().is_err());
-        assert!(rlp::decode::<ShieldedTxBody>(&rlp::encode(&dup)).is_err());
+        assert!(ShieldedTxBody::decode_canonical(&rlp::encode(&dup)).is_err());
 
         let mut no_dest = shield_out();
         no_dest.dest = None;
@@ -413,7 +517,7 @@ mod tests {
         let mut into_pool = shield_out();
         into_pool.dest.as_mut().unwrap().space = Space::Shielded;
         assert!(into_pool.check_structure().is_err());
-        assert!(rlp::decode::<ShieldedTxBody>(&rlp::encode(&into_pool))
+        assert!(ShieldedTxBody::decode_canonical(&rlp::encode(&into_pool))
             .is_err());
 
         assert!(body().check_structure().is_ok());

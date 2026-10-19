@@ -37,6 +37,8 @@ pub enum BlockError {
     InvalidPackedGasLimit(OutOfBounds<U256>),
     /// Total rlp sizes of transactions in block is out of bound.
     InvalidBlockSize(OutOfBounds<u64>),
+    /// Too many shielded transactions in the block's shielded section.
+    TooManyShieldedTransactions(OutOfBounds<usize>),
     InvalidBasePrice(Mismatch<SpaceMap<U256>>),
     /// Timestamp header field is invalid.
     InvalidTimestamp(OutOfBounds<SystemTime>),
@@ -95,6 +97,9 @@ impl fmt::Display for BlockError {
                 format!("Invalid packed gas limit: {}", oob)
             }
             InvalidBlockSize(ref oob) => format!("Invalid block size: {}", oob),
+            TooManyShieldedTransactions(ref oob) => {
+                format!("Too many shielded transactions: {}", oob)
+            }
             InvalidTimestamp(ref oob) => {
                 let oob =
                     oob.map(|st| st.elapsed().unwrap_or_default().as_secs());

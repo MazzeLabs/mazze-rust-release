@@ -2,7 +2,10 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-use crate::{BlockHeader, SignedTransaction, TransactionWithSignature};
+use crate::{
+    shielded::ShieldedTxBody, BlockHeader, SignedTransaction,
+    TransactionWithSignature,
+};
 use byteorder::{ByteOrder, LittleEndian};
 use keccak_hash::keccak;
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
@@ -46,6 +49,9 @@ pub struct Block {
     pub block_header: BlockHeader,
     /// The transactions in this block.
     pub transactions: Vec<Arc<SignedTransaction>>,
+    /// The shielded transaction bodies, a section apart from the account
+    /// transactions. Their proofs travel as a witness sidecar.
+    pub shielded: Vec<Arc<ShieldedTxBody>>,
     /// Approximated rlp size of the block.
     pub approximated_rlp_size: usize,
     /// Approximated rlp size of block with transaction public key.
@@ -54,7 +60,9 @@ pub struct Block {
 
 impl MallocSizeOf for Block {
     fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
-        self.block_header.size_of(ops) + self.transactions.size_of(ops)
+        self.block_header.size_of(ops)
+            + self.transactions.size_of(ops)
+            + self.shielded.len() * std::mem::size_of::<ShieldedTxBody>()
     }
 }
 
@@ -86,8 +94,55 @@ impl Block {
         Block {
             block_header,
             transactions,
+            shielded: Vec::new(),
             approximated_rlp_size,
             approximated_rlp_size_with_public,
+        }
+    }
+
+    /// Sets the shielded section. The approximated sizes grow by the encoded
+    /// bodies.
+    pub fn with_shielded(mut self, shielded: Vec<Arc<ShieldedTxBody>>) -> Self {
+        let added: usize =
+            shielded.iter().map(|body| rlp::encode(&**body).len()).sum();
+        self.approximated_rlp_size += added;
+        self.approximated_rlp_size_with_public += added;
+        self.shielded = shielded;
+        self
+    }
+
+    /// `[header, transactions]`, plus the shielded section as a third item
+    /// when it is not empty. Blocks without shielded transactions keep their
+    /// encoding.
+    fn begin_block_list(&self, stream: &mut RlpStream) {
+        stream.begin_list(2 + !self.shielded.is_empty() as usize);
+    }
+
+    fn append_shielded(&self, stream: &mut RlpStream) {
+        if !self.shielded.is_empty() {
+            stream.begin_list(self.shielded.len());
+            for body in &self.shielded {
+                stream.append(&**body);
+            }
+        }
+    }
+
+    fn decode_shielded(
+        rlp: &Rlp,
+    ) -> Result<Vec<Arc<ShieldedTxBody>>, DecoderError> {
+        match rlp.item_count()? {
+            2 => Ok(Vec::new()),
+            3 => {
+                let bodies = rlp.list_at::<ShieldedTxBody>(2)?;
+                // An empty section has only one form: absent.
+                if bodies.is_empty() {
+                    return Err(DecoderError::Custom(
+                        "Empty shielded section must be omitted",
+                    ));
+                }
+                Ok(bodies.into_iter().map(Arc::new).collect())
+            }
+            _ => Err(DecoderError::RlpIncorrectListLen),
         }
     }
 
@@ -185,10 +240,11 @@ impl Block {
 
     pub fn encode_with_tx_public(&self) -> Vec<u8> {
         let mut stream = RlpStream::new();
+        self.begin_block_list(&mut stream);
         stream
-            .begin_list(2)
             .append(&self.block_header)
             .append_raw(&*self.encode_body_with_tx_public(), 1);
+        self.append_shielded(&mut stream);
         stream.drain()
     }
 
@@ -196,16 +252,16 @@ impl Block {
         if rlp.as_raw().len() != rlp.payload_info()?.total() {
             return Err(DecoderError::RlpIsTooBig);
         }
-        if rlp.item_count()? != 2 {
-            return Err(DecoderError::RlpIncorrectListLen);
-        }
+        let shielded = Self::decode_shielded(rlp)?;
 
-        Ok(Block::new_with_rlp_size(
+        let mut block = Block::new_with_rlp_size(
             rlp.val_at(0)?,
             Self::decode_body_with_tx_public(&rlp.at(1)?)?,
             None,
             Some(rlp.as_raw().len()),
-        ))
+        );
+        block.shielded = shielded;
+        Ok(block)
     }
 }
 
@@ -213,11 +269,13 @@ impl Block {
 // without "sender" and "public" fields.
 impl Encodable for Block {
     fn rlp_append(&self, stream: &mut RlpStream) {
-        stream.begin_list(2).append(&self.block_header);
+        self.begin_block_list(stream);
+        stream.append(&self.block_header);
         stream.begin_list(self.transactions.len());
         for tx in &self.transactions {
             stream.append(&tx.transaction);
         }
+        self.append_shielded(stream);
     }
 }
 
@@ -228,9 +286,7 @@ impl Decodable for Block {
         if rlp.as_raw().len() != rlp.payload_info()?.total() {
             return Err(DecoderError::RlpIsTooBig);
         }
-        if rlp.item_count()? != 2 {
-            return Err(DecoderError::RlpIncorrectListLen);
-        }
+        let shielded = Self::decode_shielded(rlp)?;
 
         let transactions = rlp.list_at::<TransactionWithSignature>(1)?;
 
@@ -240,12 +296,14 @@ impl Decodable for Block {
             signed_transactions.push(Arc::new(signed));
         }
 
-        Ok(Block::new_with_rlp_size(
+        let mut block = Block::new_with_rlp_size(
             rlp.val_at(0)?,
             signed_transactions,
             Some(rlp.as_raw().len()),
             None,
-        ))
+        );
+        block.shielded = shielded;
+        Ok(block)
     }
 }
 
@@ -384,5 +442,68 @@ impl Decodable for CompactBlock {
             tx_short_ids: short_ids,
             reconstructed_txns: Vec::new(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Block;
+    use crate::{shielded::ShieldedTxBody, BlockHeaderBuilder};
+    use rlp::{Rlp, RlpStream};
+    use std::sync::Arc;
+
+    fn block(shielded: usize) -> Block {
+        let header = BlockHeaderBuilder::new().with_height(7).build();
+        Block::new(header, vec![]).with_shielded(
+            (0..shielded as u32)
+                .map(|i| Arc::new(ShieldedTxBody::sample_for_tests(i)))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn block_without_shielded_keeps_two_items() {
+        let b = block(0);
+        for encoded in [rlp::encode(&b).to_vec(), b.encode_with_tx_public()] {
+            assert_eq!(Rlp::new(&encoded).item_count().unwrap(), 2);
+        }
+    }
+
+    #[test]
+    fn shielded_section_round_trips() {
+        let b = block(3);
+        let encoded = rlp::encode(&b);
+        assert_eq!(Rlp::new(&encoded).item_count().unwrap(), 3);
+        let decoded: Block = rlp::decode(&encoded).unwrap();
+        assert_eq!(decoded.shielded, b.shielded);
+        assert_eq!(decoded.hash(), b.hash());
+
+        let with_public = b.encode_with_tx_public();
+        let decoded =
+            Block::decode_with_tx_public(&Rlp::new(&with_public)).unwrap();
+        assert_eq!(decoded.shielded, b.shielded);
+    }
+
+    #[test]
+    fn empty_shielded_section_is_rejected() {
+        let b = block(0);
+        let mut s = RlpStream::new_list(3);
+        s.append(&b.block_header);
+        s.begin_list(0);
+        s.begin_list(0);
+        let encoded = s.out();
+        assert!(rlp::decode::<Block>(&encoded).is_err());
+        assert!(Block::decode_with_tx_public(&Rlp::new(&encoded)).is_err());
+    }
+
+    #[test]
+    fn four_items_are_rejected() {
+        let b = block(1);
+        let mut s = RlpStream::new_list(4);
+        s.append(&b.block_header);
+        s.begin_list(0);
+        s.append_list(&[ShieldedTxBody::sample_for_tests(1)]);
+        s.begin_list(0);
+        assert!(rlp::decode::<Block>(&s.out()).is_err());
     }
 }

@@ -17,7 +17,6 @@ use mazze_types::{
     Address, Bloom, Space, SpaceMap, H256, KECCAK_EMPTY_BLOOM, U256,
 };
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
-use rlp_derive::{RlpDecodable, RlpEncodable};
 use std::{
     mem,
     ops::{Deref, DerefMut},

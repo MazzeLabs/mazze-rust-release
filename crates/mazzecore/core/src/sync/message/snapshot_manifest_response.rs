@@ -136,6 +136,24 @@ impl Handleable for SnapshotManifestResponse {
             &ctx.manager.request_manager,
         )?;
 
+        // The server's "cannot serve this snapshot" answer: ask another
+        // peer, but do not treat it as misbehaviour (that dropped every
+        // full node that had GC'd the snapshot's receipts, until the
+        // joiner had no peers left).
+        if request.is_initial_request()
+            && self.state_root_vec.is_empty()
+            && self.manifest.chunk_boundaries.is_empty()
+        {
+            debug!(
+                "peer {:?} cannot serve snapshot {:?}",
+                ctx.node_id,
+                request.snapshot_to_sync.get_snapshot_epoch_id()
+            );
+            ctx.manager
+                .request_manager
+                .resend_request_to_another_peer(ctx.io, &message);
+            return Ok(());
+        }
         if let Err(e) = self.validate(ctx, request) {
             ctx.manager
                 .request_manager

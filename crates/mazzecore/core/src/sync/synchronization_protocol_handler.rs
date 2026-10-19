@@ -1147,6 +1147,35 @@ impl SynchronizationProtocolHandler {
         if to_request_blocks.is_empty()
             && !self.graph.inner.read().block_to_fill_set.is_empty()
         {
+            // Name the last few missing bodies (once a minute) so a fill that
+            // never completes can be traced to the blocks no peer serves.
+            {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static LAST_TAIL_LOG: AtomicU64 = AtomicU64::new(0);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let last = LAST_TAIL_LOG.load(Ordering::Relaxed);
+                let fill = &self.graph.inner.read().block_to_fill_set;
+                if fill.len() <= 10
+                    && now >= last + 60
+                    && LAST_TAIL_LOG
+                        .compare_exchange(
+                            last,
+                            now,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok()
+                {
+                    warn!(
+                        "request_block_bodies: last missing bodies still \
+                         unfilled: {:?}",
+                        fill
+                    );
+                }
+            }
             let cleared =
                 self.request_manager.reconcile_inflight_block_orphans();
             if cleared > 0 {

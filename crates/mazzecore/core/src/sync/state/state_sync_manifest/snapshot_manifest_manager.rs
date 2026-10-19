@@ -65,6 +65,9 @@ pub struct RelatedData {
     pub true_state_root_by_blame_info: StateRootWithAuxInfo,
     /// Point to the corresponding entry to the snapshot in the blame vectors.
     pub blame_vec_offset: usize,
+    /// State roots of the blame vector, aligned with `receipt_blame_vec`
+    /// (verified with it against the trusted blame block's header).
+    pub state_root_vec: Vec<StateRoot>,
     pub receipt_blame_vec: Vec<H256>,
     pub bloom_blame_vec: Vec<H256>,
     pub epoch_receipts: Vec<(H256, H256, Arc<BlockReceipts>)>,
@@ -358,6 +361,7 @@ impl SnapshotManifestManager {
         self.related_data = Some(RelatedData {
             true_state_root_by_blame_info,
             blame_vec_offset,
+            state_root_vec: response.state_root_vec.clone(),
             receipt_blame_vec: response.receipt_blame_vec,
             bloom_blame_vec: response.bloom_blame_vec,
             epoch_receipts,
@@ -509,6 +513,7 @@ impl SnapshotManifestManager {
             self.related_data = Some(RelatedData {
                 true_state_root_by_blame_info: state_root_with_aux_info,
                 blame_vec_offset,
+                state_root_vec: response.state_root_vec.clone(),
                 receipt_blame_vec: response.receipt_blame_vec,
                 bloom_blame_vec: response.bloom_blame_vec,
                 epoch_receipts,

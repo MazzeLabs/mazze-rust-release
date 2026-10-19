@@ -1369,11 +1369,20 @@ impl RpcImpl {
             .get_main_chain_and_weight(height_range)?)
     }
 
-    fn get_executed_info(&self, block_hash: H256) -> RpcResult<(H256, H256)> {
+    /// `get_executed_info` for the debug API.
+    pub fn debug_get_executed_info(
+        &self, block_hash: H256,
+    ) -> RpcResult<(H256, H256)> {
+        self.get_executed_info(block_hash)
+    }
+
+    pub fn get_executed_info(
+        &self, block_hash: H256,
+    ) -> RpcResult<(H256, H256)> {
         let commitment = self
             .consensus
             .get_data_manager()
-            .get_epoch_execution_commitment(&block_hash)
+            .get_epoch_execution_commitment_with_db(&block_hash)
             .ok_or(JsonRpcError::invalid_params(
                 "No receipts root. Possibly never main?".to_owned(),
             ))?;
@@ -2272,6 +2281,7 @@ impl LocalRpc for LocalRpcImpl {
 
         to self.rpc_impl {
             fn current_sync_phase(&self) -> JsonRpcResult<String>;
+            fn debug_get_executed_info(&self, block_hash: H256) -> JsonRpcResult<(H256, H256)>;
             fn consensus_graph_state(&self) -> JsonRpcResult<ConsensusGraphStates>;
             fn epoch_receipts(&self, epoch: BlockHashOrEpochNumber, include_eth_recepits: Option<bool>,) -> JsonRpcResult<Option<Vec<Vec<RpcReceipt>>>>;
             fn epoch_receipt_proof_by_transaction(&self, tx_hash: H256) -> JsonRpcResult<Option<EpochReceiptProof>>;

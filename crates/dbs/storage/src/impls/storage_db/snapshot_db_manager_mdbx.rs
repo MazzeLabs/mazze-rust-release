@@ -542,7 +542,7 @@ impl SnapshotDbManagerMdbx {
     /// `scan_persist_state` will GC the partial child on the
     /// next boot.
     fn run_chunked_merge(
-        &self, old_snapshot_epoch_id: &EpochId,
+        &self, parent: Option<&Arc<SnapshotKvDbMdbx>>,
         snapshot_epoch_id: &EpochId, delta_mpt: DeltaMptIterator,
         recover_mpt_with_kv_snapshot_exist: bool,
         in_reconstruct_snapshot_state: bool,
@@ -567,30 +567,18 @@ impl SnapshotDbManagerMdbx {
         // Pick between direct_merge (no parent) and
         // copy_and_merge (parent → child). Same branch as
         // paritydb.
-        let root = if *old_snapshot_epoch_id == NULL_EPOCH {
-            child.direct_merge(
+        let root = match parent {
+            None => child.direct_merge(
                 None,
                 &mut None,
                 recover_mpt_with_kv_snapshot_exist,
                 in_reconstruct_snapshot_state,
-            )?
-        } else {
-            // Open the parent readonly. Errors here bubble out
-            // (with the marker still in place, so the next boot's
-            // scan_persist_state GCs the partial child).
-            let parent = self
-                .get_snapshot_by_epoch_id(
-                    old_snapshot_epoch_id,
-                    false,
-                    false,
-                )?
-                .ok_or_else(|| Error::from(ErrorKind::SnapshotNotFound))?;
-            let parent = Arc::new(parent);
-            child.copy_and_merge(
-                &parent,
+            )?,
+            Some(parent) => child.copy_and_merge(
+                parent,
                 &mut None,
                 in_reconstruct_snapshot_state,
-            )?
+            )?,
         };
         Ok(root)
     }
@@ -805,15 +793,36 @@ impl SnapshotDbManagerTrait for SnapshotDbManagerMdbx {
         // mid-merge leaves the marker for `scan_persist_state` to GC the
         // partial child. So commit the merge's writes in large chunks
         // instead of one rw txn (and, in `safenosync`, ~one fsync) per key.
-        let outcome = self.env.with_chunked_writes(MERGE_CHUNK_OPS, || {
-            self.run_chunked_merge(
-                old_snapshot_epoch_id,
-                &snapshot_epoch_id,
-                delta_mpt,
-                recover_mpt_with_kv_snapshot_exist,
-                in_reconstruct_snapshot_state,
-            )
-        });
+        //
+        // The parent is opened first, outside the chunked scope: opening
+        // may block on the open-snapshot semaphore, whose permits are
+        // released by `SnapshotKvDbMdbx::drop` only after a pending
+        // destroy, which needs this env's writer slot the scope holds.
+        let outcome = (|| {
+            let parent = if *old_snapshot_epoch_id == NULL_EPOCH {
+                None
+            } else {
+                // Errors bubble out with the marker still in place, so
+                // the next boot's scan_persist_state GCs the child.
+                Some(Arc::new(
+                    self.get_snapshot_by_epoch_id(
+                        old_snapshot_epoch_id,
+                        false,
+                        false,
+                    )?
+                    .ok_or_else(|| Error::from(ErrorKind::SnapshotNotFound))?,
+                ))
+            };
+            self.env.with_chunked_writes(MERGE_CHUNK_OPS, || {
+                self.run_chunked_merge(
+                    parent.as_ref(),
+                    &snapshot_epoch_id,
+                    delta_mpt,
+                    recover_mpt_with_kv_snapshot_exist,
+                    in_reconstruct_snapshot_state,
+                )
+            })
+        })();
         let new_snapshot_root = match outcome {
             Ok(root) => root,
             Err(e) => {

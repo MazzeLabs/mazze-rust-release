@@ -2,4 +2,7 @@
 # Bumped from 1.84.0 to 1.91.0 to satisfy revm 40+ (requires Rust 1.91+)
 # and the broader alloy 2.0 / c-kzg 2.x dependency tree we're migrating
 # toward. See the alloy + revm modernization plan in docs/.
-channel = "1.91.0"
+# Bumped from 1.91.0 to 1.93.0 for the shielded space: Plonky3 0.8 (the
+# PS-1 STARK prover/verifier) needs Rust 1.93+ (stable `maybe_uninit_slice`).
+# See docs/internal/privacy-pq-stark.md §6.4.
+channel = "1.93.0"

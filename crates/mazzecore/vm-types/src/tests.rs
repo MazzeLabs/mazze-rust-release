@@ -103,6 +103,13 @@ impl MockContext {
         context
     }
 
+    /// Alter mock context to run before the Cancun opcodes, where 0x5c..0x5e
+    /// are the EIP-2315 subroutine opcodes
+    pub fn pre_cancun(mut self) -> Self {
+        self.spec.cancun_opcodes = false;
+        self
+    }
+
     /// Alter mock context to allow wasm
     pub fn with_wasm(mut self) -> Self {
         self.spec.wasm = Some(Default::default());

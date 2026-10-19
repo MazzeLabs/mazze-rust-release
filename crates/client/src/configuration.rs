@@ -1838,7 +1838,7 @@ mod tests {
         assert_eq!(
             addr,
             parse_config_address_string(
-                "mazze:aarc9abycue0hhzgyrr53m6cxedgccrmmyybjgh4xg",
+                "mazze:aarc9abycue0hhzgyrr53m6cxedgccrmmy23t026be",
                 &Network::Main,
             )
             .unwrap()
@@ -1847,7 +1847,7 @@ mod tests {
         assert_eq!(
             addr,
             parse_config_address_string(
-                "mazze:type.user:aarc9abycue0hhzgyrr53m6cxedgccrmmyybjgh4xg",
+                "mazze:type.user:aarc9abycue0hhzgyrr53m6cxedgccrmmy23t026be",
                 &Network::Main,
             )
             .unwrap()
@@ -1855,10 +1855,26 @@ mod tests {
     }
 
     #[test]
+    fn test_snapshot_epoch_count_is_clamped_to_era_by_default() {
+        let mut conf = Configuration::default();
+        conf.raw_conf.mode = Some("test".into());
+        conf.raw_conf.node_type = Some(NodeType::Archive);
+        conf.raw_conf.snapshot_epoch_count = 2048;
+        conf.raw_conf.dev_snapshot_epoch_count = 2000;
+
+        conf.apply_node_type_profile();
+
+        let era = super::RANDOMX_EPOCH_LENGTH as u32;
+        assert_eq!(conf.raw_conf.snapshot_epoch_count, era);
+        assert_eq!(conf.raw_conf.dev_snapshot_epoch_count, era);
+    }
+
+    #[test]
     fn test_snapshot_epoch_count_is_canonical_in_test_mode() {
         let mut conf = Configuration::default();
         conf.raw_conf.mode = Some("test".into());
         conf.raw_conf.node_type = Some(NodeType::Archive);
+        conf.raw_conf.test_allow_small_snapshot_epoch_count = true;
         conf.raw_conf.snapshot_epoch_count = 2048;
         conf.raw_conf.dev_snapshot_epoch_count = 2000;
 

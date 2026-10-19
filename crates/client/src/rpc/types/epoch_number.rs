@@ -125,7 +125,7 @@ impl<'a> Visitor<'a> for EpochNumberVisitor {
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         write!(
             formatter,
-            "an epoch number or 'latest_mined', 'latest_state', 'latest_checkpoint', 'latest_finalized', 'latest_confirmed' or 'earliest'"
+            "an epoch number or 'latest_mined', 'latest_state', 'latest_checkpoint', 'latest_confirmed' or 'earliest'"
         )
     }
 
@@ -232,7 +232,7 @@ impl<'a> Visitor<'a> for BlockHashOrEpochNumberVisitor {
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         write!(
             formatter,
-            "an epoch number or 'latest_mined', 'latest_state', 'latest_checkpoint', 'latest_finalized', \
+            "an epoch number or 'latest_mined', 'latest_state', 'latest_checkpoint', \
              'latest_confirmed', or 'earliest', or 'hash:<BLOCK_HASH>'"
         )
     }
@@ -345,7 +345,6 @@ mod tests {
             "latest_mined",
             "latest_checkpoint",
             "latest_confirmed",
-            "latest_finalized",
             "hash:0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
             {"epochNumber": "0xa"},
 			{"blockHash": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"},

@@ -883,7 +883,10 @@ mod tests {
             Some([8; PROTOCOL_ID_SIZE]),
             vec![2, 4],
         );
-        assert_eq!(packet, vec![2, 4, 8, 8, 8, 1, 6]);
+        let mut expected = vec![2, 4];
+        expected.extend([8; PROTOCOL_ID_SIZE]);
+        expected.extend([1, 6]);
+        assert_eq!(packet, expected);
     }
 
     #[test]
@@ -922,9 +925,10 @@ mod tests {
         );
 
         // user packet with protocol
-        let packet =
-            SessionPacket::parse(vec![1, 9, 3, 3, 3, 1, PACKET_USER].into())
-                .unwrap();
+        let mut raw = vec![1, 9];
+        raw.extend([3; PROTOCOL_ID_SIZE]);
+        raw.extend([1, PACKET_USER]);
+        let packet = SessionPacket::parse(raw.into()).unwrap();
         assert_eq!(
             packet,
             SessionPacket {

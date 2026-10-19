@@ -403,8 +403,8 @@ mod tests {
         };
 
         let s = r#"{
-            "from":"MAZZE:TYPE.BUILTIN:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEJC4EYEY6",
-            "to":"MAZZE:TYPE.BUILTIN:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJD0WN6U9U",
+            "from":"MAZZE:TYPE.BUILTIN:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEE47YNCG8",
+            "to":"MAZZE:TYPE.BUILTIN:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJTSZ5D0RW",
             "gasPrice":"0x1",
             "gas":"0x2",
             "value":"0x3",
@@ -436,8 +436,8 @@ mod tests {
         };
 
         let s = r#"{
-            "from": "MAZZE:TYPE.USER:AANA7DS0DVSXFTYANC727SNUU6HUSJ3VMYC3F1AY93",
-            "to": "MAZZE:TYPE.CONTRACT:ACCG7DS0TVSXFTYANC727SNUU6HUSKCFP6KB3NFJ02",
+            "from": "MAZZE:TYPE.USER:AANA7DS0DVSXFTYANC727SNUU6HUSJ3VMYSBCH9WR5",
+            "to": "MAZZE:TYPE.CONTRACT:ACCG7DS0TVSXFTYANC727SNUU6HUSKCFP6F3854SE4",
             "gas": "0x76c0",
             "gasPrice": "0x9184e72a000",
             "value": "0x9184e72a",
@@ -473,7 +473,7 @@ mod tests {
             ..Default::default()
         };
 
-        let s = r#"{"from":"MAZZE:TYPE.BUILTIN:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEJC4EYEY6"}"#;
+        let s = r#"{"from":"MAZZE:TYPE.BUILTIN:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEE47YNCG8"}"#;
         let deserialized_result = serde_json::from_str::<CallRequest>(s);
         assert!(
             deserialized_result.is_ok(),

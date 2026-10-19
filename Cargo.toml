@@ -38,7 +38,6 @@ members = [
     "crates/util/hibitset",
     "crates/util/io",
     "crates/util/link-cut-tree",
-    "crates/util/log_device",
     "crates/util/malloc_size_of",
     "crates/util/malloc_size_of_derive",
     "crates/util/memory-cache",

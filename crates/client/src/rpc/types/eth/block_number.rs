@@ -49,6 +49,9 @@ pub enum BlockNumber {
     /// Compatibility tag support for ethereum "safe" tag. Will reflect to
     /// "latest_confirmed"
     Safe,
+    /// Compatibility tag support for ethereum "finalized" tag. Will reflect
+    /// to "latest_checkpoint"
+    Finalized,
 }
 
 impl Default for BlockNumber {
@@ -96,6 +99,7 @@ impl Serialize for BlockNumber {
             BlockNumber::Earliest => serializer.serialize_str("earliest"),
             BlockNumber::Pending => serializer.serialize_str("pending"),
             BlockNumber::Safe => serializer.serialize_str("safe"),
+            BlockNumber::Finalized => serializer.serialize_str("finalized"),
         }
     }
 }
@@ -184,6 +188,7 @@ impl<'a> Visitor<'a> for BlockNumberVisitor {
             "earliest" => Ok(BlockNumber::Earliest),
             "pending" => Ok(BlockNumber::Pending),
             "safe" => Ok(BlockNumber::Safe),
+            "finalized" => Ok(BlockNumber::Finalized),
             _ if value.starts_with("0x") => {
                 u64::from_str_radix(&value[2..], 16)
                     .map(BlockNumber::Num)
@@ -215,6 +220,7 @@ impl TryFrom<BlockNumber> for EpochNumber {
             BlockNumber::Earliest => Ok(EpochNumber::Earliest),
             BlockNumber::Pending => Ok(EpochNumber::LatestState),
             BlockNumber::Safe => Ok(EpochNumber::LatestConfirmed),
+            BlockNumber::Finalized => Ok(EpochNumber::LatestCheckpoint),
             BlockNumber::Hash { .. } => Err(invalid_params(
                 "block_num",
                 "Expected block number, found block hash",
@@ -252,6 +258,7 @@ mod tests {
                 BlockNumber::Earliest,
                 BlockNumber::Pending,
                 BlockNumber::Safe,
+                BlockNumber::Finalized,
                 BlockNumber::Num(10),
                 BlockNumber::Hash {
                     hash: H256::from_str(

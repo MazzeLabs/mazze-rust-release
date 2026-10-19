@@ -107,19 +107,19 @@ mod tests {
     #[test]
     fn test_deserialize_address() {
         check_deserialize(
-            "\"mazze:acc7uawf5ubtnmezvhu9dhc6sghea0403y2dgpyfjp\"",
+            "\"mazze:acc7uawf5ubtnmezvhu9dhc6sghea0403yy5b6nd4s\"",
             "0x85d80245dc02f5a89589e1f19c5c718e405b56cd",
             Network::Main,
         );
 
         check_deserialize(
-            "\"mazzetest:acc7uawf5ubtnmezvhu9dhc6sghea0403ywjz6wtpg\"",
+            "\"mazzetest:acc7uawf5ubtnmezvhu9dhc6sghea0403ye0xx9g1k\"",
             "0x85d80245dc02f5a89589e1f19c5c718e405b56cd",
             Network::Test,
         );
 
         check_deserialize(
-            "\"mazzetest:type.contract:acc7uawf5ubtnmezvhu9dhc6sghea0403ywjz6wtpg\"",
+            "\"mazzetest:type.contract:acc7uawf5ubtnmezvhu9dhc6sghea0403ye0xx9g1k\"",
             "0x85d80245dc02f5a89589e1f19c5c718e405b56cd",
             Network::Test,
         );
@@ -129,7 +129,7 @@ mod tests {
     #[should_panic]
     fn test_deserialize_incorrect_network_prefix() {
         check_deserialize(
-            "\"cfy:acc7uawf5ubtnmezvhu9dhc6sghea0403y2dgpyfjp\"",
+            "\"cfy:acc7uawf5ubtnmezvhu9dhc6sghea0403yn4wuazbj\"",
             "0x85d80245dc02f5a89589e1f19c5c718e405b56cd",
             Network::Main,
         );
@@ -149,7 +149,7 @@ mod tests {
     #[should_panic]
     fn test_deserialize_incorrect_type() {
         check_deserialize(
-            "\"mazze:type.user:acc7uawf5ubtnmezvhu9dhc6sghea0403y2dgpyfjp\"",
+            "\"mazze:type.user:acc7uawf5ubtnmezvhu9dhc6sghea0403yy5b6nd4s\"",
             "0x85d80245dc02f5a89589e1f19c5c718e405b56cd",
             Network::Main,
         );
@@ -158,8 +158,9 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_deserialize_incorrect_checksum() {
+        // The testnet checksum under the mainnet prefix: a wrong checksum on purpose.
         check_deserialize(
-            "\"mazze:acc7uawf5ubtnmezvhu9dhc6sghea0403ywjz6wtpg\"",
+            "\"mazze:acc7uawf5ubtnmezvhu9dhc6sghea0403ye0xx9g1k\"",
             "0x85d80245dc02f5a89589e1f19c5c718e405b56cd",
             Network::Main,
         );

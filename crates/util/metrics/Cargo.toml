@@ -9,7 +9,7 @@ parking_lot = "0.11"
 timer = "0.2.0"
 time = "0.1"
 rand = "0.7"
-influx_db_client = "0.5.1"
+influx_db_client = "0.6.1"
 log = "0.4"
 log4rs = { version = "1.2.0", features = ["background_rotation", "gzip"] }
 futures = "0.3.26"

@@ -12,7 +12,6 @@ extern crate log;
 #[macro_use]
 extern crate serde_derive;
 extern crate mazzekey as keylib;
-extern crate tempdir;
 
 #[macro_use]
 mod config_macro;

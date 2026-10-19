@@ -418,7 +418,10 @@ impl SnapshotDbManagerMdbx {
                 .map_err(|_err| ErrorKind::SemaphoreTryAcquireError)?
                 .forget();
         } else {
+            // `acquire` only errors once the semaphore is closed, which
+            // never happens for this pool.
             futures::executor::block_on(self.open_snapshot_semaphore.acquire())
+                .expect("open_snapshot_semaphore is never closed")
                 .forget();
         }
         Ok(())
@@ -1150,10 +1153,10 @@ impl SnapshotDbManagerTrait for SnapshotDbManagerMdbx {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     fn open_env() -> (TempDir, Arc<MdbxEnv>) {
-        let dir = TempDir::new("snapshot_db_manager_mdbx").unwrap();
+        let dir = tempfile::Builder::new().prefix("snapshot_db_manager_mdbx").tempdir().unwrap();
         let env = MdbxEnv::open(dir.path()).unwrap();
         (dir, env)
     }
@@ -1161,7 +1164,7 @@ mod tests {
     fn make_manager() -> (TempDir, TempDir, SnapshotDbManagerMdbx) {
         let (env_dir, env) = open_env();
         let path_dir =
-            TempDir::new("snapshot_manager_mdbx_path").unwrap();
+            tempfile::Builder::new().prefix("snapshot_manager_mdbx_path").tempdir().unwrap();
         let m = SnapshotDbManagerMdbx::new(
             env,
             path_dir.path().join("snapshot"),

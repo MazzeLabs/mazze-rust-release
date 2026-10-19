@@ -1337,10 +1337,10 @@ impl SnapshotKvDbMdbx {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     fn open_env() -> (TempDir, Arc<MdbxEnv>) {
-        let dir = TempDir::new("snapshot_kv_db_mdbx").unwrap();
+        let dir = tempfile::Builder::new().prefix("snapshot_kv_db_mdbx").tempdir().unwrap();
         let env = MdbxEnv::open(dir.path()).unwrap();
         (dir, env)
     }

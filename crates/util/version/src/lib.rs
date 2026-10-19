@@ -37,7 +37,7 @@ pub fn platform() -> String {
 pub fn commit() -> &'static str {
     match option_env!("MAZZE_BUILD_COMMIT") {
         Some(c) if !c.is_empty() => c,
-        _ => env!("VERGEN_GIT_SHA_SHORT"),
+        _ => env!("VERGEN_GIT_SHA"),
     }
 }
 

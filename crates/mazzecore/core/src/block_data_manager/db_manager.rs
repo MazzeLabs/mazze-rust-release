@@ -1384,8 +1384,8 @@ impl MallocSizeOf for DBManager {
 mod write_buffer_tests {
     use super::*;
 
-    fn make_db() -> (tempdir::TempDir, Arc<DBManager>) {
-        let dir = tempdir::TempDir::new("db_manager_write_buffer").unwrap();
+    fn make_db() -> (tempfile::TempDir, Arc<DBManager>) {
+        let dir = tempfile::Builder::new().prefix("db_manager_write_buffer").tempdir().unwrap();
         let env = MdbxEnv::open(dir.path()).unwrap();
         let db = DBManager::new(
             env,

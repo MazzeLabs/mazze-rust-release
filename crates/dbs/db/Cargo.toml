@@ -7,4 +7,6 @@ edition = "2021"
 log = "0.4"
 kvdb = "0.4"
 parity-db = { git = "https://github.com/paritytech/parity-db", rev = "ee51351b21621b2105786832d0b576f0d0d14eec", features = ["instrumentation"] }
-parity-util-mem = "0.5"
+# Default features minus "lru": the lru 0.4 impl is unused and carries
+# RUSTSEC-2021-0130.
+parity-util-mem = { version = "0.5", default-features = false, features = ["std", "ethereum-impls", "hashbrown", "smallvec", "primitive-types"] }

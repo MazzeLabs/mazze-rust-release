@@ -1454,7 +1454,7 @@ mod tests {
     /// chunks, and everything is committed when the scope ends.
     #[test]
     fn chunked_write_scope_read_your_writes_and_commit() {
-        let dir = tempdir::TempDir::new("kvdb_mdbx_scope").unwrap();
+        let dir = tempfile::Builder::new().prefix("kvdb_mdbx_scope").tempdir().unwrap();
         let env = MdbxEnv::open(dir.path()).unwrap();
         let db = KvdbMdbx::with_column(Arc::clone(&env), 3);
         db.put(b"pre", b"0").unwrap();
@@ -1500,7 +1500,7 @@ mod tests {
     /// chunks stay committed.
     #[test]
     fn chunked_write_scope_error_aborts_open_chunk() {
-        let dir = tempdir::TempDir::new("kvdb_mdbx_scope_err").unwrap();
+        let dir = tempfile::Builder::new().prefix("kvdb_mdbx_scope_err").tempdir().unwrap();
         let env = MdbxEnv::open(dir.path()).unwrap();
         let db = KvdbMdbx::with_column(Arc::clone(&env), 0);
         let r: Result<()> = env.with_chunked_writes(2, || {
@@ -1521,7 +1521,7 @@ mod tests {
     /// clean shutdown/restart and round-trips byte payloads byte-for-byte.
     #[test]
     fn open_write_reopen_read() {
-        let dir = tempdir::TempDir::new("kvdb_mdbx_smoke").unwrap();
+        let dir = tempfile::Builder::new().prefix("kvdb_mdbx_smoke").tempdir().unwrap();
         let path = dir.path();
 
         // First session: write a few entries across two columns.
@@ -1572,7 +1572,7 @@ mod tests {
     #[test]
     fn iter_range_owned_semantics() {
         let dir =
-            tempdir::TempDir::new("kvdb_mdbx_iter").unwrap();
+            tempfile::Builder::new().prefix("kvdb_mdbx_iter").tempdir().unwrap();
         let env = MdbxEnv::open(dir.path()).unwrap();
         let col0 = KvdbMdbx::with_column(env, 0);
 
@@ -1646,7 +1646,7 @@ mod tests {
     /// occupancy fields actually reflect the write volume.
     #[test]
     fn stats_zero_before_writes_grow_after() {
-        let dir = tempdir::TempDir::new("kvdb_mdbx_stats").unwrap();
+        let dir = tempfile::Builder::new().prefix("kvdb_mdbx_stats").tempdir().unwrap();
         let env = MdbxEnv::open(dir.path()).unwrap();
         let col0 = KvdbMdbx::with_column(env, 0);
 
@@ -1700,7 +1700,7 @@ mod tests {
     #[test]
     fn write_batch_empty_is_noop() {
         let dir =
-            tempdir::TempDir::new("kvdb_mdbx_batch_empty").unwrap();
+            tempfile::Builder::new().prefix("kvdb_mdbx_batch_empty").tempdir().unwrap();
         let env = MdbxEnv::open(dir.path()).unwrap();
         let col0 = KvdbMdbx::with_column(env, 0);
         // Populate one value to prove the empty batch doesn't disturb it.
@@ -1723,7 +1723,7 @@ mod tests {
     #[test]
     fn write_batch_ordering() {
         let dir =
-            tempdir::TempDir::new("kvdb_mdbx_batch_order").unwrap();
+            tempfile::Builder::new().prefix("kvdb_mdbx_batch_order").tempdir().unwrap();
         let env = MdbxEnv::open(dir.path()).unwrap();
         let col0 = KvdbMdbx::with_column(env, 0);
 
@@ -1756,8 +1756,8 @@ mod tests {
     /// one txn per key — so the equivalence must be exact.
     #[test]
     fn write_batch_matches_individual_puts() {
-        let dir_a = tempdir::TempDir::new("mdbx_ind").unwrap();
-        let dir_b = tempdir::TempDir::new("mdbx_bat").unwrap();
+        let dir_a = tempfile::Builder::new().prefix("mdbx_ind").tempdir().unwrap();
+        let dir_b = tempfile::Builder::new().prefix("mdbx_bat").tempdir().unwrap();
         let ind = KvdbMdbx::with_column(
             MdbxEnv::open(dir_a.path()).unwrap(),
             0,
@@ -1844,7 +1844,7 @@ mod tests {
         }
 
         let dir =
-            tempdir::TempDir::new("kvdb_mdbx_parity").unwrap();
+            tempfile::Builder::new().prefix("kvdb_mdbx_parity").tempdir().unwrap();
         let env = MdbxEnv::open(dir.path()).unwrap();
         let mdbx = KvdbMdbx::with_column(env, 0);
         let mut reference: BTreeMap<Vec<u8>, Vec<u8>> =
@@ -1947,7 +1947,7 @@ mod tests {
     #[test]
     fn iter_range_owned_snapshot_isolation() {
         let dir =
-            tempdir::TempDir::new("kvdb_mdbx_iter_iso").unwrap();
+            tempfile::Builder::new().prefix("kvdb_mdbx_iter_iso").tempdir().unwrap();
         let env = MdbxEnv::open(dir.path()).unwrap();
         let col0 = KvdbMdbx::with_column(env, 0);
 
@@ -1975,7 +1975,7 @@ mod tests {
     #[test]
     fn transaction_commits_atomically() {
         let dir =
-            tempdir::TempDir::new("kvdb_mdbx_txn_smoke").unwrap();
+            tempfile::Builder::new().prefix("kvdb_mdbx_txn_smoke").tempdir().unwrap();
         let env = MdbxEnv::open(dir.path()).unwrap();
         let col0 = KvdbMdbx::with_column(env, 0);
 
@@ -2017,7 +2017,7 @@ mod tests {
     #[test]
     fn open_with_geometry_rejects_bad_sizes() {
         let dir =
-            tempdir::TempDir::new("kvdb_mdbx_geom_bad").unwrap();
+            tempfile::Builder::new().prefix("kvdb_mdbx_geom_bad").tempdir().unwrap();
         // zero growth step
         assert!(MdbxEnv::open_with_geometry(
             dir.path(),
@@ -2042,7 +2042,7 @@ mod tests {
     #[test]
     fn open_with_geometry_round_trip() {
         let dir =
-            tempdir::TempDir::new("kvdb_mdbx_geom_ok").unwrap();
+            tempfile::Builder::new().prefix("kvdb_mdbx_geom_ok").tempdir().unwrap();
         let env = MdbxEnv::open_with_geometry(
             dir.path(),
             8 * 1024 * 1024, // 8 MiB initial
@@ -2061,7 +2061,7 @@ mod tests {
     #[test]
     fn first_in_range_empty() {
         let dir =
-            tempdir::TempDir::new("kvdb_first_empty").unwrap();
+            tempfile::Builder::new().prefix("kvdb_first_empty").tempdir().unwrap();
         let env = MdbxEnv::open(dir.path()).unwrap();
         let col = KvdbMdbx::with_column(env, 3);
         assert_eq!(col.first_in_range(b"", None).unwrap(), None);
@@ -2073,7 +2073,7 @@ mod tests {
     /// `iter_range_owned`), (c) `upper_bound_excl` is respected.
     #[test]
     fn first_in_range_returns_first_hit() {
-        let dir = tempdir::TempDir::new("kvdb_first_hit").unwrap();
+        let dir = tempfile::Builder::new().prefix("kvdb_first_hit").tempdir().unwrap();
         let env = MdbxEnv::open(dir.path()).unwrap();
         let col = KvdbMdbx::with_column(env, 5);
         for i in 0u8..8 {
@@ -2100,7 +2100,7 @@ mod tests {
     /// (c) chunk boundary bookkeeping doesn't skip or double-count.
     #[test]
     fn delete_range_chunked_purges_range() {
-        let dir = tempdir::TempDir::new("kvdb_del_chunk").unwrap();
+        let dir = tempfile::Builder::new().prefix("kvdb_del_chunk").tempdir().unwrap();
         let env = MdbxEnv::open(dir.path()).unwrap();
         let col = KvdbMdbx::with_column(env, 7);
         // Layout: keys 0x00..0x20 in-range, keys 0x40..0x50 out-of-range.
@@ -2129,7 +2129,7 @@ mod tests {
     /// front instead of looping forever.
     #[test]
     fn delete_range_chunked_rejects_zero_chunk() {
-        let dir = tempdir::TempDir::new("kvdb_del_bad").unwrap();
+        let dir = tempfile::Builder::new().prefix("kvdb_del_bad").tempdir().unwrap();
         let env = MdbxEnv::open(dir.path()).unwrap();
         let col = KvdbMdbx::with_column(env, 9);
         col.put(b"k", b"v").unwrap();

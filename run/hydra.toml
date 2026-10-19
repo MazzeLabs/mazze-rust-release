@@ -498,6 +498,12 @@ mdbx_map_size_mb = 65536
 #   utterlynosync — no fsync (throwaway benchmarks only)
 # See fleet incident 2026-07-08 report §5 recommendation #6.
 mdbx_sync_mode = "safenosync"
+# safenosync only: make an fsynced (steady) point once this many MB or
+# this many ms of commits are unsynced; on power loss the DB rolls back
+# to the last steady point (process crashes lose nothing). 0 disables a
+# threshold; with both 0 libmdbx fsyncs on almost every commit.
+# mdbx_autosync_mb = 64
+# mdbx_autosync_period_ms = 10000
 
 # State storage parameters.
 # Refer to the documentation for details.

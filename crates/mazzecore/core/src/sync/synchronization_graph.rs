@@ -1050,10 +1050,17 @@ impl SynchronizationGraphInner {
         &self, index: usize, verification_config: &VerificationConfig,
     ) -> Result<(), Error> {
         let block_header = &self.arena[index].block_header;
-        let parent = self
-            .data_man
-            .block_header_by_hash(block_header.parent_hash())
-            .expect("headers will not be deleted");
+        // Prefer the parent header held by the graph: one loaded from the DB
+        // has its RandomX hash recomputed, which made graph-status
+        // propagation over a restarted archive take hours (m2, 2026-10-19).
+        let parent_index = self.arena[index].parent;
+        let parent = if parent_index != NULL {
+            self.arena[parent_index].block_header.clone()
+        } else {
+            self.data_man
+                .block_header_by_hash(block_header.parent_hash())
+                .expect("headers will not be deleted")
+        };
         let block = self
             .data_man
             .block_by_hash(&block_header.hash(), true)

@@ -1234,11 +1234,14 @@ impl SynchronizationProtocolHandler {
             if let Some(body) =
                 self.graph.data_man.db_manager.block_body_from_db(&hash)
             {
+                // Not `recover_from_db`: that skips caching the body, and
+                // graph-status propagation would then reload the whole block
+                // from the DB (recomputing the header's RandomX hash).
                 self.graph.insert_block(
                     Block::new((*header).clone(), body),
                     true,  /* need_to_verify */
                     false, /* persistent: already on disk */
-                    true,  /* recover_from_db */
+                    false, /* recover_from_db */
                 );
                 local_hits.insert(hash);
             }

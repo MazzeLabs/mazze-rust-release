@@ -37,7 +37,7 @@ pub use self::{
         DynamicCapability, DynamicCapabilityChange, DynamicCapabilitySet,
     },
     get_block_hashes_by_epoch::GetBlockHashesByEpoch,
-    get_block_hashes_response::GetBlockHashesResponse,
+    get_block_hashes_response::{EpochHashes, GetBlockHashesResponse},
     get_block_headers::GetBlockHeaders,
     get_block_headers_response::GetBlockHeadersResponse,
     get_block_txn::GetBlockTxn,
@@ -57,10 +57,12 @@ pub use self::{
     snapshot_chunk_request::SnapshotChunkRequest,
     snapshot_chunk_response::SnapshotChunkResponse,
     snapshot_manifest_request::SnapshotManifestRequest,
-    snapshot_manifest_response::SnapshotManifestResponse,
+    snapshot_manifest_response::{
+        EpochBlockHashes, PreComputedRelatedData, SnapshotManifestResponse,
+    },
     state_sync_candidate_request::StateSyncCandidateRequest,
     state_sync_candidate_response::StateSyncCandidateResponse,
-    status::{StatusV2, StatusV3},
+    status::{NodeVersionInfo, StatusV3},
     throttling::Throttled,
     transactions::{
         GetTransactions, GetTransactionsFromTxHashes,

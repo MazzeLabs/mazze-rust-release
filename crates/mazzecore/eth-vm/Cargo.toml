@@ -1,0 +1,49 @@
+[package]
+description = "revm-backed EVM for the Mazze eSpace; native space stays on the custom interpreter."
+homepage = "https://www.mazze.io"
+license = "GPL-3.0"
+name = "mazze-eth-vm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Mazze
+mazze-bytes      = { path = "../../mazze_bytes" }
+mazze-types      = { path = "../../mazze_types" }
+mazze-vm-types   = { path = "../vm-types" }
+
+# We pin to the same revm version that geth-tracer and execute-helper use
+# (8.0). Upgrading to revm 40+ requires two prerequisites that are tracked
+# as a separate migration:
+#   1. geth-tracer and execute-helper must move to revm 40+ in lockstep
+#      (the Inspector trait, EVM builder, and Context types all reshaped).
+#   2. The native-library linking conflict between revm-precompile 6.0's
+#      c-kzg 1.x and revm-precompile 36.0's c-kzg 2.x must be resolved by
+#      having every revm consumer in the workspace agree on one version.
+#
+# Until that migration ships, we stay on revm 8.0. This is fine for the
+# stated goal — Solidity 0.8.35 compiled with `--evm-version cancun` (its
+# default) deploys cleanly under revm 8.0's Cancun spec. revm 40's main
+# uplift over 8.0 is Prague, which Solidity does not emit by default yet.
+#
+# When the geth-tracer migration is done, bump to "40.0" here AND bump
+# `ESPACE_SPEC` in `src/spec_map.rs` to `SpecId::PRAGUE`.
+revm             = { version = "40.0", default-features = false, features = ["std"] }
+alloy-primitives = { workspace = true }
+
+# Logging.
+log              = "0.4"
+
+[dev-dependencies]
+# State-test harness (tests/state_tests.rs). The fixtures themselves
+# live under tests/fixtures/ as a git submodule; see that dir's README.
+serde            = { version = "1", features = ["derive"] }
+serde_json       = "1"
+hex              = "0.4"
+keccak-hash      = "0.5"
+mazze-bytes      = { path = "../../mazze_bytes" }
+mazze-db-errors  = { path = "../../dbs/db-errors" }
+mazze-vm-types   = { path = "../vm-types", features = ["testonly_code"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

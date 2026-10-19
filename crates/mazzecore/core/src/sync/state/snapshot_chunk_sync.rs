@@ -24,6 +24,7 @@ use crate::sync::{
 use mazze_parameters::consensus_internal::REWARD_EPOCH_COUNT;
 use mazze_storage::Result as StorageResult;
 use mazze_types::H256;
+use metrics::{Counter, CounterUsize};
 use network::{node_table::NodeId, NetworkContext};
 use parking_lot::RwLock;
 use primitives::EpochId;
@@ -33,6 +34,175 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+
+/// D.2 — How many snapshot-aligned epochs above `epoch_to_sync` to
+/// propose as candidates. Each step is `snapshot_epoch_count` epochs
+/// (cf. `BlockDataManager::get_snapshot_epoch_count`). The default 6
+/// covers a full era (`era_epoch_count / snapshot_epoch_count = 10`)
+/// minus the trailing-headroom needed for the trusted-blame check —
+/// generous for fast chains while bounded against canvass spam.
+const D2_FORWARD_CANDIDATE_WINDOW: usize = 6;
+
+lazy_static! {
+    /// Counter for snapshot-sync transitions into Status::Invalid.
+    /// Each increment means the node fell back from snapshot-based sync to
+    /// legacy body sync for this era. See docs/flow-audit.md G-CC-4.
+    static ref SNAPSHOT_SYNC_INVALID_TRANSITIONS: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "snapshot_sync",
+            "invalid_transitions",
+        );
+
+    /// D.2 — Bumped when snapshot-sync truly falls back to legacy body
+    /// sync (= genesis replay if no checkpoint state is on disk).
+    /// Separate counters per `reason` discriminator so operators can
+    /// tell apart "no peer offered any candidate" (network problem)
+    /// from "manifest exhausted" (chunk-download failure) from
+    /// "state-root mismatch" (peer-side corruption / wrong-fork).
+    /// Distinct from `invalid_transitions` because that counts every
+    /// transition into Status::Invalid — including ones where we
+    /// resume (B.2 path), whereas this counts only the terminal
+    /// genesis-replay-bound fallback. Phase D.2 in
+    /// `docs/checkpoint-snapshot-lifecycle.md`.
+    static ref SNAPSHOT_SYNC_FALLBACK_MANIFEST_EXHAUSTED: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "snapshot_sync",
+            "fallback_total.manifest_exhausted",
+        );
+    static ref SNAPSHOT_SYNC_FALLBACK_NO_PEER_OFFERED: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "snapshot_sync",
+            "fallback_total.no_peer_offered_candidate",
+        );
+    static ref SNAPSHOT_SYNC_LAST_DITCH_CANVASSES: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "snapshot_sync",
+            "last_ditch_canvasses_total",
+        );
+    static ref SNAPSHOT_SYNC_LAST_DITCH_RECOVERIES: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "snapshot_sync",
+            "last_ditch_recoveries_total",
+        );
+}
+
+/// D.2 — Enumerate snapshot-aligned epochs the local header chain knows
+/// about, ordered newest-first, ready to be proposed as alternative
+/// snapshot-sync candidates. The original target (`primary`) is always
+/// the *first* candidate the caller pairs with these; we generate
+/// forward-direction (= newer) alternatives.
+///
+/// **Why**: on a fast chain producing many blocks per second, peers
+/// regularly prune past the era-genesis epoch by the time a fresh node
+/// joins. The original `start_sync` proposed a single candidate
+/// (`epoch_to_sync`); if no peer still has it, the node fell back to
+/// genesis replay even though everyone holds a newer snapshot. We
+/// avoid that by canvassing for the newest snapshot-aligned epoch a
+/// quorum of peers supports.
+///
+/// **Trusted-blame headroom**: each proposed candidate must be at
+/// least `snapshot_epoch_count` below the network tip so that the
+/// trusted-blame verification has a stable blame block to anchor
+/// against (cf. `ConsensusGraph::catch_up_completed`). Candidates that
+/// don't pass `get_trusted_blame_block_for_snapshot` later are
+/// filtered at activation time.
+fn enumerate_forward_candidates(
+    sync_handler: &SynchronizationProtocolHandler,
+    primary_hash: &EpochId, primary_height: u64,
+) -> Vec<SnapshotSyncCandidate> {
+    let data_man = &sync_handler.graph.data_man;
+    let snapshot_epoch_count =
+        data_man.get_snapshot_epoch_count() as u64;
+    if snapshot_epoch_count == 0 {
+        return Vec::new();
+    }
+    let best_height = sync_handler.graph.consensus.best_epoch_number();
+
+    let mut alternatives = Vec::new();
+    let mut height = primary_height.saturating_add(snapshot_epoch_count);
+    let mut steps_remaining = D2_FORWARD_CANDIDATE_WINDOW;
+    while steps_remaining > 0 {
+        // Trusted-blame headroom: validating a snapshot needs a trusted
+        // blame block `snapshot_blame_plus_depth` epochs above it (plus the
+        // deferred-state lag), which our header chain must already reach;
+        // the same margin `catch_up_completed` demands for the primary.
+        if height
+            + data_man.get_snapshot_blame_plus_depth() as u64
+            + mazze_parameters::consensus::DEFERRED_STATE_EPOCH_COUNT
+            + 10
+            > best_height
+        {
+            break;
+        }
+        if let Ok(hash) = sync_handler
+            .graph
+            .consensus
+            .get_hash_from_epoch_number(primitives::EpochNumber::Number(height))
+        {
+            // Skip vacuous identities (already covered by `primary`).
+            if &hash != primary_hash {
+                alternatives.push(SnapshotSyncCandidate::FullSync {
+                    height,
+                    snapshot_epoch_id: hash,
+                });
+            }
+        }
+        height = height.saturating_add(snapshot_epoch_count);
+        steps_remaining -= 1;
+    }
+
+    // Newest first — `set_active_candidate` picks the first one with
+    // peer support, and the newest snapshot means the least catch-up
+    // work after sync completes.
+    alternatives.sort_by(|a, b| b.get_height().cmp(&a.get_height()));
+    alternatives
+}
+
+/// Build the snapshot-sync candidate list for one `start_sync` round: the
+/// primary `epoch_to_sync` (the stable checkpoint our consensus elected)
+/// plus the header-derived forward alternatives (D.2).
+///
+/// A fast-sync joiner gets here only after anchoring its consensus graph at
+/// a trusted era checkpoint and header-syncing above it, so its candidates
+/// come from its own header chain like any other node's. Proposing the
+/// configured anchors themselves (the former trusted-checkpoint mode) made
+/// it restore a snapshot AT the consensus root, whose first epochs cannot be
+/// executed (their reward epochs lie below the root). See
+/// docs/fast-sync-design.md §5.19.
+fn enumerate_sync_candidates(
+    sync_handler: &SynchronizationProtocolHandler, epoch_to_sync: &EpochId,
+    primary_height: u64,
+) -> Vec<SnapshotSyncCandidate> {
+    let mut candidates = vec![SnapshotSyncCandidate::FullSync {
+        height: primary_height,
+        snapshot_epoch_id: *epoch_to_sync,
+    }];
+    candidates.extend(enumerate_forward_candidates(
+        sync_handler,
+        epoch_to_sync,
+        primary_height,
+    ));
+    candidates
+}
+
+/// D.2 — Loud, structured operator-facing log explaining why
+/// snapshot-sync is about to genesis-replay. One line, parseable.
+fn log_terminal_fallback(
+    reason: &'static str, epoch_to_sync: &EpochId, peers_canvassed: usize,
+    candidates_tried: usize,
+) {
+    error!(
+        "SNAPSHOT-SYNC FALLBACK to legacy/genesis-replay: \
+         reason={}  epoch_to_sync={:?}  peers_canvassed={}  \
+         candidates_tried={}  recovery_estimate=\"hours to days\". \
+         Operator action: confirm at least one peer in active_peers \
+         holds a snapshot for an epoch within the last \
+         era_epoch_count window; if peers have pruned past every \
+         snapshot-aligned epoch you have headers for, the only \
+         recovery is full genesis replay.",
+        reason, epoch_to_sync, peers_canvassed, candidates_tried,
+    );
+}
 
 #[derive(Copy, Clone, PartialEq)]
 pub enum Status {
@@ -85,6 +255,12 @@ struct Inner {
 
     related_data: Option<RelatedData>,
     manifest_attempts: usize,
+    /// D.2 — Last-ditch canvass already fired for the current sync
+    /// attempt. Latched on first attempt so we don't loop the canvass
+    /// forever; cleared by `Inner::new` / `SnapshotChunkSync::reset`
+    /// on era rollover. Without this flag the manifest-exhaustion
+    /// path would re-canvass on every `update_status` tick.
+    last_ditch_canvass_done: bool,
 }
 
 impl Default for Inner {
@@ -102,6 +278,7 @@ impl Inner {
             chunk_manager: None,
             manifest_manager: None,
             manifest_attempts: 0,
+            last_ditch_canvass_done: false,
         }
     }
 
@@ -207,10 +384,34 @@ impl SnapshotChunkSync {
         }
     }
 
+    pub fn reset(&self) {
+        *self.inner.write() = Inner::new();
+    }
+
     pub fn status(&self) -> Status {
         self.inner.read().status
     }
 
+    /// Epoch of the snapshot whose chunks have been imported and verified
+    /// (`RelatedData.snapshot_info`), or `None` before a manifest was
+    /// accepted. It is not necessarily the requested `epoch_to_sync`: a
+    /// newer forward candidate (D.2) may have been synced instead.
+    pub fn completed_snapshot_epoch_id(&self) -> Option<H256> {
+        self.inner
+            .read()
+            .related_data
+            .as_ref()
+            .map(|r| *r.snapshot_info.get_snapshot_epoch_id())
+    }
+
+    /// Single-version manifest entry point. The response now always
+    /// carries `pre_computed`; when the server populated a non-default
+    /// pre_computed payload we route to the bypass that skips
+    /// `validate_blame_states` + `validate_epoch_receipts` and trusts
+    /// the chunk-merkle floor (server lies → chunk-verification fails
+    /// loud, never silently corrupts state). When the server couldn't
+    /// build a payload (empty SnapshotInfo), we fall through to the
+    /// legacy validation walks. See docs/fast-sync-design.md §5.13 / §5.14.
     pub fn handle_snapshot_manifest_response(
         &self, ctx: &Context, response: SnapshotManifestResponse,
         request: &SnapshotManifestRequest,
@@ -222,9 +423,22 @@ impl SnapshotChunkSync {
             info!("Snapshot manifest received, but mismatch with current status {:?}", inner.status);
             return Ok(());
         };
+
+        let use_bypass = response.pre_computed.snapshot_info.height > 0;
+
         if let Some(manifest_manager) = &mut inner.manifest_manager {
-            let r = manifest_manager
-                .handle_snapshot_manifest_response(ctx, response, request)?;
+            let pre_computed = response.pre_computed.clone();
+            let r = if use_bypass {
+                manifest_manager.handle_snapshot_manifest_response_v5(
+                    ctx,
+                    response,
+                    pre_computed,
+                    request,
+                )?
+            } else {
+                manifest_manager
+                    .handle_snapshot_manifest_response(ctx, response, request)?
+            };
             if let Some(related_data) = r {
                 // update status
                 inner.status = Status::DownloadingChunks(Instant::now());
@@ -236,6 +450,7 @@ impl SnapshotChunkSync {
                         related_data.parent_snapshot_info.clone(),
                         manifest_manager.chunk_boundaries.clone(),
                         manifest_manager.chunk_boundary_proofs.clone(),
+                        manifest_manager.chunk_hashes.clone(),
                         manifest_manager.active_peers.clone(),
                         self.config.chunk_config(),
                         // This delta_root is the intermediate_delta_root of
@@ -302,24 +517,53 @@ impl SnapshotChunkSync {
             .expect("Set after receving manifest");
         let mut deferred_block_hash =
             related_data.snapshot_info.get_snapshot_epoch_id().clone();
-        // FIXME: Because state_root_aux_info can't be computed for state block
-        // FIXME: before snapshot, for the reward epoch count, maybe
-        // FIXME: save it to a dedicated place for reward computation.
-        for i in related_data.blame_vec_offset
-            ..(related_data.blame_vec_offset + REWARD_EPOCH_COUNT as usize)
-        {
+        // Commitments of the snapshot epoch and the reward-window epochs
+        // below it, which this node never executes. Each gets its own state
+        // root from the verified blame vector. They used to all reuse the
+        // snapshot epoch's root, and these epochs are never re-executed, so
+        // that stayed: a blame vector reaching below the snapshot (a block
+        // within a few epochs above it that blames its parents, e.g. while
+        // another miner's state diverged) then did not match, the joiner
+        // flagged valid blocks, and from there its own blocks carried a blame
+        // nobody else agreed with (m6, 2026-10-19, right after its snapshot
+        // at 660000).
+        let offset = related_data.blame_vec_offset;
+        for i in offset..(offset + REWARD_EPOCH_COUNT as usize) {
+            let state_root_with_aux_info = if i == offset {
+                related_data.true_state_root_by_blame_info.clone()
+            } else {
+                match related_data.state_root_vec.get(i) {
+                    Some(root) => {
+                        let mut r =
+                            related_data.true_state_root_by_blame_info.clone();
+                        r.aux_info.state_root_hash =
+                            root.compute_state_root_hash();
+                        r.state_root = root.clone();
+                        r
+                    }
+                    None => {
+                        warn!(
+                            "no blame-vector state root for the epoch {} \
+                             below the snapshot ({:?}); using the snapshot's",
+                            i - offset,
+                            deferred_block_hash
+                        );
+                        related_data.true_state_root_by_blame_info.clone()
+                    }
+                }
+            };
             info!(
-                "insert_epoch_execution_commitment for block hash {:?}",
-                &deferred_block_hash
+                "insert_epoch_execution_commitment for block hash {:?} \
+                 state_root_hash {:?}",
+                &deferred_block_hash,
+                state_root_with_aux_info.aux_info.state_root_hash
             );
             sync_handler
                 .graph
                 .data_man
                 .insert_epoch_execution_commitment(
                     deferred_block_hash,
-                    // FIXME: the state root is wrong for epochs before sync
-                    // FIXME: point. but these information won't be used.
-                    related_data.true_state_root_by_blame_info.clone(),
+                    state_root_with_aux_info,
                     related_data.receipt_blame_vec[i],
                     related_data.bloom_blame_vec[i],
                 );
@@ -373,13 +617,108 @@ impl SnapshotChunkSync {
         io: &dyn NetworkContext, sync_handler: &SynchronizationProtocolHandler,
     ) {
         let mut inner = self.inner.write();
+        // D.2 — Era rollover refresh: a new sync target deserves a
+        // fresh manifest-retry budget AND a fresh last-ditch canvass
+        // opportunity. The first-ever sync attempt (era_genesis still
+        // default) is excluded — `start_sync` will initialise the
+        // candidate manager's era field.
+        if inner.sync_candidate_manager.current_era_genesis
+            != current_era_genesis
+            && inner.sync_candidate_manager.current_era_genesis
+                != EpochId::default()
+        {
+            debug!(
+                "D.2: era rollover detected ({:?} -> {:?}); resetting \
+                 manifest_attempts + last_ditch_canvass_done.",
+                inner.sync_candidate_manager.current_era_genesis,
+                current_era_genesis,
+            );
+            inner.manifest_attempts = 0;
+            inner.last_ditch_canvass_done = false;
+        }
         if inner.manifest_attempts
             >= self.config.max_downloading_manifest_attempts
         {
-            panic!(
-                "Exceed max manifest attempts {}",
-                self.config.max_downloading_manifest_attempts
+            // D.2 — Pre-Invalid last-ditch canvass. The era-genesis
+            // target we were asked to sync may be pruned at every
+            // peer, while NEWER snapshot-aligned epochs are still
+            // available everywhere. Before settling for legacy body
+            // sync (= genesis replay for a fresh joiner), enumerate
+            // forward candidates from the local header chain and ask
+            // ALL connected peers which they support. If anyone
+            // responds, restart sync with the discovered candidate
+            // list. The flag latches so we don't loop forever.
+            if !inner.last_ditch_canvass_done {
+                inner.last_ditch_canvass_done = true;
+                let primary_height = sync_handler
+                    .graph
+                    .data_man
+                    .block_height_by_hash(&epoch_to_sync)
+                    .unwrap_or(0);
+                let candidates = enumerate_sync_candidates(
+                    sync_handler,
+                    &epoch_to_sync,
+                    primary_height,
+                );
+                let forward_count = candidates.len().saturating_sub(1);
+                let peers = PeerFilter::new(
+                    msgid::STATE_SYNC_CANDIDATE_REQUEST,
+                )
+                .select_all(&sync_handler.syn);
+                let peer_count = peers.len();
+                SNAPSHOT_SYNC_LAST_DITCH_CANVASSES.inc(1);
+                error!(
+                    "snapshot-sync: exhausted max manifest attempts ({}) \
+                     for epoch_to_sync={:?}. Mounting last-ditch canvass: \
+                     {} forward snapshot-aligned candidates × {} peers \
+                     before falling back to genesis replay.",
+                    self.config.max_downloading_manifest_attempts,
+                    epoch_to_sync,
+                    forward_count,
+                    peer_count,
+                );
+                if peer_count > 0 && !candidates.is_empty() {
+                    // Reset retry budget for the broader candidate set.
+                    inner.manifest_attempts = 0;
+                    inner.manifest_manager = None;
+                    inner.chunk_manager = None;
+                    inner.related_data = None;
+                    inner.status = Status::Inactive;
+                    inner.start_sync(
+                        current_era_genesis,
+                        candidates,
+                        io,
+                        sync_handler,
+                    );
+                    SNAPSHOT_SYNC_LAST_DITCH_RECOVERIES.inc(1);
+                    return;
+                }
+                // No peers / no candidates → fall through to terminal
+                // fallback with the no-peer reason.
+                SNAPSHOT_SYNC_FALLBACK_NO_PEER_OFFERED.inc(1);
+                SNAPSHOT_SYNC_INVALID_TRANSITIONS.inc(1);
+                log_terminal_fallback(
+                    "no_peer_offered_candidate",
+                    &epoch_to_sync,
+                    peer_count,
+                    candidates.len(),
+                );
+                inner.status = Status::Invalid;
+                return;
+            }
+            // Already canvassed once. Real terminal fallback.
+            SNAPSHOT_SYNC_FALLBACK_MANIFEST_EXHAUSTED.inc(1);
+            SNAPSHOT_SYNC_INVALID_TRANSITIONS.inc(1);
+            log_terminal_fallback(
+                "manifest_exhausted",
+                &epoch_to_sync,
+                /* peers_canvassed */ 0,
+                /* candidates_tried */ self
+                    .config
+                    .max_downloading_manifest_attempts,
             );
+            inner.status = Status::Invalid;
+            return;
         }
 
         debug!("sync state status before updating: {:?}", *inner);
@@ -392,6 +731,14 @@ impl SnapshotChunkSync {
                 manager: sync_handler,
             },
         );
+
+        if inner.status == Status::Invalid {
+            debug!(
+                "sync state status remains invalid for {:?}; waiting for phase fallback/reset",
+                epoch_to_sync
+            );
+            return;
+        }
 
         // If we moves into the next era, we should force state_sync to change
         // the candidates to states with in the new stable era. If the
@@ -408,15 +755,55 @@ impl SnapshotChunkSync {
                     if inner.sync_candidate_manager.pending_peers().is_empty() {
                         inner.status = Status::StartCandidateSync;
                         inner.sync_candidate_manager.set_active_candidate();
+                        if inner
+                            .sync_candidate_manager
+                            .get_active_candidate_and_peers()
+                            .is_none()
+                        {
+                            // D.2 — Don't surrender yet. The
+                            // last-ditch canvass branch above will
+                            // get a chance via the manifest-attempts
+                            // exhaustion path on the next tick. Mark
+                            // Inactive so the loop reissues
+                            // `start_sync` (now with multi-candidate
+                            // enumeration on the rebound at the
+                            // bottom of `update_status`). We only
+                            // truly terminate via the fallback paths
+                            // above, which emit `fallback_total{reason}`.
+                            warn!(
+                                "snapshot-sync: no peers support the current candidate set for {:?}. \
+                                 Bouncing back through Status::Inactive so a refreshed multi-candidate \
+                                 enumeration can pick newer snapshot-aligned epochs (D.2).",
+                                epoch_to_sync
+                            );
+                            inner.status = Status::Inactive;
+                            inner.manifest_manager = None;
+                            inner.chunk_manager = None;
+                            inner.related_data = None;
+                        }
                     }
                 }
-                Status::DownloadingManifest(_) => {
+                Status::DownloadingManifest(since) => {
+                    let stalled =
+                        since.elapsed() > self.config.candidate_stall_deadline;
                     if inner
                         .manifest_manager
                         .as_ref()
                         .expect("always set in DownloadingManifest")
                         .is_inactive()
+                        || stalled
                     {
+                        if stalled {
+                            warn!(
+                                "snapshot-sync: manifest download for {:?} made no \
+                                 progress in {:?}; abandoning this candidate and \
+                                 trying the next one (stall recovery).",
+                                epoch_to_sync, self.config.candidate_stall_deadline,
+                            );
+                            // Count against the retry budget so repeated stalls
+                            // eventually trip the last-ditch canvass / fallback.
+                            inner.manifest_attempts += 1;
+                        }
                         // The current candidate fails, so try to choose the
                         // next one.
                         inner.status = Status::StartCandidateSync;
@@ -424,12 +811,29 @@ impl SnapshotChunkSync {
                     }
                 }
                 Status::DownloadingChunks(_) => {
-                    if inner
+                    let chunk = inner
                         .chunk_manager
                         .as_ref()
-                        .expect("always set in DownloadingChunks")
-                        .is_inactive()
-                    {
+                        .expect("always set in DownloadingChunks");
+                    // A chunk download wedges with peers still attached when a
+                    // peer serves the manifest but not the chunks, or when
+                    // `finalize_restoration` keeps failing for this snapshot
+                    // (the m5 17h stall: 0/0/6, 1 peer). `is_inactive` only
+                    // catches peers-empty; `is_stalled` catches no-progress.
+                    let stalled =
+                        chunk.is_stalled(self.config.candidate_stall_deadline);
+                    if chunk.is_inactive() || stalled {
+                        if stalled {
+                            warn!(
+                                "snapshot-sync: chunk download for {:?} made no \
+                                 progress in {:?} ({:?}); abandoning this candidate \
+                                 and trying the next one (stall recovery).",
+                                epoch_to_sync,
+                                self.config.candidate_stall_deadline,
+                                chunk,
+                            );
+                            inner.manifest_attempts += 1;
+                        }
                         // The current candidate fails, so try to choose the
                         // next one.
                         inner.status = Status::StartCandidateSync;
@@ -438,7 +842,8 @@ impl SnapshotChunkSync {
                 }
                 _ => {}
             }
-            if inner.sync_candidate_manager.is_inactive()
+            if inner.status != Status::Invalid
+                && inner.sync_candidate_manager.is_inactive()
                 && inner
                     .chunk_manager
                     .as_ref()
@@ -454,6 +859,8 @@ impl SnapshotChunkSync {
                 warn!("current sync candidate becomes inactive: {:?}", inner);
                 inner.status = Status::Inactive;
                 inner.manifest_manager = None;
+                inner.chunk_manager = None;
+                inner.related_data = None;
             }
             // We need to start/restart syncing states for a candidate.
             if inner.status == Status::StartCandidateSync {
@@ -478,7 +885,17 @@ impl SnapshotChunkSync {
                             );
                         }
                         None => {
-                            error!("failed to start checkpoint sync, the trusted blame block is unavailable, epoch_to_sync={:?}", epoch_to_sync);
+                            // Retrying the same candidate never succeeds
+                            // (headers are not synced in this phase): try the
+                            // next one; with none left the status turns
+                            // Inactive and the candidates are re-enumerated.
+                            error!(
+                                "failed to start checkpoint sync, the trusted \
+                                 blame block is unavailable for candidate {:?} \
+                                 (epoch_to_sync={:?}); trying the next candidate",
+                                sync_candidate, epoch_to_sync
+                            );
+                            inner.sync_candidate_manager.set_active_candidate();
                         }
                     }
                 } else {
@@ -490,18 +907,38 @@ impl SnapshotChunkSync {
         }
 
         if inner.status == Status::Inactive {
-            // New era started or all candidates fail, we should restart
-            // candidates sync
-            let height = sync_handler
+            // D.2 — Multi-candidate enumeration on every restart. The
+            // primary candidate is the era-genesis target we were
+            // asked to sync, but we also propose forward
+            // snapshot-aligned epochs from the local header chain so
+            // peers that have pruned past `epoch_to_sync` can still
+            // offer us a newer snapshot. `set_active_candidate` walks
+            // these newest-first, so a successful sync to a newer
+            // epoch costs less catch-up afterward.
+            let height = match sync_handler
                 .graph
                 .data_man
                 .block_header_by_hash(&epoch_to_sync)
-                .expect("Syncing checkpoint should have available header")
-                .height();
-            let candidates = vec![SnapshotSyncCandidate::FullSync {
+            {
+                Some(h) => h.height(),
+                None => {
+                    error!(
+                        "snapshot-sync: no header for the sync target {:?}",
+                        epoch_to_sync
+                    );
+                    return;
+                }
+            };
+            let candidates = enumerate_sync_candidates(
+                sync_handler,
+                &epoch_to_sync,
                 height,
-                snapshot_epoch_id: epoch_to_sync,
-            }];
+            );
+            debug!(
+                "snapshot-sync: proposing {} candidate(s) for era_genesis={:?}",
+                candidates.len(),
+                current_era_genesis,
+            );
             inner.start_sync(current_era_genesis, candidates, io, sync_handler)
         }
         debug!("sync state status after updating: {:?}", *inner);
@@ -531,6 +968,11 @@ pub struct StateSyncConfiguration {
     pub chunk_request_timeout: Duration,
     pub manifest_request_timeout: Duration,
     pub max_downloading_manifest_attempts: usize,
+    /// No-progress deadline after which a manifest/chunk download is
+    /// considered wedged and the candidate is abandoned (so the FSM tries
+    /// the next one instead of spinning forever — the m5 17h-stall fix).
+    /// See docs/fast-sync-design.md §5.18.
+    pub candidate_stall_deadline: Duration,
 }
 
 impl StateSyncConfiguration {

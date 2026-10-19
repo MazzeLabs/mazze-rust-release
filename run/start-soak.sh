@@ -8,12 +8,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 EXECUTABLE="$REPO_ROOT/target/release/mazze"
 BASE_CONF="$SCRIPT_DIR/hydra.toml"
 TEMP_CONF="$SCRIPT_DIR/hydra.soak.runtime.toml"
-LOG_DIR="$SCRIPT_DIR/logs"
+LOG_DIR="$REPO_ROOT/logs"
 LOG_FILE="$LOG_DIR/mazze-soak.log"
 METRICS_FILE="$LOG_DIR/metrics-soak.log"
 PID_FILE="$SCRIPT_DIR/soak_pid.txt"
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$LOG_DIR/archive"
 
 if [[ ! -x "$EXECUTABLE" ]]; then
   echo "Error: binary not found at $EXECUTABLE. Did you run: cargo build --release?" >&2
@@ -99,7 +99,7 @@ fi
 
 printf '-------%s-------\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG_FILE"
 
-pushd "$SCRIPT_DIR" >/dev/null
+pushd "$REPO_ROOT" >/dev/null
 "$EXECUTABLE" --config "$TEMP_CONF" >> "$LOG_FILE" 2>&1 &
 PID=$!
 echo "$PID" > "$PID_FILE"

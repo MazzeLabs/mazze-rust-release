@@ -35,7 +35,17 @@ pub struct State {
     recover_mpt_during_construct_main_state: bool,
 }
 
+const SNAPSHOT_CREATION_DELAY_AFTER_BOUNDARY: u32 = 200;
+
 impl State {
+    fn snapshot_creation_trigger_delta_height(
+        snapshot_epoch_count: u32,
+    ) -> u32 {
+        SNAPSHOT_CREATION_DELAY_AFTER_BOUNDARY
+            .min(snapshot_epoch_count.saturating_sub(1))
+            .max(1)
+    }
+
     pub fn new(
         manager: Arc<StateManager>, state_trees: StateTrees,
         construct_main_state: bool,
@@ -331,6 +341,12 @@ impl StateTrait for State {
         // TODO(yz): Think about leaving these node dirty and only commit when
         // the dirty node is removed from cache.
         let commit_result = self.do_db_commit(epoch_id, &merkle_root);
+        // `do_db_commit` keeps an already committed state for `epoch_id`
+        // (see there); report that state's root, not the recomputed one.
+        let merkle_root = match &commit_result {
+            Ok(committed_root) => *committed_root,
+            Err(_) => merkle_root,
+        };
         debug!(
             "commit state for epoch {:?}: merkle_root = {:?}, delta_trie_height={:?} \
             has_intermediate={}, height={:?}, snapshot_epoch_id={:?}, \
@@ -351,17 +367,22 @@ impl StateTrait for State {
 
             commit_result?;
         }
-        if self.delta_trie_height.unwrap()
-            >= self
-                .manager
-                .get_storage_manager()
-                .get_snapshot_epoch_count()
-                / 3
+        let snapshot_epoch_count = self
+            .manager
+            .get_storage_manager()
+            .get_snapshot_epoch_count();
+        let snapshot_trigger_delta_height =
+            Self::snapshot_creation_trigger_delta_height(snapshot_epoch_count);
+        if self.delta_trie_height.unwrap() >= snapshot_trigger_delta_height
             && self.maybe_intermediate_trie.is_some()
         {
-            // TODO: use a better criteria and put it in consensus maybe.
+            // Trigger snapshot generation a fixed distance after the
+            // boundary instead of right around the RandomX epoch switch.
             let snapshot_height = self.height.clone().unwrap()
                 - self.delta_trie_height.unwrap() as u64;
+            SNAPSHOT_CREATION_TRIGGERED.inc(1);
+            let _t =
+                MeterTimer::time_func(SNAPSHOT_CREATION_TIMER.as_ref());
             self.manager.check_make_snapshot(
                 self.maybe_intermediate_trie.clone(),
                 self.intermediate_trie_root.clone(),
@@ -372,6 +393,22 @@ impl StateTrait for State {
         }
 
         Ok(self.state_root(merkle_root))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::State;
+
+    #[test]
+    fn snapshot_trigger_uses_fixed_delay_for_large_windows() {
+        assert_eq!(State::snapshot_creation_trigger_delta_height(2048), 200);
+    }
+
+    #[test]
+    fn snapshot_trigger_is_capped_for_small_windows() {
+        assert_eq!(State::snapshot_creation_trigger_delta_height(10), 9);
+        assert_eq!(State::snapshot_creation_trigger_delta_height(1), 1);
     }
 }
 
@@ -620,27 +657,46 @@ impl State {
         }
     }
 
+    /// Commit the delta trie as the state of `epoch_id` and return the merkle
+    /// root that is now stored for it.
+    ///
+    /// If a state for `epoch_id` is already committed, nothing is written and
+    /// the committed root is returned. A re-execution that yields a different
+    /// root is logged as an error instead of aborting the node: the committed
+    /// state is the one this node already executed on top of (and published
+    /// in the deferred state roots of the blocks it mined), the commitment and
+    /// every later state reference it, and replacing it is impossible anyway.
+    /// The usual re-execution of committed epochs is the forced recompute in
+    /// `construct_main_state` after a restart, whose reward inputs
+    /// (state_valid / blame, vote validity, outlier sets) are re-derived from a
+    /// consensus graph rebuilt from the database and can differ from the ones
+    /// the live node used (m3 / m6, 2026-10-18: the assert here put the node
+    /// into a crash loop at its last executed epoch).
     fn do_db_commit(
         &mut self, epoch_id: EpochId, merkle_root: &MerkleHash,
-    ) -> Result<()> {
+    ) -> Result<MerkleHash> {
         let maybe_existing_merkle_root =
             self.delta_trie.get_merkle_root_by_epoch_id(&epoch_id)?;
-        if maybe_existing_merkle_root.is_some() {
-            // TODO This may happen for genesis when we restart
-            info!(
-                "Overwriting computed state for epoch {:?}, \
-                 committed merkle root {:?}, new merkle root {:?}",
-                epoch_id,
-                maybe_existing_merkle_root.unwrap(),
-                merkle_root
-            );
-            assert_eq!(
-                maybe_existing_merkle_root,
-                Some(*merkle_root),
-                "Overwriting computed state with a different merkle root."
-            );
+        if let Some(existing_merkle_root) = maybe_existing_merkle_root {
+            if existing_merkle_root == *merkle_root {
+                // TODO This may happen for genesis when we restart
+                info!(
+                    "Overwriting computed state for epoch {:?}, \
+                     committed merkle root {:?}, new merkle root {:?}",
+                    epoch_id, existing_merkle_root, merkle_root
+                );
+            } else {
+                error!(
+                    "Re-execution of epoch {:?} produced a different state: \
+                     committed merkle root {:?}, new merkle root {:?}. Keeping \
+                     the committed state. The execution inputs of this epoch \
+                     (rewards: state/blame validity, outlier sets) differ from \
+                     those of its first execution.",
+                    epoch_id, existing_merkle_root, merkle_root
+                );
+            }
             self.revert();
-            return Ok(());
+            return Ok(existing_merkle_root);
         }
 
         // Use coarse lock to prevent row number from interleaving,
@@ -763,7 +819,7 @@ impl State {
 
         self.dirty = false;
 
-        Ok(())
+        Ok(*merkle_root)
     }
 
     fn state_root_check(&self) -> Result<MerkleHash> {
@@ -972,8 +1028,29 @@ use crate::{
     StorageRootProof,
 };
 use fallible_iterator::FallibleIterator;
+use lazy_static::lazy_static;
 use mazze_internal_common::{StateRootAuxInfo, StateRootWithAuxInfo};
 use mazze_types::AddressWithSpace;
+use metrics::{
+    register_meter_with_group, Counter, CounterUsize, Meter, MeterTimer,
+};
+
+lazy_static! {
+    /// Latency of `check_make_snapshot` (the trigger path that promotes a
+    /// delta MPT into a new snapshot). Snapshot creation is the rarest
+    /// high-cost storage operation and was previously unmetered.
+    /// See docs/flow-audit.md G-ST-1.
+    static ref SNAPSHOT_CREATION_TIMER: Arc<dyn Meter> =
+        register_meter_with_group(
+            "timer",
+            "storage::check_make_snapshot",
+        );
+    static ref SNAPSHOT_CREATION_TRIGGERED: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "storage",
+            "snapshot_creation_triggered",
+        );
+}
 use primitives::{
     DeltaMptKeyPadding, EpochId, MerkleHash, MptValue, NodeMerkleTriplet,
     SkipInputCheck, StateRoot, StaticBool, StorageKey, StorageKeyWithSpace,

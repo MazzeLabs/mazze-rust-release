@@ -99,6 +99,8 @@ lazy_static! {
         Duration::from_secs(2);
 }
 
+const PINNED_PEER_RETRY_ROUNDS: u32 = 3;
+
 #[derive(Debug)]
 struct WaitingRequest(Box<dyn Request>, Duration); // (request, delay)
 
@@ -155,10 +157,18 @@ impl RequestManager {
         let inflight_pending_tx_index_maintain_timeout =
             protocol_config.inflight_pending_tx_index_maintain_timeout;
 
-        // FIXME: make sent_transaction_window_size to be 2^pow.
         let sent_transaction_window_size =
-            protocol_config.tx_maintained_for_peer_timeout.as_millis()
-                / protocol_config.send_tx_period.as_millis();
+            if protocol_config.send_tx_period.is_zero() {
+                1
+            } else {
+                let raw_window_size =
+                    (protocol_config.tx_maintained_for_peer_timeout.as_millis()
+                        / protocol_config.send_tx_period.as_millis())
+                    .max(1) as usize;
+                raw_window_size
+                    .checked_next_power_of_two()
+                    .unwrap_or(raw_window_size)
+            };
         Self {
             received_transactions: Arc::new(RwLock::new(
                 ReceivedTransactionContainer::new(
@@ -171,7 +181,7 @@ impl RequestManager {
                 ),
             )),
             sent_transactions: RwLock::new(SentTransactionContainer::new(
-                sent_transaction_window_size as usize,
+                sent_transaction_window_size,
             )),
             inflight_keys: Default::default(),
             waiting_requests: Default::default(),
@@ -206,6 +216,7 @@ impl RequestManager {
         &self, io: &dyn NetworkContext, mut request: Box<dyn Request>,
         mut peer: Option<NodeId>, delay: Option<Duration>,
     ) {
+        let mut waiting_peer = peer;
         // retain the request items that not in flight.
         request.with_inflight(&self.inflight_keys);
 
@@ -219,6 +230,7 @@ impl RequestManager {
             && delay.is_none()
             && !self.check_and_update_net_inflight_blocks(&request)
         {
+            waiting_peer = peer;
             peer = None;
         }
 
@@ -234,7 +246,7 @@ impl RequestManager {
             self.waiting_requests.lock().push(TimedWaitingRequest::new(
                 Instant::now() + cur_delay,
                 WaitingRequest(request, next_delay),
-                peer,
+                waiting_peer,
             ));
             return;
         }
@@ -474,9 +486,10 @@ impl RequestManager {
             .update(tx_from_hashes_inflight_keys.len());
         TX_RECEIVED_POOL_METER.mark(received_transactions.get_length());
 
-        let (tx_hashes, indices) = {
+        let (tx_hashes, indices, requested_tx_hashes) = {
             let mut tx_hashes = HashSet::new();
             let mut indices = Vec::new();
+            let mut requested_tx_hashes = Vec::new();
 
             for i in 0..responded_tx_hashes.len() {
                 let tx_hash = responded_tx_hashes[i];
@@ -488,13 +501,14 @@ impl RequestManager {
                 if tx_from_hashes_inflight_keys.insert(Key::Hash(tx_hash)) {
                     indices.push(tx_hashes_indices[i]);
                     tx_hashes.insert(tx_hash);
+                    requested_tx_hashes.push(tx_hash);
                 } else {
                     // Already being requested
                     INFLIGHT_TX_REJECT_METER.mark(1);
                 }
             }
 
-            (tx_hashes, indices)
+            (tx_hashes, indices, requested_tx_hashes)
         };
         TX_REQUEST_METER.mark(tx_hashes.len());
         debug!(
@@ -508,6 +522,7 @@ impl RequestManager {
             window_index,
             indices,
             tx_hashes: tx_hashes.clone(),
+            requested_tx_hashes,
         };
 
         if request.is_empty() {
@@ -879,6 +894,7 @@ impl RequestManager {
         let now = Instant::now();
         let mut batcher =
             RequestBatcher::new(*DEFAULT_REQUEST_BATCH_BUCKET_SIZE);
+        let mut pinned_peer_requests = Vec::new();
 
         let mut cancelled_requests = Vec::new();
         while let Some(req) = waiting_requests.pop() {
@@ -898,6 +914,7 @@ impl RequestManager {
             // Waiting requests are already in-flight, so send them without
             // checking
             let WaitingRequest(request, delay) = req.request;
+            let pinned_peer = req.peer;
             let request = match request.resend() {
                 Some(r) => r,
                 None => continue,
@@ -911,11 +928,55 @@ impl RequestManager {
                     now + delay,
                     // Do not increase delay because this is not a failure.
                     WaitingRequest(request, delay),
-                    None,
+                    pinned_peer,
                 ));
                 continue;
             }
+            if let Some(peer) = pinned_peer {
+                if delay
+                    <= *REQUEST_START_WAITING_TIME * PINNED_PEER_RETRY_ROUNDS
+                {
+                    let mut peer_set = HashSet::new();
+                    peer_set.insert(peer);
+                    let mut filter = PeerFilter::new(request.msg_id())
+                        .choose_from(&peer_set);
+                    if let Some(cap) = request.required_capability() {
+                        filter = filter.with_cap(cap);
+                    }
+                    if let Some(preferred_node_type) =
+                        request.preferred_node_type()
+                    {
+                        filter = filter
+                            .with_preferred_node_type(preferred_node_type);
+                    }
+                    if filter.select(&self.syn).is_some() {
+                        pinned_peer_requests.push((delay, peer, request));
+                        continue;
+                    }
+                }
+            }
             batcher.insert(delay, request);
+        }
+
+        for (next_delay, chosen_peer, request) in pinned_peer_requests {
+            debug!(
+                "Send waiting req {:?} to pinned peer={} with next_delay={:?}",
+                request, chosen_peer, next_delay
+            );
+            if let Err(request) = self.request_handler.send_request(
+                io,
+                Some(chosen_peer),
+                request,
+                Some(next_delay),
+            ) {
+                let keep_peer = next_delay
+                    <= *REQUEST_START_WAITING_TIME * PINNED_PEER_RETRY_ROUNDS;
+                waiting_requests.push(TimedWaitingRequest::new(
+                    Instant::now() + next_delay,
+                    WaitingRequest(request, next_delay),
+                    if keep_peer { Some(chosen_peer) } else { None },
+                ));
+            }
         }
 
         for (next_delay, request) in
@@ -1019,6 +1080,64 @@ impl RequestManager {
             net_inflight_blocks.remove(&Key::Hash(*block_hash));
         }
     }
+
+    /// §5.26: force-clear hashes from the REGULAR `GET_BLOCKS` in-flight
+    /// set. This is the set `in_flight_blocks()` reads and that
+    /// `GetBlocks::with_inflight` retains against — i.e. the actual gate
+    /// that decides whether a body request goes out. Entries here are
+    /// normally removed only by `on_removed` (response received / request
+    /// timed out). A hash orphaned here (key inserted by `with_inflight`
+    /// but the request dropped/emptied without `on_removed` ever firing)
+    /// is permanently excluded from re-request: `request_block_bodies`'s
+    /// `.difference(&in_flight_blocks)` skips it, and `with_inflight`
+    /// strips it from any new request. §5.23's recovery cleared only the
+    /// SEPARATE `NET_INFLIGHT_BLOCKS` bucket, so a body-missing frontier
+    /// block stuck here never got re-requested — observed live on m6
+    /// (full): 3 blocks at heights 13011-13017 status=BLOCK_HEADER_GRAPH_
+    /// READY block_ready=false, 0 outgoing GetBlocks, missing_bodies pinned
+    /// at 35398, frontier re-sampled every second forever. Clearing the
+    /// GET_BLOCKS key lets the next `.difference()` include the block and a
+    /// GetBlocks finally goes out. Only ever called for frontier blocks
+    /// already wedged with block_ready==false, so a double-request is
+    /// harmless (peer responds, `on_removed` clears both sets).
+    pub fn remove_inflight_blocks<'a, I: Iterator<Item = &'a H256>>(
+        &self, blocks: I,
+    ) {
+        let mut inflight_blocks = self.inflight_keys.write(msgid::GET_BLOCKS);
+        for block_hash in blocks {
+            inflight_blocks.remove(&Key::Hash(*block_hash));
+        }
+    }
+
+    /// Reconcile the `GET_BLOCKS` in-flight key set against the requests that
+    /// are ACTUALLY live in the request handler, removing ORPHANS — hashes in
+    /// `inflight_keys` not backed by any live tracked request. Such orphans
+    /// leak in when a request is dropped/emptied without `on_removed` firing;
+    /// they never time out (nothing in the per-peer timeout tracking references
+    /// them) yet keep occupying the in-flight window, so once they accumulate
+    /// to `max_inflight` the body-request drain computes
+    /// `n_blocks_to_request == 0` and stops requesting — the node goes idle and
+    /// wedges with `missing_bodies` frozen while peers hold the bodies. This is
+    /// the ROOT of the recurring archive body-fetch wedge class (§5.18–5.26/C
+    /// patched only the frontier manifestations; this clears the general
+    /// body-backlog orphans too). Returns the number cleared. Only ever removes
+    /// hashes with no live request behind them, so genuinely in-flight requests
+    /// are untouched and the normal drain simply re-requests the freed hashes.
+    pub fn reconcile_inflight_block_orphans(&self) -> usize {
+        let live = self.request_handler.live_block_request_hashes();
+        let mut inflight = self.inflight_keys.write(msgid::GET_BLOCKS);
+        let orphans: Vec<H256> = inflight
+            .iter()
+            .filter_map(|k| match k {
+                Key::Hash(h) if !live.contains(h) => Some(*h),
+                _ => None,
+            })
+            .collect();
+        for h in &orphans {
+            inflight.remove(&Key::Hash(*h));
+        }
+        orphans.len()
+    }
 }
 
 /// Return block hashes in `request` if it's requesting blocks.
@@ -1026,21 +1145,25 @@ impl RequestManager {
 pub fn try_get_block_hashes(request: &Box<dyn Request>) -> Option<&Vec<H256>> {
     match request.msg_id() {
         msgid::GET_BLOCKS | msgid::GET_CMPCT_BLOCKS => {
-            let hashes = if let Some(req) =
-                request.as_any().downcast_ref::<GetBlocks>()
-            {
-                &req.hashes
+            if let Some(req) = request.as_any().downcast_ref::<GetBlocks>() {
+                Some(&req.hashes)
             } else if let Some(req) =
                 request.as_any().downcast_ref::<GetCompactBlocks>()
             {
-                &req.hashes
+                Some(&req.hashes)
             } else {
-                panic!(
-                    "MessageId and Request not match, request={:?}",
+                // msg_id() claims this is a GetBlocks/GetCompactBlocks
+                // request but the concrete type is neither. This indicates a
+                // programming bug in the request constructor — log loudly
+                // and return None so callers treat it as "no hashes" rather
+                // than crashing the request manager.
+                error!(
+                    "msg_id/Request type mismatch in try_get_block_hashes: \
+                     request={:?}",
                     request
                 );
-            };
-            Some(hashes)
+                None
+            }
         }
         _ => None,
     }

@@ -15,16 +15,17 @@ use mazze_internal_common::{
     ChainIdParams, ChainIdParamsInner, ChainIdParamsOneChainInner,
 };
 use mazze_parameters::{
-    block::DEFAULT_TARGET_BLOCK_GAS_LIMIT, tx_pool::TXPOOL_DEFAULT_NONCE_BITS,
+    block::DEFAULT_TARGET_BLOCK_GAS_LIMIT, pow::RANDOMX_EPOCH_LENGTH,
+    tx_pool::TXPOOL_DEFAULT_NONCE_BITS,
 };
 use mazze_storage::{
     defaults::DEFAULT_DEBUG_SNAPSHOT_CHECKER_THREADS, storage_dir,
-    ConsensusParam, MdbxConfig, MdbxSyncMode, ProvideExtraSnapshotSyncConfig,
-    StateDbBackend, StorageConfiguration,
+    ConsensusParam, MdbxConfig, ProvideExtraSnapshotSyncConfig,
+    SnapshotMdbxConfig, StateDbBackend, StorageConfiguration,
 };
 use mazze_types::{Address, AllChainID, Space, SpaceMap, H256, U256};
 use mazzecore::{
-    block_data_manager::{BlockDbBackend, DataManagerConfiguration},
+    block_data_manager::DataManagerConfiguration,
     block_parameters::*,
     cache_config::{
         DEFAULT_INVALID_BLOCK_HASH_CACHE_SIZE_IN_COUNT,
@@ -33,7 +34,7 @@ use mazzecore::{
     },
     consensus::{
         consensus_inner::consensus_executor::ConsensusExecutionConfiguration,
-        ConsensusConfig, ConsensusInnerConfig,
+        ConsensusConfig, ConsensusInnerConfig, TrustedCheckpoint,
     },
     consensus_internal_parameters::*,
     consensus_parameters::*,
@@ -57,6 +58,15 @@ lazy_static! {
 }
 const BLOCK_DB_DIR_NAME: &str = "blockchain_db";
 const NET_CONFIG_DB_DIR_NAME: &str = "net_config";
+const FULL_FAST_MIN_OUTGOING_PEERS: usize = 32;
+const FULL_FAST_MIN_INFLIGHT_REQUEST_COUNT: u64 = 2_000;
+const FULL_FAST_MIN_UNPROCESSED_BLOCK_SIZE_MB: usize = 256;
+const FULL_FAST_MIN_DOWNLOADING_CHUNKS: usize = 48;
+const FULL_FAST_MIN_CHUNK_SIZE_BYTES: u64 = 1_024 * 1_024;
+const FULL_FAST_MIN_OPEN_SNAPSHOTS: u16 = 16;
+const FULL_FAST_MIN_OPEN_MPTS: u32 = 16;
+const FULL_FAST_MIN_PARITYDB_OPEN_FILES: u32 = 1024;
+const DEFAULT_SERVING_SNAPSHOT_COUNT: u32 = 2;
 
 // usage:
 // ```
@@ -134,10 +144,22 @@ build_config! {
         (evm_chain_id, (Option<u32>), None)
         (execute_genesis, (bool), true)
         (default_transition_time, (Option<u64>), None)
-        // Snapshot Epoch Count is a consensus parameter. This flag overrides
-        // the parameter, which only take effect in `dev` mode.
+        // Snapshot cadence controls the local checkpoint/snapshot grid used
+        // for state sync across all node profiles.
+        (snapshot_epoch_count, (u32), SNAPSHOT_EPOCHS_CAPACITY)
+        // Legacy compatibility alias. Runtime behavior always follows
+        // `snapshot_epoch_count`.
         (dev_snapshot_epoch_count, (u32), SNAPSHOT_EPOCHS_CAPACITY)
         (era_epoch_count, (u64), ERA_DEFAULT_EPOCH_COUNT)
+        // TEST-ONLY (honoured only with `mode = "test"`): keep a
+        // `snapshot_epoch_count` below RANDOMX_EPOCH_LENGTH so a local
+        // multi-node harness (scripts/local-restart-repro.sh) can pass
+        // several eras in minutes. Never set in production.
+        (test_allow_small_snapshot_epoch_count, (bool), false)
+        // TEST-ONLY (honoured only in test/dev mode): run per-block ASERT
+        // instead of pinning every block to the initial difficulty, so the
+        // local harness can check that nodes agree on difficulty.
+        (test_enable_asert, (bool), false)
         (heavy_block_difficulty_ratio, (u64), HEAVY_BLOCK_DEFAULT_DIFFICULTY_RATIO)
         (genesis_accounts, (Option<String>), None)
         (genesis_secrets, (Option<String>), None)
@@ -173,7 +195,13 @@ build_config! {
         (jsonrpc_http_threads, (Option<usize>), None)
         (jsonrpc_cors, (Option<String>), None)
         (jsonrpc_http_keep_alive, (bool), false)
-        (jsonrpc_ws_max_payload_bytes, (usize), 30 * 1024 * 1024)
+        // M-12 (docs/security-audit.md): tightened default from
+        // 30 MB to 10 MB. Legitimate eth_getLogs / mazze_getLogs over
+        // WebSocket return well under 10 MB for any sane epoch range;
+        // the previous 30 MB allowed memory pressure from a single
+        // hostile WS client. Operators serving large batched
+        // subscriptions can raise this in hydra.toml.
+        (jsonrpc_ws_max_payload_bytes, (usize), 10 * 1024 * 1024)
         (jsonrpc_http_eth_port, (Option<u16>), None)
         (jsonrpc_ws_eth_port, (Option<u16>), None)
         // The network_id, if unset, defaults to the chain_id.
@@ -188,7 +216,7 @@ build_config! {
         (udp_port, (Option<u16>), Some(55555))
 
         // Network parameters section.
-        (blocks_request_timeout_ms, (u64), 15_000)
+        (blocks_request_timeout_ms, (u64), 5_000)
         (check_request_period_ms, (u64), 500)
         (chunk_size_byte, (u64), DEFAULT_CHUNK_SIZE)
         (demote_peer_for_timeout, (bool), false)
@@ -213,6 +241,12 @@ build_config! {
         (max_outgoing_peers_archive, (Option<usize>), None)
         (max_peers_tx_propagation, (usize), 128)
         (max_unprocessed_block_size_mb, (usize), (128))
+        // Download↔execution backpressure: pause epoch discovery during
+        // catch-up once this many epochs are enqueued-but-unexecuted in
+        // the consensus executor. Bounds the Arc<Block>s pinned by the
+        // (otherwise unbounded) execution queue so a fast downloader can't
+        // OOM the node. 0 disables the throttle.
+        (max_pending_execution_epochs, (usize), (5000))
         (min_peers_tx_propagation, (usize), 8)
         (min_phase_change_normal_peer_count, (usize), 3)
         (received_tx_index_maintain_timeout_ms, (u64), 300_000)
@@ -221,6 +255,11 @@ build_config! {
         (snapshot_candidate_request_timeout_ms, (u64), 10_000)
         (snapshot_chunk_request_timeout_ms, (u64), 30_000)
         (snapshot_manifest_request_timeout_ms, (u64), 30_000)
+        // No-progress deadline (ms) after which a wedged manifest/chunk
+        // download abandons its candidate and tries the next. Generous so a
+        // healthy-but-slow download is never falsely abandoned; far below the
+        // 17h wedge it replaces. See docs/fast-sync-design.md §5.18.
+        (snapshot_candidate_stall_deadline_ms, (u64), 180_000)
         (sync_expire_block_timeout_s, (u64), 7200)
         (throttling_conf, (Option<String>), None)
         (timeout_observing_period_s, (u64), 600)
@@ -250,7 +289,7 @@ build_config! {
 
         // Transaction cache/transaction pool section.
         (tx_cache_index_maintain_timeout_ms, (u64), 300_000)
-        (tx_pool_size, (usize), 50_000)
+        (tx_pool_size, (usize), 500_000)
         (tx_pool_min_native_tx_gas_price, (Option<u64>), None)
         (tx_pool_min_eth_tx_gas_price, (Option<u64>), None)
         (tx_pool_nonce_bits, (usize), TXPOOL_DEFAULT_NONCE_BITS)
@@ -281,8 +320,21 @@ build_config! {
         (invalid_block_hash_cache_size_in_count, (usize), DEFAULT_INVALID_BLOCK_HASH_CACHE_SIZE_IN_COUNT)
         (state_db_type, (String), "mdbx".to_string())
         (mdbx_map_size_mb, (Option<u64>), Some(mazze_storage::defaults::DEFAULT_MDBX_MAP_SIZE_MB))
-        (mdbx_max_readers, (Option<u32>), None)
+        // MDBX commit durability tier. `safe`/`durable` = fsync on
+        // every commit (libmdbx default, safest). `safenosync`/`relaxed`
+        // = up to 10x throughput at the cost of losing the last few
+        // seconds of state on OS crash. Recommended `safenosync` on
+        // testnet miners, `durable` on operator archives. See fleet
+        // incident 2026-07-08 report §5 recommendation #6.
         (mdbx_sync_mode, (Option<String>), None)
+        // `safenosync` only: make an fsynced (steady) point once this many
+        // MB / this many ms are unsynced. 0 disables the threshold; with
+        // both 0 libmdbx fsyncs on almost every commit.
+        (mdbx_autosync_mb, (u64), mazze_storage::defaults::DEFAULT_MDBX_AUTOSYNC_MB)
+        (mdbx_autosync_period_ms, (u64), mazze_storage::defaults::DEFAULT_MDBX_AUTOSYNC_PERIOD_MS)
+        (snapshot_mdbx_initial_mb, (u64), mazze_storage::defaults::DEFAULT_SNAPSHOT_MDBX_INITIAL_MB)
+        (snapshot_mdbx_max_mb, (u64), mazze_storage::defaults::DEFAULT_SNAPSHOT_MDBX_MAX_MB)
+        (snapshot_mdbx_growth_step_mb, (u64), mazze_storage::defaults::DEFAULT_SNAPSHOT_MDBX_GROWTH_STEP_MB)
         (storage_delta_mpts_cache_recent_lfu_factor, (f64), mazze_storage::defaults::DEFAULT_DELTA_MPTS_CACHE_RECENT_LFU_FACTOR)
         (storage_delta_mpts_cache_size, (u32), mazze_storage::defaults::DEFAULT_DELTA_MPTS_CACHE_SIZE)
         (storage_delta_mpts_cache_start_size, (u32), mazze_storage::defaults::DEFAULT_DELTA_MPTS_CACHE_START_SIZE)
@@ -296,6 +348,11 @@ build_config! {
         (strict_tx_index_gc, (bool), true)
         (sync_state_starting_epoch, (Option<u64>), None)
         (sync_state_epoch_gap, (Option<u64>), None)
+        (trusted_checkpoint_height, (Option<u64>), None)
+        (trusted_checkpoint_hash, (Option<String>), None)
+        (trusted_blame_height, (Option<u64>), None)
+        (trusted_blame_hash, (Option<String>), None)
+        (trusted_checkpoint_block_number, (Option<u64>), None)
         (target_difficulties_cache_size_in_count, (usize), DEFAULT_TARGET_DIFFICULTIES_CACHE_SIZE_IN_COUNT)
 
         // General/Unclassified section.
@@ -308,6 +365,10 @@ build_config! {
         (get_logs_filter_max_block_number_range, (Option<u64>), None)
         (get_logs_epoch_batch_size, (usize), 32)
         (max_trans_count_received_in_catch_up, (u64), 60_000)
+        // Per-peer cumulative tx cap during normal phase. None = use
+        // the built-in default (500_000). See
+        // docs/security-audit.md finding H-3.
+        (max_trans_count_per_peer_normal, (Option<u64>), None)
         (persist_tx_index, (bool), false)
         (persist_block_number_index, (bool), true)
         (print_memory_usage_period_s, (Option<u64>), None)
@@ -336,15 +397,12 @@ build_config! {
         (keep_snapshot_before_stable_checkpoint, (bool), true)
         (force_recompute_height_during_construct_main, (Option<u64>), None)
 
-        // The snapshot database consists of two tables: snapshot_key_value and snapshot_mpt. However, the size of snapshot_mpt is significantly larger than that of snapshot_key_value.
-        // When the configuration parameter use_isolated_db_for_mpt_table is set to true, the snapshot_mpt table will be located in a separate database.
-        (use_isolated_db_for_mpt_table, (bool), false)
-        // The use_isolated_db_for_mpt_table_height parameter is utilized to determine when to enable the use_isolated_db_for_mpt_table option.
-        //  None: enabled since the next snapshot
-        //  u64: enabled since the specified height
-        (use_isolated_db_for_mpt_table_height, (Option<u64>), None)
-        // Recover the latest MPT snapshot from the era checkpoint
-        (recovery_latest_mpt_snapshot, (bool), false)
+        // Phase 5d: `use_isolated_db_for_mpt_table` /
+        // `use_isolated_db_for_mpt_table_height` /
+        // `recovery_latest_mpt_snapshot` deleted. The
+        // isolated-MPT-dir mode was already non-functional under
+        // paritydb (see design doc §3 / R1.3) and gone entirely
+        // under 5c's MDBX cutover — MPT + KV live in the same env.
         (keep_era_genesis_snapshot, (bool), true)
     }
     {
@@ -374,6 +432,16 @@ build_config! {
             (Vec<ProvideExtraSnapshotSyncConfig>),
             vec![ProvideExtraSnapshotSyncConfig::StableCheckpoint],
             ProvideExtraSnapshotSyncConfig::parse_config_list)
+        // Comma-separated list of fast-sync era checkpoints, each
+        // "checkpoint_height:checkpoint_hash:block_number" or (legacy, with
+        // a blame anchor) "checkpoint_height:checkpoint_hash:blame_height:
+        // blame_hash:block_number"; block_number is the checkpoint block's
+        // `blockNumber` from mazze_getBlockByHash.
+        // Listing several era checkpoints (e.g. the current + previous era
+        // genesis) lets a fresh node fast-sync to whichever one peers still
+        // serve, so a single stale anchor can't wedge the join.
+        (trusted_checkpoints, (Vec<TrustedCheckpoint>), Vec::new(),
+            parse_trusted_checkpoints_list)
         (node_type, (Option<NodeType>), None, NodeType::from_str)
         (public_rpc_apis, (ApiSet), ApiSet::Safe, ApiSet::from_str)
         (public_evm_rpc_apis, (ApiSet), ApiSet::Evm, ApiSet::from_str)
@@ -383,16 +451,6 @@ build_config! {
             _ =>  Err("Invalid single_mpt_space".to_owned()),
         })
     }
-}
-
-#[allow(unused_macros)]
-macro_rules! set_conf {
-    ($src: expr; $dst: expr => {$($field: tt),* }) => {
-        {
-            let number = $src;
-            $($dst.$field = number;)*
-        }
-    };
 }
 
 #[derive(Debug)]
@@ -415,13 +473,276 @@ impl Configuration {
 
         if matches.is_present("archive") {
             config.raw_conf.node_type = Some(NodeType::Archive);
+        } else if matches.is_present("mining")
+            || matches.is_present("full-fast")
+        {
+            // `--mining` is the preferred flag; `--full-fast` is the alias.
+            config.raw_conf.node_type = Some(NodeType::FullFast);
         } else if matches.is_present("full") {
             config.raw_conf.node_type = Some(NodeType::Full);
         } else if matches.is_present("light") {
             config.raw_conf.node_type = Some(NodeType::Light);
         }
 
+        config.apply_node_type_profile();
+
+        // Validate fast-sync anchors early so a misconfiguration is a clear
+        // startup error rather than a deep panic during catch-up.
+        config.assemble_trusted_checkpoints()?;
+
         Ok(config)
+    }
+
+    /// Assemble the full set of fast-sync anchors (the `trusted_checkpoints`
+    /// list passed to `ConsensusConfig`), merging three sources:
+    ///   1. the legacy four scalars (one anchor, if all set),
+    ///   2. the `trusted_checkpoints` config list, and
+    ///   3. any baked-in defaults for this chain.
+    /// Each anchor is validated, de-duplicated by checkpoint hash, and the
+    /// result is sorted **newest-first** (descending checkpoint height).
+    ///
+    /// Each checkpoint MUST land on an **era boundary** (a multiple of
+    /// `era_epoch_count`). Era boundaries are the network's consensus-final
+    /// checkpoints AND the snapshots that serving nodes retain long-term
+    /// (the `StableCheckpoint` retention policy); an arbitrary mid-era
+    /// snapshot is kept only in a short sliding window and is pruned from
+    /// the fleet within minutes — the historical "stale anchor" failure.
+    /// Pinning era checkpoints is therefore both the durable (non-stale)
+    /// and the higher-trust choice. See docs/fast-sync-design.md §5.16.
+    fn assemble_trusted_checkpoints(
+        &self,
+    ) -> Result<Vec<TrustedCheckpoint>, String> {
+        let r = &self.raw_conf;
+        let era = r.era_epoch_count;
+        if era == 0 {
+            return Err("era_epoch_count must be non-zero".into());
+        }
+        let mut out: Vec<TrustedCheckpoint> = Vec::new();
+
+        // (1) Legacy four scalars — all-or-nothing.
+        let scalars = [
+            r.trusted_checkpoint_height.is_some(),
+            r.trusted_checkpoint_hash.is_some(),
+            r.trusted_blame_height.is_some(),
+            r.trusted_blame_hash.is_some(),
+            r.trusted_checkpoint_block_number.is_some(),
+        ];
+        let n_set = scalars.iter().filter(|x| **x).count();
+        if n_set != 0 && n_set != 5 {
+            return Err(format!(
+                "trusted-checkpoint config is all-or-nothing: set all five of \
+                 trusted_checkpoint_height / trusted_checkpoint_hash / \
+                 trusted_blame_height / trusted_blame_hash / \
+                 trusted_checkpoint_block_number, or none, or use the \
+                 `trusted_checkpoints` list instead. (got {}/5)",
+                n_set
+            ));
+        }
+        if n_set == 5 {
+            out.push(parse_trusted_checkpoint_parts(
+                r.trusted_checkpoint_height.unwrap(),
+                r.trusted_checkpoint_hash.as_ref().unwrap(),
+                Some((
+                    r.trusted_blame_height.unwrap(),
+                    r.trusted_blame_hash.as_ref().unwrap().as_str(),
+                )),
+                r.trusted_checkpoint_block_number.unwrap(),
+            )?);
+        }
+
+        // (2) The `trusted_checkpoints` list (already parsed at load time).
+        out.extend(r.trusted_checkpoints.iter().cloned());
+
+        // (3) Baked-in defaults for this chain (weak-subjectivity
+        // checkpoints shipped with the binary). Empty by default.
+        out.extend(baked_in_trusted_checkpoints(
+            r.chain_id.unwrap_or(0),
+        ));
+
+        // Validate each anchor lands on an era boundary and the blame block
+        // sits above the checkpoint.
+        for cp in &out {
+            if cp.checkpoint_height % era != 0 {
+                return Err(format!(
+                    "trusted checkpoint height ({}) must be a multiple of \
+                     era_epoch_count ({}) — pin an era checkpoint, not an \
+                     arbitrary snapshot. Era checkpoints are consensus-final \
+                     and retained long-term by serving nodes; mid-era \
+                     snapshots are pruned within minutes (the stale-anchor \
+                     failure). Nearest valid heights: {} or {}.",
+                    cp.checkpoint_height,
+                    era,
+                    cp.checkpoint_height / era * era,
+                    (cp.checkpoint_height / era + 1) * era,
+                ));
+            }
+            if cp.checkpoint_height == 0 {
+                return Err(
+                    "trusted checkpoint height 0 is the genesis; list a \
+                     later era checkpoint"
+                        .into(),
+                );
+            }
+            let blame_height = match cp.blame {
+                None => continue,
+                Some((h, _)) => h,
+            };
+            if blame_height <= cp.checkpoint_height {
+                return Err(format!(
+                    "trusted blame height ({}) must be ABOVE the checkpoint \
+                     height ({}): the blame anchor proves the checkpoint's \
+                     state root and must sit a few hundred epochs higher.",
+                    blame_height, cp.checkpoint_height
+                ));
+            }
+            // The manifest validator indexes the blame block's state-root
+            // vector at `blame - (checkpoint + DEFERRED_STATE_EPOCH_COUNT)
+            // - (snapshot_epoch_count + 1)`; a closer blame block cannot prove the
+            // checkpoint (m6, 2026-10-18: blame 2100 above with
+            // snapshot_epoch_count = 20000 underflowed and killed the node).
+            let min_blame_height = cp.checkpoint_height
+                + r.snapshot_epoch_count as u64
+                + DEFERRED_STATE_EPOCH_COUNT
+                + 1;
+            if blame_height < min_blame_height {
+                return Err(format!(
+                    "trusted blame height ({}) is too close to the checkpoint \
+                     ({}): it must be at least checkpoint + \
+                     snapshot_epoch_count ({}) + {} + 1 = {}.",
+                    blame_height,
+                    cp.checkpoint_height,
+                    r.snapshot_epoch_count,
+                    DEFERRED_STATE_EPOCH_COUNT,
+                    min_blame_height
+                ));
+            }
+        }
+
+        // De-duplicate by checkpoint hash (keep first occurrence), then
+        // sort newest-first so the FSM prefers the least catch-up work.
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|c| seen.insert(c.checkpoint_hash));
+        out.sort_by(|a, b| b.checkpoint_height.cmp(&a.checkpoint_height));
+        // A fast-sync node roots its chain at one era checkpoint with the
+        // next one as its stable checkpoint (docs/fast-sync-design.md
+        // §5.19), so it needs two consecutive ones.
+        if !out.is_empty()
+            && !out.iter().any(|s| {
+                out.iter().any(|r| r.checkpoint_height + era == s.checkpoint_height)
+            })
+        {
+            return Err(format!(
+                "trusted_checkpoints needs two consecutive era checkpoints \
+                 (heights H and H + era_epoch_count = H + {}), e.g. the \
+                 network's latest checkpoint and the one before it; got \
+                 heights {:?}",
+                era,
+                out.iter().map(|c| c.checkpoint_height).collect::<Vec<_>>()
+            ));
+        }
+        Ok(out)
+    }
+
+    fn apply_node_type_profile(&mut self) {
+        let node_type = self.node_type();
+        if !matches!(node_type, NodeType::Light) {
+            self.apply_snapshot_serving_defaults();
+        }
+        if matches!(node_type, NodeType::FullFast) {
+            self.apply_mining_profile();
+        }
+    }
+
+    fn apply_snapshot_serving_defaults(&mut self) {
+        let test_small_snapshots = self.is_test_mode()
+            && self.raw_conf.test_allow_small_snapshot_epoch_count;
+        let raw = &mut self.raw_conf;
+        if raw.snapshot_epoch_count < RANDOMX_EPOCH_LENGTH as u32
+            && !test_small_snapshots
+        {
+            raw.snapshot_epoch_count = RANDOMX_EPOCH_LENGTH as u32;
+        }
+        // Keep the legacy field aligned so test mode cannot diverge from the
+        // canonical snapshot cadence.
+        raw.dev_snapshot_epoch_count = raw.snapshot_epoch_count;
+
+        // Leave header catch-up once headers are within one snapshot window
+        // of the peers, for every profile (full-fast already did this). With
+        // no gap, `catch_up_completed` also demands that the snapshot target
+        // -- the stable checkpoint rounded down to a 20k boundary -- be within
+        // 20k epochs of the peer median. The live fleet's own checkpoint lags
+        // the tip by 2-3 eras, so a restarted archive/full node stayed in
+        // CatchUpSyncBlockHeader forever even with headers at the tip
+        // (m1/m2, 2026-10-10).
+        if raw.sync_state_epoch_gap.is_none() {
+            raw.sync_state_epoch_gap = Some(raw.snapshot_epoch_count as u64);
+        }
+
+        raw.additional_maintained_snapshot_count = raw
+            .additional_maintained_snapshot_count
+            .max(DEFAULT_SERVING_SNAPSHOT_COUNT);
+
+        if raw.provide_more_snapshot_for_sync
+            == vec![ProvideExtraSnapshotSyncConfig::StableCheckpoint]
+        {
+            raw.provide_more_snapshot_for_sync.push(
+                ProvideExtraSnapshotSyncConfig::EpochNearestMultipleOf(
+                    raw.snapshot_epoch_count,
+                ),
+            );
+        }
+    }
+
+    /// The lean **mining-node** profile (node type `mining` / legacy
+    /// `full-fast`). Goal: get a miner producing valid blocks at the tip as
+    /// fast as possible, then retain the **bare minimum** — just enough
+    /// recent state to compute the deferred root and mine. A miner is a
+    /// snapshot *consumer*, not a *source*: it does not retain or serve
+    /// extra snapshots (that's left to `full`/`archive` nodes), which keeps
+    /// its disk footprint and I/O small. See docs/fast-sync-design.md §5.18.
+    fn apply_mining_profile(&mut self) {
+        let raw = &mut self.raw_conf;
+        let snapshot_epoch_count = raw.snapshot_epoch_count as u64;
+
+        // --- Fast-sync DOWNLOAD tuning (reach the tip quickly) ---
+        raw.request_block_with_public = true;
+        raw.max_outgoing_peers =
+            raw.max_outgoing_peers.max(FULL_FAST_MIN_OUTGOING_PEERS);
+        raw.max_inflight_request_count = raw
+            .max_inflight_request_count
+            .max(FULL_FAST_MIN_INFLIGHT_REQUEST_COUNT);
+        raw.max_unprocessed_block_size_mb = raw
+            .max_unprocessed_block_size_mb
+            .max(FULL_FAST_MIN_UNPROCESSED_BLOCK_SIZE_MB);
+        raw.max_downloading_chunks = raw
+            .max_downloading_chunks
+            .max(FULL_FAST_MIN_DOWNLOADING_CHUNKS);
+        raw.chunk_size_byte =
+            raw.chunk_size_byte.max(FULL_FAST_MIN_CHUNK_SIZE_BYTES);
+        raw.storage_max_open_snapshots = raw
+            .storage_max_open_snapshots
+            .max(FULL_FAST_MIN_OPEN_SNAPSHOTS);
+        raw.storage_max_open_mpt_count =
+            raw.storage_max_open_mpt_count.max(FULL_FAST_MIN_OPEN_MPTS);
+        raw.paritydb_max_open_files = Some(
+            raw.paritydb_max_open_files
+                .unwrap_or_default()
+                .max(FULL_FAST_MIN_PARITYDB_OPEN_FILES),
+        );
+        raw.sync_state_epoch_gap = Some(
+            raw.sync_state_epoch_gap
+                .unwrap_or_default()
+                .max(snapshot_epoch_count),
+        );
+
+        // --- Lean retention (mine, don't serve/archive) ---
+        // Override the snapshot-serving defaults that ran earlier in
+        // `apply_snapshot_serving_defaults`: keep NO extra snapshots beyond
+        // the minimum the node needs for its own state, and don't retain
+        // any for serving peers. `keep_snapshot_before_stable_checkpoint`
+        // (default true) still preserves execution continuity (D.3).
+        raw.additional_maintained_snapshot_count = 0;
+        raw.provide_more_snapshot_for_sync = Vec::new();
     }
 
     fn network_id(&self) -> u64 {
@@ -438,46 +759,42 @@ impl Configuration {
         }
     }
 
-    fn paritydb_settings(&self) -> Option<db::ParityDbOpenConfig> {
-        if self.raw_conf.block_db_type != "paritydb" {
-            panic!(
-                "Invalid block_db_type parameter: {}. Expected paritydb",
-                self.raw_conf.block_db_type
-            );
-        }
-
-        let compression = self
-            .raw_conf
-            .paritydb_journal_compression
-            .as_ref()
-            .map(|c| db::ParityCompression::from_str(c).unwrap());
-
-        Some(db::ParityDbOpenConfig {
-            columns: self.raw_conf.paritydb_columns.unwrap_or(NUM_COLUMNS),
-            compression,
-            disable_wal: self.raw_conf.paritydb_disable_wal,
-            stats: false,
-        })
-    }
-
     fn state_db_backend(&self) -> StateDbBackend {
+        // Phase 5e: `state_db_type` accepts only `"mdbx"` now —
+        // the ParityDb fallback was removed alongside the paritydb
+        // impl files. `mdbx_sync_mode` was re-wired 2026-07-08
+        // after the fleet fork incident (report §5 rec #6) — the
+        // libmdbx default is `Durable` (fsync every commit), which
+        // is the worst throughput tier and NOT what a testnet
+        // needs.
         match self.raw_conf.state_db_type.as_str() {
             "mdbx" => {
-                let sync_mode = match self.raw_conf.mdbx_sync_mode.as_deref() {
-                    None | Some("safe") => MdbxSyncMode::Safe,
-                    Some("relaxed") => MdbxSyncMode::Relaxed,
-                    Some(other) => panic!(
-                        "Invalid mdbx_sync_mode parameter: {other}. Expected safe/relaxed",
-                    ),
+                let sync_mode = match self
+                    .raw_conf
+                    .mdbx_sync_mode
+                    .as_deref()
+                {
+                    None => mazze_storage::MdbxSyncMode::default(),
+                    Some(s) => mazze_storage::MdbxSyncMode::from_str_lossy(s)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "Invalid mdbx_sync_mode {:?}. Expected \
+                                 durable | nometasync | safenosync | \
+                                 utterlynosync (case-insensitive).",
+                                s
+                            )
+                        }),
                 };
                 StateDbBackend::Mdbx(MdbxConfig {
                     map_size_mb: self.raw_conf.mdbx_map_size_mb,
-                    max_readers: self.raw_conf.mdbx_max_readers,
                     sync_mode,
+                    autosync_mb: self.raw_conf.mdbx_autosync_mb,
+                    autosync_period_ms: self.raw_conf.mdbx_autosync_period_ms,
                 })
             }
             other => panic!(
-                "Invalid state_db_type parameter: {other}. Expected mdbx"
+                "Invalid state_db_type parameter: {other}. Only `mdbx` \
+                 is supported after Phase 5e."
             ),
         }
     }
@@ -575,10 +892,8 @@ impl Configuration {
 
         match self.raw_conf.block_db_type.as_str() {
             "paritydb" => {
-                let columns = self
-                    .raw_conf
-                    .paritydb_columns
-                    .unwrap_or(NUM_COLUMNS);
+                let columns =
+                    self.raw_conf.paritydb_columns.unwrap_or(NUM_COLUMNS);
                 let compression = self
                     .raw_conf
                     .paritydb_journal_compression
@@ -665,8 +980,6 @@ impl Configuration {
                     None => None,
                 },
                 force_recompute_height_during_construct_main: self.raw_conf.force_recompute_height_during_construct_main,
-                recovery_latest_mpt_snapshot: self.raw_conf.recovery_latest_mpt_snapshot,
-                use_isolated_db_for_mpt_table: self.raw_conf.use_isolated_db_for_mpt_table,
             },
             bench_mode: false,
             transaction_epoch_bound: self.raw_conf.transaction_epoch_bound,
@@ -677,6 +990,33 @@ impl Configuration {
             get_logs_filter_max_limit: self.raw_conf.get_logs_filter_max_limit,
             sync_state_starting_epoch: self.raw_conf.sync_state_starting_epoch,
             sync_state_epoch_gap: self.raw_conf.sync_state_epoch_gap,
+            trusted_checkpoint_height: self.raw_conf.trusted_checkpoint_height,
+            trusted_checkpoint_hash: self
+                .raw_conf
+                .trusted_checkpoint_hash
+                .as_ref()
+                .map(|s| {
+                    let stripped = s.strip_prefix("0x").unwrap_or(s);
+                    H256::from_str(stripped).expect(
+                        "trusted_checkpoint_hash: expected 32-byte hex (with or without 0x prefix)",
+                    )
+                }),
+            trusted_blame_height: self.raw_conf.trusted_blame_height,
+            trusted_blame_hash: self
+                .raw_conf
+                .trusted_blame_hash
+                .as_ref()
+                .map(|s| {
+                    let stripped = s.strip_prefix("0x").unwrap_or(s);
+                    H256::from_str(stripped).expect(
+                        "trusted_blame_hash: expected 32-byte hex (with or without 0x prefix)",
+                    )
+                }),
+            // Already validated in `Configuration::parse` →
+            // `assemble_trusted_checkpoints`, so this cannot fail here.
+            trusted_checkpoints: self
+                .assemble_trusted_checkpoints()
+                .expect("trusted checkpoints validated at config parse time"),
         };
         match self.raw_conf.node_type {
             Some(NodeType::Archive) => {
@@ -717,7 +1057,7 @@ impl Configuration {
             },
             |s| s.as_str(),
         );
-        ProofOfWorkConfig::new(
+        let mut pow_config = ProofOfWorkConfig::new(
             self.is_test_or_dev_mode(),
             mining_type,
             self.raw_conf.initial_difficulty,
@@ -725,7 +1065,10 @@ impl Configuration {
             self.raw_conf.stratum_port,
             stratum_secret,
             self.raw_conf.pow_problem_window_size,
-        )
+        );
+        pow_config.asert_in_test_mode =
+            self.is_test_or_dev_mode() && self.raw_conf.test_enable_asert;
+        pow_config
     }
 
     pub fn verification_config(
@@ -763,11 +1106,7 @@ impl Configuration {
                 .raw_conf
                 .additional_maintained_snapshot_count,
             consensus_param: ConsensusParam {
-                snapshot_epoch_count: if self.is_test_mode() {
-                    self.raw_conf.dev_snapshot_epoch_count
-                } else {
-                    SNAPSHOT_EPOCHS_CAPACITY
-                },
+                snapshot_epoch_count: self.raw_conf.snapshot_epoch_count,
                 era_epoch_count: self.raw_conf.era_epoch_count,
             },
             debug_snapshot_checker_threads:
@@ -818,14 +1157,15 @@ impl Configuration {
             keep_snapshot_before_stable_checkpoint: self
                 .raw_conf
                 .keep_snapshot_before_stable_checkpoint,
-            use_isolated_db_for_mpt_table: self
-                .raw_conf
-                .use_isolated_db_for_mpt_table,
-            use_isolated_db_for_mpt_table_height: self
-                .raw_conf
-                .use_isolated_db_for_mpt_table_height,
             keep_era_genesis_snapshot: self.raw_conf.keep_era_genesis_snapshot,
             state_db_backend: self.state_db_backend(),
+            snapshot_mdbx_config: SnapshotMdbxConfig {
+                initial_mb: self.raw_conf.snapshot_mdbx_initial_mb,
+                max_mb: self.raw_conf.snapshot_mdbx_max_mb,
+                growth_step_mb: self.raw_conf.snapshot_mdbx_growth_step_mb,
+            },
+            path_snapshot_mdbx_dir: mazze_data_path
+                .join(&*storage_dir::SNAPSHOT_MDBX_DIR),
         }
     }
 
@@ -875,6 +1215,19 @@ impl Configuration {
             max_trans_count_received_in_catch_up: self
                 .raw_conf
                 .max_trans_count_received_in_catch_up,
+            // Per-peer cumulative cap on tx submissions during normal
+            // phase. Operators can override via `hydra.toml`; default
+            // intentionally generous so a legit explorer-node peer
+            // sending high tx volume isn't disconnected by accident.
+            // See docs/security-audit.md finding H-3.
+            max_trans_count_per_peer_normal: self
+                .raw_conf
+                .max_trans_count_per_peer_normal
+                // Phase-0: this is a LIFETIME cap per peer, reset only on phase
+                // change, so at a few hundred TPS a link hits it and is
+                // force-disconnected (TooManyTrans) in ~16 min, desyncing pools.
+                // Raise 100x as a stopgap until it becomes a per-sec token bucket.
+                .unwrap_or(50_000_000),
             min_peers_tx_propagation: self.raw_conf.min_peers_tx_propagation,
             max_peers_tx_propagation: self.raw_conf.max_peers_tx_propagation,
             max_downloading_chunks: self.raw_conf.max_downloading_chunks,
@@ -911,6 +1264,9 @@ impl Configuration {
                 .raw_conf
                 .max_unprocessed_block_size_mb
                 * 1_000_000,
+            max_pending_execution_epochs: self
+                .raw_conf
+                .max_pending_execution_epochs,
             sync_expire_block_timeout: Duration::from_secs(
                 self.raw_conf.sync_expire_block_timeout_s,
             ),
@@ -941,6 +1297,9 @@ impl Configuration {
             max_downloading_manifest_attempts: self
                 .raw_conf
                 .max_downloading_manifest_attempts,
+            candidate_stall_deadline: Duration::from_millis(
+                self.raw_conf.snapshot_candidate_stall_deadline_ms,
+            ),
         }
     }
 
@@ -953,13 +1312,6 @@ impl Configuration {
             tx_cache_index_maintain_timeout: Duration::from_millis(
                 self.raw_conf.tx_cache_index_maintain_timeout_ms,
             ),
-            block_db_backend: match self.raw_conf.block_db_type.as_str() {
-                "paritydb" => BlockDbBackend::Paritydb,
-                other => panic!(
-                    "Invalid block_db_type parameter: {other}. Expected paritydb"
-                ),
-            },
-            paritydb_settings: self.paritydb_settings(),
             additional_maintained_block_body_epoch_count: self
                 .raw_conf
                 .additional_maintained_block_body_epoch_count,
@@ -987,7 +1339,21 @@ impl Configuration {
         // but `node_type = "archive"` is a shortcut for keeping all them.
         if !matches!(self.raw_conf.node_type, Some(NodeType::Archive)) {
             if conf.additional_maintained_block_body_epoch_count.is_none() {
-                conf.additional_maintained_block_body_epoch_count = Some(0);
+                // `full` keeps FULL_NODE_BLOCK_BODY_RETENTION_SECS of bodies
+                // (in epochs at one block per epoch, an upper bound, so it is
+                // at least that long for any DAG width). `full-fast` (miners)
+                // stays lean. Receipts/traces/results stay pruned: an archive
+                // rebuilding history only needs headers + bodies.
+                conf.additional_maintained_block_body_epoch_count =
+                    Some(match self.node_type() {
+                        NodeType::Full => {
+                            (mazze_parameters::pow::FULL_NODE_BLOCK_BODY_RETENTION_SECS
+                                * mazze_parameters::pow::ONE_SECOND_IN_USEC
+                                / self.pow_config().block_generation_period)
+                                as usize
+                        }
+                        _ => 0,
+                    });
             }
             if conf
                 .additional_maintained_execution_result_epoch_count
@@ -1326,6 +1692,94 @@ pub fn parse_hex_string<F: FromStr>(hex_str: &str) -> Result<F, F::Err> {
     hex_str.strip_prefix("0x").unwrap_or(hex_str).parse()
 }
 
+/// Parse the `trusted_checkpoints` config value: a comma-separated list of
+/// "checkpoint_height:checkpoint_hash:blame_height:blame_hash" entries.
+/// Empty/whitespace items are skipped. Era-boundary validation happens
+/// later in `assemble_trusted_checkpoints` (it needs `era_epoch_count`).
+fn parse_trusted_checkpoints_list(
+    s: &str,
+) -> Result<Vec<TrustedCheckpoint>, String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .enumerate()
+        .map(|(i, e)| {
+            parse_trusted_checkpoint_entry(e)
+                .map_err(|err| format!("trusted_checkpoints[{}]: {}", i, err))
+        })
+        .collect()
+}
+
+/// Parse one `trusted_checkpoints` list entry:
+/// "checkpoint_height:checkpoint_hash:block_number", or with the legacy blame
+/// anchor "checkpoint_height:checkpoint_hash:blame_height:blame_hash:
+/// block_number".
+fn parse_trusted_checkpoint_entry(
+    s: &str,
+) -> Result<TrustedCheckpoint, String> {
+    let parts: Vec<&str> = s.split(':').map(str::trim).collect();
+    let parse_u64 = |label: &str, v: &str| {
+        v.parse::<u64>()
+            .map_err(|e| format!("{} not a u64: {}", label, e))
+    };
+    match parts.len() {
+        3 => parse_trusted_checkpoint_parts(
+            parse_u64("checkpoint_height", parts[0])?,
+            parts[1],
+            None,
+            parse_u64("block_number", parts[2])?,
+        ),
+        5 => parse_trusted_checkpoint_parts(
+            parse_u64("checkpoint_height", parts[0])?,
+            parts[1],
+            Some((parse_u64("blame_height", parts[2])?, parts[3])),
+            parse_u64("block_number", parts[4])?,
+        ),
+        n => Err(format!(
+            "expected checkpoint_height:checkpoint_hash:block_number (or \
+             checkpoint_height:checkpoint_hash:blame_height:blame_hash:\
+             block_number), got {} colon-separated fields. block_number is \
+             the checkpoint block's `blockNumber` from mazze_getBlockByHash \
+             on a synced node; fast sync numbers every later block from it.",
+            n
+        )),
+    }
+}
+
+/// Build a `TrustedCheckpoint` from already-split parts, parsing the
+/// hashes as 32-byte hex (with or without a `0x` prefix).
+fn parse_trusted_checkpoint_parts(
+    checkpoint_height: u64, checkpoint_hash: &str,
+    blame: Option<(u64, &str)>, block_number: u64,
+) -> Result<TrustedCheckpoint, String> {
+    let parse_hash = |label: &str, s: &str| -> Result<H256, String> {
+        let stripped = s.strip_prefix("0x").unwrap_or(s);
+        H256::from_str(stripped)
+            .map_err(|e| format!("{} not 32-byte hex: {:?}", label, e))
+    };
+    Ok(TrustedCheckpoint {
+        checkpoint_height,
+        checkpoint_hash: parse_hash("checkpoint_hash", checkpoint_hash)?,
+        block_number,
+        blame: match blame {
+            None => None,
+            Some((h, hash)) => Some((h, parse_hash("blame_hash", hash)?)),
+        },
+    })
+}
+
+/// Weak-subjectivity fast-sync checkpoints shipped with the binary, keyed
+/// by native chain id. A fresh node with no operator-configured anchor can
+/// fast-sync from the newest of these that peers still serve, with zero
+/// operator harvesting. Empty until a mainnet / long-lived testnet pins
+/// values here — a frequently-relaunched dev fleet changes genesis each
+/// relaunch, so baked-in hashes would be invalidated there (use the
+/// `trusted_checkpoints` config list instead).
+/// See docs/fast-sync-design.md §5.16.
+fn baked_in_trusted_checkpoints(_chain_id: u32) -> Vec<TrustedCheckpoint> {
+    Vec::new()
+}
+
 pub fn parse_config_address_string(
     addr: &str, network: &Network,
 ) -> Result<Address, String> {
@@ -1360,8 +1814,9 @@ pub fn parse_config_address_string(
 #[cfg(test)]
 mod tests {
     use mazze_addr::Network;
+    use mazzecore::NodeType;
 
-    use crate::configuration::parse_config_address_string;
+    use crate::configuration::{parse_config_address_string, Configuration};
 
     #[test]
     fn test_config_address_string() {
@@ -1397,5 +1852,155 @@ mod tests {
             )
             .unwrap()
         );
+    }
+
+    #[test]
+    fn test_snapshot_epoch_count_is_canonical_in_test_mode() {
+        let mut conf = Configuration::default();
+        conf.raw_conf.mode = Some("test".into());
+        conf.raw_conf.node_type = Some(NodeType::Archive);
+        conf.raw_conf.snapshot_epoch_count = 2048;
+        conf.raw_conf.dev_snapshot_epoch_count = 2000;
+
+        conf.apply_node_type_profile();
+
+        assert_eq!(conf.raw_conf.snapshot_epoch_count, 2048);
+        assert_eq!(conf.raw_conf.dev_snapshot_epoch_count, 2048);
+        assert_eq!(
+            conf.storage_config(&NodeType::Archive)
+                .consensus_param
+                .snapshot_epoch_count,
+            2048
+        );
+    }
+
+    #[test]
+    fn test_trusted_checkpoints_assembly() {
+        use super::parse_trusted_checkpoints_list;
+
+        let h1 = "0x1111111111111111111111111111111111111111111111111111111111111111";
+        let b1 = "0x2222222222222222222222222222222222222222222222222222222222222222";
+        let h2 = "0x3333333333333333333333333333333333333333333333333333333333333333";
+        let b2 = "0x4444444444444444444444444444444444444444444444444444444444444444";
+
+        // Parser: two valid era-aligned entries (order as written).
+        let list =
+            format!("20000:{}:22100:{}:41000 , 40000:{}:82000", h1, b1, h2);
+        let parsed = parse_trusted_checkpoints_list(&list).unwrap();
+        assert_eq!(parsed.len(), 2);
+
+        // assemble(): era-aligned, sorted NEWEST-FIRST.
+        let mut conf = Configuration::default();
+        conf.raw_conf.era_epoch_count = 20000;
+        conf.raw_conf.trusted_checkpoints = parsed;
+        let out = conf.assemble_trusted_checkpoints().unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].checkpoint_height, 40000);
+        assert_eq!(out[0].block_number, 82000);
+        assert_eq!(out[0].blame, None);
+        assert_eq!(out[1].checkpoint_height, 20000);
+        assert_eq!(out[1].block_number, 41000);
+        assert_eq!(out[1].blame.map(|b| b.0), Some(22100));
+
+        // De-dup by checkpoint hash (same hash listed twice → one entry).
+        let dup = parse_trusted_checkpoints_list(&format!(
+            "20000:{}:22100:{}:41000,20000:{}:41000,40000:{}:82000",
+            h1, b1, h1, h2
+        ))
+        .unwrap();
+        let mut confd = Configuration::default();
+        confd.raw_conf.era_epoch_count = 20000;
+        confd.raw_conf.trusted_checkpoints = dup;
+        assert_eq!(confd.assemble_trusted_checkpoints().unwrap().len(), 2);
+
+        // A single checkpoint, or two that are not consecutive eras, cannot
+        // root a fast-sync node (it needs an era genesis and its stable).
+        for list in [
+            format!("40000:{}:82000", h2),
+            format!("20000:{}:41000,60000:{}:120000", h1, h2),
+        ] {
+            let mut c = Configuration::default();
+            c.raw_conf.era_epoch_count = 20000;
+            c.raw_conf.trusted_checkpoints =
+                parse_trusted_checkpoints_list(&list).unwrap();
+            assert!(c.assemble_trusted_checkpoints().is_err());
+        }
+
+        // Non-era-aligned checkpoint height is rejected.
+        let bad = parse_trusted_checkpoints_list(&format!(
+            "12345:{}:24000",
+            h1
+        ))
+        .unwrap();
+        let mut conf2 = Configuration::default();
+        conf2.raw_conf.era_epoch_count = 20000;
+        conf2.raw_conf.trusted_checkpoints = bad;
+        assert!(conf2.assemble_trusted_checkpoints().is_err());
+
+        // blame_height <= checkpoint_height is rejected.
+        let bad2 = parse_trusted_checkpoints_list(&format!(
+            "20000:{}:19999:{}:41000",
+            h1, b1
+        ))
+        .unwrap();
+        let mut conf3 = Configuration::default();
+        conf3.raw_conf.era_epoch_count = 20000;
+        conf3.raw_conf.trusted_checkpoints = bad2;
+        assert!(conf3.assemble_trusted_checkpoints().is_err());
+
+        // A blame block closer than snapshot_epoch_count +
+        // DEFERRED_STATE_EPOCH_COUNT + 1 cannot prove the checkpoint.
+        let close = parse_trusted_checkpoints_list(&format!(
+            "20000:{}:20100:{}:41000",
+            h1, b1
+        ))
+        .unwrap();
+        let mut conf5 = Configuration::default();
+        conf5.raw_conf.era_epoch_count = 20000;
+        conf5.raw_conf.snapshot_epoch_count = 2000;
+        conf5.raw_conf.trusted_checkpoints = close;
+        assert!(conf5.assemble_trusted_checkpoints().is_err());
+
+        // Legacy scalars are all-or-nothing (1/5 set → error).
+        let mut conf4 = Configuration::default();
+        conf4.raw_conf.era_epoch_count = 20000;
+        conf4.raw_conf.trusted_checkpoint_height = Some(20000);
+        assert!(conf4.assemble_trusted_checkpoints().is_err());
+
+        // A complete legacy scalar set merges into one anchor.
+        let mut conf5 = Configuration::default();
+        conf5.raw_conf.era_epoch_count = 20000;
+        conf5.raw_conf.trusted_checkpoint_height = Some(20000);
+        conf5.raw_conf.trusted_checkpoint_hash = Some(h1.to_string());
+        conf5.raw_conf.trusted_blame_height = Some(22100);
+        conf5.raw_conf.trusted_blame_hash = Some(b1.to_string());
+        assert!(conf5.assemble_trusted_checkpoints().is_err());
+        conf5.raw_conf.trusted_checkpoint_block_number = Some(41000);
+        conf5.raw_conf.trusted_checkpoints =
+            parse_trusted_checkpoints_list(&format!("40000:{}:82000", h2))
+                .unwrap();
+        let merged = conf5.assemble_trusted_checkpoints().unwrap();
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].checkpoint_height, 40000);
+        assert_eq!(merged[1].checkpoint_height, 20000);
+        assert_eq!(merged[1].block_number, 41000);
+
+        // A malformed entry is a parse error.
+        assert!(parse_trusted_checkpoints_list("20000:not-hex:20100:also-bad")
+            .is_err());
+        assert!(parse_trusted_checkpoints_list("missing:fields").is_err());
+        // The pre-§5.19 4-field form lacks the block number.
+        assert!(parse_trusted_checkpoints_list(&format!(
+            "20000:{}:42100:{}",
+            h1, b1
+        ))
+        .is_err());
+        // Height 0 is the genesis, not a checkpoint.
+        let zero =
+            parse_trusted_checkpoints_list(&format!("0:{}:0", h1)).unwrap();
+        let mut conf6 = Configuration::default();
+        conf6.raw_conf.era_epoch_count = 20000;
+        conf6.raw_conf.trusted_checkpoints = zero;
+        assert!(conf6.assemble_trusted_checkpoints().is_err());
     }
 }

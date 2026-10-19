@@ -65,12 +65,32 @@ impl Handleable for GetBlockHeadersResponse {
             return Ok(());
         }
 
-        let req = ctx.match_request(self.request_id)?;
-        let delay = req.delay;
-        let req = req.downcast_ref::<GetBlockHeaders>(
-            ctx.io,
-            &ctx.manager.request_manager,
-        )?;
+        let (requested, delay): (HashSet<H256>, Option<Duration>) =
+            match ctx.match_request(self.request_id) {
+                Ok(req) => {
+                    let delay = req.delay;
+                    let req = req.downcast_ref::<GetBlockHeaders>(
+                        ctx.io,
+                        &ctx.manager.request_manager,
+                    )?;
+                    (req.hashes.iter().cloned().collect(), delay)
+                }
+                Err(e) => match &e.0 {
+                    ErrorKind::RequestNotFound => {
+                        trace!(
+                            "late GetBlockHeadersResponse request_id={} peer={:?} headers={}",
+                            self.request_id,
+                            ctx.node_id,
+                            self.headers.len()
+                        );
+                        (
+                            self.headers.iter().map(|h| h.hash()).collect(),
+                            None,
+                        )
+                    }
+                    _ => return Err(e),
+                },
+            };
 
         // keep first time drift validation error to return later
         let now_timestamp = SystemTime::now()
@@ -107,7 +127,6 @@ impl Handleable for GetBlockHeadersResponse {
         };
 
         // re-request headers requested but not received
-        let requested: HashSet<H256> = req.hashes.iter().cloned().collect();
         self.handle_block_headers(
             ctx,
             &self.headers,
@@ -121,7 +140,23 @@ impl Handleable for GetBlockHeadersResponse {
 }
 
 impl GetBlockHeadersResponse {
-    // FIXME Remove recursive call if block headers exist db
+    pub(crate) fn handle_local_headers(
+        ctx: &Context, headers: Vec<BlockHeader>,
+    ) -> Result<(), Error> {
+        let response = GetBlockHeadersResponse {
+            request_id: 0,
+            headers,
+        };
+        let requested = response.headers.iter().map(|h| h.hash()).collect();
+        response.handle_block_headers(
+            ctx,
+            &response.headers,
+            requested,
+            None,
+            None,
+        )
+    }
+
     fn handle_block_headers(
         &self, ctx: &Context, block_headers: &Vec<BlockHeader>,
         requested: HashSet<H256>, chosen_peer: Option<NodeId>,
@@ -182,6 +217,10 @@ impl GetBlockHeadersResponse {
                     header.height(),
                     era_genesis_height
                 );
+                // Still record it as pre-checkpoint history, so in-era
+                // blocks referencing it stop waiting for it (a node rooted
+                // at a fast-sync anchor has no other record of it).
+                ctx.manager.graph.record_pre_era_header(header);
                 continue;
             }
 
@@ -210,10 +249,18 @@ impl GetBlockHeadersResponse {
                     true, /* persistent */
                 )
             };
-            if insert_result.is_invalid() {
+            if insert_result.is_peer_fault() {
+                // Only true `Invalid` (malformed / wrong chain) triggers
+                // the `has_invalid_header` disconnect path. `AtCapacity`
+                // (our local arena is full) is a LOCAL condition — do
+                // NOT punish the peer for it, or a lagging node will
+                // systematically drop the very peers it needs to catch
+                // up with. See fleet incident 2026-07-08.
                 has_invalid_header = true;
                 continue;
             } else if !insert_result.is_new_valid() {
+                // AlreadyProcessed*, TemporarySkipped, AtCapacity — all
+                // soft outcomes, drop silently.
                 continue;
             }
 

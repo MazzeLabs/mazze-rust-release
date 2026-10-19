@@ -11,6 +11,7 @@ use std::str::FromStr;
 pub enum NodeType {
     Archive,
     Full,
+    FullFast,
     Light,
     Unknown,
 }
@@ -37,6 +38,9 @@ impl From<&NodeType> for u8 {
         match node_type {
             NodeType::Archive => 0,
             NodeType::Full => 1,
+            // `full-fast` is a local operator profile and remains wire
+            // compatible with regular full nodes.
+            NodeType::FullFast => 1,
             NodeType::Light => 2,
             NodeType::Unknown => 0xff,
         }
@@ -50,6 +54,11 @@ impl FromStr for NodeType {
         let node_type = match s {
             "archive" => Self::Archive,
             "full" => Self::Full,
+            // `mining`/`mining-node` is the preferred name for the lean
+            // fast-sync miner profile; `full-fast` is kept as an alias.
+            // All map to the same wire-compatible (full-tier) node type.
+            "full-fast" | "full_fast" | "mining" | "mining-node"
+            | "mining_node" => Self::FullFast,
             "light" => Self::Light,
             _ => Self::Unknown,
         };

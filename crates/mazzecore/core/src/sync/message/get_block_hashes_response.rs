@@ -2,20 +2,33 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
+//! Single-version pre-launch sync protocol — `GetBlockHashesResponse`
+//! carries the canonical V4 shape (per-epoch grouping via
+//! `Vec<EpochHashes>`). The legacy flat-hash V1–V3 shape has been
+//! dropped along with the rest of the consolidation; commit history
+//! preserves it.
+
 use crate::{
     message::RequestId,
     sync::{
         message::{Context, GetBlockHashesByEpoch, Handleable},
-        Error,
+        Error, ErrorKind,
     },
 };
 use mazze_types::H256;
 use rlp_derive::{RlpDecodable, RlpEncodable};
+use std::collections::HashSet;
+
+#[derive(Debug, PartialEq, RlpEncodable, RlpDecodable)]
+pub struct EpochHashes {
+    pub epoch: u64,
+    pub hashes: Vec<H256>,
+}
 
 #[derive(Debug, PartialEq, RlpEncodable, RlpDecodable)]
 pub struct GetBlockHashesResponse {
     pub request_id: RequestId,
-    pub hashes: Vec<H256>,
+    pub epoch_hashes: Vec<EpochHashes>,
 }
 
 impl Handleable for GetBlockHashesResponse {
@@ -28,27 +41,64 @@ impl Handleable for GetBlockHashesResponse {
             ctx.io,
             &ctx.manager.request_manager,
         )?;
+        let requested_epochs =
+            epoch_req.epochs.iter().cloned().collect::<HashSet<_>>();
+        let mut received_epochs = HashSet::new();
+        let mut hashes = Vec::new();
+        let anchor = ctx
+            .manager
+            .graph
+            .fast_sync_anchor
+            .lock()
+            .as_ref()
+            .map(|a| a.root.clone());
 
-        // assume received everything
-        // FIXME: peer should signal error?
-        let req = epoch_req.epochs.iter().cloned().collect();
-        let rec = epoch_req.epochs.iter().cloned().collect();
-        ctx.manager
-            .request_manager
-            .epochs_received(ctx.io, req, rec, delay);
+        for epoch_hashes in self.epoch_hashes {
+            if !requested_epochs.contains(&epoch_hashes.epoch)
+                || !received_epochs.insert(epoch_hashes.epoch)
+            {
+                bail!(ErrorKind::UnexpectedResponse);
+            }
+            // Fast-sync anchor bootstrap: keep the anchor's own epoch set
+            // (the pivot, i.e. the anchor, is its last block). Our
+            // consensus is rooted at the anchor and never orders that
+            // epoch itself. See docs/fast-sync-design.md §5.19.
+            if let Some(anchor) = &anchor {
+                if epoch_hashes.epoch == anchor.checkpoint_height
+                    && epoch_hashes.hashes.last()
+                        == Some(&anchor.checkpoint_hash)
+                {
+                    ctx.manager
+                        .graph
+                        .data_man
+                        .insert_executed_epoch_set_hashes_to_db(
+                            anchor.checkpoint_height,
+                            &epoch_hashes.hashes,
+                        );
+                }
+            }
+            hashes.extend(epoch_hashes.hashes);
+        }
 
-        // request missing headers
-        let missing_headers = self
-            .hashes
+        if received_epochs.is_empty() {
+            warn!(
+                "Empty GetBlockHashesResponse from peer {:?} for epochs {:?}",
+                ctx.node_id, epoch_req.epochs
+            );
+        }
+
+        ctx.manager.request_manager.epochs_received(
+            ctx.io,
+            requested_epochs,
+            received_epochs,
+            delay,
+        );
+
+        let missing_headers = hashes
             .iter()
-            .filter(|h| !ctx.manager.graph.contains_block_header(&h))
+            .filter(|h| !ctx.manager.graph.contains_block_header(h))
             .cloned()
             .collect();
-
-        // NOTE: this is to make sure no section of the DAG is skipped
-        // e.g. if the request for epoch 4 is lost or the reply is in-
-        // correct, the request for epoch 5 should recursively request
-        // all dependent blocks (see on_block_headers_response)
 
         ctx.manager.request_block_headers(
             ctx.io,
@@ -56,10 +106,6 @@ impl Handleable for GetBlockHashesResponse {
             missing_headers,
             true, /* ignore_db */
         );
-
-        // TODO: handle empty response
-
-        // try requesting some more epochs
         ctx.manager.start_sync(ctx.io);
 
         Ok(())

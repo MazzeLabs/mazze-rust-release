@@ -97,6 +97,54 @@ fn test_slicing_position() {
     }
 }
 
+/// Key-values larger than the chunk size: every chunk takes one key-value,
+/// boundaries strictly increase (also when slicing resumes from a boundary,
+/// as a manifest continuation page does) and slicing ends. The slicer used
+/// to stop for good at the first oversized key-value.
+#[test]
+fn test_slicing_values_larger_than_chunk() {
+    let mut keys: Vec<Vec<u8>> = generate_keys(TEST_NUMBER_OF_KEYS)
+        .into_iter()
+        .take(200)
+        .collect();
+    keys.sort();
+    keys.dedup();
+    let mpt_kv_iter = DumpedMptKvIterator {
+        kv: keys
+            .iter()
+            .map(|k| (k[..].into(), vec![7u8; 100].into()))
+            .collect(),
+    };
+    let mut snapshot_mpt = FakeSnapshotMptDb::default();
+    MptMerger::new(None, &mut snapshot_mpt)
+        .merge(&mpt_kv_iter)
+        .unwrap();
+    let chunk_size = 10;
+
+    let slice = |mpt: &mut FakeSnapshotMptDb, start: Option<&[u8]>| {
+        let mut slicer = match start {
+            None => MptSlicer::new(mpt).unwrap(),
+            Some(key) => MptSlicer::new_from_key(mpt, key).unwrap(),
+        };
+        let mut bounds: Vec<Vec<u8>> = vec![];
+        for _ in 0..keys.len() + 1 {
+            slicer.advance(chunk_size).unwrap();
+            match slicer.get_range_end_key() {
+                Some(key) => bounds.push(Vec::from(key)),
+                None => return bounds,
+            }
+        }
+        panic!("slicing did not end: {} boundaries", bounds.len());
+    };
+
+    let bounds = slice(&mut snapshot_mpt, None);
+    assert_eq!(bounds, keys[1..].to_vec());
+
+    // Resume from a boundary, like a manifest continuation page.
+    let resumed = slice(&mut snapshot_mpt, Some(&keys[50]));
+    assert_eq!(resumed, keys[51..].to_vec());
+}
+
 use crate::{
     impls::merkle_patricia_trie::{mpt_cursor::rlp_key_value_len, MptMerger},
     tests::{

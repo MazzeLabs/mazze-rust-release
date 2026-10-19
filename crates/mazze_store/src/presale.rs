@@ -14,13 +14,9 @@
 // You should have received a copy of the GNU General Public License
 // along with OpenEthereum.  If not, see <http://www.gnu.org/licenses/>.
 
-use crypto::{
-    self, pbkdf2,
-    publickey::{Address, KeyPair, Secret},
-    Keccak256,
-};
+use crate::crypto::{self, pbkdf2, Keccak256};
+use crate::mazzekey::{Address, KeyPair, Secret};
 use mazzekey::Password;
-// use mazzekey::Secret;
 use crate::json;
 use crate::Error;
 use std::{fs, num::NonZeroU32, path::Path};
@@ -79,9 +75,13 @@ impl PresaleWallet {
         .map_err(|_| Error::InvalidPassword)?;
         let unpadded = &key[..len];
 
-        let secret = Secret::import_key(&unpadded.keccak256())?;
+        let secret = Secret::from_unsafe_slice(&unpadded.keccak256())?;
         if let Ok(kp) = KeyPair::from_secret(secret) {
-            if kp.address() == self.address {
+            // Presale-wallet addresses are stored in the legacy
+            // Ethereum no-nibble format; compare with `evm_address()`
+            // rather than `address()` (which sets the Mazze user-account
+            // type-nibble).
+            if kp.evm_address() == self.address {
                 return Ok(kp);
             }
         }

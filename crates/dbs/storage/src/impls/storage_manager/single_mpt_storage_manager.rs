@@ -3,6 +3,7 @@ use crate::{
     impls::{
         delta_mpt::node_ref_map::DeltaMptId, single_mpt_state::SingleMptState,
         state_manager::DeltaDbManager,
+        storage_db::kvdb_mdbx::MdbxEnv,
     },
     node_memory_manager::{
         DeltaMptsCacheAlgorithm, DeltaMptsNodeMemoryManager,
@@ -37,8 +38,17 @@ impl SingleMptStorageManager {
         if !db_path.exists() {
             fs::create_dir_all(&db_path).expect("db path create error");
         }
+        // Storage Phase 4c: SingleMpt now runs on MDBX (via
+        // `DeltaDbManagerMdbx`). Each `SingleMptStorageManager`
+        // owns its own MDBX env at its own `db_path` — no sharing
+        // with the main `storage_db/mdbx/` env used by the primary
+        // `StorageManager`. This isolates the single-MPT optimisation
+        // (which only some node configs enable) from the shared
+        // hot-tier env's map size and column budget.
+        let single_mpt_env = MdbxEnv::open(&db_path)
+            .expect("SingleMpt MDBX env open error");
         let db_manager = Arc::new(SingleMptDbManager {
-            db_manager: DeltaDbManager::new(db_path)
+            db_manager: DeltaDbManager::new(single_mpt_env, db_path)
                 .expect("DeltaDb initialize error"),
             opened_mpt: Mutex::new(None),
         });

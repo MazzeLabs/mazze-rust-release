@@ -13,12 +13,24 @@ use crate::{
             Handleable, Key, KeyContainer,
         },
         request_manager::{AsAny, Request},
-        Error, ErrorKind, ProtocolConfiguration, SYNC_PROTO_V1, SYNC_PROTO_V3,
+        Error, ErrorKind, ProtocolConfiguration, SYNC_PROTO_V1,
     },
 };
+use lazy_static::lazy_static;
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_types::H256;
-use metrics::MeterTimer;
+use metrics::{register_meter_with_group, Meter, MeterTimer};
+
+lazy_static! {
+    /// Bumped when a peer is dropped for exceeding the per-peer tx
+    /// submission cap (either catch-up or normal-phase). See
+    /// docs/security-audit.md finding H-3.
+    static ref TXPOOL_REJECTED_PER_PEER_CAP: std::sync::Arc<dyn Meter> =
+        register_meter_with_group(
+            "txpool",
+            "rejected_per_peer_cap_total"
+        );
+}
 use network::service::ProtocolVersion;
 use primitives::{transaction::TxPropagateId, TransactionWithSignature};
 use priority_send_queue::SendQueuePriority;
@@ -57,11 +69,15 @@ impl Handleable for Transactions {
         let peer_info = ctx.manager.syn.get_peer_info(&ctx.node_id)?;
         let should_disconnect = {
             let mut peer_info = peer_info.write();
+            // Always tally the cumulative submission count so the cap
+            // applies in both catch-up and normal phases. See
+            // docs/security-audit.md finding H-3.
+            peer_info.received_transaction_count += transactions.len();
             if peer_info
                 .notified_capabilities
                 .contains(DynamicCapability::NormalPhase(false))
             {
-                peer_info.received_transaction_count += transactions.len();
+                // Catch-up phase: tighter historical cap.
                 peer_info.received_transaction_count
                     > ctx
                         .manager
@@ -69,11 +85,19 @@ impl Handleable for Transactions {
                         .max_trans_count_received_in_catch_up
                         as usize
             } else {
-                false
+                // Normal phase: per-peer cumulative cap. Past this
+                // the peer is disconnected; the metric below ticks.
+                peer_info.received_transaction_count
+                    > ctx
+                        .manager
+                        .protocol_config
+                        .max_trans_count_per_peer_normal
+                        as usize
             }
         };
 
         if should_disconnect {
+            TXPOOL_REJECTED_PER_PEER_CAP.mark(1);
             bail!(ErrorKind::TooManyTrans);
         }
 
@@ -308,7 +332,7 @@ impl AsAny for GetTransactions {
     }
 }
 
-mark_msg_version_bound!(GetTransactions, SYNC_PROTO_V1, SYNC_PROTO_V3);
+mark_msg_version_bound!(GetTransactions, SYNC_PROTO_V1, SYNC_PROTO_V1);
 impl Message for GetTransactions {
     fn msg_id(&self) -> MsgId {
         msgid::GET_TRANSACTIONS
@@ -461,6 +485,7 @@ pub struct GetTransactionsFromTxHashes {
     pub window_index: usize,
     pub indices: Vec<usize>,
     pub tx_hashes: HashSet<H256>,
+    pub requested_tx_hashes: Vec<H256>,
 }
 
 impl_request_id_methods!(GetTransactionsFromTxHashes);
@@ -478,7 +503,7 @@ impl AsAny for GetTransactionsFromTxHashes {
 mark_msg_version_bound!(
     GetTransactionsFromTxHashes,
     SYNC_PROTO_V1,
-    SYNC_PROTO_V3
+    SYNC_PROTO_V1
 );
 impl Message for GetTransactionsFromTxHashes {
     fn msg_id(&self) -> MsgId {
@@ -576,6 +601,7 @@ impl Decodable for GetTransactionsFromTxHashes {
             window_index: rlp.val_at(1)?,
             indices: rlp.list_at(2)?,
             tx_hashes: HashSet::new(),
+            requested_tx_hashes: Vec::new(),
         })
     }
 }
@@ -601,7 +627,36 @@ impl Handleable for GetTransactionsResponse {
             &ctx.manager.request_manager,
         )?;
 
-        // FIXME: Do some check based on transaction request.
+        if self.transactions.len() != req.indices.len() {
+            warn!(
+                "Unexpected GetTransactionsResponse transaction count from peer {:?}: expected {}, got {}",
+                ctx.node_id,
+                req.indices.len(),
+                self.transactions.len()
+            );
+            bail!(ErrorKind::UnexpectedResponse);
+        }
+        if self.tx_hashes.len() != req.tx_hashes_indices.len() {
+            warn!(
+                "Unexpected GetTransactionsResponse tx-hash count from peer {:?}: expected {}, got {}",
+                ctx.node_id,
+                req.tx_hashes_indices.len(),
+                self.tx_hashes.len()
+            );
+            bail!(ErrorKind::UnexpectedResponse);
+        }
+        if self.transactions.iter().any(|tx| {
+            let hash = tx.hash();
+            let short_id =
+                TransactionDigests::to_u24(hash[29], hash[30], hash[31]);
+            !req.tx_hashes.contains(&hash) && !req.short_ids.contains(&short_id)
+        }) {
+            warn!(
+                "Unexpected GetTransactionsResponse payload from peer {:?}: response contains transactions outside the requested digest set",
+                ctx.node_id
+            );
+            bail!(ErrorKind::UnexpectedResponse);
+        }
 
         debug!(
             "Received {:?} transactions and {:?} tx hashes from Peer {:?}",
@@ -681,7 +736,17 @@ impl Handleable for GetTransactionsFromTxHashesResponse {
             &ctx.manager.request_manager,
         )?;
 
-        // FIXME: Do some check based on transaction request.
+        let returned_hashes: Vec<H256> =
+            self.transactions.iter().map(|tx| tx.hash()).collect();
+        if returned_hashes != req.requested_tx_hashes {
+            warn!(
+                "Unexpected GetTransactionsFromTxHashesResponse from peer {:?}: requested {:?}, got {:?}",
+                ctx.node_id,
+                req.requested_tx_hashes,
+                returned_hashes
+            );
+            bail!(ErrorKind::UnexpectedResponse);
+        }
 
         debug!(
             "Received {:?} transactions from Peer {:?}",

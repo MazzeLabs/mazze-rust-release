@@ -99,8 +99,31 @@ impl SynchronizationService {
 
     pub fn on_mined_block(&self, block: Block) -> Result<(), Error> {
         let hash = block.hash();
-        self.protocol_handler.on_mined_block(block);
+        // Keep a copy for the full-body broadcast below; `on_mined_block`
+        // consumes the block and may drop it (mining guardrails).
+        let block_for_broadcast = block.clone();
+        let inserted = self.protocol_handler.on_mined_block(block);
+        if !inserted {
+            // Guardrail dropped it — don't advertise a block we didn't keep.
+            return Ok(());
+        }
+        // Broadcast the FULL block body (NewBlock) so peers have it even if
+        // this node shuts down before they lazily fetch it via GetBlocks.
+        // Without this, a mined uncle whose producer leaves would be lost and
+        // wedge any node referencing it (hash-only relay = `relay_blocks`).
+        self.broadcast_new_block(&block_for_broadcast)?;
         self.relay_blocks(vec![hash])
+    }
+
+    fn broadcast_new_block(&self, block: &Block) -> Result<(), Error> {
+        self.network.with_context(
+            self.protocol_handler.clone(),
+            self.protocol,
+            |io| {
+                self.protocol_handler.broadcast_new_block(io, block);
+                Ok(())
+            },
+        )?
     }
 
     pub fn expire_block_gc(&self, timeout: u64) {

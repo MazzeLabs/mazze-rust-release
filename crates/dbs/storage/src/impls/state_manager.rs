@@ -2,8 +2,21 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-pub type DeltaDbManager = DeltaDbManagerParitydb;
-pub type SnapshotDbManager = SnapshotDbManagerParitydb;
+/// Storage Phase 4c + 5c cutover: point BOTH the delta MPT
+/// manager AND the snapshot manager at their MDBX-native
+/// implementations. See:
+/// - [`docs/internal/storage-delta-mpt-migration.md`](../../../../docs/internal/storage-delta-mpt-migration.md)
+///   for the 4c delta-MPT migration.
+/// - [`docs/internal/storage-phase-5-cde-migration.md`](../../../../docs/internal/storage-phase-5-cde-migration.md)
+///   for the 5c snapshot-tier migration.
+///
+/// Every consumer that referenced `DeltaDbManagerParitydb` /
+/// `SnapshotDbManagerParitydb` indirectly (via these aliases)
+/// now transparently uses the MDBX backend — no call-site
+/// changes required. The paritydb impls stay in-tree until 5e
+/// deletes them post-fleet-validation.
+pub type DeltaDbManager = DeltaDbManagerMdbx;
+pub type SnapshotDbManager = SnapshotDbManagerMdbx;
 pub type SnapshotDb = <SnapshotDbManager as SnapshotDbManagerTrait>::SnapshotDb;
 
 pub struct StateTrees {
@@ -826,8 +839,8 @@ use crate::{
         errors::*,
         replicated_state::ReplicatedState,
         storage_db::{
-            delta_db_manager_paritydb::DeltaDbManagerParitydb,
-            snapshot_db_manager_paritydb::SnapshotDbManagerParitydb,
+            delta_db_manager_mdbx::DeltaDbManagerMdbx,
+            snapshot_db_manager_mdbx::SnapshotDbManagerMdbx,
         },
         storage_manager::{
             single_mpt_storage_manager::SingleMptStorageManager,

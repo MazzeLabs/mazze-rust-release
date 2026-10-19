@@ -156,7 +156,14 @@ impl<'a, O: ExecutiveObserver> PreCheckedExecutive<'a, O> {
         let sender = tx.sender();
         let nonce = tx.nonce();
 
-        let init_gas = tx.gas() - cost.base_gas;
+        // `FreshExecutive::check_intrinsic_gas` should already have
+        // dropped any tx with `tx.gas() < base_gas`. `checked_sub +
+        // expect` here turns a bypass into a tagged assertion instead
+        // of a U256 underflow panic.
+        let init_gas = tx.gas().checked_sub(cost.base_gas.into()).expect(
+            "tx.gas() < base_gas reached pre_checked_executive — \
+             FreshExecutive::check_intrinsic_gas was bypassed",
+        );
 
         match tx.action() {
             Action::Create => {

@@ -6,7 +6,8 @@ use crate::{
     message::{Message, RequestId},
     sync::{
         message::{
-            Context, GetBlockHashesResponse, Handleable, Key, KeyContainer,
+            Context, EpochHashes, GetBlockHashesResponse, Handleable, Key,
+            KeyContainer,
         },
         request_manager::{AsAny, Request},
         Error, ProtocolConfiguration,
@@ -64,22 +65,23 @@ impl Request for GetBlockHashesByEpoch {
 
 impl Handleable for GetBlockHashesByEpoch {
     fn handle(self, ctx: &Context) -> Result<(), Error> {
-        let hashes = self
+        let epoch_hashes = self
             .epochs
             .iter()
             .take(MAX_EPOCHS_TO_SEND as usize)
-            .map(|&e| ctx.manager.graph.get_all_block_hashes_by_epoch(e))
+            .map(|&epoch| {
+                ctx.manager
+                    .graph
+                    .get_all_block_hashes_by_epoch(epoch)
+                    .map(|hashes| (epoch, hashes))
+            })
             .filter_map(Result::ok)
-            .fold(vec![], |mut res, sub| {
-                res.extend(sub);
-                res
-            });
+            .map(|(epoch, hashes)| EpochHashes { epoch, hashes })
+            .collect::<Vec<_>>();
 
-        let response = GetBlockHashesResponse {
+        ctx.send_response(&GetBlockHashesResponse {
             request_id: self.request_id,
-            hashes,
-        };
-
-        ctx.send_response(&response)
+            epoch_hashes,
+        })
     }
 }

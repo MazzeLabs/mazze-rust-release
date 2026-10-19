@@ -86,11 +86,9 @@ pub struct NodeDatabase {
     // Add or updated by incoming TCP connection or PING discovery message.
     untrusted_nodes: NodeTable,
 
-    // Blacklisted nodes are refused to connect or update via UDP discovery.
-    // Generally, node is blacklisted due to protocol mismatch in runtime.
+    // Inert table kept for on-disk compatibility only. Blacklisting is
+    // disabled by design (see `set_blacklisted`), so this is never populated.
     blacklisted_nodes: NodeTable,
-    // Maximum duration to blacklist a node since last contact.
-    blacklisted_lifetime: Duration,
 
     // IP address/subnet index for trusted and untrusted nodes.
     ip_limit: NodeIpLimit,
@@ -117,7 +115,6 @@ impl NodeDatabase {
             trusted_nodes,
             untrusted_nodes,
             blacklisted_nodes: NodeTable::new(path, BLACKLISTED_NODES_FILE),
-            blacklisted_lifetime: Duration::from_secs(7 * 24 * 3600),
             ip_limit,
             trusted_node_tag_index,
         };
@@ -566,49 +563,31 @@ impl NodeDatabase {
         );
     }
 
-    /// Set the specified node to blacklisted.
+    /// Blacklisting is DISABLED by design.
+    ///
+    /// This is a permissionless, decentralized network. A persistent
+    /// (7-day) ban that a handful of coordinating peers can land on an
+    /// honest, just-joining node — worst of all a new miner at genesis
+    /// when total hashpower/difficulty is low — is a censorship and
+    /// centralization vector. Empirically it also turned transient
+    /// partitions into a persistent fork on the fleet (banned peers
+    /// couldn't reconnect for a week). So we never move a node into the
+    /// blacklist table; we keep only the soft, self-healing reputation
+    /// signal (`note_failure` → demotion), which throttles/deprioritizes
+    /// a misbehaving peer without permanently excluding it.
+    /// See docs/fast-sync-design.md §5.15.
     pub fn set_blacklisted(&mut self, id: &NodeId) {
-        // update the last failure time
+        // Soft demotion only — NO permanent ban.
         self.note_failure(
             id, true,  /* by_connection */
             false, /* trusted_only */
         );
-
-        // move to blacklisted node table
-        if let Some(node) = self.remove(id) {
-            self.blacklisted_nodes
-                .add_node(node, false /* preserve_last_contact */);
-        }
     }
 
-    /// Check if the specified node is blacklisted.
-    /// If blacklisted for a long time, it will be removed from blacklisted node
-    /// table.
-    pub fn evaluate_blacklisted(&mut self, id: &NodeId) -> bool {
-        let node = match self.blacklisted_nodes.get_mut(id) {
-            Some(node) => node,
-            None => return false,
-        };
-
-        let last_contact = match node.last_contact {
-            Some(contact) => contact.time(),
-            None => {
-                // By default, the last_contact should not be empty.
-                // If changed to None (e.g. manually), just treat
-                // the node as non-blacklisted.
-                self.blacklisted_nodes.remove_with_id(id);
-                return false;
-            }
-        };
-
-        if let Ok(elapsed) = last_contact.elapsed() {
-            if elapsed > self.blacklisted_lifetime {
-                self.blacklisted_nodes.remove_with_id(id);
-                return false;
-            }
-        }
-
-        true
+    /// Blacklisting is disabled (see `set_blacklisted`): no node is ever
+    /// considered blacklisted, so an honest peer can always (re)connect.
+    pub fn evaluate_blacklisted(&mut self, _id: &NodeId) -> bool {
+        false
     }
 }
 
@@ -769,32 +748,23 @@ mod tests {
     }
 
     #[test]
-    fn test_blacklisted() {
+    fn test_blacklisting_disabled() {
+        // Blacklisting is disabled by design (permissionless, decentralized
+        // network — see `set_blacklisted`). `set_blacklisted` must never
+        // ban a node: `evaluate_blacklisted` stays false, and the node is
+        // not excluded, so an honest peer can always (re)connect.
         let mut db = NodeDatabase::new(None, 2);
 
         let n = new_entry("127.0.0.1:999");
         db.insert_trusted(n.clone());
-        assert_eq!(db.get(&n.id, true /* trusted_only */).unwrap().id, n.id);
         assert_eq!(db.evaluate_blacklisted(&n.id), false);
 
-        // set to blacklisted
+        // "blacklist" it — should be a no-op as far as banning goes.
         db.set_blacklisted(&n.id);
-        assert_eq!(db.evaluate_blacklisted(&n.id), true);
-        assert_eq!(db.get(&n.id, false), None);
-    }
-
-    #[test]
-    fn test_blacklisted_lifetime() {
-        let mut db = NodeDatabase::new(None, 2);
-
-        let n = new_entry("127.0.0.1:999");
-        db.insert_trusted(n.clone());
-        db.set_blacklisted(&n.id);
-
-        db.blacklisted_lifetime = Duration::from_millis(1);
-        std::thread::sleep(Duration::from_millis(2));
-
-        assert_eq!(db.evaluate_blacklisted(&n.id), false);
-        assert_eq!(db.get(&n.id, false), None);
+        assert_eq!(
+            db.evaluate_blacklisted(&n.id),
+            false,
+            "blacklisting must be disabled: a node can never be banned"
+        );
     }
 }

@@ -215,7 +215,19 @@ impl Session {
     {
         let wrapper = match self.state {
             State::Handshake(ref mut h) => h,
-            State::Session(_) => panic!("Unexpected session state"),
+            State::Session(_) => {
+                // complete_handshake was invoked twice for the same session;
+                // disconnect rather than panic so the rest of the network
+                // service stays up.
+                warn!(
+                    "complete_handshake called while already in Session state \
+                     for peer {:?}; disconnecting",
+                    self.metadata.id
+                );
+                return Err(self.send_disconnect(DisconnectReason::Custom(
+                    "duplicate handshake completion".to_string(),
+                )));
+            }
         };
 
         // update node id for ingress session
@@ -695,11 +707,12 @@ impl<T> MovableWrapper<T> {
     }
 
     fn take(&mut self) -> T {
-        if self.item.is_none() {
-            panic!("cannot take moved item")
-        }
-
-        self.item.take().expect("should have value")
+        // Internal invariant: only called once per session lifecycle, after
+        // get()/get_mut() have been used. complete_handshake guards the
+        // outer state transition; if this fires it's a programming bug.
+        self.item
+            .take()
+            .expect("MovableWrapper::take called after item was already moved")
     }
 }
 

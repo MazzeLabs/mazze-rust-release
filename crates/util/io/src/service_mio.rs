@@ -283,7 +283,7 @@ where
     ) -> Result<(), IoError> {
         let worker = crossbeam_deque::Worker::new_fifo();
         let stealer = worker.stealer();
-        let num_workers = 4;
+        let num_workers = 8;
         let work_ready_mutex = Arc::new(SMutex::new(()));
         let work_ready = Arc::new(SCondvar::new());
         let workers = (0..num_workers)
@@ -301,7 +301,7 @@ where
             })
             .collect();
 
-        let num_socket_workers = 4;
+        let num_socket_workers = 8;
         let socket_workers = (0..num_socket_workers)
             .map(|i| {
                 let (tx, rx) = crossbeam_channel::unbounded();
@@ -489,17 +489,20 @@ where
                 handler_id,
                 msg,
             } => {
-                let worker_id = peer % 4;
+                let worker_id = peer % self.socket_workers.len();
                 if let Some(handler) = self.handlers.read().get(handler_id) {
-                    self.socket_workers[worker_id]
-                        .0
-                        .send(Work {
-                            work_type: WorkType::Message(msg),
-                            token: peer,
-                            handler: handler.clone(),
-                            handler_id,
-                        })
-                        .expect("fail to send message to socket_worker");
+                    if let Err(e) = self.socket_workers[worker_id].0.send(Work {
+                        work_type: WorkType::Message(msg),
+                        token: peer,
+                        handler: handler.clone(),
+                        handler_id,
+                    }) {
+                        warn!(
+                            "fail to send message to socket_worker {}: {:?}",
+                            worker_id,
+                            e
+                        );
+                    }
                 }
             }
         }

@@ -1,5 +1,9 @@
 use super::ConsensusExecutionHandler;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::{convert::From, sync::Arc};
+
+/// Rolling counter for the rate-limited evm-split profiling log.
+static EVM_SPLIT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 use alloy_rpc_types_trace::geth::GethDebugTracingOptions;
 use geth_tracer::{GethTraceWithHash, GethTracer, TxExecContext};
@@ -46,7 +50,9 @@ impl ConsensusExecutionHandler {
         epoch_blocks: &Vec<Arc<Block>>, start_block_number: u64,
         on_local_main: bool, virtual_call: Option<VirtualCall<'a>>,
     ) -> DbResult<Vec<Arc<BlockReceipts>>> {
+        let _t_prefetch = std::time::Instant::now();
         self.prefetch_storage_for_execution(epoch_id, state, epoch_blocks);
+        let prefetch_ms = _t_prefetch.elapsed().as_millis();
 
         let main_block = epoch_blocks.last().expect("Epoch not empty");
 
@@ -77,6 +83,7 @@ impl ConsensusExecutionHandler {
             start_block_number,
         );
 
+        let _t_txloop = std::time::Instant::now();
         for (idx, block) in epoch_blocks.iter().enumerate() {
             if idx > 0 {
                 block_context.next_block(block);
@@ -87,6 +94,21 @@ impl ConsensusExecutionHandler {
                 state,
                 &mut epoch_recorder,
             )?;
+        }
+        // Split the "evm" phase into prefetch (synchronous account-cache warm)
+        // vs the actual tx loop, so we can tell whether the ~40ms/block cost on
+        // a near-empty testnet is prefetch overhead or execution. Rate-limited.
+        if !dry_run {
+            let n = EVM_SPLIT_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+            if n % 128 == 0 {
+                info!(
+                    "evm-split blocks={} txs={} prefetch={}ms txloop={}ms",
+                    epoch_blocks.len(),
+                    epoch_blocks.iter().map(|b| b.transactions.len()).sum::<usize>(),
+                    prefetch_ms,
+                    _t_txloop.elapsed().as_millis(),
+                );
+            }
         }
 
         if let Some(VirtualCall::GethTrace(task)) = context.virtual_call {

@@ -14,7 +14,7 @@ use crate::{
         },
         request_manager::{AsAny, Request},
         state::storage::{Chunk, ChunkKey, SnapshotSyncCandidate},
-        Error, ErrorKind, ProtocolConfiguration, SYNC_PROTO_V1, SYNC_PROTO_V3,
+        Error, ErrorKind, ProtocolConfiguration, SYNC_PROTO_V1,
     },
 };
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
@@ -34,7 +34,7 @@ pub struct SnapshotChunkRequest {
 
 build_msg_with_request_id_impl! {
     SnapshotChunkRequest, msgid::GET_SNAPSHOT_CHUNK,
-    "SnapshotChunkRequest", SYNC_PROTO_V1, SYNC_PROTO_V3
+    "SnapshotChunkRequest", SYNC_PROTO_V1, SYNC_PROTO_V1
 }
 
 impl SnapshotChunkRequest {
@@ -59,21 +59,24 @@ impl Handleable for SnapshotChunkRequest {
                 "OneStepSync/IncSync not yet implemented.".into()
             )),
         };
-        let chunk = match Chunk::load(
+        let maybe_chunk = match Chunk::load(
             snapshot_epoch_id,
             &self.chunk_key,
             &ctx.manager.graph.data_man.storage_manager,
             ctx.manager.protocol_config.chunk_size_byte * 2,
         ) {
-            Ok(Some(chunk)) => chunk,
+            Ok(chunk) => chunk,
             Err(r) => return Err(r),
-            _ => Chunk::default(),
         };
 
-        ctx.send_response(&SnapshotChunkResponse {
-            request_id: self.request_id,
-            chunk,
-        })
+        match maybe_chunk {
+            Some(chunk) => ctx.send_response(
+                &SnapshotChunkResponse::available(self.request_id, chunk),
+            ),
+            None => ctx.send_response(
+                &SnapshotChunkResponse::unavailable(self.request_id),
+            ),
+        }
     }
 }
 

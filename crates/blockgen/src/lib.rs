@@ -4,7 +4,7 @@
 pub mod miner;
 
 use crate::miner::{
-    stratum::{Options as StratumOption, Stratum},
+    stratum::{Options as StratumOption, Stratum, StratumSolution},
     work_notify::NotifyWork,
 };
 use lazy_static::lazy_static;
@@ -24,7 +24,7 @@ use parking_lot::{Mutex, RwLock};
 use primitives::*;
 use std::{
     cmp::max,
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     sync::{
         mpsc::{self, TryRecvError},
         Arc,
@@ -206,7 +206,13 @@ impl BlockGenerator {
         }
     }
 
-    // TODO: should not hold and pass write lock to consensus.
+    // TODO(G-MN-4 in docs/flow-audit.md): assemble_new_block_impl holds the
+    // ConsensusGraphInner write lock from line 226 below through the entire
+    // assembly path. At 4 bps this is occasionally observable as consensus
+    // worker stalls. The right fix is to restructure so the lock is only
+    // held for the brief data extraction (parent/referees/blame), with the
+    // rest of assembly working off a snapshot. Tracked as long-term because
+    // it requires touching choose_correct_parent + a chain of helpers.
     fn assemble_new_block_impl(
         &self, mut parent_hash: H256, mut referees: Vec<H256>,
         mut blame_info: StateBlameInfo, block_gas_limit: U256,
@@ -351,11 +357,15 @@ impl BlockGenerator {
         ))
     }
 
-    /// Assemble a new block without nonce
+    /// Assemble a new block without nonce. Returns `None` while the deferred
+    /// state of the best block is not available yet ("parent is too old for
+    /// computing the deferred state", e.g. right after a restart or while
+    /// execution catches up); callers retry later. This used to `unwrap()`,
+    /// which on the stratum path killed the mining thread silently.
     pub fn assemble_new_block(
         &self, num_txs: usize, block_size_limit: usize,
         additional_transactions: Vec<Arc<SignedTransaction>>,
-    ) -> Block {
+    ) -> Option<Block> {
         let consensus_graph = self.consensus_graph();
 
         let (best_info, block_gas_limit, transactions, maybe_base_price) =
@@ -375,18 +385,23 @@ impl BlockGenerator {
         }
         PACKED_ACCOUNT_SIZE.update(sender_accounts.len());
 
-        let state_blame_info = consensus_graph
+        let state_blame_info = match consensus_graph
             .get_blame_and_deferred_state_for_generation(
                 &best_info.best_block_hash,
-            )
-            .unwrap();
+            ) {
+            Ok(info) => info,
+            Err(e) => {
+                debug!("Cannot assemble a block yet: {}", e);
+                return None;
+            }
+        };
 
         let best_block_hash = best_info.best_block_hash.clone();
         let mut referee = best_info.bounded_terminal_block_hashes.clone();
 
         referee.retain(|r| *r != best_block_hash);
 
-        self.assemble_new_block_impl(
+        Some(self.assemble_new_block_impl(
             best_block_hash,
             referee,
             state_blame_info,
@@ -395,7 +410,7 @@ impl BlockGenerator {
             0,
             None,
             maybe_base_price,
-        )
+        ))
     }
 
     /// Assemble a new block without nonce and with options to override the
@@ -454,8 +469,9 @@ impl BlockGenerator {
 
     /// Update and sync a new block
     pub fn on_mined_block(&self, block: Block) {
-        // FIXME: error handling.
-        self.sync.on_mined_block(block).ok();
+        if let Err(err) = self.sync.on_mined_block(block) {
+            warn!("Failed to submit mined block to sync service: {}", err);
+        }
     }
 
     /// Check if we need to mine on a new block
@@ -507,11 +523,13 @@ impl BlockGenerator {
         &self, num_txs: usize, block_size_limit: usize,
         additional_transactions: Vec<Arc<SignedTransaction>>,
     ) -> H256 {
-        let block = self.assemble_new_block(
-            num_txs,
-            block_size_limit,
-            additional_transactions,
-        );
+        let block = self
+            .assemble_new_block(
+                num_txs,
+                block_size_limit,
+                additional_transactions,
+            )
+            .expect("deferred state of the best block is not available yet");
         self.generate_block_impl(block)
     }
 
@@ -753,7 +771,7 @@ impl BlockGenerator {
 
     pub fn start_new_stratum_worker(
         bg: Arc<BlockGenerator>,
-    ) -> mpsc::Receiver<ProofOfWorkSolution> {
+    ) -> mpsc::Receiver<StratumSolution> {
         let (solution_sender, solution_receiver) = mpsc::channel();
         let cfg = StratumOption {
             listen_addr: bg.pow_config.stratum_listen_addr.clone(),
@@ -816,20 +834,14 @@ impl BlockGenerator {
                 current_mining_block.as_ref(),
                 &last_assemble,
             ) {
-                let new_block = match std::panic::catch_unwind(
-                    std::panic::AssertUnwindSafe(|| {
-                        bg.assemble_new_block(
-                            MAX_TRANSACTION_COUNT_PER_BLOCK,
-                            bg.graph
-                                .verification_config
-                                .max_block_size_in_bytes,
-                            vec![],
-                        )
-                    }),
+                let new_block = match bg.assemble_new_block(
+                    MAX_TRANSACTION_COUNT_PER_BLOCK,
+                    bg.graph.verification_config.max_block_size_in_bytes,
+                    vec![],
                 ) {
-                    Ok(block) => block,
-                    Err(_) => {
-                        warn!("Failed to assemble new block, execution results not ready. Retrying...");
+                    Some(block) => block,
+                    None => {
+                        // Execution results not ready yet; retry next tick.
                         thread::sleep(sleep_duration);
                         continue;
                     }
@@ -923,10 +935,14 @@ impl BlockGenerator {
         let mut recent_mining_blocks = vec![];
         let mut recent_mining_problems = vec![];
         let mut current_problem: Option<ProofOfWorkProblem> = None;
+        // pow_hashes of jobs already turned into blocks. Re-sending one of
+        // them is useless: the miner submits at most one share per job, and
+        // the dispatcher refuses a second nonce for a solved job anyway.
+        let mut recently_mined_problems: VecDeque<H256> = VecDeque::new();
         let sleep_duration =
             time::Duration::from_millis(BLOCKGEN_LOOP_SLEEP_IN_MILISECS);
 
-        let receiver: mpsc::Receiver<ProofOfWorkSolution> =
+        let receiver: mpsc::Receiver<StratumSolution> =
             BlockGenerator::start_new_stratum_worker(bg.clone());
 
         let mut last_notify = SystemTime::now();
@@ -947,11 +963,39 @@ impl BlockGenerator {
                     continue;
                 }
 
-                current_mining_block = Some(bg.assemble_new_block(
+                current_mining_block = match bg.assemble_new_block(
                     MAX_TRANSACTION_COUNT_PER_BLOCK,
                     bg.graph.verification_config.max_block_size_in_bytes,
                     vec![],
-                ));
+                ) {
+                    Some(block) => Some(block),
+                    None => {
+                        // Execution results not ready yet; retry next tick
+                        // instead of killing the stratum mining thread.
+                        thread::sleep(sleep_duration);
+                        continue;
+                    }
+                };
+
+                // Right after a block is mined, consensus may not have
+                // processed it yet, so the template is re-assembled on the
+                // same parent with the same contents and (same second) the
+                // same timestamp: the job just solved. Pushing it leaves the
+                // miner idle (it already submitted that job), and since the
+                // parent still equals the best block nothing re-assembles
+                // until BLOCK_FORCE_UPDATE_INTERVAL_IN_SECS. Retry instead:
+                // the template changes once consensus moves the best block
+                // or the timestamp ticks.
+                if let Some(block) = current_mining_block.as_ref() {
+                    if recently_mined_problems
+                        .contains(&block.block_header.problem_hash())
+                    {
+                        trace!("re-assembled an already mined job, retrying");
+                        current_mining_block = None;
+                        thread::sleep(sleep_duration);
+                        continue;
+                    }
+                }
 
                 if recent_mining_blocks.len()
                     == bg.pow_config.pow_problem_window_size
@@ -995,45 +1039,55 @@ impl BlockGenerator {
                     .push(current_mining_block.clone().unwrap());
                 recent_mining_problems.push(problem);
             } else {
-                // check if the problem solved
+                // Check whether a job was solved. The dispatcher tags each
+                // accepted share with the pow_hash of the job it solves; the
+                // block is picked by that hash, NOT by re-validating the nonce
+                // against the window: at low difficulty a nonce meets the
+                // boundary of most jobs in the window, and the oldest-first
+                // scan then built the block from a stale template (stale
+                // parent -> sibling instead of a tip extension; the job the
+                // miner actually solved was never turned into a block).
                 let mut new_solution = receiver.try_recv();
                 let mut maybe_mined_block = None;
 
                 loop {
                     trace!("new solution: {:?}", new_solution);
-                    // check if the block received valid
-                    if !new_solution.is_ok() {
-                        break;
-                    }
-
-                    for index in 0..recent_mining_problems.len() {
+                    let sol = match new_solution {
+                        Ok(sol) => sol,
+                        Err(_) => break,
+                    };
+                    if let Some(index) = find_solved_problem(
+                        &recent_mining_problems,
+                        &sol.pow_hash,
+                    ) {
                         if validate(
                             bg.pow.clone(),
                             &recent_mining_problems[index],
-                            &new_solution.unwrap(),
+                            &sol.solution,
                         ) {
                             maybe_mined_block =
                                 Some(recent_mining_blocks[index].clone());
                             break;
                         }
                     }
-
-                    if maybe_mined_block.is_none() {
-                        warn!(
-                            "Received invalid solution from miner: nonce = {}!",
-                            &new_solution.unwrap().nonce
-                        );
-                        new_solution = receiver.try_recv();
-                        continue;
-                    }
-                    break;
+                    warn!(
+                        "Received invalid or stale solution from miner: \
+                         pow_hash = {:?}, nonce = {}!",
+                        sol.pow_hash, sol.solution.nonce
+                    );
+                    new_solution = receiver.try_recv();
                 }
 
-                if new_solution.is_ok() {
-                    let solution = new_solution.unwrap();
+                if let Ok(sol) = new_solution {
                     let mut mined_block = maybe_mined_block.unwrap();
-                    mined_block.block_header.set_nonce(solution.nonce);
+                    mined_block.block_header.set_nonce(sol.solution.nonce);
                     mined_block.block_header.compute_hash();
+                    if recently_mined_problems.len()
+                        >= bg.pow_config.pow_problem_window_size.max(1)
+                    {
+                        recently_mined_problems.pop_front();
+                    }
+                    recently_mined_problems.push_back(sol.pow_hash);
                     bg.on_mined_block(mined_block);
                     current_mining_block = None;
                     current_problem = None;
@@ -1085,5 +1139,59 @@ impl BlockGenerator {
 impl Stopable for BlockGenerator {
     fn stop(&self) {
         Self::stop(self)
+    }
+}
+
+/// Index of the job with `pow_hash` in the recent-problem window. The newest
+/// match wins (a re-sent identical job has an identical template anyway).
+fn find_solved_problem(
+    problems: &[ProofOfWorkProblem], pow_hash: &H256,
+) -> Option<usize> {
+    problems.iter().rposition(|p| p.block_hash == *pow_hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn problem(i: u64) -> ProofOfWorkProblem {
+        // Difficulty 1 => boundary = U256::MAX: any nonce "solves" every
+        // problem, so only the pow_hash can tell them apart.
+        ProofOfWorkProblem::new(
+            i,
+            H256::from_low_u64_be(i),
+            U256::one(),
+            H256::zero(),
+        )
+    }
+
+    #[test]
+    fn solution_is_matched_by_pow_hash_not_by_nonce() {
+        let window: Vec<_> = (1..=8).map(problem).collect();
+        // Every problem in the window accepts any hash at difficulty 1; the
+        // old oldest-first nonce scan therefore always returned index 0.
+        assert!(window.iter().all(|p| p.boundary == U256::MAX));
+        for (i, p) in window.iter().enumerate() {
+            assert_eq!(find_solved_problem(&window, &p.block_hash), Some(i));
+        }
+    }
+
+    #[test]
+    fn unknown_pow_hash_is_stale() {
+        let window: Vec<_> = (1..=4).map(problem).collect();
+        assert_eq!(
+            find_solved_problem(&window, &H256::from_low_u64_be(99)),
+            None
+        );
+    }
+
+    #[test]
+    fn resent_job_matches_newest_copy() {
+        let mut window: Vec<_> = (1..=3).map(problem).collect();
+        window.push(problem(2));
+        assert_eq!(
+            find_solved_problem(&window, &H256::from_low_u64_be(2)),
+            Some(3)
+        );
     }
 }

@@ -85,6 +85,8 @@ use std::{
 pub const NODE_TAG_NODE_TYPE: &str = "node_type";
 pub const NODE_TAG_ARCHIVE: &str = "archive";
 pub const NODE_TAG_FULL: &str = "full";
+/// Peer node software version, see `sync::message::status::NodeVersionInfo`.
+pub const NODE_TAG_NODE_VERSION: &str = "node_version";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NetworkConfiguration {

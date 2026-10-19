@@ -1,9 +1,9 @@
-# Set the node type to Full node, Archive node, or Light node.
-# Possible values are "full", "archive", or "light".
-# The command line parameter `--full`, `--archive`, or `--light` will overwrite this parameter.
+# Set the node type to Full node, Full-fast node, Archive node, or Light node.
+# Possible values are "full", "full-fast", "archive", or "light".
+# The command line parameter `--full`, `--full-fast`, `--archive`, or `--light` will overwrite this parameter.
 #
 
-bootnodes = "mazzenode://a340a417a575dcbd5797252f88348550533989da203142ea5d02e84d4cefecadaafcc6a91ff6e598577ed79982b4dca310df5b046774e6ab96e19286efbbbb23@37.27.99.214:55555,mazzenode://be7846274d5dbf53b8c1f7078b45089a0d5693aca09557203cfa0f740443175148472cf7ffffd4fbc9fc0f5daa1bff7ae0328739ead4b1f111538499ddf0b591@138.201.206.108:55555,mazzenode://f66864acbeb39e0892d664f0f3919332c61d2de994f40b958a624ee8fc73fd2bbb8ce4f1d16fcce033b0e00bf73f888f8c3fe6edaba067233431e7aa210dfac8@37.27.134.37:55555,mazzenode://f0578f55e11dfba882d27ec583879b7d7d82d8edccba0be7631d24f75b428739d76951c11ebe4c4ec8d69677d8d73dc0775fb8f61d3ded30915015a5603b12cb@37.27.134.36:55555"
+bootnodes = "mazzenode://3bb10422bbc03c4321e8019a370173d2e2af0c6364221cd2c4c1e62ee9b9b68da4909f01c4a63c6319395dbf5b7386a5e844d4c968f87749f67b9515eda8994e@37.27.134.36:55555,mazzenode://14b2acab27c5ae9f532cc9037e9fd44fd24032c81180f8afcb2f2e004495325bea956bd02579e8e5974d7e4d2d5ecc7ce3e227b18c6c37ee517426084048b074@37.27.134.37:55555,mazzenode://8e8e6a01a85fef024e9094d1485fe0d044f65f86821d7ef77f78ef0183b2b7ad2cf683e41aa56e1379f7e187dc295fe69391d51e78174886fe6bfa7cf021bf0a@37.27.99.214:55555,mazzenode://bf1cb6cc17de439cf294f8058af2792763e13f98d9082575e10abecb56a4fe1ec15fd97f049d9657cd18fc35afffe958d9064145ceb498a0eea840b13e8bb75c@138.201.206.108:55555,mazzenode://3707613162e168d3376361003c0111241a055e0faae44de5847f91f1f4ac11db3d106a92a3dca71b2bf66bd74b871c9fdf360b56d42666ef00b6784c2ae8eb3e@37.27.134.141:55555"
 
 node_type = "archive"
 
@@ -53,7 +53,7 @@ node_type = "archive"
 # mining_author controls where mining rewards are sent.
 # Leave unset unless you are mining and have a valid address.
 # It must be a valid base32 (CIP-37) or a 40-hex address.
-mining_author = "mazze:aasxjrswnsed5jptgw02vhj462ubvjn5fu2tc3bjg5"
+mining_author = "mazze:aamzbekyhkk2ag8rzwvyetyecrvncyg0hjpw84k5yr"
 
 # `mining_type` controls whether the mining process goes through the
 # stratum protocol, uses CPU-mining, or disable mining.
@@ -65,7 +65,7 @@ mining_type = "stratum"
 
 # Listen address for stratum
 
-stratum_listen_address = "0.0.0.0"
+stratum_listen_address = "127.0.0.1"
 
 # Port for stratum.
 #
@@ -73,13 +73,16 @@ stratum_port = 32525
 
 # Window size for PoW manager
 #
-pow_problem_window_size = 30
+pow_problem_window_size = 8
 
 # Secret key for stratum.
-# The value is 64-digit hex string.
+# The value is a 64-digit hex string.
 # If not set, the RPC subscription will not check the authorization.
 #
-stratum_secret = "9c22ff5f21f0b81b113e63f7db6da94fedef11b2119b4088b89664fb9a3cb658"
+# NOTE: the actual value lives in `run/hydra.secrets.toml` (gitignored).
+# `start-node.sh` / `start-node-dev.sh` / `start-miner.sh` generate that file
+# on first run and inject `stratum_secret = "..."` into the runtime config.
+# See `run/hydra.secrets.toml.example` for the format.
 
 # -------------- Log-related Configuration -------------
 
@@ -106,7 +109,7 @@ log_level = "info"
 # If not set, the process will try to find out the public IP with best effort, and use `tcp_port` as public port.
 # However, it's HIGHLY RECOMMENDED to set the value manually, especially for machines with IP translated by NAT.
 #
-public_address = "YourIP"
+# public_address = "x.x.x.x"  # set per host at deploy time; auto-detected if unset
 
 # `tcp_port` is the TCP port that the process listens for P2P messages. The default is 55555.
 #
@@ -124,7 +127,7 @@ tcp_port = 55555
 
 # `jsonrpc_http_threads` is used to control how many threads to process HTTP rpc requests.
 #
-jsonrpc_http_threads = 8
+jsonrpc_http_threads = 4
 
 # `jsonrpc_http_keep_alive` is used to control whether to set KeepAlive for rpc HTTP connections.
 #
@@ -132,10 +135,19 @@ jsonrpc_http_keep_alive = true
 
 # `jsonrpc_cors` is used to control the rpc domain validation policies.
 # The value should be "none", "all", or a list string split by commas without space.
-# If not set, domain validation is disabled.
-# By default, the values are not set.
+# If not set (the safe default), domain validation is disabled and only
+# same-origin requests are accepted.
 #
-jsonrpc_cors = "all"
+# M-11 (docs/security-audit.md): previously this sample set "all" which
+# disables CORS checks. Browsers reaching this RPC from any origin
+# could read responses — a real risk if the operator binds to 0.0.0.0
+# without a reverse proxy. Sample now omits the value so the Rust
+# default (None = same-origin) wins. Set explicitly only when you
+# need to whitelist specific UI origins:
+#
+#   jsonrpc_cors = "https://app1.example.com,https://app2.example.com"
+#
+# NEVER set this to "all" on a public bind address.
 
 # The following parameters are the ports for the node to provide rpc service. If not set,
 # the node will not start rpc services. By default, the `jsonrpc_local_http_port` is set,
@@ -148,54 +160,61 @@ jsonrpc_ws_port = 52535
 jsonrpc_tcp_port = 52536
 jsonrpc_http_port = 52537
 #jsonrpc_local_tcp_port=12538
-#jsonrpc_local_http_port=12539
+jsonrpc_local_http_port=12539
 #jsonrpc_local_ws_port=12540
 jsonrpc_http_eth_port = 58545
 jsonrpc_ws_eth_port = 58546
 
 # Specify the APIs available through the public JSON-RPC interfaces (HTTP, TCP, WebSocket)
 # using a comma-delimited list of API names.
-
+#
 # Possible Core space names are: all, safe, mazze, pos, debug, pubsub, test, trace, txpool.
-# `safe` only includes `mazze` and `pubsub`, `txpool`.
-public_rpc_apis = "all"
+# `safe` only includes `mazze`, `pubsub`, `txpool`.
+#
+# SECURITY: `"all"` exposes `debug_*`, `trace_*`, and (test builds only)
+# `test_*` namespaces on whatever address `jsonrpc_http_port` binds to.
+# `debug_*` and `trace_*` are CPU/memory-expensive; `test_*` includes
+# state-mutation RPCs. Use `"safe"` for any public-facing node. See
+# docs/security-audit.md §5.1 and finding C-2.
+public_rpc_apis = "safe"
 
 # Possible eSpace names are: eth, ethpubsub, ethdebug.
-# `evm` only includes `eth` and `ethpubsub`
+# `evm` only includes `eth` and `ethpubsub`. `ethdebug` is excluded
+# from the default — same rationale as above.
 public_evm_rpc_apis = "evm"
 
 # --------------- Performance-related Network Parameters ----------------------
 
 # Timeout for block-related requests (GetBlock, GetCmpctBlock, GetBlockTxn)
 #
-# blocks_request_timeout_ms = 20_000
+blocks_request_timeout_ms = 60_000
 
 # Time interval to check timeout requests periodically.
 #
-# check_request_period_ms=5000
+check_request_period_ms = 1_000
 
 # Chunk size for snapshot retrieval
 #
-# chunk_size_byte = 4194304
+#chunk_size_byte = 8388608
 
 # Control whether to demote peers to unstrusted
 #
-# demote_peer_for_timeout = false
+demote_peer_for_timeout = false
 
 # Maximum network queue size. When reached, the queue will refuse any new data.
 # The unit is MB.
 #
-egress_queue_capacity = 1024
+#egress_queue_capacity = 1024
 
 # Minimum queue size for throttling in manner of ratio.
 # The unit is MB.
 #
-egress_min_throttle = 50
+#egress_min_throttle = 50
 
 # Maximum queue size for throttling in manner of ratio.
 # The unit is MB.
 #
-egress_max_throttle = 256
+#egress_max_throttle = 256
 
 # Time interval to garbage-collect not block-graph-ready blocks periodically.
 #
@@ -203,7 +222,7 @@ egress_max_throttle = 256
 
 # Timeout for header-related requests (GetBlockHeaders)
 #
-# headers_request_timeout_ms=10_000
+headers_request_timeout_ms=30_000
 
 # Time interval to broadcast Status as heartbeat periodically
 #
@@ -217,7 +236,7 @@ egress_max_throttle = 256
 # If the max is reached, the peer will be disconnected.
 # `demote_peer_for_timeout` controls if the peer will be demoted in this case.
 #
-# max_allowed_timeout_in_observing_period = 10
+max_allowed_timeout_in_observing_period = 240
 
 # Maximum number of peers to download state chunks from.
 #
@@ -233,7 +252,7 @@ egress_max_throttle = 256
 
 # Maximum number of outgoing connections.
 #
-max_outgoing_peers = 32
+max_outgoing_peers = 12
 
 # Maximum number of outgoing connections to archive nodes. 0 represents
 # not required to connect to archive nodes. E.g. light node or full node
@@ -243,15 +262,15 @@ max_outgoing_peers = 32
 
 ## Maximum number of inflight requests for each peer.
 ## If the max is reached, requests will be buffered until inflight requests are responded or timeout.
-## Lowered to reduce memory/CPU pressure during catchup.
-max_inflight_request_count = 2000
+## Keep this lower to reduce peak memory pressure during catchup.
+max_inflight_request_count = 128
 
 # Maximum number of peers to broadcast transaction digests.
 #
 # max_peers_tx_propagation = 128
 
 ## Maximum cached received block size waiting to be processed.
-## Lowered to prevent OOM during heavy catchup.
+## Keep this lower to prevent OOM during heavy catchup.
 max_unprocessed_block_size_mb = 128
 
 # Minimum number of peers to broadcast transaction digests.
@@ -260,7 +279,9 @@ max_unprocessed_block_size_mb = 128
 
 # Minimum number of normal-phase peers to estimate the current global latest epoch for phase change.
 #
-# min_phase_change_normal_peer_count = 3
+min_phase_change_normal_peer_count = 0
+
+dev_allow_phase_change_without_peer = true
 
 # The time to maintain received transactions to avoid duplicated requests.
 #
@@ -269,10 +290,9 @@ max_unprocessed_block_size_mb = 128
 # Whether to request blocks with public key during catch-up to avoid recovering
 # the public keys for transactions.
 #
-## Request blocks with public keys included. Enabling reduces CPU during catchup
-## at the cost of larger payloads. Keep false by default; consider enabling on
-## CPU-bound nodes.
-request_block_with_public = true
+## Request blocks without embedded public keys during catchup when the node is
+## network-bound. This reduces payload size and usually improves raw sync rate.
+request_block_with_public = false
 
 # Time interval to broadcast transaction digests periodically.
 #
@@ -297,7 +317,7 @@ request_block_with_public = true
 
 # The time period to observe if a peers has too many timeouts.
 #
-# timeout_observing_period_s = 600
+timeout_observing_period_s = 1200
 
 # Timeout for transaction requests.
 #
@@ -376,14 +396,14 @@ session_ip_limits = "1,32,16,4"
 # Whether to persist block number indices.
 # This only needs to be enabled if you want to use RPCs that take block numbers as an input.
 #
-persist_block_number_index = true
+persist_block_number_index = false
 
 # ---------------- Transaction Cache Parameters -----------------
 
 # Whether to persist transaction indices.
 # This only needs to be enabled if you want to reliably answer transaction-related RPCs.
 #
-persist_tx_index = true
+persist_tx_index = false
 
 # Time to keep transactions in in-memory transaction cache.
 #
@@ -391,7 +411,9 @@ persist_tx_index = true
 
 # Maximum number of transactions allowed in the transaction pool.
 #
-# tx_pool_size = 50_000
+# Raised 50k -> 500k to absorb tx-spam bursts without hitting the cliff
+# (full pool dropping txs / stalling packing under load).
+tx_pool_size = 500_000
 
 # Minimum allowed transaction gas price for two spaces in the transaction pool.
 #
@@ -419,7 +441,7 @@ persist_tx_index = true
 # Time interval to evict old data from in-memory data cache.
 #
 ## Run cache GC more frequently to keep memory steady during catchup.
-block_cache_gc_period_ms = 5_000
+#block_cache_gc_period_ms = 5_000
 
 # Database type to store block-related data.
 # Supported: sqlite, paritydb.
@@ -429,7 +451,7 @@ block_db_type = "paritydb"
 # Extra ParityDB tuning knobs. Only effective when `block_db_type = "paritydb"`.
 #
 paritydb_columns = 16
-paritydb_max_open_files = 512
+paritydb_max_open_files = 2048
 paritydb_journal_compression = "lz4"
 paritydb_disable_wal = false
 
@@ -447,27 +469,54 @@ paritydb_disable_wal = false
 # Maximum size of cached ledger data (block, receipts, e.t.c.)
 # The unit is MB.
 #
-ledger_cache_size = 4096
+ledger_cache_size = 8192
+
+# Rocksdb cache size.
+# Only applies if `block_db_type = "rocksdb"`.
+#
+#rocksdb_cache_size = 512
+
+# Rocksdb compaction file path.
+# Only applies if `block_db_type = "rocksdb"`.
+# If not set, compaction configuration will be set automatically by rocksdb.
+#
+# rocksdb_compaction_profile = "./compact_file.conf"
 
 # State database backend used by the storage subsystem.
 # Supported: mdbx.
-#
-# state_db_type = "mdbx"
+state_db_type = "mdbx"
 
 # Additional MDBX parameters. Only in effect when `state_db_type = "mdbx"`.
 #
-# mdbx_map_size_mb = 65536
-# mdbx_max_readers = 512
-# mdbx_sync_mode = "safe" # allowed: safe, relaxed
+mdbx_map_size_mb = 65536
+# MDBX commit durability tier.
+#   durable     — fsync every commit (libmdbx default; safest, slowest)
+#   nometasync  — sync data pages, defer meta fsync (~2x throughput)
+#   safenosync  — asynchronous mmap flush; transaction-atomic on
+#                 crash but last few seconds may be lost (up to 10x
+#                 throughput; recommended for testnet nodes)
+#   utterlynosync — no fsync (throwaway benchmarks only)
+# See fleet incident 2026-07-08 report §5 recommendation #6.
+mdbx_sync_mode = "safenosync"
+# safenosync only: make an fsynced (steady) point once this many MB or
+# this many ms of commits are unsynced; on power loss the DB rolls back
+# to the last steady point (process crashes lose nothing). 0 disables a
+# threshold; with both 0 libmdbx fsyncs on almost every commit.
+# mdbx_autosync_mb = 64
+# mdbx_autosync_period_ms = 10000
 
 # State storage parameters.
 # Refer to the documentation for details.
 #
-storage_delta_mpts_cache_recent_lfu_factor = 4.0
-storage_delta_mpts_cache_size = 40000000
-storage_delta_mpts_cache_start_size = 2000000
-storage_delta_mpts_node_map_vec_size = 160000000
-storage_delta_mpts_slab_idle_size = 400000
+#storage_delta_mpts_cache_recent_lfu_factor = 4.0
+#storage_delta_mpts_cache_size = 40000000
+#storage_delta_mpts_cache_start_size = 2000000
+#storage_delta_mpts_node_map_vec_size = 160000000
+#storage_delta_mpts_slab_idle_size = 400000
+
+# Configure the maximal open snapshots. Lowering this reduces file-descriptor
+# pressure during archive catch-up on ParityDB-backed storage.
+storage_max_open_snapshots = 12
 
 # Configure the maximal open MPT count. Open MPTs are maintained as an LRU cache, and we will close the database handle
 # for the evicted MPT once its usage finishes. Every MPT contains the data written in 2000 epochs.
@@ -481,7 +530,7 @@ storage_delta_mpts_slab_idle_size = 400000
 # However, increasing the value may increase the system memory usage by opening more database instances at the same
 # time, and the memory usage of an MPT depends on the ParityDB configuration (cache sizes, columns, etc.).
 #
-storage_max_open_mpt_count = 8
+#storage_max_open_mpt_count = 4
 
 # Configure if we strictly check the tx index before garbage collection.
 # Setting it to `false` will improve the performance. But if the value is `false`, it's possible that although the
@@ -499,7 +548,7 @@ storage_max_open_mpt_count = 8
 # The number of epochs needed between our best_epoch and our neighbours' best_epoch that we want to
 # start downloading states during catching up.
 #
-sync_state_epoch_gap = 5
+#sync_state_epoch_gap = 5
 
 # ------------------ Light Node Parameters ----------------------
 
@@ -539,24 +588,24 @@ sync_state_epoch_gap = 5
 # Maximum number of log entries returned from mazze_getLogs and eth_getLogs.
 # If not set, mazze_getLogs and eth_getLogs will not limit the number of logs returned.
 #
-get_logs_filter_max_limit = 10000
+get_logs_filter_max_limit = 5000
 
 # Epoch batch size used in log filtering.
-# Larger batch sizes may improve performance but might also prevent consensus from making progress under high RPC load.
+# Smaller = shorter lock windows per batch, less consensus starvation.
 #
-get_logs_epoch_batch_size = 128
+get_logs_epoch_batch_size = 32
 
 # The maximal allowed number of epochs between `from_epoch` and `to_epoch` in the filter to call `mazze_getLogs`.
 # If not set, there is no limit on the gap.
 # By default it is not set.
 #
-get_logs_filter_max_epoch_range = 100000
+get_logs_filter_max_epoch_range = 1000
 
 # The maximal allowed number of blocks between `from_block` and `to_block` in the filter to call `mazze_getLogs`.
 # If not set, there is no limit on the gap.
 # By default it is not set.
 #
-get_logs_filter_max_block_number_range = 100000
+get_logs_filter_max_block_number_range = 1000
 
 # Maximum number of transactions allowed for peers to send to a catch-up node.
 #
@@ -578,3 +627,5 @@ pos_reference_enable_height = 1
 
 
 # genesis_secrets="genesis_secrets.toml"
+
+execute_genesis = true

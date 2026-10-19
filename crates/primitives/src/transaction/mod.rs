@@ -403,7 +403,10 @@ impl Transaction {
     }
 
     pub fn is_shielded(&self) -> bool {
-        matches!(self, Transaction::Native(TypedNativeTransaction::Shielded(_)))
+        matches!(
+            self,
+            Transaction::Native(TypedNativeTransaction::Shielded(_))
+        )
     }
 }
 
@@ -678,7 +681,9 @@ impl Decodable for TransactionWithSignatureSerializePart {
                 _ => Err(DecoderError::RlpInvalidLength),
             }
         } else {
-            TransactionWithSignatureSerializePart::decode_typed_raw(rlp.as_raw())
+            TransactionWithSignatureSerializePart::decode_typed_raw(
+                rlp.as_raw(),
+            )
         }
     }
 }

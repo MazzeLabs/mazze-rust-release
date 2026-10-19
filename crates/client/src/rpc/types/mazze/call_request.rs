@@ -136,9 +136,7 @@ impl SendTxRequest {
         let chain_id = self.chain_id.unwrap_or(chain_id.into()).as_u32();
         let data: mazze_bytes::Bytes =
             self.data.unwrap_or(Bytes::new(vec![])).into();
-        let tx_type = self
-            .transaction_type
-            .map(|id| id.as_usize() as u8);
+        let tx_type = self.transaction_type.map(|id| id.as_usize() as u8);
 
         if matches!(tx_type, Some(MIP_SHIELDED_TYPE)) {
             return Err(
@@ -164,7 +162,7 @@ impl SendTxRequest {
                 }
                 if !value.is_zero() {
                     return Err(
-                        "Shielded transaction must not transfer value".into(),
+                        "Shielded transaction must not transfer value".into()
                     );
                 }
                 let tx = ShieldedTransaction {
@@ -178,8 +176,8 @@ impl SendTxRequest {
                     chain_id,
                     data,
                 };
-                let sig_hash = Transaction::Native(Shielded(tx.clone()))
-                    .signature_hash();
+                let sig_hash =
+                    Transaction::Native(Shielded(tx.clone())).signature_hash();
                 (Transaction::Native(Shielded(tx)), sig_hash)
             }
             Some(other) => {

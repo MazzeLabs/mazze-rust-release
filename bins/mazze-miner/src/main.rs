@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
+use mazze_types::H256;
 use log::{error, info};
 use mazzecore::pow::ProofOfWorkSolution;
 use miner_config::MinerConfig;
@@ -21,6 +22,7 @@ async fn connect_with_retry(
     config: &MinerConfig, miner: Miner,
     solution_receiver: tokio::sync::broadcast::Receiver<(
         ProofOfWorkSolution,
+        H256,
         u64,
     )>,
 ) -> Result<StratumClient, Box<dyn std::error::Error>> {
@@ -55,13 +57,12 @@ async fn connect_with_retry(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::builder()
-        .format_timestamp_millis()
-        .filter_module(
-            "mazze_miner::core::atomic_state",
-            log::LevelFilter::Debug,
-        )
-        .init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    )
+    .format_timestamp_millis()
+    .filter_module("mazze_miner::core::atomic_state", log::LevelFilter::Debug)
+    .init();
 
     info!("Initializing Mazze Miner client...");
 

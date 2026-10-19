@@ -1,11 +1,11 @@
-# Set the node type to Full node, Archive node, or Light node.
-# Possible values are "full", "archive", or "light".
-# The command line parameter `--full`, `--archive`, or `--light` will overwrite this parameter.
+# Set the node type to Full node, Full-fast node, Archive node, or Light node.
+# Possible values are "full", "full-fast", "archive", or "light".
+# The command line parameter `--full`, `--full-fast`, `--archive`, or `--light` will overwrite this parameter.
 #
 
-bootnodes = "mazzenode://a340a417a575dcbd5797252f88348550533989da203142ea5d02e84d4cefecadaafcc6a91ff6e598577ed79982b4dca310df5b046774e6ab96e19286efbbbb23@37.27.99.214:55555,mazzenode://be7846274d5dbf53b8c1f7078b45089a0d5693aca09557203cfa0f740443175148472cf7ffffd4fbc9fc0f5daa1bff7ae0328739ead4b1f111538499ddf0b591@138.201.206.108:55555,mazzenode://f66864acbeb39e0892d664f0f3919332c61d2de994f40b958a624ee8fc73fd2bbb8ce4f1d16fcce033b0e00bf73f888f8c3fe6edaba067233431e7aa210dfac8@37.27.134.37:55555,mazzenode://f0578f55e11dfba882d27ec583879b7d7d82d8edccba0be7631d24f75b428739d76951c11ebe4c4ec8d69677d8d73dc0775fb8f61d3ded30915015a5603b12cb@37.27.134.36:55555"
+bootnodes = "mazzenode://b0eeff078b8683a8615807cbb84c07e072871b55bad5778fc46d507ba4d00742875787528149fffebfea55f490d2366484fe6953c455554310a3934b635e36d4@37.27.99.214:55555,mazzenode://0eca07a06887ab1b71d371d6f8cb36ea7b95f75028ea960a60532abae4473552809c2d997ebe5c90400ea0fb3b6a0a66def0451b1ea2b097166f1e878e2bebb3@138.201.206.108:55555,mazzenode://9d728bab39464f518cd3570dd754cb7a7a0f483ed5e87247306bda58f0e0ab84ab2d7fc76086e185cd8d37a4c0c425f960a4f59dacbf9b59b64e16acaffd022b@37.27.134.37:55555,mazzenode://487477e37e07f8d50cf92e6c81a26a45e09ea593abe5106ec5e66633a696644d51b3a775bddd4d315ecd0330b3ac9cf132e7633c51d787144a4cd83a4cf8dc27@37.27.134.36:55555,mazzenode://bafe4221d9aae0d41ad0d27b309af692fef0292303e59c50616a5bfc8efb094e74a899323ffa300618415901fd3f6fcc897c9dbbe6956dbc9063a1788d47e0df@37.27.134.141:55555"
 
-node_type = "archive"
+node_type = "full-fast"
 
 # Some preset develepment configurations.
 # It should not be set in production environment.
@@ -53,7 +53,7 @@ node_type = "archive"
 # mining_author controls where mining rewards are sent.
 # Leave unset unless you are mining and have a valid address.
 # It must be a valid base32 (CIP-37) or a 40-hex address.
-mining_author = "mazze:aasxjrswnsed5jptgw02vhj462ubvjn5fu2tc3bjg5"
+mining_author = "mazze:aamzbekyhkk2ag8rzwvyetyecrvncyg0hjpw84k5yr"
 
 # `mining_type` controls whether the mining process goes through the
 # stratum protocol, uses CPU-mining, or disable mining.
@@ -73,7 +73,7 @@ stratum_port = 32525
 
 # Window size for PoW manager
 #
-pow_problem_window_size = 30
+pow_problem_window_size = 1
 
 # Secret key for stratum.
 # The value is 64-digit hex string.
@@ -106,7 +106,7 @@ log_level = "info"
 # If not set, the process will try to find out the public IP with best effort, and use `tcp_port` as public port.
 # However, it's HIGHLY RECOMMENDED to set the value manually, especially for machines with IP translated by NAT.
 #
-public_address = "YourIP"
+public_address = "5.12.37.188"
 
 # `tcp_port` is the TCP port that the process listens for P2P messages. The default is 55555.
 #
@@ -168,11 +168,11 @@ public_evm_rpc_apis = "evm"
 
 # Timeout for block-related requests (GetBlock, GetCmpctBlock, GetBlockTxn)
 #
-# blocks_request_timeout_ms = 20_000
+blocks_request_timeout_ms = 30_000
 
 # Time interval to check timeout requests periodically.
 #
-# check_request_period_ms=5000
+check_request_period_ms = 3000
 
 # Chunk size for snapshot retrieval
 #
@@ -203,7 +203,7 @@ egress_max_throttle = 256
 
 # Timeout for header-related requests (GetBlockHeaders)
 #
-# headers_request_timeout_ms=10_000
+headers_request_timeout_ms = 15_000
 
 # Time interval to broadcast Status as heartbeat periodically
 #
@@ -217,7 +217,7 @@ egress_max_throttle = 256
 # If the max is reached, the peer will be disconnected.
 # `demote_peer_for_timeout` controls if the peer will be demoted in this case.
 #
-# max_allowed_timeout_in_observing_period = 10
+max_allowed_timeout_in_observing_period = 25
 
 # Maximum number of peers to download state chunks from.
 #
@@ -244,7 +244,7 @@ max_outgoing_peers = 32
 ## Maximum number of inflight requests for each peer.
 ## If the max is reached, requests will be buffered until inflight requests are responded or timeout.
 ## Lowered to reduce memory/CPU pressure during catchup.
-max_inflight_request_count = 2000
+max_inflight_request_count = 512
 
 # Maximum number of peers to broadcast transaction digests.
 #
@@ -297,7 +297,7 @@ request_block_with_public = true
 
 # The time period to observe if a peers has too many timeouts.
 #
-# timeout_observing_period_s = 600
+timeout_observing_period_s = 900
 
 # Timeout for transaction requests.
 #
@@ -399,6 +399,11 @@ persist_tx_index = true
 # tx_pool_min_eth_tx_gas_price = 20_000_000_000
 
 # ------------------ Storage Parameters ----------------------
+
+# Align sync snapshots with RandomX epoch boundaries so fresh nodes can
+# bootstrap from the latest downloadable PoW epoch checkpoint.
+snapshot_epoch_count = 2048
+provide_more_snapshot_for_sync = "checkpoint,multiple_of_2048"
 
 # The number of additional snapshot before the current stable checkpoint that we will maintain.
 # If it's 0, all snapshot before stable genesis will be deleted and the states are unavailable.
@@ -578,3 +583,5 @@ pos_reference_enable_height = 1
 
 
 # genesis_secrets="genesis_secrets.toml"
+
+execute_genesis = false

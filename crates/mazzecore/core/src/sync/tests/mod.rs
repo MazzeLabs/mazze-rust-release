@@ -2,12 +2,10 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-use crate::{
-    block_data_manager::BlockDbBackend,
-    sync::{
-        utils::{create_simple_block_impl, initialize_synchronization_graph},
-        SynchronizationGraphNode,
-    },
+use crate::consensus::ConsensusGraphTrait;
+use crate::sync::{
+    utils::{create_simple_block_impl, initialize_synchronization_graph},
+    SynchronizationGraphNode,
 };
 use mazze_types::{BigEndianHash, H256, U256};
 use primitives::Block;
@@ -28,7 +26,6 @@ fn test_remove_expire_blocks() {
             1,
             1,
             50000,
-            BlockDbBackend::Paritydb,
             H256::default(),
         );
         // test initialization
@@ -119,6 +116,7 @@ fn test_remove_expire_blocks() {
                 let me = inner.arena.insert(SynchronizationGraphNode {
                     graph_status: graph_status[i as usize],
                     block_ready: false,
+                    sent_to_consensus: false,
                     parent_reclaimed: false,
                     parent: parent_index,
                     children: childrens[i as usize].clone(),
@@ -235,4 +233,262 @@ fn test_remove_expire_blocks() {
         retry -= 1;
         sleep(Duration::from_millis(300));
     }
+}
+
+/// Wait until the consensus worker has drained everything the sync graph
+/// handed to it.
+fn wait_consensus_drained(sync: &crate::sync::SynchronizationGraph) {
+    let start = std::time::Instant::now();
+    while sync.is_consensus_worker_busy() {
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "consensus worker did not drain"
+        );
+        sleep(Duration::from_millis(5));
+    }
+}
+
+fn remove_test_db(dir: &str) {
+    let mut retry = 3;
+    while let Err(e) = fs::remove_dir_all(dir) {
+        println!("failed to remove directory {}, err = {:?}", dir, e);
+        if retry == 0 {
+            return;
+        }
+        retry -= 1;
+        sleep(Duration::from_millis(300));
+    }
+}
+
+/// Build `n` empty blocks on a single chain above the genesis, with the base
+/// price the sync graph expects (it is checked at BLOCK_GRAPH_READY).
+fn simple_chain(
+    sync: &crate::sync::SynchronizationGraph, genesis: &Block, n: usize,
+) -> Vec<Block> {
+    use mazze_parameters::{
+        consensus::GENESIS_GAS_LIMIT, consensus_internal::ELASTICITY_MULTIPLIER,
+    };
+    use mazze_types::{address_util::AddressUtil, Address, SpaceMap};
+    use primitives::{block_header::compute_next_price_tuple, BlockHeaderBuilder};
+
+    let machine = sync.machine();
+    let params = machine.params();
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut parent = genesis.hash();
+    let mut parent_price: Option<SpaceMap<U256>> = None;
+    for i in 0..n {
+        let height = genesis.block_header.height() + 1 + i as u64;
+        let gas_limit = U256::from(GENESIS_GAS_LIMIT);
+        let espace_limit = if params.can_pack_evm_transaction(height) {
+            gas_limit * 5 / 10
+        } else {
+            U256::zero()
+        };
+        let gas_target = SpaceMap::new(gas_limit * 9 / 10, espace_limit)
+            .map_all(|x| x / ELASTICITY_MULTIPLIER);
+        let parent_base_price = if height == 1 {
+            params.init_base_price()
+        } else {
+            parent_price.unwrap()
+        };
+        let price = SpaceMap::zip4(
+            gas_target,
+            SpaceMap::default(),
+            parent_base_price,
+            params.min_base_price(),
+        )
+        .map_all(compute_next_price_tuple);
+        let mut author = Address::zero();
+        author.set_user_account_type_bits();
+        let mut header = BlockHeaderBuilder::new()
+            .with_parent_hash(parent)
+            .with_height(height)
+            .with_gas_limit(gas_limit)
+            .with_nonce(U256::from(1000 + i))
+            .with_difficulty(U256::from(10))
+            .with_author(author)
+            .with_base_price(Some(price))
+            .build();
+        header.compute_hash();
+        header.pow_hash = Some(crate::pow::pow_quality_to_hash(
+            &U256::from(10),
+            &header.nonce(),
+        ));
+        let block = Block::new(header, vec![]);
+        parent = block.hash();
+        parent_price = Some(price);
+        blocks.push(block);
+    }
+    blocks
+}
+
+/// A block delivered to consensus twice (once at HEADER_GRAPH_READY in a
+/// header-to-consensus phase, again at BLOCK_GRAPH_READY when its body
+/// arrives -- body sync runs in every phase, §5.20) must be inserted into the
+/// consensus arena exactly once. A second `ConsensusGraphInner::insert`
+/// creates a shadow arena node and re-points `hash_to_arena_indices` to it;
+/// once an era checkpoint lands on the original lineage the shadow is turned
+/// into out-era "legacy" (era_block = NULL) and every later descendant is
+/// inserted as an out-era stub (m6, 2026-10-17: consensus frozen at 484767).
+#[test]
+fn test_header_then_body_is_delivered_to_consensus_once() {
+    let db = "./test_dup_delivery.db/";
+    {
+        let (sync, consensus, _, genesis) = initialize_synchronization_graph(
+            db,
+            1,
+            1,
+            1,
+            1,
+            50000,
+            H256::default(),
+        );
+        let blocks =
+            simple_chain(&sync, &genesis, 4);
+
+        // Header phase: every header goes to consensus at HGR.
+        for b in &blocks {
+            let mut h = b.block_header.clone();
+            sync.insert_block_header(
+                &mut h, false, /* need_to_verify */
+                true,  /* bench_mode */
+                true,  /* insert_to_consensus */
+                true,  /* persistent */
+            );
+        }
+        wait_consensus_drained(&sync);
+        // Bodies arrive afterwards (still not locked for catch-up).
+        for b in &blocks {
+            sync.insert_block(
+                b.clone(),
+                false, /* need_to_verify */
+                true,  /* persistent */
+                false, /* recover_from_db */
+            );
+        }
+        wait_consensus_drained(&sync);
+
+        let inner = consensus.inner.read();
+        // genesis + 4 blocks, no shadow copies.
+        assert_eq!(
+            inner.arena.len(),
+            1 + blocks.len(),
+            "duplicate consensus delivery created shadow arena nodes"
+        );
+        for b in &blocks {
+            let idx = inner.hash_to_arena_indices[&b.hash()];
+            assert_ne!(inner.arena[idx].era_block(), !0usize);
+        }
+    }
+    remove_test_db(db);
+}
+
+/// A block that becomes HEADER_GRAPH_READY through a call that does not
+/// insert into consensus (e.g. a body response for a header-less block,
+/// `insert_to_consensus = false`) must still reach consensus before a child
+/// that is sent at HEADER_GRAPH_READY; otherwise the child is processed while
+/// its parent is absent and is inserted as an out-era stub forever.
+#[test]
+fn test_unsent_parent_is_delivered_before_child() {
+    let db = "./test_unsent_parent.db/";
+    {
+        let (sync, consensus, _, genesis) = initialize_synchronization_graph(
+            db,
+            1,
+            1,
+            1,
+            1,
+            50000,
+            H256::default(),
+        );
+        let blocks =
+            simple_chain(&sync, &genesis, 3);
+
+        let mut h0 = blocks[0].block_header.clone();
+        sync.insert_block_header(&mut h0, false, true, false, true);
+        for b in &blocks[1..] {
+            let mut h = b.block_header.clone();
+            sync.insert_block_header(&mut h, false, true, true, true);
+        }
+        wait_consensus_drained(&sync);
+
+        let inner = consensus.inner.read();
+        for b in &blocks {
+            let idx = *inner
+                .hash_to_arena_indices
+                .get(&b.hash())
+                .expect("block must be in consensus");
+            assert_ne!(
+                inner.arena[idx].era_block(),
+                !0usize,
+                "block {:?} was inserted as an out-era stub",
+                b.hash()
+            );
+        }
+    }
+    remove_test_db(db);
+}
+
+/// End-to-end shape of the m6 freeze (2026-10-17). In a header-to-consensus
+/// phase every header is handed to consensus at HEADER_GRAPH_READY; bodies
+/// (body sync runs in every phase) trail behind and each one handed the block
+/// to consensus AGAIN at BLOCK_GRAPH_READY. Consensus inserted a second
+/// ("shadow") arena node per duplicate and re-pointed the hash at it. An era
+/// checkpoint on the original lineage then turned the shadow into out-era
+/// legacy (era_block = NULL) while the hashes still mapped to it, and from the
+/// moment the body wave caught up with the tip every new block was inserted
+/// as an out-era stub: the pivot froze for good. (With the tiny parameters
+/// used here the pre-fix corruption instead trips the timer-chain assertion
+/// in `make_checkpoint_at` and kills the consensus worker.)
+#[test]
+fn test_pivot_advances_when_bodies_trail_headers_across_a_checkpoint() {
+    let db = "./test_dup_checkpoint.db/";
+    {
+        let (sync, consensus, _, genesis) = initialize_synchronization_graph(
+            db,
+            1,
+            1,
+            1,
+            1,
+            10, /* era_epoch_count */
+            H256::default(),
+        );
+        let blocks = simple_chain(&sync, &genesis, 150);
+        let headers = |range: std::ops::Range<usize>| {
+            for b in &blocks[range] {
+                let mut h = b.block_header.clone();
+                sync.insert_block_header(&mut h, false, true, true, true);
+            }
+            wait_consensus_drained(&sync);
+        };
+        let bodies = |range: std::ops::Range<usize>| {
+            for b in &blocks[range] {
+                sync.insert_block(b.clone(), false, true, false);
+            }
+            wait_consensus_drained(&sync);
+        };
+        headers(0..60);
+        bodies(0..30); // body wave trails the header tip
+        headers(60..120); // pivot (and era checkpoints) move on
+        bodies(30..120); // body wave catches up with the tip
+        headers(120..150); // new blocks at the tip
+
+        let inner = consensus.inner.read();
+        let out_era = inner
+            .arena
+            .iter()
+            .filter(|(_, n)| n.era_block() == !0usize)
+            .count();
+        println!(
+            "era_genesis_height={} arena={} out_era={} best_epoch={}",
+            inner.get_cur_era_genesis_height(),
+            inner.arena.len(),
+            out_era,
+            consensus.best_epoch_number()
+        );
+        assert!(inner.get_cur_era_genesis_height() > 0, "no checkpoint formed");
+        drop(inner);
+        assert_eq!(consensus.best_epoch_number(), 150);
+    }
+    remove_test_db(db);
 }

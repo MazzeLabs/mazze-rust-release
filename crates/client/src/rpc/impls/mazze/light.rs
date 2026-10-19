@@ -41,7 +41,8 @@ use crate::{
             CheckBalanceAgainstTransactionResponse, ConsensusGraphStates,
             EpochNumber, EstimateGasAndCollateralResponse, FeeHistory,
             Log as RpcLog, MazzeFeeHistory, MazzeRpcLogFilter,
-            Receipt as RpcReceipt, RewardInfo as RpcRewardInfo, RpcAddress,
+            Receipt as RpcReceipt,
+            RewardInfo as RpcRewardInfo, RpcAddress,
             SendTxRequest, SponsorInfo, StatOnGasLoad, Status as RpcStatus,
             StorageCollateralInfo, SyncGraphStates, TokenSupplyInfo,
             Transaction as RpcTransaction, WrapTransaction, U64 as HexU64,
@@ -1053,6 +1054,8 @@ impl Mazze for MazzeHandler {
             fn best_block_hash(&self) -> JsonRpcResult<H256>;
             fn confirmation_risk_by_hash(&self, block_hash: H256) -> JsonRpcResult<Option<U256>>;
             fn get_client_version(&self) -> JsonRpcResult<String>;
+            fn get_node_version(&self) -> JsonRpcResult<serde_json::Value>;
+            fn get_consensus_debug(&self) -> JsonRpcResult<serde_json::Value>;
             fn get_status(&self) -> JsonRpcResult<RpcStatus>;
             fn skipped_blocks_by_epoch(&self, num: EpochNumber) -> JsonRpcResult<Vec<H256>>;
             fn account_pending_info(&self, addr: RpcAddress) -> BoxFuture<Option<AccountPendingInfo>>;
@@ -1195,6 +1198,7 @@ impl LocalRpc for DebugRpcImpl {
     not_supported! {
         fn consensus_graph_state(&self) -> JsonRpcResult<ConsensusGraphStates>;
         fn current_sync_phase(&self) -> JsonRpcResult<String>;
+        fn debug_get_executed_info(&self, block_hash: H256) -> JsonRpcResult<(H256, H256)>;
         fn epoch_receipts(&self, epoch: BlockHashOrEpochNumber, include_eth_recepits: Option<bool>) -> JsonRpcResult<Option<Vec<Vec<RpcReceipt>>>>;
         fn epoch_receipt_proof_by_transaction(&self, tx_hash: H256) -> JsonRpcResult<Option<EpochReceiptProof>>;
         fn stat_on_gas_load(&self, epoch: EpochNumber, time_window: U64) -> JsonRpcResult<Option<StatOnGasLoad>>;

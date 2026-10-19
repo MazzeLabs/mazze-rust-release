@@ -1,0 +1,17 @@
+# Ethereum state-test fixtures live here as a git submodule.
+#
+# Set up with:
+#   git submodule add https://github.com/ethereum/tests \
+#       crates/mazzecore/eth-vm/tests/fixtures/ethereum_tests
+#   git submodule update --init
+#
+# The fixtures themselves are large (~hundreds of MB) and should not be
+# committed to this repository directly.
+
+# Ignore everything in this directory except the meta files and the
+# `ethereum_tests` submodule directory itself (the submodule has its own
+# .git pointer; its contents are not tracked here).
+*
+!.gitignore
+!README.md
+!ethereum_tests

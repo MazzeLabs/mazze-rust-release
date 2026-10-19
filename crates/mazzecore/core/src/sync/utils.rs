@@ -21,7 +21,7 @@ use primitives::{Block, BlockHeaderBuilder};
 
 use crate::{
     block_data_manager::{
-        BlockDataManager, BlockDbBackend, DataManagerConfiguration,
+        BlockDataManager, DataManagerConfiguration,
     },
     cache_config::CacheConfig,
     consensus::{
@@ -103,7 +103,7 @@ pub fn create_simple_block(
 }
 
 pub fn initialize_data_manager(
-    db_dir: &str, dbtype: BlockDbBackend, pow: Arc<PowComputer>, vm: VmFactory,
+    db_dir: &str, pow: Arc<PowComputer>, vm: VmFactory,
 ) -> (Arc<BlockDataManager>, Arc<Block>) {
     let parity_config = db::ParityDbOpenConfig {
         columns: NUM_COLUMNS,
@@ -111,11 +111,9 @@ pub fn initialize_data_manager(
         disable_wal: false,
         stats: false,
     };
-    let settings = db::paritydb_settings(
-        Path::new(db_dir).to_path_buf(),
-        &parity_config,
-    )
-    .expect("Failed to configure ParityDB");
+    let settings =
+        db::paritydb_settings(Path::new(db_dir).to_path_buf(), &parity_config)
+            .expect("Failed to configure ParityDB");
     let ledger_db = db::open_database(&settings)
         .map_err(|e| format!("Failed to open database {:?}", e))
         .unwrap();
@@ -165,7 +163,6 @@ pub fn initialize_data_manager(
                                              * address */
             false, /* do not persist block number index */
             Duration::from_millis(300_000), /* max cached tx count */
-            dbtype,
         ),
         pow,
     ));
@@ -225,8 +222,6 @@ pub fn initialize_synchronization_graph_with_data_manager(
                 debug_dump_dir_invalid_state_root: None,
                 debug_invalid_state_root_epoch: None,
                 force_recompute_height_during_construct_main: None,
-                recovery_latest_mpt_snapshot: false,
-                use_isolated_db_for_mpt_table: false,
             },
             bench_mode: true, /* Set bench_mode to true so that we skip
                                * execution */
@@ -238,6 +233,11 @@ pub fn initialize_synchronization_graph_with_data_manager(
             get_logs_filter_max_limit: None,
             sync_state_starting_epoch: None,
             sync_state_epoch_gap: None,
+            trusted_checkpoint_height: None,
+            trusted_checkpoint_hash: None,
+            trusted_blame_height: None,
+            trusted_blame_hash: None,
+            trusted_checkpoints: Vec::new(),
         },
         txpool.clone(),
         statistics.clone(),
@@ -268,7 +268,7 @@ pub fn initialize_synchronization_graph_with_data_manager(
 /// This method is only used in tests and benchmarks.
 pub fn initialize_synchronization_graph(
     db_dir: &str, beta: u64, h: u64, tcr: u64, tcb: u64, era_epoch_count: u64,
-    dbtype: BlockDbBackend, seed_hash: H256,
+    seed_hash: H256,
 ) -> (
     Arc<SynchronizationGraph>,
     Arc<ConsensusGraph>,
@@ -279,7 +279,7 @@ pub fn initialize_synchronization_graph(
     let pow = Arc::new(PowComputer::new(seed_hash));
 
     let (data_man, genesis_block) =
-        initialize_data_manager(db_dir, dbtype, pow.clone(), vm.clone());
+        initialize_data_manager(db_dir, pow.clone(), vm.clone());
 
     let (sync, consensus) = initialize_synchronization_graph_with_data_manager(
         data_man.clone(),

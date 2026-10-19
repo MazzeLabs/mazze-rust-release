@@ -6,6 +6,7 @@ mod blame_verifier;
 pub mod confirmation_meter;
 pub mod consensus_executor;
 pub mod consensus_new_block_handler;
+mod state_divergence;
 
 use crate::{
     block_data_manager::{
@@ -17,7 +18,7 @@ use crate::{
         debug_recompute::log_invalid_state_root, outlier_cache::OutlierCache,
         pastset_cache::PastSetCache, MaybeExecutedTxExtraInfo, TransactionInfo,
     },
-    pow::{target_difficulty, PowComputer, ProofOfWorkConfig},
+    pow::{asert_difficulty, PowComputer, ProofOfWorkConfig},
     state_exposer::{ConsensusGraphBlockExecutionState, STATE_EXPOSER},
     verification::VerificationConfig,
 };
@@ -48,6 +49,19 @@ lazy_static! {
             "system_metrics",
             "invalid_blame_or_state_root_count"
         );
+    // outlier_cache hit/miss. A "miss" forces a brute-force outlier walk
+    // that scales with DAG size; high miss rates explain on_new_block lag.
+    // See docs/flow-audit.md G-CN-2.
+    static ref OUTLIER_CACHE_HITS: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("consensus_cache", "outlier_hits");
+    static ref OUTLIER_CACHE_MISSES: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("consensus_cache", "outlier_misses");
+    // pastset_cache hit/miss. Misses trigger compute_pastset_brutal which
+    // walks the block past set.
+    static ref PASTSET_CACHE_HITS: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("consensus_cache", "pastset_hits");
+    static ref PASTSET_CACHE_MISSES: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("consensus_cache", "pastset_misses");
 }
 
 #[derive(Clone)]
@@ -77,8 +91,6 @@ pub struct ConsensusInnerConfig {
     pub debug_dump_dir_invalid_state_root: Option<String>,
     pub debug_invalid_state_root_epoch: Option<H256>,
     pub force_recompute_height_during_construct_main: Option<u64>,
-    pub recovery_latest_mpt_snapshot: bool,
-    pub use_isolated_db_for_mpt_table: bool,
 }
 
 #[derive(Copy, Clone, DeriveMallocSizeOf)]
@@ -451,10 +463,14 @@ pub struct ConsensusGraphInner {
     /// original genesis. As time goes, it will move to future era genesis
     /// checkpoint.
     cur_era_genesis_block_arena_index: usize,
-    /// The height of the ``current'' era_genesis block
+    /// Epoch number of the ``current'' era's genesis block. Stored as
+    /// `u64` and named `*_height` for historical reasons, but it is an
+    /// **epoch number** — see `docs/chain-model.md` §1.
     cur_era_genesis_height: u64,
-    /// The height of the ``stable'' era block, unless from the start, it is
-    /// always era_epoch_count higher than era_genesis_height
+    /// Epoch number of the ``current'' era's stable block. Unless from
+    /// the start, it is always `era_epoch_count` higher than
+    /// `cur_era_genesis_height`. Stored as `u64`; semantically an
+    /// epoch number — see `docs/chain-model.md` §1.
     cur_era_stable_height: u64,
     /// If this value is not none, then we are still expecting the initial
     /// stable block to come. This value would equal to the expected hash of
@@ -502,6 +518,10 @@ pub struct ConsensusGraphInner {
     /// `true` before we enter `CacheUpSyncBlock`. We need to execute
     /// transactions and process state if it's `false`.
     header_only: bool,
+
+    /// Reports when this node's own state disagrees with most of its main
+    /// chain (see `state_divergence`). Observation only.
+    state_divergence: state_divergence::StateDivergenceTracker,
 }
 
 impl MallocSizeOf for ConsensusGraphInner {
@@ -536,6 +556,14 @@ pub struct ConsensusGraphNode {
     is_timer: bool,
     /// The total number of *executed* blocks in its past (not including self)
     past_num_blocks: u64,
+    /// ASERT block counter: cumulative `min(1 + #referees, cap)` along the
+    /// parent chain, relative to the arena root. Only differences between a
+    /// block and one of its ancestors are used, and those depend on nothing
+    /// but the headers on that chain -- unlike `past_num_blocks`, whose
+    /// epoch sets come from a node's own view (pivot, caches, era) and once
+    /// made a restarted node disagree on difficulty and fork itself off
+    /// (m2, 2026-10-12).
+    asert_count: u64,
     adaptive: bool,
 
     /// The genesis arena index of the era that `self` is in.
@@ -622,6 +650,7 @@ impl ConsensusGraphInner {
             best_terminals_reorg_height: NULLU64,
             has_timer_block_in_outlier_cache: Default::default(),
             header_only: true,
+            state_divergence: Default::default(),
         };
 
         // NOTE: Only genesis block will be first inserted into consensus graph
@@ -932,8 +961,11 @@ impl ConsensusGraphInner {
             let lca = self.lca(last, parent);
             assert!(lca != NULL);
             if self.pastset_cache.get_and_update_cache(lca).is_none() {
+                PASTSET_CACHE_MISSES.inc(1);
                 let pastset = self.compute_pastset_brutal(lca);
                 self.pastset_cache.update(lca, pastset);
+            } else {
+                PASTSET_CACHE_HITS.inc(1);
             }
             self.compute_blockset_in_own_view_of_epoch_impl(lca, main);
         }
@@ -1176,6 +1208,7 @@ impl ConsensusGraphInner {
         let parent_outlier_opt = self.outlier_cache.get(parent_arena_index);
         let mut outlier;
         if parent_outlier_opt.is_none() {
+            OUTLIER_CACHE_MISSES.inc(1);
             outlier = consensus_new_block_handler::ConsensusNewBlockHandler::compute_outlier_bruteforce(
                 self, parent_arena_index,
             );
@@ -1183,6 +1216,7 @@ impl ConsensusGraphInner {
                 outlier.add(i);
             }
         } else {
+            OUTLIER_CACHE_HITS.inc(1);
             outlier = self.compute_future_bitset(parent_arena_index);
             for index in parent_outlier_opt.unwrap() {
                 outlier.add(*index as u32);
@@ -1584,6 +1618,7 @@ impl ConsensusGraphInner {
             is_heavy: true,
             difficulty: *block_header.difficulty(),
             past_num_blocks: 0,
+            asert_count: 0,
             is_timer: false,
             // Block header contains an adaptive field, we will verify with our
             // own computation
@@ -1655,8 +1690,53 @@ impl ConsensusGraphInner {
         timer_chain_choice
     }
 
-    #[inline]
+    /// A header referee that this node's consensus does not hold is dropped
+    /// from the block's DAG edges. That is expected for blocks in the past of
+    /// the era genesis (out of the era, filtered from every epoch anyway):
+    /// they sit below the era genesis height or at most a few epochs above it
+    /// (side branches the era genesis merged; seen on every restart). Far
+    /// above it the referee should be here: dropping it changes this node's
+    /// past/epoch sets, block numbers and rewards, so its state will differ
+    /// from the network's from now on (2026-10-13 m2 incident: a block of
+    /// epoch 11,518 never reached consensus and every later block number was
+    /// one lower than the network's).
+    fn report_missing_referee(
+        &self, block_header: &BlockHeader, referee: &H256,
+    ) {
+        const ERA_GENESIS_PAST_MARGIN: u64 = 100;
+        let referee_height = self
+            .data_man
+            .block_header_by_hash(referee)
+            .map(|h| h.height());
+        match referee_height {
+            Some(h)
+                if h <= self.cur_era_genesis_height
+                    + ERA_GENESIS_PAST_MARGIN =>
+            {
+                debug!(
+                    "referee {:?} (height {}) of block {:?} is not in \
+                     consensus (era genesis height {}); not a DAG edge",
+                    referee,
+                    h,
+                    block_header.hash(),
+                    self.cur_era_genesis_height
+                )
+            }
+            _ => error!(
+                "consensus: block {:?} (height {}) references {:?} (height \
+                 {:?}) which is not in consensus although it is far above \
+                 the era genesis ({}). The edge is dropped, so this node's \
+                 epoch sets and state will differ from the network's.",
+                block_header.hash(),
+                block_header.height(),
+                referee,
+                referee_height,
+                self.cur_era_genesis_height
+            ),
+        }
+    }
 
+    #[inline]
     fn insert(&mut self, block_header: &BlockHeader) -> (usize, usize) {
         let hash = block_header.hash();
 
@@ -1669,12 +1749,32 @@ impl ConsensusGraphInner {
                     .db_manager
                     .get_current_seed_hash(block_header.height()),
             ));
-        let is_heavy = pow_quality
-            >= U512::from(self.inner_conf.heavy_block_difficulty_ratio)
+        // A heavy/timer block's PoW hash must be small enough to satisfy a
+        // difficulty `ratio` times harder than the block's own. `pow_quality`
+        // is the raw PoW hash as a number — LOWER means more work (verify_pow
+        // accepts a block when `quality <= difficulty_to_boundary(difficulty)`,
+        // i.e. `hash <= 2^256 / difficulty`). So a heavy/timer block is one
+        // whose hash clears the tighter boundary `2^256 / (ratio *
+        // difficulty)`, and the test is `<=`, not `>=`.
+        //
+        // The previous `pow_quality >= ratio * difficulty` compared a ~2^256
+        // hash against a tiny value (~ratio*difficulty, e.g. 180*47) and was
+        // therefore true for essentially EVERY block — flagging all blocks as
+        // timer/heavy and saturating the timer chain (mazze_isTimerBlock
+        // returned true for 100% of blocks, and the timer-chain anchor that
+        // gates checkpoint formation lost all meaning). Done in U512 to avoid
+        // overflow when `ratio * difficulty` is large.
+        let pow_max = U512::one() << 256; // 2^256
+        let heavy_target =
+            U512::from(self.inner_conf.heavy_block_difficulty_ratio)
                 * U512::from(block_header.difficulty());
-        let is_timer = pow_quality
-            >= U512::from(self.inner_conf.timer_chain_block_difficulty_ratio)
+        let is_heavy =
+            !heavy_target.is_zero() && pow_quality <= pow_max / heavy_target;
+        let timer_target =
+            U512::from(self.inner_conf.timer_chain_block_difficulty_ratio)
                 * U512::from(block_header.difficulty());
+        let is_timer =
+            !timer_target.is_zero() && pow_quality <= pow_max / timer_target;
 
         let parent =
             if hash != self.data_man.get_cur_consensus_era_genesis_hash() {
@@ -1690,6 +1790,8 @@ impl ConsensusGraphInner {
         for hash in block_header.referee_hashes().iter() {
             if let Some(x) = self.hash_to_arena_indices.get(hash) {
                 self.insert_referee_if_not_duplicate(&mut referees, *x);
+            } else {
+                self.report_missing_referee(block_header, hash);
             }
         }
 
@@ -1713,6 +1815,7 @@ impl ConsensusGraphInner {
             is_heavy,
             difficulty: *block_header.difficulty(),
             past_num_blocks: 0,
+            asert_count: 0,
             is_timer,
             // Block header contains an adaptive field, we will verify with our
             // own computation
@@ -1737,6 +1840,19 @@ impl ConsensusGraphInner {
         for referee in referees {
             self.arena[referee].referrers.push(index);
         }
+
+        // Header-only ASERT counter (see `ConsensusGraphNode::asert_count`).
+        // Counts the header's referees, not the arena's resolved ones, so
+        // the value cannot depend on which blocks this node holds.
+        let contribution = std::cmp::min(
+            1 + block_header.referee_hashes().len() as u64,
+            mazze_parameters::pow::ASERT_MAX_BLOCK_CONTRIBUTION,
+        );
+        self.arena[index].asert_count = if parent != NULL {
+            self.arena[parent].asert_count + contribution
+        } else {
+            contribution
+        };
 
         self.compute_blockset_in_own_view_of_epoch(index);
         let executed_epoch_len =
@@ -1886,86 +2002,164 @@ impl ConsensusGraphInner {
         epoch_blocks
     }
 
-    /// Compute the expected difficulty of a new block given its parent.
-    /// Assume the difficulty adjustment period being p.
-    /// The period boundary is [i*p+1, (i+1)*p].
-    /// Genesis block does not belong to any period, and the first
-    /// period is [1, p]. Then, if parent height is less than p, the
-    /// current block belongs to the first period, and its difficulty
-    /// should be the initial difficulty. Otherwise, we need to consider
-    /// 2 cases:
-    ///
-    /// 1. The parent height is at the period boundary, i.e., the height
-    /// is exactly divisible by p. In this case, the new block and its
-    /// parent do not belong to the same period. The expected difficulty
-    /// of the new block should be computed based on the situation of
-    /// parent's period.
-    ///
-    /// 2. The parent height is not at the period boundary. In this case,
-    /// the new block and its parent belong to the same period, and hence,
-    /// its difficulty should be same as its parent's.
+    /// Compute the expected difficulty of a new block given its parent:
+    /// ASERT over the DAG blocks and time elapsed since the era-genesis
+    /// anchor on the parent's lineage (see `pow::asert_difficulty`).
     pub fn expected_difficulty(&self, parent_hash: &H256) -> U256 {
-        let parent_arena_index =
-            *self.hash_to_arena_indices.get(parent_hash).unwrap();
-        let parent_epoch = self.arena[parent_arena_index].height;
-        if parent_epoch < self.pow_config.difficulty_adjustment_epoch_period() {
-            // Use initial difficulty for early epochs
-            self.pow_config.initial_difficulty.into()
-        } else {
-            let last_period_upper = (parent_epoch
-                / self.pow_config.difficulty_adjustment_epoch_period())
-                * self.pow_config.difficulty_adjustment_epoch_period();
-            if last_period_upper != parent_epoch {
-                self.arena[parent_arena_index].difficulty
-            } else {
-                target_difficulty(
-                    &self.data_man,
-                    &self.pow_config,
-                    &self.arena[parent_arena_index].hash,
-                    |h| {
-                        let index = self.hash_to_arena_indices.get(h).unwrap();
-                        let parent = self.arena[*index].parent;
-                        (self.arena[*index].past_num_blocks
-                            - self.arena[parent].past_num_blocks)
-                            as usize
-                    },
-                )
-            }
+        let parent = *self.hash_to_arena_indices.get(parent_hash).unwrap();
+        let initial: U256 = self.pow_config.initial_difficulty.into();
+        let parent_height = self.arena[parent].height;
+        if (self.pow_config.test_mode && !self.pow_config.asert_in_test_mode)
+            || parent_height == 0
+        {
+            return initial;
         }
+        if self.arena[parent].era_block == NULL {
+            // Outside the current era subtree: no anchor in the arena. Such
+            // blocks are not processed as part of the current era anyway.
+            return self.arena[parent].difficulty;
+        }
+        // ASERT anchor: the era-genesis block on the parent's own lineage
+        // (deterministic for every lineage, re-anchored once per era). The
+        // first era anchors at height 1 because genesis has timestamp 0.
+        let anchor_height =
+            std::cmp::max(1, self.get_era_genesis_height(parent_height));
+        let anchor = self.ancestor_at(parent, anchor_height);
+        // Header-only count of DAG blocks merged along the chain since the
+        // anchor (see `asert_count`), not `past_num_blocks`.
+        let blocks = self.arena[parent]
+            .asert_count
+            .saturating_sub(self.arena[anchor].asert_count);
+        let ts = |idx: usize| {
+            self.data_man
+                .block_header_by_hash(&self.arena[idx].hash)
+                .expect("header of arena block must exist")
+                .timestamp()
+        };
+        // Timestamps are non-decreasing along the parent chain (verified
+        // in the sync graph), so this never underflows.
+        let secs = ts(parent).saturating_sub(ts(anchor));
+        asert_difficulty(
+            &self.arena[anchor].difficulty,
+            blocks,
+            secs,
+            self.pow_config.block_generation_period,
+            mazze_parameters::pow::ASERT_HALF_LIFE_SECS,
+            &initial,
+        )
+    }
+
+    /// Diagnostic snapshot of the checkpoint machinery (served by RPC
+    /// `mazze_consensusDebug`): why the stable height / checkpoint do or do
+    /// not move. `acc_lca_on_main` = the last force-confirm point is an
+    /// ancestor of the current best block.
+    pub fn debug_checkpoint_status(&self) -> Vec<(&'static str, String)> {
+        let best = *self.main_chain.last().expect("not empty");
+        let stable_idx = self.get_main_block_arena_index(self.cur_era_stable_height);
+        let last_acc = self.timer_chain_accumulative_lca.last().copied();
+        let acc_height = last_acc.map(|i| self.arena[i].height);
+        let acc_on_main = last_acc.map(|i| self.lca(i, best) == i);
+        vec![
+            ("best_epoch", self.arena[best].height.to_string()),
+            ("cur_era_genesis_height", self.cur_era_genesis_height.to_string()),
+            ("cur_era_stable_height", self.cur_era_stable_height.to_string()),
+            (
+                "stable_hash_matches_main",
+                (self.arena[stable_idx].hash == self.cur_era_stable_block_hash)
+                    .to_string(),
+            ),
+            ("timer_chain_len", self.timer_chain.len().to_string()),
+            (
+                "cur_era_genesis_timer_chain_height",
+                self.cur_era_genesis_timer_chain_height.to_string(),
+            ),
+            (
+                "acc_lca_len",
+                self.timer_chain_accumulative_lca.len().to_string(),
+            ),
+            ("acc_lca_last_height", format!("{:?}", acc_height)),
+            ("acc_lca_on_main", format!("{:?}", acc_on_main)),
+            ("header_only", self.header_only.to_string()),
+            (
+                "local_state_diverged_since",
+                format!("{:?}", self.state_divergence.diverged_since()),
+            ),
+            (
+                "main_chain_state_invalid",
+                self.state_divergence.invalid_share(),
+            ),
+        ]
+    }
+
+    /// Diagnostic: every input of `expected_difficulty(parent)`, so a node
+    /// that disagrees with the network on a block's difficulty can be
+    /// compared field by field with a healthy one.
+    pub fn explain_expected_difficulty(&self, parent: usize) -> String {
+        let parent_height = self.arena[parent].height;
+        if parent_height == 0 || self.arena[parent].era_block == NULL {
+            return format!(
+                "parent={:?} h={} era_block_null={} expected={}",
+                self.arena[parent].hash,
+                parent_height,
+                self.arena[parent].era_block == NULL,
+                self.expected_difficulty(&self.arena[parent].hash)
+            );
+        }
+        let anchor_height =
+            std::cmp::max(1, self.get_era_genesis_height(parent_height));
+        let anchor = self.ancestor_at(parent, anchor_height);
+        let ts = |idx: usize| {
+            self.data_man
+                .block_header_by_hash(&self.arena[idx].hash)
+                .map(|h| h.timestamp())
+                .unwrap_or(0)
+        };
+        format!(
+            "parent={:?} h={} asert_count={} past_num_blocks={} epoch_len={} \
+             | anchor={:?} h={} diff={} asert_count={} past_num_blocks={} \
+             ts={} | parent_ts={} | cur_era_genesis_h={} expected={}",
+            self.arena[parent].hash,
+            parent_height,
+            self.arena[parent].asert_count,
+            self.arena[parent].past_num_blocks,
+            self.get_ordered_executable_epoch_blocks(parent).len(),
+            self.arena[anchor].hash,
+            self.arena[anchor].height,
+            self.arena[anchor].difficulty,
+            self.arena[anchor].asert_count,
+            self.arena[anchor].past_num_blocks,
+            ts(anchor),
+            ts(parent),
+            self.cur_era_genesis_height,
+            self.expected_difficulty(&self.arena[parent].hash)
+        )
     }
 
     fn adjust_difficulty(&mut self, new_best_arena_index: usize) {
-        let new_best_hash = self.arena[new_best_arena_index].hash.clone();
-        let new_best_difficulty = self.arena[new_best_arena_index].difficulty;
-        let old_best_arena_index = *self.main_chain.last().expect("not empty");
-        if old_best_arena_index == self.arena[new_best_arena_index].parent {
-            // main chain prolonged
-            assert!(self.current_difficulty == new_best_difficulty);
-        }
-
+        // Difficulty is now per block (ASERT), so `current_difficulty` is
+        // simply what a block mined on top of the new best must carry.
         let epoch = self.arena[new_best_arena_index].height;
         if epoch == 0 {
             // This may happen since the block at height 1 may have wrong
             // state root and do not update the main chain.
             self.current_difficulty = self.pow_config.initial_difficulty.into();
-        } else if epoch
-            == (epoch / self.pow_config.difficulty_adjustment_epoch_period())
-                * self.pow_config.difficulty_adjustment_epoch_period()
-        {
-            self.current_difficulty = target_difficulty(
-                &self.data_man,
-                &self.pow_config,
-                &new_best_hash,
-                |h| {
-                    let index = self.hash_to_arena_indices.get(h).unwrap();
-                    let parent = self.arena[*index].parent;
-                    (self.arena[*index].past_num_blocks
-                        - self.arena[parent].past_num_blocks)
-                        as usize
-                },
-            );
         } else {
-            self.current_difficulty = new_best_difficulty;
+            let new_best_hash = self.arena[new_best_arena_index].hash;
+            self.current_difficulty = self.expected_difficulty(&new_best_hash);
+        }
+        // Pin the seeds the chain needs: the tip's and the next RandomX
+        // epoch's (the block at the start of the current epoch, so known a
+        // full epoch early). Their full datasets are built in the background
+        // and RPC lookups of old blocks can never demote them. Checked
+        // sparsely; idempotent.
+        if epoch % 100 == 0 {
+            let db = &self.data_man.db_manager;
+            if let Some(current) = db.try_get_current_seed_hash(epoch + 1) {
+                let next = db.try_get_current_seed_hash(
+                    epoch + 1 + mazze_parameters::pow::RANDOMX_EPOCH_LENGTH,
+                );
+                self.pow.set_chain_seeds(&current, next.as_ref());
+            }
         }
     }
 
@@ -2188,13 +2382,45 @@ impl ConsensusGraphInner {
         &mut self, referee_bound: usize,
     ) -> Vec<H256> {
         let best_block_arena_index = *self.main_chain.last().unwrap();
-        if self.terminal_hashes.len() > referee_bound {
+        let candidates: Vec<H256> = if self.terminal_hashes.len() > referee_bound
+        {
             self.best_terminals(best_block_arena_index, referee_bound)
         } else {
             self.terminal_hashes
                 .iter()
                 .map(|hash| hash.clone())
                 .collect()
+        };
+
+        // Difficulty floor for referee selection: drop terminals whose difficulty
+        // is far below our own current adjusted target. A thin diverged fork
+        // retargets its difficulty down to near-nothing and mints cheap blocks;
+        // referencing those tips pulls the foreign low-difficulty flood into our
+        // epochs (inflating the retarget and swamping the body pipeline until the
+        // fleet wedges). This reads ONLY local state (self.current_difficulty),
+        // never peer-reported state, so a slow/malicious minority cannot use it to
+        // hold the network back. See REFEREE_DIFFICULTY_FLOOR_DIVISOR.
+        let diff_floor = self.current_difficulty
+            / U256::from(
+                mazze_parameters::block::REFEREE_DIFFICULTY_FLOOR_DIVISOR,
+            );
+        let filtered: Vec<H256> = candidates
+            .into_iter()
+            .filter(|h| match self.hash_to_arena_indices.get(h) {
+                Some(idx) => self.arena[*idx].difficulty >= diff_floor,
+                // Not in the consensus arena (shouldn't happen for a terminal):
+                // keep it rather than silently drop a possibly-valid tip.
+                None => true,
+            })
+            .collect();
+
+        // Our own pivot tip is a terminal at ~current_difficulty and always clears
+        // the floor, so `filtered` is non-empty in practice; guard the degenerate
+        // case anyway so we never emit an empty referee/terminal set.
+        if filtered.is_empty() {
+            vec![self.arena[best_block_arena_index].hash]
+        } else {
+            filtered
         }
     }
 
@@ -2770,6 +2996,16 @@ impl ConsensusGraphInner {
         if !state_valid {
             self.arena[me].data.blame_info = Some(state_blame_info);
         }
+        let main_index = self.height_to_main_index(block_height);
+        if main_index < self.main_chain.len()
+            && self.main_chain[main_index] == me
+        {
+            self.state_divergence.record(
+                block_height,
+                *block_header.author(),
+                state_valid,
+            );
+        }
 
         if self.inner_conf.enable_state_expose {
             STATE_EXPOSER
@@ -3155,17 +3391,23 @@ impl ConsensusGraphInner {
                     }
                     lca = self.lca(lca, self.timer_chain[j]);
                 }
-                // Note that we have the assumption that the force
-                // confirmation point will always move
-                // along parental edges, i.e., it is not possible for the
-                // point to move to a sibling tree. This
-                // assumption is true if the timer_chain_beta
-                // and the timer_chain_difficulty_ratio are set to large
-                // enough values.
-                //
-                // It is therefore safe here to use the height to compare.
+                // The force-confirm point must only ever move DOWN the same
+                // lineage. The old code trusted an assumption ("cannot move to a
+                // sibling tree, true if timer_chain_beta / difficulty_ratio are
+                // large enough") and compared height ONLY. Under a partition
+                // longer than ~timer_chain_beta timer blocks that assumption
+                // breaks: the window LCA can land in a SIBLING subtree at greater
+                // height, and a height-only ratchet silently jumps forks. Because
+                // the ratchet chains from its own previous value, the jump is
+                // permanent and LOCAL -> two nodes holding the same blocks then
+                // carry different force_confirm forever and can never reconcile
+                // (root cause of the ~180k spontaneous fork). Guard the advance
+                // with an ancestry check: only accept the new point if the current
+                // point is its ancestor. Otherwise hold position until the graph
+                // reconciles. Uses only local graph structure, no peer state.
                 if lca != NULL
                     && self.arena[last_lca].height < self.arena[lca].height
+                    && self.lca(last_lca, lca) == last_lca
                 {
                     last_lca = lca;
                 }
@@ -3227,14 +3469,13 @@ impl ConsensusGraphInner {
                     // Note that we have the assumption that the force
                     // confirmation point will always move
                     // along parental edges, i.e., it is not possible for the
-                    // point to move to a sibling tree. This
-                    // assumption is true if the timer_chain_beta
-                    // and the timer_chain_difficulty_ratio are set to large
-                    // enough values.
-                    //
-                    // It is therefore safe here to use the height to compare.
+                    // point to move to a sibling tree. Ancestry-guard the advance
+                    // (see the detailed note on the first tmp_lca loop above): only
+                    // move the force-confirm point to a descendant of the current
+                    // one, never a sibling fork; else hold position.
                     if lca != NULL
                         && self.arena[last_lca].height < self.arena[lca].height
+                        && self.lca(last_lca, lca) == last_lca
                     {
                         last_lca = lca;
                     }
@@ -3313,16 +3554,17 @@ impl ConsensusGraphInner {
                         self.cur_era_genesis_block_arena_index
                     };
                 // Note that we have the assumption that the force confirmation
-                // point will always move along parental edges,
-                // i.e., it is not possible for the point
-                // to move to a sibling tree. This assumption is true if the
-                // timer_chain_beta
-                // and the timer_chain_difficulty_ratio are set to large enough
-                // values.
-                //
-                // It is therefore safe here to use the height to compare.
+                // point will always move along parental edges. Ancestry-guard the
+                // advance (see the detailed note on the first tmp_lca loop): only
+                // push the new point if the current one is its ancestor (moving
+                // down the same lineage), never a sibling fork -- otherwise the
+                // accumulative-LCA ratchet can silently and permanently jump forks,
+                // making force_confirm view-dependent and splitting nodes that hold
+                // the same blocks. On a sibling candidate, re-push the current
+                // point and wait for the graph to reconcile.
                 if lca != NULL
                     && self.arena[last_lca].height < self.arena[lca].height
+                    && self.lca(last_lca, lca) == last_lca
                 {
                     self.timer_chain_accumulative_lca.push(lca);
                 } else {
@@ -3396,17 +3638,50 @@ impl ConsensusGraphInner {
     /// Return the epoch that we are going to sync the state
     pub fn get_to_sync_epoch_id(&self) -> EpochId {
         let height_to_sync = self.latest_snapshot_height();
-        // The height_to_sync is within the range of `self.pivit_chain`.
-        let epoch_to_sync = self.arena
-            [self.main_chain[self.height_to_main_index(height_to_sync)]]
-        .hash;
-        epoch_to_sync
+        // In rare recovery/corruption cases main_chain can be shorter than the
+        // computed height window. Do not panic; fall back to the latest known
+        // main-chain epoch so sync can continue.
+        let main_index = self.height_to_main_index(height_to_sync);
+        if let Some(&arena_index) = self.main_chain.get(main_index) {
+            if let Some(epoch) = self.arena.get(arena_index) {
+                return epoch.hash;
+            }
+        }
+
+        warn!(
+            "get_to_sync_epoch_id fallback: height_to_sync={}, main_index={}, main_chain_len={}",
+            height_to_sync,
+            main_index,
+            self.main_chain.len(),
+        );
+
+        let fallback_arena_index = self
+            .main_chain
+            .last()
+            .copied()
+            .unwrap_or(self.cur_era_genesis_block_arena_index);
+        self.arena
+            .get(fallback_arena_index)
+            .map(|epoch| epoch.hash)
+            .unwrap_or_default()
     }
 
-    /// FIXME Use snapshot-related information when we can sync snapshot states.
+    /// Height of the current era's stable checkpoint. `0` for a fresh
+    /// node that has not advanced past genesis. Used by the outer
+    /// `ConsensusGraph` to gate the trusted-checkpoint fast-sync path.
+    pub fn cur_era_stable_height(&self) -> u64 {
+        self.cur_era_stable_height
+    }
+
     /// Return the latest height that a snapshot should be available.
     fn latest_snapshot_height(&self) -> u64 {
-        self.cur_era_stable_height
+        let snapshot_epoch_count =
+            self.data_man.get_snapshot_epoch_count() as u64;
+        if snapshot_epoch_count == 0 {
+            return self.cur_era_stable_height;
+        }
+
+        self.cur_era_stable_height / snapshot_epoch_count * snapshot_epoch_count
     }
 
     fn collect_defer_blocks_missing_execution_commitments(
@@ -3455,6 +3730,16 @@ impl ConsensusGraphInner {
         //let state_boundary_height =
         //    self.data_man.state_availability_boundary.read().lower_bound;
         loop {
+            if cur == NULL {
+                // Walked past the era genesis without finding a block with a
+                // known state_valid; nothing further back can be computed.
+                warn!(
+                    "compute_state_valid_and_blame_info: no known state_valid \
+                     up to the era genesis for block {:?}",
+                    self.arena[me].hash
+                );
+                break;
+            }
             if self.arena[cur].data.state_valid.is_some() {
                 break;
             }
@@ -3584,10 +3869,22 @@ impl ConsensusGraphInner {
             }
         } else {
             if start_epoch_hash != self.data_man.true_genesis.hash() {
-                error!(
-                    "Fail to recover state_valid: start_epoch_hash={:?}",
+                // No block with an agreed state was found right above the
+                // start of the available state. The start block itself is
+                // the local checkpoint/snapshot whose state this node holds,
+                // so anchor `state_valid` there; otherwise every main block
+                // keeps `state_valid = None` and the parent walk in
+                // `compute_state_valid_and_blame_info` runs past the era
+                // genesis ("invalid key" panic on m3, 2026-10-17).
+                warn!(
+                    "Fail to recover state_valid: start_epoch_hash={:?}; \
+                     anchoring state_valid at the start of the available state",
                     start_epoch_hash
                 );
+                let start = self.main_chain[start_main_index];
+                if self.arena[start].data.state_valid.is_none() {
+                    self.arena[start].data.state_valid = Some(true);
+                }
             }
         }
     }
@@ -3787,6 +4084,7 @@ impl ConsensusGraphInner {
         let parent_outlier_opt = self.outlier_cache.get(parent_arena_index);
         let mut outlier;
         if parent_outlier_opt.is_none() {
+            OUTLIER_CACHE_MISSES.inc(1);
             outlier = consensus_new_block_handler::ConsensusNewBlockHandler::compute_outlier_bruteforce(
                 self, parent_arena_index,
             );
@@ -3794,6 +4092,7 @@ impl ConsensusGraphInner {
                 outlier.add(i);
             }
         } else {
+            OUTLIER_CACHE_HITS.inc(1);
             outlier = self.compute_future_bitset(parent_arena_index);
             for index in parent_outlier_opt.unwrap() {
                 outlier.add(*index as u32);

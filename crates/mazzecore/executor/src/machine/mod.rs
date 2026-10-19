@@ -183,14 +183,10 @@ fn new_builtin_map(space: Space) -> BTreeMap<Address, Builtin> {
             0,
         ),
     );
-    btree.insert(
-        Address::from(H256::from_low_u64_be(10)),
-        Builtin::new(
-            Box::new(Linear::new(50000, 0)),
-            builtin_factory("kzg_point_eval"),
-            0,
-        ),
-    );
+    // Precompile 0x0a (KZG point evaluation) is now provided exclusively
+    // by the eSpace revm path. Native space does not register a KZG
+    // precompile; callers of 0x0a on native space will see the address as
+    // empty. See docs/flow-audit.md and the comment in builtin/mod.rs.
     btree
 }
 

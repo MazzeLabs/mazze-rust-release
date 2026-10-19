@@ -9,7 +9,38 @@ use mazze_parameters::{
 };
 use mazze_statedb::{global_params::*, Result as DbResult};
 use mazze_types::{address_util::AddressUtil, Address, AddressSpaceUtil, U256};
-use mazze_vm_types::{self as vm};
+use mazze_vm_types::{self as vm, Spec};
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+
+    /// Confirms `MAZZIES_PER_STORAGE_COLLATERAL_UNIT.checked_mul()`
+    /// returns `None` on overflow instead of panicking or wrapping.
+    /// Regression guard for finding H-4 in `docs/security-audit.md`.
+    #[test]
+    fn checked_mul_overflow_returns_none() {
+        let unit = *MAZZIES_PER_STORAGE_COLLATERAL_UNIT;
+        // A multiplier near U256::MAX guarantees overflow when multiplied
+        // by a non-trivial unit (~1e15).
+        let huge = U256::MAX;
+        assert_eq!(unit.checked_mul(huge), None);
+    }
+
+    /// The realistic input range (u64 collateral counts) must never
+    /// overflow — confirms the production path doesn't get rejected on
+    /// a legitimate large workload.
+    #[test]
+    fn checked_mul_max_u64_collaterals_succeeds() {
+        let unit = *MAZZIES_PER_STORAGE_COLLATERAL_UNIT;
+        let max_u64_as_u256 = U256::from(u64::MAX);
+        let product = unit.checked_mul(max_u64_as_u256);
+        assert!(
+            product.is_some(),
+            "unit * u64::MAX must fit in U256 (unit ~= 1e15, u64::MAX ~= 1.8e19, product ~= 1.8e34 << U256::MAX ~= 1.16e77)"
+        );
+    }
+}
 
 impl State {
     pub fn collateral_for_storage(&self, address: &Address) -> DbResult<U256> {
@@ -161,10 +192,27 @@ fn settle_collateral_for_address(
     let addr_with_space = addr.with_native_space();
     let (inc_collaterals, sub_collaterals) =
         substate.get_collateral_change(addr);
-    let (inc, sub) = (
-        *MAZZIES_PER_STORAGE_COLLATERAL_UNIT * inc_collaterals,
-        *MAZZIES_PER_STORAGE_COLLATERAL_UNIT * sub_collaterals,
-    );
+    // SECURITY: previously the multiplication was direct `*`, which on
+    // `primitive-types` `U256` panics in debug builds and wraps in
+    // release on overflow. `inc_collaterals` / `sub_collaterals` come
+    // from substate aggregates that can — in principle — be influenced
+    // by attacker-shaped storage activity. Use `checked_mul` and
+    // reject the tx on overflow rather than panic or wrap-around. See
+    // docs/security-audit.md finding H-4.
+    let inc = MAZZIES_PER_STORAGE_COLLATERAL_UNIT
+        .checked_mul(U256::from(inc_collaterals))
+        .ok_or_else(|| -> mazze_statedb::Error {
+            "settle_collateral: inc-collateral multiplication overflow"
+                .to_string()
+                .into()
+        })?;
+    let sub = MAZZIES_PER_STORAGE_COLLATERAL_UNIT
+        .checked_mul(U256::from(sub_collaterals))
+        .ok_or_else(|| -> mazze_statedb::Error {
+            "settle_collateral: sub-collateral multiplication overflow"
+                .to_string()
+                .into()
+        })?;
 
     let is_contract = state.is_contract_with_code(&addr_with_space)?;
 

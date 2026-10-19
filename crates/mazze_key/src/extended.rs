@@ -95,17 +95,25 @@ impl ExtendedSecret {
         ExtendedSecret::with_code(secret, chain_code)
     }
 
-    /// Derive new private key
-    pub fn derive<T>(&self, index: Derivation<T>) -> ExtendedSecret
+    /// Derive new private key.
+    ///
+    /// Returns `Err(DerivationError::InvalidPrivateKey)` when the
+    /// current secret isn't a valid secp256k1 scalar. Previously this
+    /// branch panicked, which made any code path that derives keys
+    /// from attacker-controlled input a DoS vector. See
+    /// docs/security-audit.md finding H-6.
+    pub fn derive<T>(
+        &self, index: Derivation<T>,
+    ) -> Result<ExtendedSecret, DerivationError>
     where
         T: Label,
     {
         let (derived_key, next_chain_code) =
-            derivation::private(*self.secret, self.chain_code, index);
+            derivation::private(*self.secret, self.chain_code, index)?;
 
         let derived_secret = Secret::from(derived_key.0);
 
-        ExtendedSecret::with_code(derived_secret, next_chain_code)
+        Ok(ExtendedSecret::with_code(derived_secret, next_chain_code))
     }
 
     /// Private key component of the extended key.
@@ -210,7 +218,7 @@ impl ExtendedKeyPair {
     where
         T: Label,
     {
-        let derived = self.secret.derive(index);
+        let derived = self.secret.derive(index)?;
 
         Ok(ExtendedKeyPair {
             public: ExtendedPublic::from_secret(&derived)?,
@@ -227,10 +235,23 @@ mod derivation {
     use crate::keccak;
     use crate::math::curve_order;
     use crate::SECP256K1;
+    use hmac::{Hmac, Mac};
     use mazze_types::{BigEndianHash, H256, H512, U256, U512};
-    use parity_crypto::hmac;
-    use secp256k1::key::{PublicKey, SecretKey};
+    use secp256k1::{PublicKey, SecretKey};
+    use sha2::Sha512;
     use std::convert::TryInto;
+
+    type HmacSha512 = Hmac<Sha512>;
+
+    fn hmac_sha512(key: &[u8], data: &[u8]) -> [u8; 64] {
+        let mut mac = <HmacSha512 as Mac>::new_from_slice(key)
+            .expect("HMAC accepts any key length");
+        mac.update(data);
+        let out = mac.finalize().into_bytes();
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(&out);
+        arr
+    }
 
     #[derive(Debug)]
     pub enum Error {
@@ -238,6 +259,12 @@ mod derivation {
         InvalidPoint,
         MissingIndex,
         InvalidSeed,
+        /// Caller passed an `H256` that doesn't represent a valid
+        /// secp256k1 scalar in `(0, curve_order)`. Previously this
+        /// branch panicked via `.expect()`; surfaced as an error so
+        /// untrusted input (e.g. a derivation path supplied via RPC)
+        /// can't crash the node. See docs/security-audit.md H-6.
+        InvalidPrivateKey,
     }
 
     // Deterministic derivation of the key using secp256k1 elliptic curve.
@@ -245,11 +272,11 @@ mod derivation {
     // For hardened derivation, pass u32 index at least 2^31 or custom
     // Derivation::Hard(T) enum
     //
-    // Can panic if passed `private_key` is not a valid secp256k1 private key
-    // (outside of (0..curve_order()]) field
+    // Returns `Err(Error::InvalidPrivateKey)` if `private_key` isn't a
+    // valid secp256k1 scalar — previously this branch panicked.
     pub fn private<T>(
         private_key: H256, chain_code: H256, index: Derivation<T>,
-    ) -> (H256, H256)
+    ) -> Result<(H256, H256), Error>
     where
         T: Label,
     {
@@ -258,7 +285,10 @@ mod derivation {
                 private_soft(private_key, chain_code, index)
             }
             Derivation::Hard(index) => {
-                private_hard(private_key, chain_code, index)
+                // `private_hard` only uses U256 arithmetic + HMAC —
+                // cannot panic on invalid input, so the Hard path
+                // always returns Ok.
+                Ok(private_hard(private_key, chain_code, index))
             }
         }
     }
@@ -269,8 +299,7 @@ mod derivation {
         let private: U256 = private_key.into_uint();
 
         // produces 512-bit derived hmac (I)
-        let skey = hmac::SigKey::sha512(chain_code.as_bytes());
-        let i_512 = hmac::sign(&skey, &data[..]);
+        let i_512 = hmac_sha512(chain_code.as_bytes(), &data[..]);
 
         // left most 256 bits are later added to original private key
         let hmac_key: U256 = H256::from_slice(&i_512[0..32]).into_uint();
@@ -282,29 +311,30 @@ mod derivation {
         (child_key, next_chain_code)
     }
 
-    // Can panic if passed `private_key` is not a valid secp256k1 private key
-    // (outside of (0..curve_order()]) field
+    // Returns `Err(Error::InvalidPrivateKey)` when `private_key` is
+    // not a valid secp256k1 scalar; previously this path panicked.
     fn private_soft<T>(
         private_key: H256, chain_code: H256, index: T,
-    ) -> (H256, H256)
+    ) -> Result<(H256, H256), Error>
     where
         T: Label,
     {
         let mut data = vec![0u8; 33 + T::len()];
 
-        let sec_private =
-            SecretKey::from_slice(&SECP256K1, private_key.as_bytes())
-                .expect("Caller should provide valid private key");
-        let sec_public = PublicKey::from_secret_key(&SECP256K1, &sec_private)
-            .expect("Caller should provide valid private key");
-        let public_serialized = sec_public.serialize_vec(&SECP256K1, true);
+        let sec_private = SecretKey::from_slice(private_key.as_bytes())
+            .map_err(|_| Error::InvalidPrivateKey)?;
+        // `PublicKey::from_secret_key` is infallible in upstream
+        // `secp256k1` — the type system guarantees a valid scalar
+        // produces a valid point.
+        let sec_public = PublicKey::from_secret_key(&SECP256K1, &sec_private);
+        let public_serialized = sec_public.serialize();
 
         // curve point (compressed public key) --  index
         //             0.33                    --  33..end
         data[0..33].copy_from_slice(&public_serialized);
         index.store(&mut data[33..]);
 
-        hmac_pair(&data, private_key, chain_code)
+        Ok(hmac_pair(&data, private_key, chain_code))
     }
 
     // Deterministic derivation of the key using secp256k1 elliptic curve
@@ -355,9 +385,9 @@ mod derivation {
         let mut public_sec_raw = [0u8; 65];
         public_sec_raw[0] = 4;
         public_sec_raw[1..65].copy_from_slice(public_key.as_bytes());
-        let public_sec = PublicKey::from_slice(&SECP256K1, &public_sec_raw)
+        let public_sec = PublicKey::from_slice(&public_sec_raw)
             .map_err(|_| Error::InvalidPoint)?;
-        let public_serialized = public_sec.serialize_vec(&SECP256K1, true);
+        let public_serialized = public_sec.serialize();
 
         let mut data = vec![0u8; 33 + T::len()];
         // curve point (compressed public key) --  index
@@ -366,8 +396,7 @@ mod derivation {
         index.store(&mut data[33..(33 + T::len())]);
 
         // HMAC512SHA produces [derived private(256); new chain code(256)]
-        let skey = hmac::SigKey::sha512(chain_code.as_bytes());
-        let i_512 = hmac::sign(&skey, &data[..]);
+        let i_512 = hmac_sha512(chain_code.as_bytes(), &data[..]);
 
         let new_private = H256::from_slice(&i_512[0..32]);
         let new_chain_code = H256::from_slice(&i_512[32..64]);
@@ -377,18 +406,19 @@ mod derivation {
         if curve_order() <= new_private.into_uint() {
             return Err(Error::MissingIndex);
         }
-        let new_private_sec = SecretKey::from_slice(&SECP256K1, new_private.as_bytes())
-			.expect("Private key belongs to the field [0..CURVE_ORDER) (checked above); So initializing can never fail; qed");
-        let mut new_public =
-            PublicKey::from_secret_key(&SECP256K1, &new_private_sec)
-                .expect("Valid private key produces valid public key");
+        let new_private_sec = SecretKey::from_slice(new_private.as_bytes())
+            .expect("Private key belongs to the field [0..CURVE_ORDER) (checked above); So initializing can never fail; qed");
+        let new_public_from_priv =
+            PublicKey::from_secret_key(&SECP256K1, &new_private_sec);
 
-        // Adding two points on the elliptic curves (combining two public keys)
-        new_public
-            .add_assign(&SECP256K1, &public_sec)
+        // Adding two points on the elliptic curves (combining two
+        // public keys). Upstream `secp256k1` exposes this as
+        // `PublicKey::combine` rather than `add_assign`.
+        let combined = new_public_from_priv
+            .combine(&public_sec)
             .expect("Addition of two valid points produce valid point");
 
-        let serialized = new_public.serialize_vec(&SECP256K1, false);
+        let serialized = combined.serialize_uncompressed();
 
         Ok((H512::from_slice(&serialized[1..65]), new_chain_code))
     }
@@ -407,17 +437,16 @@ mod derivation {
     }
 
     pub fn point(secret: H256) -> Result<H512, Error> {
-        let sec = SecretKey::from_slice(&SECP256K1, secret.as_bytes())
+        let sec = SecretKey::from_slice(secret.as_bytes())
             .map_err(|_| Error::InvalidPoint)?;
-        let public_sec = PublicKey::from_secret_key(&SECP256K1, &sec)
-            .map_err(|_| Error::InvalidPoint)?;
-        let serialized = public_sec.serialize_vec(&SECP256K1, false);
+        // Infallible in upstream `secp256k1`.
+        let public_sec = PublicKey::from_secret_key(&SECP256K1, &sec);
+        let serialized = public_sec.serialize_uncompressed();
         Ok(H512::from_slice(&serialized[1..65]))
     }
 
     pub fn seed_pair(seed: &[u8]) -> (H256, H256) {
-        let skey = hmac::SigKey::sha512(b"Bitcoin seed");
-        let i_512 = hmac::sign(&skey, seed);
+        let i_512 = hmac_sha512(b"Bitcoin seed", seed);
 
         let master_key = H256::from_slice(&i_512[0..32]);
         let chain_code = H256::from_slice(&i_512[32..64]);
@@ -467,18 +496,18 @@ mod tests {
         // hardened
         assert_eq!(&**extended_secret.as_raw(), &*secret);
         assert_eq!(
-			**extended_secret.derive(2_147_483_648.into()).as_raw(),
+			**extended_secret.derive(2_147_483_648.into()).expect("derive ok").as_raw(),
 			H256::from_str("0927453daed47839608e414a3738dfad10aed17c459bbd9ab53f89b026c834b6").unwrap(),
 		);
         assert_eq!(
-			**extended_secret.derive(2_147_483_649.into()).as_raw(),
+			**extended_secret.derive(2_147_483_649.into()).expect("derive ok").as_raw(),
 			H256::from_str("44238b6a29c6dcbe9b401364141ba11e2198c289a5fed243a1c11af35c19dc0f").unwrap(),
 		);
 
         // normal
-        assert_eq!(**extended_secret.derive(0.into()).as_raw(), H256::from_str("bf6a74e3f7b36fc4c96a1e12f31abc817f9f5904f5a8fc27713163d1f0b713f6").unwrap());
-        assert_eq!(**extended_secret.derive(1.into()).as_raw(), H256::from_str("bd4fca9eb1f9c201e9448c1eecd66e302d68d4d313ce895b8c134f512205c1bc").unwrap());
-        assert_eq!(**extended_secret.derive(2.into()).as_raw(), H256::from_str("86932b542d6cab4d9c65490c7ef502d89ecc0e2a5f4852157649e3251e2a3268").unwrap());
+        assert_eq!(**extended_secret.derive(0.into()).expect("derive ok").as_raw(), H256::from_str("bf6a74e3f7b36fc4c96a1e12f31abc817f9f5904f5a8fc27713163d1f0b713f6").unwrap());
+        assert_eq!(**extended_secret.derive(1.into()).expect("derive ok").as_raw(), H256::from_str("bd4fca9eb1f9c201e9448c1eecd66e302d68d4d313ce895b8c134f512205c1bc").unwrap());
+        assert_eq!(**extended_secret.derive(2.into()).expect("derive ok").as_raw(), H256::from_str("86932b542d6cab4d9c65490c7ef502d89ecc0e2a5f4852157649e3251e2a3268").unwrap());
 
         let extended_public = ExtendedPublic::from_secret(&extended_secret)
             .expect("Extended public should be created");
@@ -515,8 +544,9 @@ mod tests {
         let extended_public = ExtendedPublic::from_secret(&extended_secret)
             .expect("Extended public should be created");
 
-        let derived_secret0 =
-            extended_secret.derive(Derivation::Soft(derivation_secret));
+        let derived_secret0 = extended_secret
+            .derive(Derivation::Soft(derivation_secret))
+            .expect("Soft derivation should succeed");
         let derived_public0 = extended_public
             .derive(Derivation::Soft(derivation_secret))
             .expect("First derivation of public should succeed");
@@ -541,7 +571,7 @@ mod tests {
             ExtendedSecret::with_code(secret, H256::from_low_u64_be(1));
 
         assert_eq!(
-			**extended_secret.derive(Derivation::Hard(derivation_secret)).as_raw(),
+			**extended_secret.derive(Derivation::Hard(derivation_secret)).expect("hard derive ok").as_raw(),
 			H256::from_str("2bc2d696fb744d77ff813b4a1ef0ad64e1e5188b622c54ba917acc5ebc7c5486").unwrap(),
 		);
     }
@@ -557,7 +587,9 @@ mod tests {
         let extended_public = ExtendedPublic::from_secret(&extended_secret)
             .expect("Extended public should be created");
 
-        let derived_secret0 = extended_secret.derive(0.into());
+        let derived_secret0 = extended_secret
+            .derive(0.into())
+            .expect("Soft secret derivation should succeed");
         let derived_public0 = extended_public
             .derive(0.into())
             .expect("First derivation of public should succeed");
@@ -592,7 +624,7 @@ mod tests {
         // xprv9uHRZZhk6KAJC1avXpDAp4MDc3sQKNxDiPvvkX8Br5ngLNv1TxvUxt4cV1rGL5hj6KCesnDYUhd7oWgT11eZG7XnxHrnYeSvkzY7d2bhkJ7
         // H(0)
         test_extended(
-			|secret| secret.derive(2_147_483_648.into()),
+			|secret| secret.derive(2_147_483_648.into()).expect("derive ok"),
 			H256::from_str("edb2e14f9ee77d26dd93b4ecede8d16ed408ce149b6cd80b0715a2d911a0afea")
 				.expect("Private should be decoded ok")
 		);
@@ -603,7 +635,7 @@ mod tests {
         // xprv9wTYmMFdV23N2TdNG573QoEsfRrWKQgWeibmLntzniatZvR9BmLnvSxqu53Kw1UmYPxLgboyZQaXwTCg8MSY3H2EU4pWcQDnRnrVA1xe8fs
         // H(0)/1
         test_extended(
-			|secret| secret.derive(2_147_483_648.into()).derive(1.into()),
+			|secret| secret.derive(2_147_483_648.into()).expect("derive ok").derive(1.into()).expect("derive ok"),
 			H256::from_str("3c6cb8d0f6a264c91ea8b5030fadaa8e538b020f0a387421a12de9319dc93368")
 				.expect("Private should be decoded ok")
 		);

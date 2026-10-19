@@ -74,8 +74,9 @@ impl LogDeviceManager {
             disable_wal: false,
             stats: false,
         };
-        let settings = db::paritydb_settings(db_dir_path.clone(), &parity_config)
-            .expect("Failed to configure ParityDB for log device");
+        let settings =
+            db::paritydb_settings(db_dir_path.clone(), &parity_config)
+                .expect("Failed to configure ParityDB for log device");
 
         let db = db::open_database(&settings).unwrap();
 

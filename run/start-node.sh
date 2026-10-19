@@ -7,11 +7,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 EXECUTABLE="$REPO_ROOT/target/release/mazze"
 CONFIG_FILE="$SCRIPT_DIR/hydra.toml"
-LOG_DIR="$SCRIPT_DIR/logs"
+LOG_DIR="$REPO_ROOT/run/logs"
 PID_FILE="$SCRIPT_DIR/node_pid.txt"
 LOG_FILE="$LOG_DIR/mazze-node.log"
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$LOG_DIR/archive"
 
 if [[ ! -x "$EXECUTABLE" ]]; then
   echo "Error: binary not found at $EXECUTABLE. Did you run: cargo build --release?" >&2
@@ -27,6 +27,34 @@ export MAZZE_SHIELDED_VK_HEX="${MAZZE_SHIELDED_VK_HEX:-$SCRIPT_DIR/shielded_vk.h
 
 echo "-------$(date '+%Y-%m-%d %H:%M:%S')-------" >> "$LOG_FILE"
 
+SECRETS_FILE="$SCRIPT_DIR/hydra.secrets.toml"
+ensure_stratum_secret() {
+  if [[ ! -f "$SECRETS_FILE" ]]; then
+    echo "Generating $SECRETS_FILE (first-run stratum secret)..." >&2
+    local generated
+    if command -v openssl >/dev/null 2>&1; then
+      generated="$(openssl rand -hex 32)"
+    else
+      generated="$(head -c 32 /dev/urandom | xxd -p -c 64)"
+    fi
+    umask 077
+    cat > "$SECRETS_FILE" <<EOF
+# Auto-generated per-deployment secrets. Do not commit.
+# See run/hydra.secrets.toml.example for the format and rotation guidance.
+stratum_secret = "$generated"
+EOF
+    chmod 600 "$SECRETS_FILE"
+  fi
+  STRATUM_SECRET="$(grep -E '^[[:space:]]*stratum_secret[[:space:]]*=' "$SECRETS_FILE" \
+    | head -n1 \
+    | sed -E 's/^[[:space:]]*stratum_secret[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/')"
+  if [[ -z "$STRATUM_SECRET" ]]; then
+    echo "Error: stratum_secret missing or unparseable in $SECRETS_FILE" >&2
+    exit 1
+  fi
+}
+ensure_stratum_secret
+
 # Ensure log_conf in config is absolute so it works regardless of CWD
 ABS_LOG_CONF="$SCRIPT_DIR/log.yaml"
 TEMP_CONF="$SCRIPT_DIR/hydra.runtime.toml"
@@ -36,6 +64,16 @@ if grep -q '^\s*log_conf\s*=' "$TEMP_CONF"; then
 else
   printf '\nlog_conf = "%s"\n' "$ABS_LOG_CONF" >> "$TEMP_CONF"
 fi
+# NOTE: We intentionally do NOT inject stratum_secret into the node config.
+# The stratum server uses keccak(miner_sent) == node_secret, so node and miner
+# cannot share the same literal value. Instead the node runs stratum with no
+# secret (auth disabled) bound to 127.0.0.1 (see stratum_listen_address in
+# hydra.toml); the co-located miner connects over localhost only. The miner
+# still keeps its own stratum_secret entry (start-miner.sh) since the binary
+# requires the field to be present.
+# net_config (the node key) alone is not chain data: a wiped node keeps it to
+# preserve its identity, and must still build the genesis WITH its transactions
+# (execute_genesis), or it derives a different genesis hash and no peer accepts it.
 has_chain_data() {
   local base="$1"
   if compgen -G "$base/blockchain_db/*" > /dev/null; then
@@ -44,12 +82,9 @@ has_chain_data() {
   if compgen -G "$base/storage_db/*" > /dev/null; then
     return 0
   fi
-  if compgen -G "$base/net_config/*" > /dev/null; then
-    return 0
-  fi
   return 1
 }
-if has_chain_data "$SCRIPT_DIR/blockchain_data"; then
+if has_chain_data "$REPO_ROOT/blockchain_data"; then
   if grep -q '^\s*execute_genesis\s*=' "$TEMP_CONF"; then
     sed -i "s#^\s*execute_genesis\s*=.*#execute_genesis = false#" "$TEMP_CONF"
   else
@@ -57,9 +92,24 @@ if has_chain_data "$SCRIPT_DIR/blockchain_data"; then
   fi
 fi
 
-# Run from the config directory so relative paths (blockchain_data, logs, etc.)
-# stay consistent across restarts.
-pushd "$SCRIPT_DIR" >/dev/null
+# Storage Phase 3 — enable all 7 MDBX shadow mirrors so every write is
+# dual-written to MDBX alongside ParityDB from genesis. Required before reads
+# can be cut over to MDBX via debug_mdbxSetReadSource(table, "shadow").
+for _f in enable_mdbx_shadow_hash_by_number enable_mdbx_shadow_tx_index \
+          enable_mdbx_shadow_blamed_header_verified_roots \
+          enable_mdbx_shadow_block_traces enable_mdbx_shadow_blocks \
+          enable_mdbx_shadow_epoch_numbers enable_mdbx_shadow_misc \
+          mdbx_read_shadow; do
+  if grep -q "^[[:space:]]*${_f}[[:space:]]*=" "$TEMP_CONF"; then
+    sed -i "s#^[[:space:]]*${_f}[[:space:]]*=.*#${_f} = true#" "$TEMP_CONF"
+  else
+    printf '\n%s = true\n' "$_f" >> "$TEMP_CONF"
+  fi
+done
+
+# Run from the repository root so log4rs and helper logs share the same
+# canonical ./logs directory.
+pushd "$REPO_ROOT" >/dev/null
 
 "$EXECUTABLE" --config "$TEMP_CONF" >> "$LOG_FILE" 2>&1 &
 PID=$!

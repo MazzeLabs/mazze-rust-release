@@ -15,6 +15,7 @@ use crate::{
 use malloc_size_of::MallocSizeOf;
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_parameters::sync::FAILED_REQUEST_RESEND_WAIT;
+use mazze_types::H256;
 use network::{
     node_table::NodeId, ErrorKind as NetworkErrorKind, NetworkContext,
     UpdateNodeOperation,
@@ -156,6 +157,25 @@ impl RequestHandler {
         timeout_requests
     }
 
+    /// Collect every block hash backed by a LIVE tracked GetBlocks /
+    /// GetCompactBlocks request across all peers. Used by the request manager
+    /// to reconcile away ORPHANED in-flight keys — hashes stuck in
+    /// `inflight_keys[GET_BLOCKS]` with no live request behind them, which
+    /// never time out and permanently starve the body-request drain.
+    pub fn live_block_request_hashes(&self) -> HashSet<H256> {
+        let mut hashes = HashSet::new();
+        for container in self.peers.lock().values() {
+            for peer_req in container.inflight_requests.values() {
+                if let Some(hs) =
+                    super::try_get_block_hashes(&peer_req.message.request)
+                {
+                    hashes.extend(hs.iter().cloned());
+                }
+            }
+        }
+        hashes
+    }
+
     pub fn process_timeout_requests(
         &self, io: &dyn NetworkContext,
     ) -> Vec<RequestMessage> {
@@ -168,14 +188,43 @@ impl RequestHandler {
                 self.match_request(&sync_req.peer_id, sync_req.request_id)
             {
                 let peer_id = sync_req.peer_id.clone();
+                let request_msg_id = req.request.msg_id();
                 if let Some(request_container) =
                     self.peers.lock().get_mut(&peer_id)
                 {
                     if request_container
                         .on_timeout_should_disconnect(&self.protocol_config)
                     {
+                        warn!(
+                            "Disconnecting peer={} after request timeout budget exceeded: \
+                             timed_out_msg_id={}, timeout_count={}, timeout_window_s={}, \
+                             timeout_limit={}, inflight_requests={}, pending_requests={}, \
+                             max_inflight_request_count={}",
+                            peer_id,
+                            request_msg_id,
+                            request_container.timeout_statistics.len(),
+                            self.protocol_config.timeout_observing_period_s,
+                            self.protocol_config
+                                .max_allowed_timeout_in_observing_period,
+                            request_container.inflight_requests.len(),
+                            request_container.pending_requests.len(),
+                            request_container.max_inflight_request_count,
+                        );
                         peers_to_disconnect.insert(peer_id);
                     } else {
+                        debug!(
+                            "Peer={} request timeout within budget: timed_out_msg_id={}, \
+                             timeout_count={}, timeout_window_s={}, timeout_limit={}, \
+                             inflight_requests={}, pending_requests={}",
+                            peer_id,
+                            request_msg_id,
+                            request_container.timeout_statistics.len(),
+                            self.protocol_config.timeout_observing_period_s,
+                            self.protocol_config
+                                .max_allowed_timeout_in_observing_period,
+                            request_container.inflight_requests.len(),
+                            request_container.pending_requests.len(),
+                        );
                         peers_to_send_pending_requests.insert(peer_id);
                     }
                 }

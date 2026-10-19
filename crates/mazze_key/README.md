@@ -1,7 +1,35 @@
 ## mazzekey-cli
 
-Mazze keys generator. It is built on top of the counterpart of Parity Ethereum. Note that Mazze
-address scheme is different from Ethereum. You cannot directly import Ethereum key files into Mazze.
+The `mazzekey` CLI generates and operates on Mazze secp256k1 keypairs, derives
+Mazze native + eSpace addresses, signs and verifies messages, and supports
+brain-wallet style recovery. The crate predates the eSpace migration but the
+derivation rules below match the current code in `crates/mazze_key`.
+
+### Address scheme
+
+Mazze and Ethereum-style addresses share the same secp256k1 key material but
+differ in the final byte-level encoding:
+
+| Space          | Derivation                                                     |
+| -------------- | -------------------------------------------------------------- |
+| Mazze native   | `keccak256(pubkey)[12..]`, then mask `byte[0] = (b & 0x0f) \| 0x10` |
+| eSpace (EVM)   | `keccak256(pubkey)[12..]` — unmodified, matches Ethereum       |
+
+The high nibble of `byte[0]` is a **type tag** for native addresses:
+
+- `0x0…` → builtin / internal precompiles (e.g. `0x0888…0000`)
+- `0x1…` → user account (every EOA produced by this CLI)
+- `0x8…` → contract account
+
+So a freshly generated key always produces a native address starting with the
+hex digit `1`. The same key in eSpace will share the lower 39 hex chars but
+typically have a different first nibble — unless `keccak256(pubkey)[12]` is
+already in `0x10..=0x1f`, in which case the two addresses coincide
+(see `is_compatible_public()` in [src/keypair.rs](src/keypair.rs)).
+
+Addresses can additionally be rendered in CIP-37 base32 form prefixed with the
+network tag (`mazze:` for mainnet, `mazzetest:` for testnet, `mazze<id>:` for a
+custom chain id). Pass `-n / --network` to enable this.
 
 ### Usage
 
@@ -20,80 +48,102 @@ Usage:
     mazzekey [-h | --help]
 
 Options:
-    -h, --help         Display this message and exit.
-    -s, --secret       Display only the secret key.
-    -p, --public       Display only the public key.
-    -a, --address      Display only the address.
-    -b, --brain        Use parity brain wallet algorithm. Not recommended.
+    -h, --help                  Display this message and exit.
+    -s, --secret                Display only the secret key.
+    -p, --public                Display only the public key.
+    -a, --address               Display only the address.
+    -b, --brain                 Use the brain-wallet algorithm. Not recommended.
+    -n, --network <network-id>  Render the address as base32 with the network
+                                prefix (`main`, `test`, or a numeric chain id).
 
 Commands:
-    info               Display public key and address of the secret.
-    generate random    Generates new random Ethereum key.
-    generate prefix    Random generation, but address must start with a prefix ("vanity address").
-    sign               Sign message using a secret key.
-    verify             Verify signer of the signature by public key or address.
-    recover            Try to find brain phrase matching given address from partial phrase.
+    info               Display public key and address for a secret or phrase.
+    generate random    Generate a new random Mazze keypair.
+    generate prefix    Random generation constrained to a hex-prefix on the
+                       derived address ("vanity address"). The prefix must
+                       start with `1` because of the user-account type tag.
+    sign               Sign a 32-byte message digest with a secret.
+    verify             Verify a signature against a public key or address.
+    recover            Recover a brain-wallet secret from a partial phrase.
 ```
 
 ### Examples
 
 #### `info <secret>`
 
-_Display info about private key._
+_Display info about a private key._
 
-- `<secret>` - Mazze secret, 32 bytes long
+- `<secret>` — Mazze secret, 32 bytes long
 
 ```
 mazzekey info 17d08f5fe8c77af811caa0c9a187e668ce3b74a99acc3f6d976f075fa8e0be55
 ```
 
 ```
-secret:  17d08f5fe8c77af811caa0c9a187e668ce3b74a99acc3f6d976f075fa8e0be55
-public:  689268c0ff57a20cd299fa60d3fb374862aff565b20b5f1767906a99e6e09f3ff04ca2b2a5cd22f62941db103c0356df1a8ed20ce322cab2483db67685afd124
-address: 26d1ec50b4e62c1d1a40d16e7cacc6a6580757d5
+secret:         17d08f5fe8c77af811caa0c9a187e668ce3b74a99acc3f6d976f075fa8e0be55
+public:         689268c0ff57a20cd299fa60d3fb374862aff565b20b5f1767906a99e6e09f3ff04ca2b2a5cd22f62941db103c0356df1a8ed20ce322cab2483db67685afd124
+address:        16d1ec50b4e62c1d1a40d16e7cacc6a6580757d5
+Hex address:    16d1ec50b4e62c1d1a40d16e7cacc6a6580757d5
+Base32 address: mazze:aanrd5cu0xxc2hj4jdj069fp24xfub414y415cussd
+```
+
+Add `-n test` to switch the base32 prefix to `mazzetest:`:
+
+```
+mazzekey info 17d08f5fe8c77af811caa0c9a187e668ce3b74a99acc3f6d976f075fa8e0be55 -n test
+```
+
+```
+Base32 address: mazzetest:aanrd5cu0xxc2hj4jdj069fp24xfub414ym4krende
 ```
 
 --
 
 #### `info --brain <phrase>`
 
-_Display info about private key generate from brain wallet recovery phrase._
+_Display info for a key derived from a brain-wallet phrase._
 
-- `<phrase>` - Parity recovery phrase, 12 words
+- `<phrase>` — Brain-wallet recovery phrase, 12 words from the bundled dictionary
+  (the dictionary comes from `parity-wordlist`; it is **not** a BIP-39 wordlist).
 
 ```
 mazzekey info --brain "this is sparta"
 ```
 
 ```
-The recover phrase was not generated by Parity: The word 'this' does not come from the dictionary.
+The recover phrase was not generated by Mazze: The word 'this' does not come from the dictionary.
 
-secret:  aa22b54c0cb43ee30a014afe5ef3664b1cde299feabca46cd3167a85a57c39f2
-public:  c4c5398da6843632c123f543d714d2d2277716c11ff612b2a2f23c6bda4d6f0327c31cd58c55a9572c3cc141dade0c32747a13b7ef34c241b26c84adbb28fcf4
-address: 006e27b6a72e1f34c626762f3c4761547aff1421
+secret:  a6bb621db2721ee05c44de651dde50ef85feefc5e91ae23bedcae69b874a22e7
+public:  756cb3f7ad1516b7c0ee34bd5e8b3a519922d3737192a58115e47df57ff3270873360a61de523ce08c0ebd7d3801bcb1d03c0364431d2b8633067f3d79e1fb25
+address: 10a33d9f95b22fe53024331c036db6e824a25bab
 ```
 
 --
 
 #### `generate random`
 
-_Generate new keypair randomly._
+_Generate a new random keypair._
 
 ```
 mazzekey generate random
 ```
 
 ```
-secret:  7d29fab185a33e2cd955812397354c472d2b84615b645aa135ff539f6b0d70d5
-public:  35f222d88b80151857a2877826d940104887376a94c1cbd2c8c7c192eb701df88a18a4ecb8b05b1466c5b3706042027b5e079fe3a3683e66d822b0e047aa3418
-address: a8fa5dd30a87bb9e3288d604eb74949c515ab66e
+secret:         e54cfb673b006b9ed7d9b277d30d57deddd6b645e473ea41bc35dfcd8374a2ee
+public:         11b8705f632ffa7064e6c45023c540c75ef1ce5812c1a1b41835368b1f0bf6804dd779000cc4352ea7c2f26e63bfa453f93b72e5551b6b6104d20fc732f34c84
+address:        1220cabc5303f692dbec9048a9e15061e30d71e3
+Hex address:    1220cabc5303f692dbec9048a9e15061e30d71e3
+Base32 address: mazze:aakcbwz6mpb9re057wjevmtbmbu8gdnv6p13p77pdb
 ```
+
+Note the leading `1` in the address — that is the user-account type tag set by
+`set_user_account_type_bits()`.
 
 --
 
 #### `generate random --brain`
 
-_Generate new keypair with recovery phrase randomly._
+_Generate a new keypair together with a recovery phrase._
 
 ```
 mazzekey generate random --brain
@@ -101,56 +151,45 @@ mazzekey generate random --brain
 
 ```
 recovery phrase: thwarting scandal creamer nuzzle asparagus blast crouch trusting anytime elixir frenzied octagon
-secret:  001ce488d50d2f7579dc190c4655f32918d505cee3de63bddc7101bc91c0c2f0
-public:  4e19a5fdae82596e1485c69b687c9cc52b5078e5b0668ef3ce8543cd90e712cb00df822489bc1f1dcb3623538a54476c7b3def44e1a51dc174e86448b63f42d0
-address: 00cf3711cbd3a1512570639280758118ba0b2bcb
+secret:          <derived from the phrase>
+public:          ...
+address:         1...
 ```
 
 --
 
 #### `generate prefix <prefix>`
 
-_Generate new keypair randomly with address starting with prefix._
+_Generate a keypair whose address starts with a given hex prefix._
 
-- `<prefix>` - desired address prefix, 0 - 32 bytes long.
-
-```
-mazzekey generate prefix ff
-```
+- `<prefix>` — desired address prefix, an **even** number of hex chars (whole
+  bytes). The first hex digit must be `1` because every user account address
+  starts with `1`.
 
 ```
-secret:  2075b1d9c124ea673de7273758ed6de14802a9da8a73ceb74533d7c312ff6acd
-public:  48dbce4508566a05509980a5dd1335599fcdac6f9858ba67018cecb9f09b8c4066dc4c18ae2722112fd4d9ac36d626793fffffb26071dfeb0c2300df994bd173
-address: fff7e25dff2aa60f61f9d98130c8646a01f31649
-```
-
---
-
-#### `generate prefix --brain <prefix>`
-
-_Generate new keypair with recovery phrase randomly with address starting with prefix._
-
-- `<prefix>` - desired address prefix, 0 - 32 bytes long.
-
-```
-mazzekey generate prefix --brain 00cf
+mazzekey generate prefix 1f
 ```
 
 ```
-recovery phrase: thwarting scandal creamer nuzzle asparagus blast crouch trusting anytime elixir frenzied octagon
-secret:  001ce488d50d2f7579dc190c4655f32918d505cee3de63bddc7101bc91c0c2f0
-public:  4e19a5fdae82596e1485c69b687c9cc52b5078e5b0668ef3ce8543cd90e712cb00df822489bc1f1dcb3623538a54476c7b3def44e1a51dc174e86448b63f42d0
-address: 00cf3711cbd3a1512570639280758118ba0b2bcb
+secret:         911a356124f325a2d0173d5d910a266a997a64d2751068024af48893258122cf
+public:         564dbb4f501f84fefe37b8e34d84fce402c89bd5f3e7ce3a4090638b7d6bb4ff7fc82f3f6bbf234f86c5088028c05a1e70009907881ab03f170ea2d7378cad59
+address:        1f213526c04c83ba8596ecc43fb719da68d4f7a0
+Hex address:    1f213526c04c83ba8596ecc43fb719da68d4f7a0
+Base32 address: mazze:aatwcrkg2bgjhsyfw50pjt71dhrgvzh1yadp5h0fr9
 ```
+
+Prefixes that do not start with `1` (e.g. `ff`, `00cf`) are not achievable —
+the type-tag masking step would rewrite the high nibble. Use `0` only for
+debugging builtin-style addresses, never for user-account generation.
 
 --
 
 #### `sign <secret> <message>`
 
-_Sign a message with a secret._
+_Sign a 32-byte message with a secret._
 
-- `<secret>` - Mazze secret, 32 bytes long
-- `<message>` - message to sign, 32 bytes long
+- `<secret>` — Mazze secret, 32 bytes long
+- `<message>` — message digest to sign, 32 bytes long
 
 ```
 mazzekey sign 17d08f5fe8c77af811caa0c9a187e668ce3b74a99acc3f6d976f075fa8e0be55 bd50b7370c3f96733b31744c6c45079e7ae6c8d299613246d28ebcef507ec987
@@ -164,11 +203,11 @@ c1878cf60417151c766a712653d26ef350c8c75393458b7a9be715f053215af63dfd3b02c2ae65a8
 
 #### `verify public <public> <signature> <message>`
 
-_Verify the signature._
+_Verify a signature against a public key._
 
-- `<public>` - Mazze public, 64 bytes long
-- `<signature>` - message signature, 65 bytes long
-- `<message>` - message, 32 bytes long
+- `<public>` — Mazze public key, 64 bytes long
+- `<signature>` — message signature, 65 bytes long
+- `<message>` — message digest, 32 bytes long
 
 ```
 mazzekey verify public 689268c0ff57a20cd299fa60d3fb374862aff565b20b5f1767906a99e6e09f3ff04ca2b2a5cd22f62941db103c0356df1a8ed20ce322cab2483db67685afd124 c1878cf60417151c766a712653d26ef350c8c75393458b7a9be715f053215af63dfd3b02c2ae65a8677917a8efa3172acb71cb90196e42106953ea0363c5aaf200 bd50b7370c3f96733b31744c6c45079e7ae6c8d299613246d28ebcef507ec987
@@ -182,14 +221,14 @@ true
 
 #### `verify address <address> <signature> <message>`
 
-_Verify the signature._
+_Verify a signature against the address it should recover to._
 
-- `<address>` - Mazze address, 20 bytes long
-- `<signature>` - message signature, 65 bytes long
-- `<message>` - message, 32 bytes long
+- `<address>` — Mazze native address, 20 bytes long
+- `<signature>` — message signature, 65 bytes long
+- `<message>` — message digest, 32 bytes long
 
 ```
-mazzekey verify address 689268c0ff57a20cd299fa60d3fb374862aff565b20b5f1767906a99e6e09f3ff04ca2b2a5cd22f62941db103c0356df1a8ed20ce322cab2483db67685afd124 c1878cf60417151c766a712653d26ef350c8c75393458b7a9be715f053215af63dfd3b02c2ae65a8677917a8efa3172acb71cb90196e42106953ea0363c5aaf200 bd50b7370c3f96733b31744c6c45079e7ae6c8d299613246d28ebcef507ec987
+mazzekey verify address 16d1ec50b4e62c1d1a40d16e7cacc6a6580757d5 c1878cf60417151c766a712653d26ef350c8c75393458b7a9be715f053215af63dfd3b02c2ae65a8677917a8efa3172acb71cb90196e42106953ea0363c5aaf200 bd50b7370c3f96733b31744c6c45079e7ae6c8d299613246d28ebcef507ec987
 ```
 
 ```
@@ -200,22 +239,24 @@ true
 
 #### `recover <address> <known-phrase>`
 
-_Try to recover an account given expected address and partial (too short or with invalid words) recovery phrase._
+_Recover the secret behind an address given a partial or imperfect brain-wallet
+phrase._
 
-- `<address>` - Mazze address, 20 bytes long
-- `<known-phrase>` - known phrase, can be in a form of `thwarting * creamer`
-
-```
-RUST_LOG="info" mazzekey recover "00cf3711cbd3a1512570639280758118ba0b2bcb" "thwarting scandal creamer nuzzle asparagus blast crouch trusting anytime elixir frenzied octag"
-```
+- `<address>` — Mazze native address, 20 bytes long
+- `<known-phrase>` — partial phrase; use `*` for unknown words, e.g.
+  `"thwarting * creamer"`
 
 ```
-INFO:mazzekey::brain_recover: Invalid word 'octag', looking for potential substitutions.
-INFO:mazzekey::brain_recover: Closest words: ["ocean", "octagon", "octane", "outage", "tag", "acting", "acts", "aorta", "cage", "chug"]
-INFO:mazzekey::brain_recover: Starting to test 7776 possible combinations.
+RUST_LOG="info" mazzekey recover "1...your address..." "thwarting scandal creamer nuzzle asparagus blast crouch trusting anytime elixir frenzied octag"
+```
+
+```
+INFO mazzekey::brain_recover: Invalid word 'octag', looking for potential substitutions.
+INFO mazzekey::brain_recover: Closest words: ["ocean", "octagon", "octane", "outage", "tag", "acting", "acts", "aorta", "cage", "chug"]
+INFO mazzekey::brain_recover: Starting to test 7776 possible combinations.
 
 thwarting scandal creamer nuzzle asparagus blast crouch trusting anytime elixir frenzied octagon
-secret:  001ce488d50d2f7579dc190c4655f32918d505cee3de63bddc7101bc91c0c2f0
-public:  4e19a5fdae82596e1485c69b687c9cc52b5078e5b0668ef3ce8543cd90e712cb00df822489bc1f1dcb3623538a54476c7b3def44e1a51dc174e86448b63f42d0
-address: 00cf3711cbd3a1512570639280758118ba0b2bcb
+secret:  ...
+public:  ...
+address: 1...
 ```

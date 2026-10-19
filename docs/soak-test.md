@@ -24,7 +24,7 @@ kill "$(cat run/soak_pid.txt)"
 
 ## Metrics output
 
-Metrics are written to `run/logs/metrics-soak.log` (append-only). Useful signals:
+Metrics are written to `logs/metrics-soak.log` (append-only). Useful signals:
 
 - `sync_graph` group: `arena_size`, `old_era_frontier_size`, `not_ready_frontier_size`
 - `consensus_worker_queue` group: `queued`, `enq_tps`, `deq_tps`

@@ -88,8 +88,16 @@ impl ConfirmationMeter {
     }
 
     /// The `ConsensusGraph` invokes this function when making a checkpoint. The
-    /// confirmation meter needs to aware of the genesis change and make
+    /// confirmation meter needs to be aware of the genesis change and make
     /// adjustment accordingly.
+    ///
+    /// **`stable_height` is an *epoch number***, despite the suffix —
+    /// it's the epoch number of the previous era's stable block, used
+    /// as the trim point for the confirmation history. See
+    /// `docs/chain-model.md` §4 for the term *stable* and §1 for the
+    /// `EpochNumber` definition. (The parameter name predates the
+    /// glossary; a future rename to `stable_epoch_number` is tracked
+    /// in the storage-cleanup plan, Phase F.)
     pub fn reset_for_checkpoint(&self, total_weight: i128, stable_height: u64) {
         let mut inner = self.inner.write();
         let change = inner.total_weight_in_past_2d.cur - total_weight;
@@ -261,6 +269,11 @@ impl ConfirmationMeter {
             let w_0 = g_inner
                 .weight_tree
                 .get(g_inner.cur_era_genesis_block_arena_index);
+            // total_weight_in_past_2d.delta is updated by
+            // update_total_weight_delta_heartbeat, not by this function — so
+            // it's safe to snapshot once before the loop instead of taking
+            // a read lock per iteration.
+            let w_4 = self.inner.read().total_weight_in_past_2d.delta;
             let mut risks = VecDeque::new();
             let mut epoch_num = g_inner
                 .main_index_to_height(g_inner.main_chain.len())
@@ -269,7 +282,6 @@ impl ConfirmationMeter {
             while epoch_num > g_inner.cur_era_genesis_height
                 && count < CONFIRMATION_METER_MAX_NUM_MAINTAINED_RISK
             {
-                let w_4 = self.inner.read().total_weight_in_past_2d.delta;
                 let risk = self.confirmation_risk(g_inner, w_0, w_4, epoch_num);
                 risks.push_front(risk);
                 epoch_num -= 1;

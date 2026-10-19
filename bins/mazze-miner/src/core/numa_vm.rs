@@ -46,6 +46,10 @@ impl ThreadLocalVM {
         self.problem_state.get_block_height()
     }
 
+    pub fn has_job(&self) -> bool {
+        self.problem_state.has_job()
+    }
+
     pub fn check_hash(&self, hash: &H256) -> bool {
         self.problem_state.check_hash_simd(hash)
     }
@@ -109,6 +113,10 @@ impl VMManager {
 
     pub fn is_block_hash_matching(&self, block_hash: &H256) -> bool {
         self.reference_state.matches(block_hash)
+    }
+
+    pub fn has_job(&self) -> bool {
+        self.reference_state.has_job()
     }
 
     pub fn get_reference_state(&self) -> ProblemState {

@@ -214,6 +214,26 @@ pub trait SnapshotDbManagerTrait {
     ) -> Result<Option<Self::SnapshotDb>>;
     fn destroy_snapshot(&self, snapshot_epoch_id: &EpochId) -> Result<()>;
 
+    /// Cheap filesystem-only check used by the snapshot-sync candidate
+    /// responder (and other hot paths) to verify we actually have the
+    /// snapshot on disk before advertising it to a peer. Does NOT open
+    /// the DB, does NOT acquire the open-snapshot semaphore, and never
+    /// blocks. The genesis-window NULL_EPOCH "snapshot" is always
+    /// considered present because it's the synthetic null-snapshot
+    /// constructed in-memory (see `SnapshotDb::get_null_snapshot`).
+    ///
+    /// Backs Phase C.2 of `docs/checkpoint-snapshot-lifecycle.md` — it
+    /// closes the gap where `snapshot_info_map_by_epoch` may briefly
+    /// know about a snapshot whose on-disk directory hasn't been
+    /// finalised (or was lost to a crash between checkpoint write and
+    /// snapshot materialisation).
+    fn snapshot_dir_exists(&self, snapshot_epoch_id: &EpochId) -> bool {
+        if snapshot_epoch_id.eq(&NULL_EPOCH) {
+            return true;
+        }
+        self.get_snapshot_db_path(snapshot_epoch_id).exists()
+    }
+
     fn new_temp_snapshot_for_full_sync(
         &self, snapshot_epoch_id: &EpochId, merkle_root: &MerkleHash,
         new_epoch_height: u64,

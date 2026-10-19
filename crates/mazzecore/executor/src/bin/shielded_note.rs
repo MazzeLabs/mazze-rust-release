@@ -3,14 +3,16 @@
 // See http://www.gnu.org/licenses/
 
 use ark_std::rand::{rngs::OsRng, rngs::StdRng, RngCore, SeedableRng};
-use mazze_addr::{mazze_addr_decode, mazze_addr_encode, EncodingOptions, Network};
-use mazze_parameters::consensus::ONE_MAZZE_IN_MAZZY;
-use mazze_types::{H256, U256};
-use mazzekey::{crypto::ecies, KeyPair, Public, Secret};
+use mazze_addr::{
+    mazze_addr_decode, mazze_addr_encode, EncodingOptions, Network,
+};
 use mazze_executor::shielded::{
     fr_from_bytes, fr_from_h256, fr_from_u256, fr_to_h256, poseidon_hash,
     poseidon_hash2, split_recipient,
 };
+use mazze_parameters::consensus::ONE_MAZZE_IN_MAZZY;
+use mazze_types::{H256, U256};
+use mazzekey::{crypto::ecies, KeyPair, Public, Secret};
 use rustc_hex::{FromHex, ToHex};
 use serde_json::json;
 
@@ -63,8 +65,9 @@ fn parse_hex_bytes(input: &str) -> Result<Vec<u8>, String> {
 fn parse_shielded_address(input: &str) -> Result<[u8; 64], String> {
     let trimmed = input.trim();
     if trimmed.contains(':') {
-        let decoded = mazze_addr_decode(trimmed)
-            .map_err(|e| format!("invalid base32 address {}: {:?}", input, e))?;
+        let decoded = mazze_addr_decode(trimmed).map_err(|e| {
+            format!("invalid base32 address {}: {:?}", input, e)
+        })?;
         if decoded.parsed_address_bytes.len() != 64 {
             return Err(format!(
                 "shielded address must be 64 bytes: {}",
@@ -99,13 +102,8 @@ fn build_commitment(
     let value_fr = fr_from_u256(value);
     let rho_fr = fr_from_bytes(rho);
     let rseed_fr = fr_from_bytes(rseed);
-    let commitment = poseidon_hash(&[
-        rcpt_left,
-        rcpt_right,
-        value_fr,
-        rho_fr,
-        rseed_fr,
-    ]);
+    let commitment =
+        poseidon_hash(&[rcpt_left, rcpt_right, value_fr, rho_fr, rseed_fr]);
     fr_to_h256(&commitment)
 }
 
@@ -230,8 +228,9 @@ fn cmd_address(args: &[String]) -> Result<(), String> {
     };
 
     let network = to_network(network_id);
-    let addr = mazze_addr_encode(&public_bytes, network, EncodingOptions::Simple)
-        .map_err(|e| format!("address encoding failed: {:?}", e))?;
+    let addr =
+        mazze_addr_encode(&public_bytes, network, EncodingOptions::Simple)
+            .map_err(|e| format!("address encoding failed: {:?}", e))?;
     println!("{}", addr);
     Ok(())
 }
@@ -251,12 +250,14 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
             }
             "--value" => {
                 i += 1;
-                value = Some(parse_u256(args.get(i).ok_or("missing --value")?)?);
+                value =
+                    Some(parse_u256(args.get(i).ok_or("missing --value")?)?);
             }
             "--value-mazze" => {
                 i += 1;
-                value_mazze =
-                    Some(parse_u256(args.get(i).ok_or("missing --value-mazze")?)?);
+                value_mazze = Some(parse_u256(
+                    args.get(i).ok_or("missing --value-mazze")?,
+                )?);
             }
             "--seed" => {
                 i += 1;
@@ -286,7 +287,9 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
     let value = match (value, value_mazze) {
         (Some(raw), None) => raw,
         (None, Some(mazze)) => mazze * U256::from(ONE_MAZZE_IN_MAZZY),
-        (Some(_), Some(_)) => return Err("use either --value or --value-mazze".into()),
+        (Some(_), Some(_)) => {
+            return Err("use either --value or --value-mazze".into())
+        }
         (None, None) => return Err("missing --value".into()),
     };
 
@@ -454,7 +457,9 @@ fn cmd_path(args: &[String]) -> Result<(), String> {
 fn main() -> Result<(), String> {
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
-        return Err("usage: shielded_note <address|build|decrypt|path> [args]".into());
+        return Err(
+            "usage: shielded_note <address|build|decrypt|path> [args]".into()
+        );
     }
     let cmd = args.remove(0);
     match cmd.as_str() {
@@ -462,6 +467,9 @@ fn main() -> Result<(), String> {
         "build" => cmd_build(&args),
         "decrypt" => cmd_decrypt(&args),
         "path" => cmd_path(&args),
-        _ => Err("usage: shielded_note <address|build|decrypt|path> [args]".into()),
+        _ => {
+            Err("usage: shielded_note <address|build|decrypt|path> [args]"
+                .into())
+        }
     }
 }

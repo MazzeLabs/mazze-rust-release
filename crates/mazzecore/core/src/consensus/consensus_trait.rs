@@ -4,7 +4,9 @@
 
 use crate::{
     block_data_manager::BlockDataManager,
-    consensus::{BestInformation, ConsensusConfig, TransactionInfo},
+    consensus::{
+        BestInformation, ConsensusConfig, TransactionInfo, TrustedCheckpoint,
+    },
     rpc_errors::Result as RpcResult,
     statistics::SharedStatistics,
     transaction_pool::SharedTransactionPool,
@@ -86,6 +88,22 @@ pub trait ConsensusGraphTrait: Send + Sync {
 
     fn get_to_sync_epoch_id(&self) -> EpochId;
 
+    /// All configured fast-sync anchors, sorted newest-first.
+    fn trusted_checkpoints(&self) -> Vec<TrustedCheckpoint> { Vec::new() }
+
+    /// True while a fresh node with configured fast-sync anchors still has
+    /// to anchor its consensus graph at one of them (see
+    /// docs/fast-sync-design.md §5.19). False once anchored, for a node that
+    /// already holds chain data, and for a node without anchors.
+    fn fast_sync_bootstrap_pending(&self) -> bool { false }
+
+    /// All configured fast-sync anchors as `(checkpoint_height,
+    /// checkpoint_hash)`, sorted newest-first. The catch-up FSM proposes
+    /// every one as a snapshot-sync candidate and syncs the newest a peer
+    /// still serves, so a single stale anchor can't wedge the join.
+    /// See docs/fast-sync-design.md §5.16.
+    fn trusted_checkpoint_candidates(&self) -> Vec<(u64, H256)> { Vec::new() }
+
     fn get_trusted_blame_block(&self, stable_hash: &H256) -> Option<H256>;
 
     fn set_initial_sequence_number(&self, initial_sn: u64);
@@ -104,9 +122,32 @@ pub trait ConsensusGraphTrait: Send + Sync {
 
     fn get_blocks_needing_bodies(&self) -> HashSet<H256>;
 
+    /// Whether `hash` is a block of the in-memory consensus graph (the
+    /// current era subtree). Unlike `get_block_epoch_number`, this never
+    /// falls back to the DB.
+    fn contains_block(&self, hash: &H256) -> bool;
+
     fn catch_up_completed(&self, peer_median_epoch: u64) -> bool;
 
+    /// Number of epochs enqueued for execution but not yet executed.
+    /// The sync layer throttles block downloads when this grows too
+    /// large, so a node catching up can't pile unexecuted epochs (each
+    /// pinning `Arc<Block>`s) into memory faster than the single
+    /// execution thread can drain them. See the download↔execution
+    /// backpressure fix.
+    fn pending_execution_count(&self) -> usize;
+
+    /// Height of the latest epoch whose state has actually been EXECUTED
+    /// (the upper bound of the state-availability boundary). Unlike
+    /// `pending_execution_count` (a queue depth that drains to ~0 when
+    /// execution is *stuck* rather than merely slow), `best_epoch_number()
+    /// - best_executed_state_epoch_number()` is the true header-vs-execution
+    /// lag. The mining backpressure keys on this so a miner never races its
+    /// header tip arbitrarily far ahead of executed state.
+    fn best_executed_state_epoch_number(&self) -> u64;
+
     fn enter_normal_phase(&self);
+    fn leave_normal_phase(&self);
     fn reset(&self);
 }
 

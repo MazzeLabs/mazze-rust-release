@@ -2,13 +2,12 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-use crate::{internal_bail, state::State, substate::cleanup_mode};
 use crate::shielded::{fr_from_h256, fr_from_u256, fr_to_h256, poseidon_hash2};
+use crate::{internal_bail, state::State, substate::cleanup_mode};
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_ff::PrimeField;
 use ark_groth16::{
-    prepare_verifying_key, Groth16, PreparedVerifyingKey, Proof,
-    VerifyingKey,
+    prepare_verifying_key, Groth16, PreparedVerifyingKey, Proof, VerifyingKey,
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use mazze_parameters::internal_contract_addresses::SHIELDED_POOL_CONTRACT_ADDRESS;
@@ -114,8 +113,8 @@ impl_function_type!(Shield, "payable_write");
 
 impl UpfrontPaymentTrait for Shield {
     fn upfront_gas_payment(
-        &self, (_commitment, ciphertext): &(H256, Bytes), _params: &ActionParams,
-        context: &InternalRefContext,
+        &self, (_commitment, ciphertext): &(H256, Bytes),
+        _params: &ActionParams, context: &InternalRefContext,
     ) -> DbResult<U256> {
         let ciphertext_words =
             (ciphertext.len().saturating_add(31) / 32) as u64;
@@ -160,9 +159,7 @@ impl_function_type!(ApplyShieldedBundle, "non_payable_write");
 
 impl UpfrontPaymentTrait for ApplyShieldedBundle {
     fn upfront_gas_payment(
-        &self,
-        bundle: &ShieldedBundleInput,
-        _params: &ActionParams,
+        &self, bundle: &ShieldedBundleInput, _params: &ActionParams,
         context: &InternalRefContext,
     ) -> DbResult<U256> {
         let writes = (bundle.nullifiers.len()
@@ -175,17 +172,17 @@ impl UpfrontPaymentTrait for ApplyShieldedBundle {
             .iter()
             .map(|entry| entry.len().saturating_add(31) / 32)
             .sum::<usize>() as u64;
-        Ok(U256::from(context.spec.sstore_reset_gas) * U256::from(writes)
-            + U256::from(context.spec.sha3_gas)
-                * U256::from(proof_words + ciphertext_words))
+        Ok(
+            U256::from(context.spec.sstore_reset_gas) * U256::from(writes)
+                + U256::from(context.spec.sha3_gas)
+                    * U256::from(proof_words + ciphertext_words),
+        )
     }
 }
 
 impl SimpleExecutionTrait for ApplyShieldedBundle {
     fn execute_inner(
-        &self,
-        bundle: ShieldedBundleInput,
-        params: &ActionParams,
+        &self, bundle: ShieldedBundleInput, params: &ActionParams,
         context: &mut InternalRefContext,
     ) -> vm::Result<()> {
         if bundle.outputs.len() != bundle.values.len() {
@@ -277,10 +274,8 @@ impl SimpleExecutionTrait for ApplyShieldedBundle {
             )?;
         }
 
-        for (address, amount) in bundle
-            .outputs
-            .into_iter()
-            .zip(bundle.values.into_iter())
+        for (address, amount) in
+            bundle.outputs.into_iter().zip(bundle.values.into_iter())
         {
             if amount.is_zero() {
                 continue;
@@ -404,9 +399,8 @@ impl SimpleExecutionTrait for VerifyingKeyHash {
 }
 
 fn verify_groth16(
-    state: &State, anchor: &H256, nullifiers: &[H256],
-    commitments: &[H256], outputs: &[Address], values: &[U256], fee: &U256,
-    proof: &[u8],
+    state: &State, anchor: &H256, nullifiers: &[H256], commitments: &[H256],
+    outputs: &[Address], values: &[U256], fee: &U256, proof: &[u8],
 ) -> bool {
     if proof.len() > MAX_PROOF_BYTES {
         return false;
@@ -422,8 +416,14 @@ fn verify_groth16(
         Err(_) => return false,
     };
 
-    let inputs =
-        build_public_inputs(anchor, nullifiers, commitments, outputs, values, fee);
+    let inputs = build_public_inputs(
+        anchor,
+        nullifiers,
+        commitments,
+        outputs,
+        values,
+        fee,
+    );
     if inputs.len() != PUBLIC_INPUT_LEN {
         return false;
     }
@@ -512,7 +512,10 @@ fn load_prepared_vk(
     }
 
     let pvk = Arc::new(prepare_verifying_key(&vk));
-    *vk_cache().write() = Some(VkCache { hash, pvk: pvk.clone() });
+    *vk_cache().write() = Some(VkCache {
+        hash,
+        pvk: pvk.clone(),
+    });
     Ok(Some(pvk))
 }
 
@@ -633,7 +636,11 @@ fn push_root(state: &mut State, root: &H256) -> DbResult<()> {
 
 fn is_root_known(state: &mut State, root: &H256) -> DbResult<bool> {
     let idx = root_index(state)?;
-    let max = if idx > ROOT_HISTORY_LEN { ROOT_HISTORY_LEN } else { idx };
+    let max = if idx > ROOT_HISTORY_LEN {
+        ROOT_HISTORY_LEN
+    } else {
+        idx
+    };
     if max == 0 {
         return Ok(root.is_zero());
     }
@@ -683,7 +690,9 @@ fn frontier_at(state: &State, level: usize) -> DbResult<H256> {
     Ok(BigEndianHash::from_uint(&value))
 }
 
-fn set_frontier_at(state: &mut State, level: usize, value: &H256) -> DbResult<()> {
+fn set_frontier_at(
+    state: &mut State, level: usize, value: &H256,
+) -> DbResult<()> {
     let mut level_bytes = [0u8; 8];
     level_bytes.copy_from_slice(&(level as u64).to_be_bytes());
     let key = storage_key(b"shielded:frontier:", &level_bytes);

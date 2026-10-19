@@ -199,16 +199,16 @@ impl SynchronizationState {
     }
 
     pub fn is_full_node(&self) -> bool {
-        self.node_type == NodeType::Full
+        matches!(self.node_type, NodeType::Full | NodeType::FullFast)
     }
 
     pub fn allow_phase_change_without_peer(&self) -> bool {
         self.allow_phase_change_without_peer
     }
 
-    // FIXME: median_chain_height_from_peers.
-    // FIXME: it lead to more questions but these are questions on the
-    // FIXME: algorithm side.
+    /// Median epoch among peers that have explicitly announced they are in
+    /// normal phase. This keeps phase changes robust against outliers while
+    /// still allowing a clean-network fresh start to move forward.
     pub fn median_epoch_from_normal_peers(&self) -> Option<u64> {
         // This flag is set to true if all peers are just starting from a clean
         // state, so we can just enter the normal phase because there's
@@ -271,6 +271,36 @@ impl SynchronizationState {
                 Some(max) => Some(if x > max { x } else { max }),
             })
     }
+
+    /// Median `best_epoch` across ALL connected peers, regardless of phase.
+    ///
+    /// Unlike [`median_epoch_from_normal_peers`], this does NOT require peers
+    /// to advertise `NormalPhase(true)`. It exists as a safety net for the
+    /// "premature-Normal" wedge: when a node has fallen far behind the network
+    /// but none of its peers advertise Normal phase (mesh split, or the peers
+    /// are themselves catching up), `median_epoch_from_normal_peers` returns
+    /// `None` and the node would otherwise sit forever in a premature Normal
+    /// phase, never resuming catch-up (observed live: an archive stranded at
+    /// epoch 130985 while the leader ran to 254052 — a 123k gap that never
+    /// closed). `best_epoch` is tracked for every peer on each Status, so the
+    /// information is always available. Using the MEDIAN (not the max) keeps a
+    /// single lying/forked peer from trapping honest nodes in perpetual
+    /// catch-up. Peers still at epoch 0 (freshly handshaked, no Status yet)
+    /// are excluded so they don't drag the estimate down.
+    pub fn median_epoch_from_all_peers(&self) -> Option<u64> {
+        let mut epochs: Vec<u64> = self
+            .peers
+            .read()
+            .iter()
+            .map(|(_, state)| state.read().best_epoch)
+            .filter(|e| *e != 0)
+            .collect();
+        if epochs.is_empty() {
+            return None;
+        }
+        epochs.sort_unstable();
+        Some(epochs[epochs.len() / 2])
+    }
 }
 
 #[derive(Default)]
@@ -326,6 +356,10 @@ impl<'a> PeerFilter<'a> {
 
     pub fn select_all(self, syn: &SynchronizationState) -> Vec<NodeId> {
         let mut peers = Vec::new();
+        // Peers that pass every filter EXCEPT `preferred_node_type`. Used only
+        // when no preferred-type peer qualifies — see the soft-preference note
+        // at the end of the loop.
+        let mut fallback = Vec::new();
 
         let check_state = self.throttle_msg_ids.is_some()
             || self.cap.is_some()
@@ -333,11 +367,6 @@ impl<'a> PeerFilter<'a> {
 
         for (id, peer) in syn.peers.read().iter() {
             let peer_node_type = peer.read().node_type.clone();
-            if let Some(ref preferred_node_type) = self.preferred_node_type {
-                if *preferred_node_type != peer_node_type {
-                    continue;
-                }
-            }
 
             if let Some(ref excludes) = self.excludes {
                 if excludes.contains(id) {
@@ -382,10 +411,28 @@ impl<'a> PeerFilter<'a> {
                 }
             }
 
-            peers.push(*id);
+            // Soft preference (was a hard filter): peers matching
+            // `preferred_node_type` go into `peers`; every other qualifying
+            // peer is kept in `fallback` and used ONLY when no preferred-type
+            // peer is available. This fixes an archive-node catch-up wedge —
+            // an archive in CatchUpSyncBlock prefers Archive peers (they keep
+            // pruned history), but the old hard filter meant that when the only
+            // archive peer was itself behind and missing a frontier body, the
+            // request never fell back to the full/full-fast peers that HAD it,
+            // wedging the archive permanently (observed live on m1/m2 while
+            // m3/m5/m6 all held the block). Falling back keeps the old-block
+            // affinity while guaranteeing progress.
+            match self.preferred_node_type {
+                Some(ref pt) if *pt != peer_node_type => fallback.push(*id),
+                _ => peers.push(*id),
+            }
         }
 
-        peers
+        if peers.is_empty() {
+            fallback
+        } else {
+            peers
+        }
     }
 
     pub fn select(self, syn: &SynchronizationState) -> Option<NodeId> {

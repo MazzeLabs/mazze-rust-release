@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 EXECUTABLE="$REPO_ROOT/target/debug/mazze"
 CONFIG_FILE="$SCRIPT_DIR/hydra.toml"
-LOG_DIR="$SCRIPT_DIR/logs"
+LOG_DIR="$REPO_ROOT/run/logs"
 PID_FILE="$SCRIPT_DIR/node_pid_dev.txt"
 LOG_FILE="$LOG_DIR/mazze-node-dev.log"
 TEMP_CONF="$SCRIPT_DIR/hydra.dev.runtime.toml"
@@ -15,7 +15,7 @@ ABS_LOG_CONF="$SCRIPT_DIR/log.yaml"
 ABS_GENESIS_SECRETS="$REPO_ROOT/bins/mazze/genesis_secrets.toml"
 DATA_DIR="$SCRIPT_DIR/blockchain_data_dev"
 
-mkdir -p "$LOG_DIR" "$DATA_DIR"
+mkdir -p "$LOG_DIR" "$LOG_DIR/archive" "$DATA_DIR"
 
 if [[ ! -x "$EXECUTABLE" ]]; then
   echo "Debug binary not found at $EXECUTABLE. Building..." >&2
@@ -46,6 +46,35 @@ set_kv() {
   fi
 }
 
+SECRETS_FILE="$SCRIPT_DIR/hydra.secrets.toml"
+ensure_stratum_secret() {
+  if [[ ! -f "$SECRETS_FILE" ]]; then
+    echo "Generating $SECRETS_FILE (first-run stratum secret)..." >&2
+    local generated
+    if command -v openssl >/dev/null 2>&1; then
+      generated="$(openssl rand -hex 32)"
+    else
+      generated="$(head -c 32 /dev/urandom | xxd -p -c 64)"
+    fi
+    umask 077
+    cat > "$SECRETS_FILE" <<EOF
+# Auto-generated per-deployment secrets. Do not commit.
+# See run/hydra.secrets.toml.example for the format and rotation guidance.
+stratum_secret = "$generated"
+EOF
+    chmod 600 "$SECRETS_FILE"
+  fi
+  STRATUM_SECRET="$(grep -E '^[[:space:]]*stratum_secret[[:space:]]*=' "$SECRETS_FILE" \
+    | head -n1 \
+    | sed -E 's/^[[:space:]]*stratum_secret[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/')"
+  if [[ -z "$STRATUM_SECRET" ]]; then
+    echo "Error: stratum_secret missing or unparseable in $SECRETS_FILE" >&2
+    exit 1
+  fi
+}
+ensure_stratum_secret
+set_kv "stratum_secret" "\"$STRATUM_SECRET\""
+
 set_kv "bootnodes" "\"\""
 set_kv "node_type" "\"full\""
 set_kv "public_address" "\"127.0.0.1\""
@@ -57,6 +86,10 @@ set_kv "mining_type" "\"disable\""
 set_kv "jsonrpc_local_http_port" "12539"
 set_kv "genesis_secrets" "\"$ABS_GENESIS_SECRETS\""
 set_kv "mazze_data_dir" "\"$DATA_DIR\""
+
+# Phase 5a: shadow-mirror flags removed. DBManager is now MDBX-native
+# primary — no dual-write, no `enable_mdbx_shadow_*` config keys.
+# state_db_type = "mdbx" (in hydra.toml) is required for boot.
 has_chain_data() {
   local base="$1"
   if compgen -G "$base/blockchain_db/*" > /dev/null; then
@@ -78,7 +111,7 @@ fi
 
 echo "-------$(date '+%Y-%m-%d %H:%M:%S')-------" >> "$LOG_FILE"
 
-pushd "$SCRIPT_DIR" >/dev/null
+pushd "$REPO_ROOT" >/dev/null
 "$EXECUTABLE" --config "$TEMP_CONF" >> "$LOG_FILE" 2>&1 &
 PID=$!
 echo "$PID" > "$PID_FILE"

@@ -4,9 +4,9 @@
 
 use crate::rpc::types::{
     BlockHashOrEpochNumber, Bytes as RpcBytes, ConsensusGraphStates,
-    EpochNumber, Receipt as RpcReceipt, RpcAddress, SendTxRequest,
-    StatOnGasLoad, SyncGraphStates, Transaction as RpcTransaction,
-    WrapTransaction,
+    EpochNumber, Receipt as RpcReceipt,
+    RpcAddress, SendTxRequest, StatOnGasLoad, SyncGraphStates,
+    Transaction as RpcTransaction, WrapTransaction,
 };
 use jsonrpc_core::{BoxFuture, Result as JsonRpcResult};
 use jsonrpc_derive::rpc;
@@ -67,6 +67,15 @@ pub trait LocalRpc {
 
     #[rpc(name = "current_sync_phase")]
     fn current_sync_phase(&self) -> JsonRpcResult<String>;
+
+    /// `(receipts_root, state_root)` this node computed for the epoch whose
+    /// main block is `block_hash` -- the test RPC `getExecutedInfo`, which
+    /// release builds do not serve, on the debug API (local RPC port), so
+    /// `scripts/compare-executed-state.py` works on a fleet.
+    #[rpc(name = "debug_getExecutedInfo")]
+    fn debug_get_executed_info(
+        &self, block_hash: H256,
+    ) -> JsonRpcResult<(H256, H256)>;
 
     #[rpc(name = "consensus_graph_state")]
     fn consensus_graph_state(&self) -> JsonRpcResult<ConsensusGraphStates>;

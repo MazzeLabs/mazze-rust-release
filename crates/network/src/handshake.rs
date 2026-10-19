@@ -37,8 +37,39 @@ const ACK_OF_AUTH_PACKET_SIZE: usize = 177;
 const ACK_OF_ACK_PACKET_SIZE: usize = 145;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
-// used for test purpose only to bypass the cryptography
+// SECURITY: bypass flag used by integration tests only. Compiled out
+// of release builds entirely so a runtime mistake can't disable peer
+// crypto. See docs/security-audit.md finding C-1.
+//
+// On release builds the symbol still exists for type-checking purposes
+// (so call sites compile uniformly) but it's a const `false` — both
+// `load` and `store` are no-ops.
+#[cfg(any(test, debug_assertions, feature = "test-network-bypass-crypto"))]
 pub static BYPASS_CRYPTOGRAPHY: AtomicBool = AtomicBool::new(false);
+
+/// Release-build stand-in. Always reads as `false`; writes are
+/// silently dropped. The setter in `service.rs` is also gated, but
+/// this is defense-in-depth in case a future caller links against
+/// this symbol.
+#[cfg(not(any(test, debug_assertions, feature = "test-network-bypass-crypto")))]
+pub struct BypassCryptographyAlwaysFalse;
+#[cfg(not(any(test, debug_assertions, feature = "test-network-bypass-crypto")))]
+impl BypassCryptographyAlwaysFalse {
+    #[inline]
+    pub fn load(&self, _: Ordering) -> bool { false }
+    #[inline]
+    pub fn store(&self, value: bool, _: Ordering) {
+        if value {
+            // Release-build attempt to flip the bypass — surface loudly.
+            log::error!(
+                "BYPASS_CRYPTOGRAPHY.store(true) called in a release build; ignored. See docs/security-audit.md C-1.",
+            );
+        }
+    }
+}
+#[cfg(not(any(test, debug_assertions, feature = "test-network-bypass-crypto")))]
+pub static BYPASS_CRYPTOGRAPHY: BypassCryptographyAlwaysFalse =
+    BypassCryptographyAlwaysFalse;
 
 #[derive(PartialEq, Eq, Debug)]
 pub enum HandshakeState {

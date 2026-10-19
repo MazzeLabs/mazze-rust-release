@@ -11,13 +11,29 @@ pub mod genesis;
 pub mod internal_contract_addresses;
 
 pub mod consensus {
+    /// Version of the consensus rules (block validity, difficulty, rewards,
+    /// header/body format). Bump ONLY with a hard fork: peers that announce a
+    /// different non-zero value are rejected at handshake. Node-software
+    /// changes that keep the rules identical must NOT bump this.
+    pub const CONSENSUS_VERSION: u32 = 2;
+
     pub const DEFERRED_STATE_EPOCH_COUNT: u64 = 5;
     pub const EPOCH_SET_PERSISTENCE_DELAY: u64 = DEFERRED_STATE_EPOCH_COUNT;
 
     pub const ADAPTIVE_WEIGHT_DEFAULT_BETA: u64 = 1000;
     pub const HEAVY_BLOCK_DEFAULT_DIFFICULTY_RATIO: u64 = 250;
-    pub const TIMER_CHAIN_BLOCK_DEFAULT_DIFFICULTY_RATIO: u64 = 180;
-    pub const TIMER_CHAIN_DEFAULT_BETA: u64 = 240;
+    // NOTE(checkpoint-stall fix): the force-confirm point (accumulative timer-chain
+    // LCA) trails the tip by ~2*TIMER_CHAIN_BETA timer blocks, and a block's
+    // force_confirm is fixed at creation. A checkpoint at era boundary E can only
+    // form once the stable block's force_confirm >= E, so the steady-state arena
+    // working set is ~2 * (2*beta timer-block trail in epochs). With the old
+    // (beta=240, ratio=180) the trail was ~73k epochs = 3.65x ERA (20k): checkpoints
+    // could not form until ~epoch 166k while the arena bloated to the hard cap and
+    // wedged. Reduced to (beta=100, ratio=120) => trail ~20k epochs (~1 era) =>
+    // arena working set ~48k blocks, checkpoints form from ~epoch 60k. Consensus-
+    // critical: all nodes must share these values (from-genesis relaunch required).
+    pub const TIMER_CHAIN_BLOCK_DEFAULT_DIFFICULTY_RATIO: u64 = 120;
+    pub const TIMER_CHAIN_DEFAULT_BETA: u64 = 100;
     // The number of epochs per era. Each era is a potential checkpoint
     // position. The parent_edge checking and adaptive checking are defined
     // relative to the era start blocks.
@@ -74,7 +90,8 @@ pub mod consensus_internal {
 
     pub const GENESIS_TOKEN_COUNT_IN_MAZZE: u64 = 3_900_000_000;
     pub const MINING_SUPPLY_TARGET_IN_MAZZE: u64 = 2_500_000_000;
-    pub const MAX_SUPPLY_TOKEN_COUNT_IN_MAZZE: u64 = GENESIS_TOKEN_COUNT_IN_MAZZE + MINING_SUPPLY_TARGET_IN_MAZZE;
+    pub const MAX_SUPPLY_TOKEN_COUNT_IN_MAZZE: u64 =
+        GENESIS_TOKEN_COUNT_IN_MAZZE + MINING_SUPPLY_TARGET_IN_MAZZE;
     pub const HALVING_INTERVAL_IN_BLOCKS: u64 = 312_500_000;
 
     /// This is the cap of the size of the outlier barrier. If we have more
@@ -139,7 +156,7 @@ pub mod sync {
     /// CATCH_UP_EPOCH_LAG_THRESHOLD behind the median of the epoch
     /// numbers of peers.
     //200 instead of 20
-    pub const CATCH_UP_EPOCH_LAG_THRESHOLD: u64 = 200;
+    pub const CATCH_UP_EPOCH_LAG_THRESHOLD: u64 = 800;
     /// This threshold controlling whether a node should request missing
     /// terminals from peers when the node is in catch-up mode.
     //400 instead of 40
@@ -188,24 +205,73 @@ pub mod pow {
     // where D is the old difficulty.
     pub const DIFFICULTY_ADJUSTMENT_FACTOR: usize = 2;
 
-    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD: u64 = 25;
-    // Time unit is micro-second (usec)
-    // We target two blocks per second. This strikes a good balance between the
-    // growth of the metadata, the memory consumption of the consensus graph,
-    // and the confirmation speed
-    // Current value is 0.250 seconds (250000 usec), lowered from 0.5 seconds (500000 usec)
-    // This value is being used to compute the number of blocks per hour, day, year.
-    // One second is 1000000 usec
-
+    // Difficulty retarget window. Raised 25 -> 100 to fix a noise-dominated
+    // controller: at the old 0.25s block target a 25-epoch window spanned only
+    // ~2-6 real seconds, measured with SECOND-granularity header timestamps
+    // (max_time - min_time), so the +-30% timestamp noise swamped the signal and
+    // difficulty stayed pinned near the floor (5-6). The pinned-low difficulty
+    // let the tip race at ~7 epochs/s; any node that briefly fell behind crossed
+    // the 200-epoch catch-up threshold (~30s) and could never catch a tip moving
+    // faster than its body-fetch pipeline -> nodes wedged one by one. A 100-epoch
+    // window at the new 1s target spans ~100 real s, so second-granularity noise
+    // is <1% and the retarget tracks the true rate.
+    pub const DIFFICULTY_ADJUSTMENT_EPOCH_PERIOD: u64 = 100;
+    // Time unit is micro-second (usec). One second is 1000000 usec.
+    // Target: ~1 block/second. Raised from 0.25s (250000) to 1s (1000000): the
+    // 0.25s target outran the single-threaded consensus/execution pipeline
+    // (bursts of 8-12 epochs/s vs ~5-7 eps sustainable), which is why lagging
+    // nodes could never catch up. 1s gives a ~4x larger per-block processing
+    // budget while still supporting ~4000 TPS at the 200KB block-size limit.
+    // Used to compute blocks per hour/day/year.
     pub const ONE_SECOND_IN_USEC: u64 = 1000000;
+    // Back to 0.25s (4 blocks/s). The earlier 0.25s failure was driven by bugs
+    // (fill-set leak, sync-arena GC never seeded, RandomX seed thrash) plus the
+    // noise-dominated period retarget, which ASERT below replaces.
     pub const TARGET_AVERAGE_BLOCK_GENERATION_PERIOD: u64 = 250000;
+
+    // ASERT half-life: if the DAG falls one half-life behind (or ahead of) its
+    // block schedule, difficulty halves (or doubles). At 4 blocks/s that is
+    // ~3600 blocks of signal per half-life (<2% noise), and a sudden 100x
+    // hashrate loss recovers in ~log2(100) * 15 min without stalling.
+    pub const ASERT_HALF_LIFE_SECS: u64 = 900;
+    // How long `full` nodes keep block bodies behind their checkpoint, so an
+    // archive (or any node) that was down for up to this long can still
+    // re-fetch the blocks it missed. Before, non-archive nodes dropped bodies
+    // at the checkpoint (~2-3 eras), and two archives that were down longer
+    // lost the history between for good (2026-10-11).
+    pub const FULL_NODE_BLOCK_BODY_RETENTION_SECS: u64 = 3 * 24 * 3600;
+    // Cap on one block's contribution to the ASERT block counter
+    // (`1 + #referees`). Normal blocks reference a handful of tips; the cap
+    // stops a miner from inflating difficulty with padded referee lists.
+    pub const ASERT_MAX_BLOCK_CONTRIBUTION: u64 = 8;
 
     // TODO: compute a more appropriate initial difficulty
     // previous initial difficulty: 20_000_000_000;
     pub const INITIAL_DIFFICULTY: u64 = 5;
 
-    // The amount of epochs to use for switching mining seed hash
-    pub const RANDOMX_EPOCH_LENGTH: u64 = 2048;
+    // The amount of epochs between RandomX seed rotations.
+    //
+    // Aligned to `ERA_DEFAULT_EPOCH_COUNT` so the seed rotates on the same
+    // boundary as the era / stable checkpoint / snapshot cadence. Rationale:
+    //   1) One time granularity across the whole chain (finality, retention,
+    //      snapshots, fast-sync targets, seed rotation) — the "epoch" and
+    //      "RandomX epoch" concepts collapse into one.
+    //   2) Eliminates the async catch-up wedge at mid-era sub-boundaries.
+    //      Header ingest and consensus ordering are decoupled queues; when
+    //      ingest crosses a seed boundary and consensus hasn't ordered the
+    //      pivot at the previous boundary yet, the seed can't be derived
+    //      and ingest wedges (observed live on m3/m5 at height 8191 with
+    //      the 2048 cadence). Making the boundary era-wide gives ordering
+    //      ~10× more tolerance — under normal load the race can't happen.
+    //   3) Lower miner overhead (1 dataset rebuild / ~83 min vs ~1 / 8.5 min
+    //      at 4 blocks/s) — the 2 GB RandomX dataset only regenerates on
+    //      rotation.
+    //   4) Anti-ASIC posture stays strong. Monero (the reference RandomX
+    //      implementation) rotates every ~68 h; Mazze at era-based cadence
+    //      is still ~50× more aggressive than that.
+    // See docs/internal/current-state.md and docs/internal/storage-v2-design.md.
+    pub const RANDOMX_EPOCH_LENGTH: u64 =
+        crate::consensus::ERA_DEFAULT_EPOCH_COUNT;
 }
 
 pub mod tx_pool {
@@ -226,6 +292,19 @@ pub mod block {
     pub const ESTIMATED_MAX_BLOCK_SIZE_IN_TRANSACTION_COUNT: usize = 4096;
     // The maximum number of referees allowed for each block
     pub const REFEREE_DEFAULT_BOUND: usize = 200;
+    // Referee-selection difficulty floor divisor. A block's required difficulty
+    // is a pure function of its parent lineage, so a thin diverged fork can
+    // retarget its own difficulty down to near-nothing and mint blocks almost
+    // for free. If honest nodes reference those low-difficulty tips, that foreign
+    // flood is pulled into our epochs -- it is counted by the difficulty retarget
+    // (driving the main difficulty up) and swamps the body pipeline until the
+    // fleet wedges (observed live: a diverged node at difficulty ~7 injected ~185
+    // blocks/epoch, driving the main difficulty 36 -> 1447). A terminal whose
+    // difficulty is below `current_difficulty / REFEREE_DIFFICULTY_FLOOR_DIVISOR`
+    // is treated as such a fork tip and NOT referenced. K=4 leaves ample room for
+    // the legitimate +-50%-per-period retarget drift (a valid recent tip is always
+    // >= current/2). Uses only LOCAL state, never peer-reported state.
+    pub const REFEREE_DIFFICULTY_FLOOR_DIVISOR: u64 = 4;
     // The maximal length of custom data in block header
     pub const HEADER_CUSTOM_LENGTH_BOUND: usize = 64;
     // If a new block is more than valid_time_drift ahead of the current system

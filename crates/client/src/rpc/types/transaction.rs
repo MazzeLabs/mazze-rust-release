@@ -4,7 +4,9 @@
 
 use crate::rpc::types::{
     eth::Transaction as ETHTransaction,
-    mazze::{from_primitive_access_list, to_primitive_access_list, MazzeAccessList},
+    mazze::{
+        from_primitive_access_list, to_primitive_access_list, MazzeAccessList,
+    },
     receipt::Receipt,
     Bytes, RpcAddress,
 };
@@ -220,8 +222,9 @@ impl Transaction {
                         .unwrap_or(self.gas_price);
                     let max_priority_fee_per_gas =
                         self.max_priority_fee_per_gas.unwrap_or_default();
-                    let access_list =
-                        to_primitive_access_list(self.access_list.unwrap_or_default());
+                    let access_list = to_primitive_access_list(
+                        self.access_list.unwrap_or_default(),
+                    );
                     let chain_id = self
                         .chain_id
                         .ok_or(Error::Custom(
@@ -244,34 +247,38 @@ impl Transaction {
                             }),
                         ),
                         MIP2930_TYPE => PrimitiveTransaction::Native(
-                            TypedNativeTransaction::Mip2930(Mip2930Transaction {
-                                nonce: self.nonce.into(),
-                                gas_price,
-                                gas: self.gas.into(),
-                                action,
-                                value: self.value.into(),
-                                storage_limit: self.storage_limit.as_u64(),
-                                epoch_height: self.epoch_height.as_u64(),
-                                chain_id,
-                                data: self.data.into(),
-                                access_list,
-                            }),
+                            TypedNativeTransaction::Mip2930(
+                                Mip2930Transaction {
+                                    nonce: self.nonce.into(),
+                                    gas_price,
+                                    gas: self.gas.into(),
+                                    action,
+                                    value: self.value.into(),
+                                    storage_limit: self.storage_limit.as_u64(),
+                                    epoch_height: self.epoch_height.as_u64(),
+                                    chain_id,
+                                    data: self.data.into(),
+                                    access_list,
+                                },
+                            ),
                         ),
                         MIP1559_TYPE => PrimitiveTransaction::Native(
-                            TypedNativeTransaction::Mip1559(Mip1559Transaction {
-                                nonce: self.nonce.into(),
-                                max_priority_fee_per_gas:
-                                    max_priority_fee_per_gas.into(),
-                                max_fee_per_gas: max_fee_per_gas.into(),
-                                gas: self.gas.into(),
-                                action,
-                                value: self.value.into(),
-                                storage_limit: self.storage_limit.as_u64(),
-                                epoch_height: self.epoch_height.as_u64(),
-                                chain_id,
-                                data: self.data.into(),
-                                access_list,
-                            }),
+                            TypedNativeTransaction::Mip1559(
+                                Mip1559Transaction {
+                                    nonce: self.nonce.into(),
+                                    max_priority_fee_per_gas:
+                                        max_priority_fee_per_gas.into(),
+                                    max_fee_per_gas: max_fee_per_gas.into(),
+                                    gas: self.gas.into(),
+                                    action,
+                                    value: self.value.into(),
+                                    storage_limit: self.storage_limit.as_u64(),
+                                    epoch_height: self.epoch_height.as_u64(),
+                                    chain_id,
+                                    data: self.data.into(),
+                                    access_list,
+                                },
+                            ),
                         ),
                         MIP_SHIELDED_TYPE => {
                             if matches!(action, Action::Create) {
@@ -293,18 +300,23 @@ impl Transaction {
                             }
                             PrimitiveTransaction::Native(
                                 TypedNativeTransaction::Shielded(
-                                ShieldedTransaction {
-                                    nonce: self.nonce.into(),
-                                    gas_price,
-                                    gas: self.gas.into(),
-                                    action,
-                                    value: self.value.into(),
-                                    storage_limit: self.storage_limit.as_u64(),
-                                    epoch_height: self.epoch_height.as_u64(),
-                                    chain_id,
-                                    data: self.data.into(),
-                                },
-                            ))
+                                    ShieldedTransaction {
+                                        nonce: self.nonce.into(),
+                                        gas_price,
+                                        gas: self.gas.into(),
+                                        action,
+                                        value: self.value.into(),
+                                        storage_limit: self
+                                            .storage_limit
+                                            .as_u64(),
+                                        epoch_height: self
+                                            .epoch_height
+                                            .as_u64(),
+                                        chain_id,
+                                        data: self.data.into(),
+                                    },
+                                ),
+                            )
                         }
                         x => {
                             return Err(Error::Custom(format!(

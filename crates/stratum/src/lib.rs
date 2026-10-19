@@ -47,6 +47,8 @@ use jsonrpc_tcp_server::{
     Dispatcher, MetaExtractor, PushMessageError, RequestContext,
     Server as JsonRpcServer, ServerBuilder as JsonRpcServerBuilder,
 };
+use lazy_static::lazy_static;
+use metrics::{Counter, CounterUsize};
 use std::sync::Arc;
 
 use crate::traits::Error::InvalidSolution;
@@ -61,6 +63,29 @@ use std::{
 type RpcResult = Result<jsonrpc_core::Value, jsonrpc_core::Error>;
 
 const NOTIFY_COUNTER_INITIAL: u32 = 16;
+
+lazy_static! {
+    /// G-MN-1 — Per-outcome counters for `mining.submit` from stratum
+    /// workers. Distinguish good shares from rejections so pool
+    /// operators can dashboard share-validity rate and alert on
+    /// miner misconfiguration (e.g. a spike in `invalid_solution` from
+    /// a single worker is usually a wrong seed_hash). See
+    /// docs/flow-audit.md G-MN-1.
+    static ref STRATUM_SHARES_ACCEPTED: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("stratum", "shares_accepted");
+    static ref STRATUM_SHARES_REJECTED_INVALID: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "stratum",
+            "shares_rejected.invalid_solution",
+        );
+    static ref STRATUM_SHARES_REJECTED_OTHER: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "stratum",
+            "shares_rejected.other_error",
+        );
+    static ref STRATUM_SHARES_MALFORMED: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("stratum", "shares_malformed");
+}
 
 /// Container which owns rpc server and stratum implementation
 pub struct Stratum {
@@ -177,10 +202,14 @@ impl StratumImpl {
                         })
                         .collect::<Vec<String>>(),
                 ) {
-                    Ok(()) => vec![to_value(true).expect("serializable")],
+                    Ok(()) => {
+                        STRATUM_SHARES_ACCEPTED.inc(1);
+                        vec![to_value(true).expect("serializable")]
+                    }
                     Err(InvalidSolution(msg)) => {
                         // When we have invalid solution, we propagate the
                         // reason to the client
+                        STRATUM_SHARES_REJECTED_INVALID.inc(1);
                         warn!("Error because of invalid solution: {:?}", msg);
                         vec![
                             to_value(false).expect("serializable"),
@@ -188,12 +217,14 @@ impl StratumImpl {
                         ]
                     }
                     Err(submit_err) => {
+                        STRATUM_SHARES_REJECTED_OTHER.inc(1);
                         warn!("Error while submitting share: {:?}", submit_err);
                         vec![to_value(false).expect("serializable")]
                     }
                 }
             }
             _ => {
+                STRATUM_SHARES_MALFORMED.inc(1);
                 trace!(target: "stratum", "Invalid submit work format {:?}", params);
                 vec![to_value(false).expect("serializable")]
             }

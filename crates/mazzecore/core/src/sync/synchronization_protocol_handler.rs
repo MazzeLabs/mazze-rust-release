@@ -13,8 +13,8 @@ use crate::{
     sync::{
         message::{
             handle_rlp_message, msgid, Context, DynamicCapability,
-            GetBlockHeadersResponse, Heartbeat, NewBlockHashes, StatusV2,
-            StatusV3, TransactionDigests,
+            GetBlockHeadersResponse, Heartbeat, NewBlock, NewBlockHashes,
+            NodeVersionInfo, StatusV3, TransactionDigests,
         },
         request_manager::{try_get_block_hashes, Request},
         state::SnapshotChunkSync,
@@ -22,7 +22,7 @@ use crate::{
         synchronization_state::PeerFilter,
         StateSyncConfiguration,
         SYNCHRONIZATION_PROTOCOL_OLD_VERSIONS_TO_SUPPORT,
-        SYNCHRONIZATION_PROTOCOL_VERSION, SYNC_PROTO_V1, SYNC_PROTO_V2,
+        SYNCHRONIZATION_PROTOCOL_VERSION, SYNC_PROTO_V1
     },
     ConsensusGraph, NodeType,
 };
@@ -32,7 +32,10 @@ use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_internal_common::ChainIdParamsDeprecated;
 use mazze_parameters::{block::MAX_BLOCK_SIZE_IN_BYTES, sync::*};
 use mazze_types::H256;
-use metrics::{register_meter_with_group, Meter, MeterTimer};
+use metrics::{
+    register_meter_with_group, Counter, CounterUsize, Gauge, GaugeUsize, Meter,
+    MeterTimer,
+};
 use network::{
     node_table::NodeId, service::ProtocolVersion,
     throttling::THROTTLING_SERVICE, Error as NetworkError, HandlerWorkType,
@@ -61,6 +64,29 @@ lazy_static! {
         register_meter_with_group("timer", "sync:recover_block");
     static ref PROPAGATE_TX_TIMER: Arc<dyn Meter> =
         register_meter_with_group("timer", "sync:propagate_tx_timer");
+    /// Counter incremented every time backpressure is engaged (sync graph
+    /// detected >= SYNC_CONSENSUS_BACKPRESSURE_BLOCK_GAP blocks ahead of
+    /// consensus). Gauge exposes the current state (0/1) for dashboards.
+    /// See docs/flow-audit.md G-CC-5.
+    static ref BACKPRESSURE_ENGAGEMENTS: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "sync",
+            "backpressure_engagements",
+        );
+    static ref BACKPRESSURE_ACTIVE: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("sync", "backpressure_active");
+    static ref SYNC_CONSENSUS_GAP: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("sync", "consensus_lag_blocks");
+    /// Transaction digest broadcast outcomes. Per-peer success/failure
+    /// rate so SREs can detect "peer X is rejecting all our tx digests".
+    /// See docs/flow-audit.md G-TX-2.
+    static ref TX_PROPAGATE_BROADCAST_OK: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("tx_propagate", "broadcast_ok");
+    static ref TX_PROPAGATE_BROADCAST_FAILED: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "tx_propagate",
+            "broadcast_failed",
+        );
 }
 
 const TX_TIMER: TimerToken = 0;
@@ -90,7 +116,27 @@ const EPOCH_SYNC_MAX_RETRY_COUNT: u64 = 20;
 const EPOCH_SYNC_RESTART_TIMEOUT_S: u64 = 60 * 10;
 const EPOCH_SYNC_MAX_INFLIGHT: u64 = 300;
 const EPOCH_SYNC_BATCH_SIZE: u64 = 30;
-const BLOCK_SYNC_MAX_INFLIGHT: usize = 1000;
+// At 4 blocks/sec, 400 in-flight = ~100s of blocks. Keeps RAM bounded.
+const BLOCK_SYNC_MAX_INFLIGHT: usize = 400;
+// Under backpressure, throttle body fetch so consensus can drain its queue --
+// but bodies are precisely what lets consensus advance, so a 64-block cliff
+// starves the pipe on an execution-bound node and deepens the body debt.
+// Phase-0: raise to 256 (RAM stays bounded by the recover-queue byte cap and
+// max_pending_execution_epochs). See docs/internal/throughput-plan-3000tps.md.
+const BLOCK_SYNC_MAX_INFLIGHT_BACKPRESSURE: usize = 256;
+// Engage backpressure when sync is 256 blocks (~64s) ahead of consensus.
+const SYNC_CONSENSUS_BACKPRESSURE_BLOCK_GAP: usize = 256;
+const ACTIVE_FRONTIER_RESCUE_BATCH_SIZE: usize = 128;
+// §B5 (Phase-1 throughput): pause epoch/header discovery once the body-fill debt
+// (blocks known-by-header but still awaiting bodies -- held in the sync-graph arena
+// and NOT era-GC-able until filled) reaches this many blocks. Header/epoch intake
+// otherwise races far ahead of body fetch and inflates the arena to
+// SYNC_GRAPH_ARENA_HARD_CAP (200k), where orphan headers are dropped, desyncing DAG
+// views and seeding the ~180k pivot fork. Set to 3/4 of that cap: discovery stops
+// well before the drop threshold, the (parallel, §B3) body drain catches up, then
+// discovery resumes -- pacing intake to body-fill capacity so the orphan-drop path
+// stays pure DoS defense. Throttles only our own download schedule, not mining/peers.
+const BODY_DEBT_EPOCH_THROTTLE: usize = 150_000;
 
 #[derive(Debug, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
 pub enum SyncHandlerWorkType {
@@ -308,28 +354,41 @@ impl FutureBlockContainer {
         }
 
         if inner.size > inner.capacity {
-            let mut removed = false;
+            // Evict from the latest-timestamp slots down to a low-water mark
+            // (~87.5% of capacity) so we don't pay eviction cost on every
+            // subsequent insert when bursts arrive. Without this, the
+            // original "remove exactly one" behaviour could fall behind a
+            // sustained future-block burst at 4 bps and leak memory.
+            let target = inner.capacity.saturating_sub(inner.capacity / 8);
             let mut empty_slots = Vec::new();
+            let mut to_remove: Vec<H256> = Vec::new();
             for entry in inner.container.iter_mut().rev() {
+                if inner.size.saturating_sub(to_remove.len()) <= target {
+                    break;
+                }
                 if entry.1.is_empty() {
                     empty_slots.push(*entry.0);
                     continue;
                 }
-
-                let hash = *entry.1.iter().next().unwrap();
-                entry.1.remove(&hash);
-                inner.hash_to_header_and_peer.remove(&hash);
-                removed = true;
-
+                // Drain this slot greedily; cheaper than re-walking the
+                // BTreeMap for every single eviction.
+                let drained: Vec<H256> = entry.1.iter().copied().collect();
+                let still_needed =
+                    inner.size.saturating_sub(to_remove.len()) - target;
+                let take = drained.len().min(still_needed);
+                for h in drained.into_iter().take(take) {
+                    entry.1.remove(&h);
+                    to_remove.push(h);
+                }
                 if entry.1.is_empty() {
                     empty_slots.push(*entry.0);
                 }
-                break;
             }
 
-            if removed {
-                inner.size -= 1;
+            for h in &to_remove {
+                inner.hash_to_header_and_peer.remove(h);
             }
+            inner.size = inner.size.saturating_sub(to_remove.len());
 
             for slot in empty_slots {
                 inner.container.remove(&slot);
@@ -430,6 +489,13 @@ pub struct ProtocolConfiguration {
     pub inflight_pending_tx_index_maintain_timeout: Duration,
     pub request_block_with_public: bool,
     pub max_trans_count_received_in_catch_up: u64,
+    /// Hard cap on the cumulative number of transactions a single peer
+    /// may submit during normal-phase operation. Past this, the
+    /// connection is dropped (and the counter `txpool.rejected_per_peer_cap_total`
+    /// increments). Coarse-grained — this is *cumulative*, not a
+    /// rolling-window rate limit. A finer rate-limiter is tracked as
+    /// M-2 in `docs/security-audit.md` deferred items.
+    pub max_trans_count_per_peer_normal: u64,
     pub min_peers_tx_propagation: usize,
     pub max_peers_tx_propagation: usize,
     pub max_downloading_chunks: usize,
@@ -442,6 +508,7 @@ pub struct ProtocolConfiguration {
     pub max_allowed_timeout_in_observing_period: u64,
     pub demote_peer_for_timeout: bool,
     pub max_unprocessed_block_size: usize,
+    pub max_pending_execution_epochs: usize,
     pub max_chunk_number_in_manifest: usize,
     pub allow_phase_change_without_peer: bool,
     pub min_phase_change_normal_peer_count: usize,
@@ -530,6 +597,30 @@ impl SynchronizationProtocolHandler {
             != SyncPhaseType::Normal
     }
 
+    fn sync_consensus_block_lag(&self) -> usize {
+        let statistics = self.graph.statistics.inner.read();
+        statistics
+            .sync_graph
+            .inserted_block_count
+            .saturating_sub(statistics.consensus_graph.inserted_block_count)
+    }
+
+    fn should_backpressure_block_requests(&self) -> bool {
+        let lag = self.sync_consensus_block_lag();
+        SYNC_CONSENSUS_GAP.update(lag);
+        let active = self.catch_up_mode()
+            && lag >= SYNC_CONSENSUS_BACKPRESSURE_BLOCK_GAP;
+        // Detect rising edge: count only the transition into the
+        // backpressured state. A re-engagement after recovering counts as a
+        // new event.
+        let prev_active = BACKPRESSURE_ACTIVE.value() != 0;
+        if active && !prev_active {
+            BACKPRESSURE_ENGAGEMENTS.inc(1);
+        }
+        BACKPRESSURE_ACTIVE.update(if active { 1 } else { 0 });
+        active
+    }
+
     pub fn in_recover_from_db_phase(&self) -> bool {
         let current_phase = self.phase_manager.get_current_phase();
         current_phase.phase_type()
@@ -540,8 +631,12 @@ impl SynchronizationProtocolHandler {
 
     pub fn need_requesting_blocks(&self) -> bool {
         let current_phase = self.phase_manager.get_current_phase();
+        if current_phase.phase_type() == SyncPhaseType::Normal {
+            return true;
+        }
+
         current_phase.phase_type() == SyncPhaseType::CatchUpSyncBlock
-            || current_phase.phase_type() == SyncPhaseType::Normal
+            && !self.should_backpressure_block_requests()
     }
 
     pub fn need_block_from_archive_node(&self) -> bool {
@@ -550,12 +645,55 @@ impl SynchronizationProtocolHandler {
             && !self.syn.is_full_node()
     }
 
-    pub fn preferred_peer_node_type_for_get_block(&self) -> Option<NodeType> {
-        if self.need_block_from_archive_node() {
-            Some(NodeType::Archive)
-        } else {
-            None
+    fn peer_debug_context(&self, peer: &NodeId) -> String {
+        if let Some(state) = self.syn.peers.read().get(peer).cloned() {
+            let state = state.read();
+            return format!(
+                "peer_known=true handshaking=false peer_version={:?} node_type={:?} best_epoch={} latest_hashes={} heartbeat_ms={}",
+                state.protocol_version,
+                state.node_type,
+                state.best_epoch,
+                state.latest_block_hashes.len(),
+                state.heartbeat.elapsed().as_millis(),
+            );
         }
+
+        let handshaking = self
+            .syn
+            .handshaking_peers
+            .read()
+            .get(peer)
+            .map(|(version, since)| {
+                format!(
+                    "handshaking=true peer_version={:?} handshake_age_ms={}",
+                    version,
+                    since.elapsed().as_millis()
+                )
+            })
+            .unwrap_or_else(|| "handshaking=false".to_string());
+
+        format!("peer_known=false {}", handshaking)
+    }
+
+    pub fn preferred_peer_node_type_for_get_block(&self) -> Option<NodeType> {
+        // Layer-5 archive body-fetch wedge (docs/internal/
+        // archive-bodyfetch-investigation.md §3b): biasing GetBlocks toward
+        // Archive peers during catch-up confined every body request to the
+        // OTHER archive peer. `PeerFilter::select_all` only falls back to
+        // non-archive peers when ZERO archive peers exist, so two mutually
+        // peered archives (m1<->m2) each kept asking the other — never the
+        // full/full-fast miner that actually mined and holds the recent body —
+        // and both wedged together while miners advanced. The preference's only
+        // real purpose is deep-history sync (non-archive nodes prune block
+        // bodies below the era boundary — configuration.rs sets
+        // additional_maintained_block_body_epoch_count = Some(0) for them), but
+        // it was applied to ALL body requests including recent/frontier bodies
+        // that every node holds. Treat all peers equally for block-body
+        // requests: whoever has the body answers. Deep-history fetches may cost
+        // a few extra rounds hitting pruned full nodes, but that self-heals via
+        // re-request and never wedges. Also neutralize the batcher's re-stamp
+        // (see remove_expired_flying_request).
+        None
     }
 
     pub fn get_synchronization_graph(&self) -> SharedSynchronizationGraph {
@@ -569,6 +707,14 @@ impl SynchronizationProtocolHandler {
     pub fn append_received_transactions(
         &self, transactions: Vec<Arc<SignedTransaction>>,
     ) {
+        // TODO(G-TX-4 in docs/flow-audit.md): a per-peer rate limit would
+        // sit here. Today the only protection against an abusive peer
+        // flooding the mempool is the global queue capacity in
+        // `recover_public_queue`. The right fix is a per-NodeId token
+        // bucket fed by request_manager's tx-digest accounting; deferred
+        // because the immediate operational answer is the network-level
+        // throttling service (`THROTTLING_SERVICE`) and there is no
+        // recorded incident attributable to a single peer.
         self.request_manager
             .append_received_transactions(transactions);
     }
@@ -587,8 +733,7 @@ impl SynchronizationProtocolHandler {
                 // `syn.peers`, and this peer should be in
                 // `syn.handshaking_peers`
                 if !self.syn.handshaking_peers.read().contains_key(peer)
-                    || (msg_id != msgid::STATUS_V3
-                        && msg_id != msgid::STATUS_V2)
+                    || msg_id != msgid::STATUS_V3
                 {
                     debug!("Message from unknown peer {:?}", msg_id);
                     return Ok(());
@@ -608,9 +753,16 @@ impl SynchronizationProtocolHandler {
             warn!("Unknown message: peer={:?} msgid={:?}", peer, msg_id);
             let reason =
                 format!("unknown sync protocol message id {:?}", msg_id);
+            warn!(
+                "Disconnecting peer for unknown sync message: peer={} msgid={:?} protocol={:?} {}",
+                peer,
+                msg_id,
+                io.get_protocol(),
+                self.peer_debug_context(peer),
+            );
             io.disconnect_peer(
                 peer,
-                Some(UpdateNodeOperation::Remove),
+                Some(UpdateNodeOperation::Failure),
                 reason.as_str(),
             );
         }
@@ -639,9 +791,9 @@ impl SynchronizationProtocolHandler {
                 op = Some(UpdateNodeOperation::Demotion)
             }
             ErrorKind::InvalidMessageFormat => {
-                // TODO: Shall we blacklist a node when the message format is
-                // wrong? maybe it's a different version of sync protocol?
-                op = Some(UpdateNodeOperation::Remove)
+                // Do not turn a possible version-skew or transient parse issue
+                // into a long-lived blacklist entry.
+                op = Some(UpdateNodeOperation::Failure)
             }
             ErrorKind::UnknownPeer => {
                 warn = false;
@@ -682,7 +834,7 @@ impl SynchronizationProtocolHandler {
                     disconnect = true;
                 }
             }
-            ErrorKind::Decoder(_) => op = Some(UpdateNodeOperation::Remove),
+            ErrorKind::Decoder(_) => op = Some(UpdateNodeOperation::Failure),
             ErrorKind::Io(_) => disconnect = false,
             ErrorKind::Network(kind) => match kind {
                 network::ErrorKind::SendUnsupportedMessage { .. } => {
@@ -736,7 +888,7 @@ impl SynchronizationProtocolHandler {
             ErrorKind::RpcCancelledByDisconnection => {}
             ErrorKind::RpcTimeout => {}
             ErrorKind::UnexpectedMessage(_) => {
-                op = Some(UpdateNodeOperation::Remove)
+                op = Some(UpdateNodeOperation::Failure)
             }
             ErrorKind::NotSupported(_) => disconnect = false,
         }
@@ -753,6 +905,18 @@ impl SynchronizationProtocolHandler {
             );
         }
 
+        if matches!(op, Some(UpdateNodeOperation::Remove)) {
+            error!(
+                "Sync peer removal decision: peer={} msgid={:?} protocol={:?} display_reason={} debug_reason={} {}",
+                peer,
+                msg_id,
+                io.get_protocol(),
+                reason,
+                error_reason,
+                self.peer_debug_context(peer),
+            );
+        }
+
         if disconnect {
             io.disconnect_peer(peer, op, reason.as_str());
         }
@@ -764,6 +928,13 @@ impl SynchronizationProtocolHandler {
         if current_phase_type == SyncPhaseType::CatchUpRecoverBlockHeaderFromDB
             || current_phase_type == SyncPhaseType::CatchUpFillBlockBodyPhase
         {
+            return;
+        }
+        // A fresh fast-sync node roots its chain at a trusted checkpoint
+        // before syncing anything (§5.19); headers from the true genesis
+        // would only be thrown away (and their processing starves the
+        // phase-change timer of the phase lock).
+        if self.graph.consensus.fast_sync_bootstrap_pending() {
             return;
         }
 
@@ -796,12 +967,7 @@ impl SynchronizationProtocolHandler {
                     // to request these old terminal blocks.
                     continue;
                 }
-                let terminals = {
-                    let mut info = info.write();
-                    let ts = info.latest_block_hashes.clone();
-                    info.latest_block_hashes.clear();
-                    ts
-                };
+                let terminals = info.read().latest_block_hashes.clone();
 
                 let to_request = terminals
                     .difference(&requested)
@@ -834,10 +1000,136 @@ impl SynchronizationProtocolHandler {
         }
     }
 
+    fn rescue_missing_frontier_dependencies(&self, io: &dyn NetworkContext) {
+        let missing = self.graph.collect_missing_frontier_dependencies(
+            ACTIVE_FRONTIER_RESCUE_BATCH_SIZE,
+        );
+        if missing.is_empty() {
+            return;
+        }
+
+        debug!(
+            "Active frontier rescue requesting {} missing dependency header(s): {:?}",
+            missing.len(),
+            missing
+        );
+        self.request_block_headers(
+            io, None, missing, false, /* ignore_db */
+        );
+    }
+
     /// Request missing block bodies from random peers in batches.
     pub fn request_block_bodies(&self, io: &dyn NetworkContext) {
-        let in_flight_blocks = self.request_manager.in_flight_blocks();
-        let to_request_blocks: Vec<_> = self
+        // §5.23 frontier-stuck body recovery. Observed live on m1
+        // archive: block 0x60b35d... at height 4242 pinned at
+        // status=BLOCK_HEADER_GRAPH_READY with block_ready=false for
+        // hours. Its hash was NEVER seen in any GetBlocks request even
+        // though peers had the body — meaning the request manager's
+        // in-flight set thought it was already flying (net_inflight_blocks
+        // entry never cleared) AND/OR the block was missing from
+        // block_to_fill_set. Both cases wedge the same way: the block
+        // is skipped by the `.difference(&in_flight_blocks)` filter
+        // below, or absent from the set entirely, so no request goes
+        // out and the frontier never promotes.
+        //
+        // Defensive fix: on every tick, look at not_ready_blocks_frontier
+        // for body-missing entries and (a) force-clear them from the
+        // request manager's in-flight set so the filter doesn't skip
+        // them, (b) re-insert them into block_to_fill_set idempotently.
+        // The regular fetch pipeline immediately below then picks them
+        // up. Idempotent under a fast path — collect_stuck returns
+        // Vec::new() when the frontier is clean or catchup-locked.
+        let stuck = self.graph.collect_stuck_frontier_bodies();
+        if !stuck.is_empty() {
+            self.request_manager
+                .remove_net_inflight_blocks(stuck.iter());
+            // §5.26: §5.23 cleared only NET_INFLIGHT_BLOCKS, but the gate
+            // that actually suppresses re-requests is the regular
+            // GET_BLOCKS in-flight set read by `in_flight_blocks()` below
+            // and retained-against by `GetBlocks::with_inflight`. A hash
+            // orphaned there (request dropped/emptied without `on_removed`
+            // firing) is filtered out of `to_request_blocks` forever, so no
+            // GetBlocks ever goes out and the frontier never promotes.
+            // Force-clear it here too so the `.difference` below includes
+            // the stuck block. Observed live on m6: 3 body-missing frontier
+            // blocks, 0 outgoing GetBlocks, missing_bodies frozen at 35398,
+            // chain wedged at epoch 13017 while the fleet reached 52k+.
+            self.request_manager.remove_inflight_blocks(stuck.iter());
+            self.graph.reinsert_to_fill_set(&stuck);
+
+            // §C: request the stuck FRONTIER bodies FIRST, with priority.
+            // §5.23/§5.26 only ensured these hashes are in `block_to_fill_set`
+            // and cleared from the in-flight set — but the general drain below
+            // requests just `to_request_blocks[0..n]`, the first n of an
+            // UNORDERED HashSet difference. During deep catch-up
+            // `block_to_fill_set` holds 100k+ hashes while n is capped at
+            // `max_inflight` (<=400), so a handful of frontier hashes sit far
+            // beyond the cutoff and are never reached — the node fetches other
+            // bodies (missing_bodies slowly falls) while the FRONTIER stays
+            // frozen and the node wedges forever in CatchUpSyncBlock (observed
+            // live: m5, 7 not-ready frontier blocks, missing_bodies 115642,
+            // latest epoch pinned at 80383 for hours). These blocks are what
+            // gates promotion, so request them directly and unconditionally.
+            // `request_blocks_without_check` re-registers them in-flight, so
+            // the `.difference()` drain below won't double-request them.
+            // §Item0 robust recovery: fan the stuck FRONTIER bodies out to
+            // EVERY connected peer, not just one round-robin pick via the
+            // waiting queue. Under a fork the body can exist on ONLY one peer
+            // (the node that raced ahead under spam and mined it); a
+            // single-peer request keeps missing that holder and the frontier
+            // wedges (observed live: 4-node subset frozen, the missing body
+            // present only on the forked peer). Clear both in-flight sets
+            // before each peer send so `with_inflight` / the net-inflight gate
+            // don't strip the hash after the first request. The stuck set is
+            // the frontier (tiny), so fanning out to all peers is cheap; the
+            // last send leaves the hashes in-flight, so the `.difference()`
+            // drain below still won't double-request them.
+            let all_peers: Vec<NodeId> =
+                self.syn.peers.read().keys().cloned().collect();
+            for chunk in stuck.chunks(MAX_BLOCKS_TO_SEND as usize) {
+                if all_peers.is_empty() {
+                    self.request_blocks_without_check(io, None, chunk.to_vec());
+                } else {
+                    for peer in &all_peers {
+                        self.request_manager
+                            .remove_net_inflight_blocks(chunk.iter());
+                        self.request_manager
+                            .remove_inflight_blocks(chunk.iter());
+                        self.request_blocks_without_check(
+                            io,
+                            Some(*peer),
+                            chunk.to_vec(),
+                        );
+                    }
+                }
+            }
+        }
+
+        let max_inflight = if self.should_backpressure_block_requests() {
+            BLOCK_SYNC_MAX_INFLIGHT_BACKPRESSURE
+        } else {
+            BLOCK_SYNC_MAX_INFLIGHT
+        };
+        // If the in-flight window is already full while bodies still need
+        // fetching, orphaned in-flight keys (leaked in without `on_removed`,
+        // never timed out) may be permanently starving the drain — the classic
+        // archive body-fetch wedge (node idle, `missing_bodies` frozen while
+        // peers hold the bodies, 0 outgoing GetBlocks). Reconcile them away so
+        // the drain resumes. Only removes hashes with no live request behind
+        // them, so genuinely in-flight requests are untouched.
+        if self.request_manager.in_flight_blocks().len() >= max_inflight {
+            let cleared =
+                self.request_manager.reconcile_inflight_block_orphans();
+            if cleared > 0 {
+                warn!(
+                    "request_block_bodies: reconciled {} orphaned in-flight \
+                     block request(s) that were starving the body drain",
+                    cleared
+                );
+            }
+        }
+        let mut in_flight_blocks = self.request_manager.in_flight_blocks();
+        let mut to_request_blocks: Vec<_> = self
             .graph
             .inner
             .read()
@@ -845,29 +1137,229 @@ impl SynchronizationProtocolHandler {
             .difference(&in_flight_blocks)
             .copied()
             .collect();
+        // The window-full check above misses the tail of a body fill: when
+        // the last few hashes are all orphaned in flight (their peers were
+        // disconnected on request timeouts without `on_removed`), the window
+        // is nearly empty, nothing is left to request, and the stuck-frontier
+        // rescue is off while the graph is locked for catch-up. m6 sat in
+        // CatchUpFillBlockBody with missing_bodies = 10 and 0 requests for
+        // 30+ min (2026-10-17). Reconcile here too.
+        if to_request_blocks.is_empty()
+            && !self.graph.inner.read().block_to_fill_set.is_empty()
+        {
+            // Name the last few missing bodies (once a minute) so a fill that
+            // never completes can be traced to the blocks no peer serves.
+            {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static LAST_TAIL_LOG: AtomicU64 = AtomicU64::new(0);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let last = LAST_TAIL_LOG.load(Ordering::Relaxed);
+                let fill = &self.graph.inner.read().block_to_fill_set;
+                if fill.len() <= 10
+                    && now >= last + 60
+                    && LAST_TAIL_LOG
+                        .compare_exchange(
+                            last,
+                            now,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok()
+                {
+                    warn!(
+                        "request_block_bodies: last missing bodies still \
+                         unfilled: {:?}",
+                        fill
+                    );
+                }
+            }
+            let cleared =
+                self.request_manager.reconcile_inflight_block_orphans();
+            if cleared > 0 {
+                warn!(
+                    "request_block_bodies: reconciled {} orphaned in-flight \
+                     block request(s) holding the last missing bodies",
+                    cleared
+                );
+                in_flight_blocks = self.request_manager.in_flight_blocks();
+                to_request_blocks = self
+                    .graph
+                    .inner
+                    .read()
+                    .block_to_fill_set
+                    .difference(&in_flight_blocks)
+                    .copied()
+                    .collect();
+            }
+        }
+        // Bodies already on disk are inserted from the local DB instead of
+        // being requested. §5.19 queues every header that becomes
+        // HEADER_GRAPH_READY without an in-memory body, so after a restart
+        // an archive re-requested its whole history from peers (m2,
+        // 2026-10-19: 1.6M "missing" bodies it already had, fetched at
+        // ~26/s). Bounded per tick so one call never holds up the IO worker.
+        const LOCAL_BODY_LOOKUPS_PER_TICK: usize = 4096;
+        let mut local_hits = HashSet::new();
+        // Headers of blocks still waiting for a body. Taken from the graph:
+        // `block_from_db` would decode the header again and recompute its
+        // RandomX hash, and with the fill set in random height order every
+        // lookup built a new light RandomX context (m2: ~3 bodies/s, IO
+        // workers stalled on the seed cache).
+        let mut db_candidates = Vec::new();
+        {
+            let inner = &mut *self.graph.inner.write();
+            for hash in to_request_blocks.iter() {
+                match inner.hash_to_arena_indices.get(hash).copied() {
+                    Some(i) if !inner.arena[i].block_ready => {
+                        if db_candidates.len() < LOCAL_BODY_LOOKUPS_PER_TICK {
+                            db_candidates.push(
+                                inner.arena[i].block_header.clone(),
+                            );
+                        }
+                    }
+                    // Body already present, or the block left the graph:
+                    // nothing to fill.
+                    _ => {
+                        inner.block_to_fill_set.remove(hash);
+                        local_hits.insert(*hash);
+                    }
+                }
+            }
+        }
+        for header in db_candidates {
+            let hash = header.hash();
+            if let Some(body) =
+                self.graph.data_man.db_manager.block_body_from_db(&hash)
+            {
+                self.graph.insert_block(
+                    Block::new((*header).clone(), body),
+                    true,  /* need_to_verify */
+                    false, /* persistent: already on disk */
+                    true,  /* recover_from_db */
+                );
+                local_hits.insert(hash);
+            }
+        }
+        if !local_hits.is_empty() {
+            debug!(
+                "request_block_bodies: filled {} bodies from the local DB",
+                local_hits.len()
+            );
+            to_request_blocks.retain(|h| !local_hits.contains(h));
+        }
         let n_blocks_to_request = min(
-            BLOCK_SYNC_MAX_INFLIGHT - in_flight_blocks.len(),
+            max_inflight.saturating_sub(in_flight_blocks.len()),
             to_request_blocks.len(),
         );
+        if n_blocks_to_request == 0 {
+            return;
+        }
 
-        // Use `MAX_BLOCKS_TO_SEND` as the batch size so the peer can respond
-        // with all blocks.
-        for block_chunk in to_request_blocks[0..n_blocks_to_request]
+        // §B3 (Phase-1 throughput): partition the body-fetch batch across ALL
+        // connected peers and send DIRECTLY (`Some(peer)`) instead of deferring
+        // every batch to the waiting queue (>=1s delay + linear backoff) to be sent
+        // to ONE random peer. During deep catch-up `block_to_fill_set` holds 100k+
+        // hashes, so a single-random-peer drain fetches far slower than the tip
+        // advances and a lagging node never catches up (observed live: m5/m6 stuck
+        // ~200k epochs behind for 16h with zero progress). Round-robin across peers
+        // parallelizes the pipe; a peer lacking a requested body silently omits it
+        // and those hashes are simply re-requested next drain cycle (now bounded by
+        // the 5s, not 15s, timeout). `MAX_BLOCKS_TO_SEND` batch size lets each peer
+        // return all blocks in the batch.
+        let body_peers: Vec<NodeId> =
+            self.syn.peers.read().keys().cloned().collect();
+        // Rotate the first peer across calls. With one chunk left (the tail
+        // of a fill) `i` is always 0, so every retry went to the same peer;
+        // when that peer had pruned the body (a mining node), the archive
+        // that has it was never asked (m6 stuck on 3 bodies for hours,
+        // 2026-10-19).
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        static BODY_PEER_ROTATION: AtomicUsize = AtomicUsize::new(0);
+        let rotation = BODY_PEER_ROTATION.fetch_add(1, AtomicOrdering::Relaxed);
+        for (i, block_chunk) in to_request_blocks[0..n_blocks_to_request]
             .chunks(MAX_BLOCKS_TO_SEND as usize)
+            .enumerate()
         {
-            self.request_blocks_without_check(io, None, block_chunk.to_vec());
+            let peer = if body_peers.is_empty() {
+                None
+            } else {
+                Some(body_peers[(rotation + i) % body_peers.len()])
+            };
+            self.request_blocks_without_check(io, peer, block_chunk.to_vec());
         }
     }
 
-    // FIXME Use another function for block catch up. It should only use local
-    // epoch set and end with all consensus block retrieved, not related to
-    // median peer epoch.
+    /// Rate-limited (10 s) trace of why `request_epochs` stopped. Diagnoses
+    /// the restart-from-DB catch-up wedge (m1, 2026-10-10: stuck at its old
+    /// tip with peers ~17k epochs ahead, never sending epoch requests).
+    fn log_request_epochs_exit(&self, reason: &str, detail: String) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LAST: AtomicU64 = AtomicU64::new(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let last = LAST.load(Ordering::Relaxed);
+        if now >= last + 10
+            && LAST
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            info!("request_epochs exit: {} {}", reason, detail);
+        }
+    }
+
     pub fn request_epochs(&self, io: &dyn NetworkContext) {
+        // Download↔execution backpressure. The consensus executor's epoch
+        // queue is unbounded and each entry pins a reward-window of
+        // Arc<Block>s; during catch-up a fast downloader (esp. the
+        // full-fast profile) feeds it far faster than the single execution
+        // thread drains it, ballooning memory to OOM. If execution is
+        // already this far behind, stop pulling more of the chain into
+        // memory and let it drain first. `0` disables the throttle.
+        let exec_cap = self.protocol_config.max_pending_execution_epochs;
+        if exec_cap != 0 {
+            let backlog = self.graph.consensus.pending_execution_count();
+            if backlog >= exec_cap {
+                debug!(
+                    "request_epochs throttled: execution backlog {} >= cap {}",
+                    backlog, exec_cap
+                );
+                self.log_request_epochs_exit(
+                    "exec_backlog",
+                    format!("backlog={} cap={}", backlog, exec_cap),
+                );
+                return;
+            }
+        }
+
+        // §B5: body-debt backpressure. Stop pulling more of the chain into the
+        // arena once we already owe more bodies than the (§B3) drain can fill
+        // before the arena would hit its hard cap and start dropping orphan
+        // headers -- the trigger for the ~180k pivot fork. Let the fill set drain
+        // first; discovery resumes automatically once it falls back below the
+        // threshold.
+        let fill_debt = self.graph.inner.read().block_to_fill_set.len();
+        if fill_debt >= BODY_DEBT_EPOCH_THROTTLE {
+            debug!(
+                "request_epochs throttled: body-fill debt {} >= {} (arena-cap guard)",
+                fill_debt, BODY_DEBT_EPOCH_THROTTLE
+            );
+            self.log_request_epochs_exit(
+                "fill_debt",
+                format!("fill_debt={}", fill_debt),
+            );
+            return;
+        }
+
         // make sure only one thread can request new epochs at a time
         let mut latest_requested = self.latest_epoch_requested.lock();
 
-        // We use median here instead of max, so w.h.p. we won't request all
-        // epoch sets from malicious peer.
+        // We advance epoch discovery conservatively against the median normal
+        // peer so a single outlier cannot drag catch-up arbitrarily far.
         // See https://github.com/s94130586/mazze-rust/issues/1466.
         let median_peer_epoch =
             self.syn.median_epoch_from_normal_peers().unwrap_or(0);
@@ -900,6 +1392,14 @@ impl SynchronizationProtocolHandler {
             if latest_request_time.elapsed()
                 < Duration::from_secs(EPOCH_SYNC_RESTART_TIMEOUT_S)
             {
+                self.log_request_epochs_exit(
+                    "max_gap_wait",
+                    format!(
+                        "latest_requested={} my_best={} gap={} since_last={:?} retry={}",
+                        latest_requested_epoch, my_best_epoch, sync_max_gap,
+                        latest_request_time.elapsed(), retry_count
+                    ),
+                );
                 return;
             } else {
                 // Restart from `my_best_epoch` to fix possible problems.
@@ -948,6 +1448,10 @@ impl SynchronizationProtocolHandler {
 
             // no peer has the epoch we need; try later
             if peer.is_none() {
+                self.log_request_epochs_exit(
+                    "no_peer",
+                    format!("from={} median={}", from, median_peer_epoch),
+                );
                 break;
             }
 
@@ -984,6 +1488,18 @@ impl SynchronizationProtocolHandler {
                 .request_epoch_hashes(io, peer, epochs, None);
             latest_requested_epoch = until - 1;
         }
+        self.log_request_epochs_exit(
+            "loop_done",
+            format!(
+                "latest_requested={} my_best={} median={} gap={} inflight={} retry={}",
+                latest_requested_epoch,
+                my_best_epoch,
+                median_peer_epoch,
+                sync_max_gap,
+                self.request_manager.num_epochs_in_flight(),
+                retry_count
+            ),
+        );
         *latest_requested = (
             latest_requested_epoch,
             Instant::now(),
@@ -992,13 +1508,47 @@ impl SynchronizationProtocolHandler {
         );
     }
 
+    /// Fast-sync helper. Bypasses the `request_epochs` discovery loop
+    /// (which advances against `my_best_epoch` and is unsuited to
+    /// pre-anchor prefix prefetch) and asks one peer directly for the
+    /// hashes at a given set of epoch numbers. Used only by the
+    /// trusted-checkpoint fast-sync path in
+    /// `CatchUpCheckpointPhase::prefetch_chain_prefix`.
+    pub fn request_epoch_hashes_for_prefetch(
+        &self, io: &dyn NetworkContext, epochs: Vec<u64>,
+    ) {
+        if epochs.is_empty() {
+            return;
+        }
+        self.request_manager
+            .request_epoch_hashes(io, None, epochs, None);
+    }
+
     pub fn request_block_headers(
         &self, io: &dyn NetworkContext, peer: Option<NodeId>,
         mut header_hashes: Vec<H256>, ignore_db: bool,
     ) {
+        let mut recovered_headers = Vec::new();
         if !ignore_db {
-            header_hashes
-                .retain(|hash| !self.try_request_header_from_db(io, hash));
+            header_hashes.retain(|hash| {
+                !self.try_request_header_from_db(hash, &mut recovered_headers)
+            });
+        }
+        if !recovered_headers.is_empty() {
+            let ctx = Context {
+                node_id: io.self_node_id(),
+                io,
+                manager: self,
+            };
+            if let Err(err) = GetBlockHeadersResponse::handle_local_headers(
+                &ctx,
+                recovered_headers,
+            ) {
+                warn!(
+                    "Failed to process block headers recovered from db: {:?}",
+                    err
+                );
+            }
         }
         // Headers may have been inserted into sync graph before as dependent
         // blocks
@@ -1015,13 +1565,14 @@ impl SynchronizationProtocolHandler {
     /// exists in db or is inserted before. Handle the block header if its
     /// seq_num is less than that of the current era genesis.
     fn try_request_header_from_db(
-        &self, io: &dyn NetworkContext, hash: &H256,
+        &self, hash: &H256, recovered_headers: &mut Vec<BlockHeader>,
     ) -> bool {
         if self.graph.contains_block_header(hash) {
             return true;
         }
 
-        if let Some(info) = self.graph.data_man.local_block_info_by_hash(hash) {
+        let local_info = self.graph.data_man.local_block_info_by_hash(hash);
+        if let Some(info) = local_info {
             if info.get_status() == BlockStatus::Invalid {
                 // this block was invalid before
                 return true;
@@ -1042,25 +1593,16 @@ impl SynchronizationProtocolHandler {
             }
         }
 
-        // FIXME: If there is no block info in db, whether we need to fetch
-        // block header from db?
         if let Some(header) = self.graph.data_man.block_header_by_hash(hash) {
-            debug!("Recovered header {:?} from db", hash);
-            // Process headers from db
-            let mut block_headers_resp = GetBlockHeadersResponse::default();
-            block_headers_resp.request_id = 0;
-            let mut headers = Vec::new();
-            headers.push((*header).clone());
-            block_headers_resp.headers = headers;
-
-            let ctx = Context {
-                node_id: io.self_node_id(),
-                io,
-                manager: self,
-            };
-
-            ctx.send_response(&block_headers_resp)
-                .expect("send response should not be error");
+            if local_info.is_some() {
+                debug!("Recovered header {:?} from db", hash);
+            } else {
+                debug!(
+                    "Recovered header {:?} from db without local block info; it will be re-verified before reuse",
+                    hash
+                );
+            }
+            recovered_headers.push((*header).clone());
             return true;
         } else {
             return false;
@@ -1190,15 +1732,118 @@ impl SynchronizationProtocolHandler {
         self.on_message(io, &io.self_node_id(), task.message.as_slice());
     }
 
-    pub fn on_mined_block(&self, mut block: Block) {
+    /// Returns `true` if the mined block was inserted (and should be
+    /// broadcast to peers), `false` if a guardrail dropped it.
+    pub fn on_mined_block(&self, mut block: Block) -> bool {
         let hash = block.block_header.hash();
+
+        // Mining guardrails — a miner must never fork the fleet or race the
+        // executor. Dropping the block just re-mines the same tip once
+        // conditions clear; the bounded wasted PoW is far cheaper than the
+        // chain-wide halt these prevent.
+        //
+        // A) Not caught up: if this node is not in Normal phase it is behind
+        //    the canonical tip. Mining now extends its own STALE branch (a
+        //    fork) instead of syncing forward — the primary divergence driver
+        //    in a multi-miner fleet (observed live: miners stuck in
+        //    CatchUpSyncBlock kept mining at ~81k while the leader ran to
+        //    ~129k, fragmenting the fleet). Drop until caught up (Normal).
+        if self.catch_up_mode() {
+            warn!(
+                "Dropping mined block {:?} — node not in Normal phase \
+                 (catching up); mining now would fork a stale branch.",
+                hash
+            );
+            return false;
+        }
+        // B) Executor too far behind: even in Normal, mining extends the
+        //    header chain independently of state execution, and the existing
+        //    `max_pending_execution_epochs` throttle only gates DOWNLOADING
+        //    from peers — not locally-mined blocks. Keyed on the REAL lag
+        //    `best_epoch - best_executed_state_epoch` (NOT the pending-queue
+        //    depth, which drains to ~0 when execution is *stuck* rather than
+        //    slow — why the queue-based check never fired). Keeping the tip
+        //    within the cap lets the stable checkpoint (which needs executed
+        //    state) advance, so the sync-graph arena keeps getting GC'd
+        //    instead of hitting its hard cap. Observed live: header tip
+        //    163712 vs executed 44874 with a near-empty queue. Missing bodies
+        //    are fed continuously by the 500ms body-sync timer (§5.20) +
+        //    §5.26, so the pause lets execution catch up, not dig deeper.
+        let exec_cap = self.protocol_config.max_pending_execution_epochs;
+        if exec_cap != 0 {
+            let best = self.graph.consensus.best_epoch_number();
+            let executed =
+                self.graph.consensus.best_executed_state_epoch_number();
+            let lag = best.saturating_sub(executed) as usize;
+            if lag >= exec_cap {
+                warn!(
+                    "Dropping mined block {:?} — execution lag {} (best {} - \
+                     executed {}) >= cap {}; pausing mining until the executor \
+                     catches up.",
+                    hash, lag, best, executed, exec_cap
+                );
+                return false;
+            }
+        }
+        // NOTE: a former guardrail C (added 9631e12, removed 848a5f6)
+        // throttled mining when this node's tip ran far ahead of the MEDIAN
+        // PEER epoch. It was removed: coupling local block production to
+        // peer-reported STATE violates node independence and is a
+        // liveness/DoS hazard — a wedged or malicious minority drags the
+        // median down and can throttle honest miners to a HALT (observed
+        // live: two body-wedged archive nodes pinned the median so far below
+        // the leaders that guardrail C dropped 100k+ mined blocks and
+        // stalled the whole fleet's production). The median-based check is
+        // NOT reinstated for the same reason.
+        //
+        // C') Isolation guard (reinstated 2026-07-21, fleet incident report
+        //     rec #3). This is DIFFERENT from the removed median-based C —
+        //     it keys on whether we have ANYONE to gossip to, not on their
+        //     reported state. A miner with zero peers CANNOT possibly
+        //     participate in consensus: its blocks reach no one and it will
+        //     drift onto a solo fork whose validity is judged by the network
+        //     later (observed 2026-07-21: m6 kept mining while its peers
+        //     were stuck in body-fetch stall, extended a solo chain 160k
+        //     epochs deep). Zero-peer is a LOCAL condition on this node's
+        //     own connectivity — cannot be manipulated by a slow/malicious
+        //     minority because it doesn't consult ANY peer's state. Safe.
+        //
+        //     Threshold of "< 2" (not "== 0") because a single peer could
+        //     itself be the one wedged half of the split we are about to
+        //     cause; with two or more peers we are meaningfully connected
+        //     to the pack.
+        {
+            let peer_count = self.syn.peers.read().len();
+            if peer_count < 2 {
+                warn!(
+                    "Dropping mined block {:?} — only {} handshaked peer(s); \
+                     pausing mining until the mesh is healthy so this node \
+                     does not solo-fork.",
+                    hash, peer_count
+                );
+                return false;
+            }
+        }
+
+        // NOTE: The former Guard D (arena-size mining backpressure) was REMOVED.
+        // It paused mining once the sync-graph arena reached 3/4 of the hard cap,
+        // waiting for old-era GC to drain the arena. But GC only drains below the
+        // stable checkpoint, and the real defect was that the checkpoint could not
+        // form at all (force-confirm trail = 3.65x era, see parameters/src/lib.rs).
+        // With the arena unable to drain, Guard D paused mining forever and froze
+        // the whole fleet (observed: all miners at arena=150k dropping every mined
+        // block, chain halted at epoch 126131). The proper fix is the timer-chain
+        // parameter change that keeps the arena bounded and forms checkpoints
+        // promptly; with that in place this backpressure is unnecessary and its
+        // failure mode (self-inflicted halt) is unacceptable.
+
         info!("Mined block {:?} header={:?}", hash, block.block_header);
         let parent_hash = *block.block_header.parent_hash();
 
         assert!(self.graph.contains_block_header(&parent_hash));
         if self.graph.contains_block_header(&hash) {
             warn!("Mined an duplicate block, the mining power is wasted!");
-            return;
+            return false;
         }
         self.graph.insert_block_header(
             &mut block.block_header,
@@ -1214,6 +1859,27 @@ impl SynchronizationProtocolHandler {
             true,  /* persistent */
             false, /* recover_from_db */
         );
+        true
+    }
+
+    /// Broadcast a full block body (`NewBlock`) to peers. Used for locally
+    /// MINED blocks: this node is the sole source of a freshly-mined block's
+    /// body, so relaying only its hash (`NewBlockHashes`, see `relay_blocks`)
+    /// risks the body being lost if this node shuts down before a peer lazily
+    /// fetches it via `GetBlocks` — an uncle referenced by the consensus DAG
+    /// would then wedge every node that needs it. Sending the body up front
+    /// guarantees availability; the cost is bounded (only our own mined blocks,
+    /// not relayed traffic).
+    pub fn broadcast_new_block(
+        &self, io: &dyn NetworkContext, block: &Block,
+    ) {
+        let msg: Box<dyn Message> = Box::new(NewBlock {
+            block: block.clone(),
+        });
+        self.broadcast_message(io, &Default::default(), msg.as_ref())
+            .unwrap_or_else(|e| {
+                warn!("Error broadcasting NewBlock, err={:?}", e);
+            });
     }
 
     fn broadcast_message(
@@ -1262,21 +1928,6 @@ impl SynchronizationProtocolHandler {
         Ok(())
     }
 
-    fn produce_status_message_v2(&self) -> StatusV2 {
-        let best_info = self.graph.consensus.best_info();
-        let chain_id = ChainIdParamsDeprecated {
-            chain_id: best_info.best_chain_id().in_native_space(),
-        };
-        let terminal_hashes = best_info.bounded_terminal_block_hashes.clone();
-
-        StatusV2 {
-            chain_id,
-            genesis_hash: self.graph.data_man.true_genesis.hash(),
-            best_epoch: best_info.best_epoch_number,
-            terminal_block_hashes: terminal_hashes,
-        }
-    }
-
     fn produce_status_message_v3(&self) -> StatusV3 {
         let best_info = self.graph.consensus.best_info();
         let chain_id = ChainIdParamsDeprecated {
@@ -1290,6 +1941,7 @@ impl SynchronizationProtocolHandler {
             genesis_hash: self.graph.data_man.true_genesis.hash(),
             best_epoch: best_info.best_epoch_number,
             terminal_block_hashes: terminal_hashes,
+            version: NodeVersionInfo::local(),
         }
     }
 
@@ -1305,21 +1957,16 @@ impl SynchronizationProtocolHandler {
 
     fn send_status(
         &self, io: &dyn NetworkContext, peer: &NodeId,
-        peer_protocol_version: ProtocolVersion,
+        _peer_protocol_version: ProtocolVersion,
     ) -> Result<(), NetworkError> {
-        if peer_protocol_version == SYNC_PROTO_V2 {
-            let status_message = self.produce_status_message_v2();
-            debug!("Sending status message to {}: {:?}", peer, status_message);
-            status_message.send(io, peer)
-        } else {
-            let status_message = self.produce_status_message_v3();
-            debug!("Sending status message to {}: {:?}", peer, status_message);
-            status_message.send(io, peer)
-        }
+        // Single-version protocol — always send V3.
+        let status_message = self.produce_status_message_v3();
+        debug!("Sending status message to {}: {:?}", peer, status_message);
+        status_message.send(io, peer)
     }
 
     fn broadcast_heartbeat(&self, io: &dyn NetworkContext) {
-        let status_message = self.produce_status_message_v2();
+        let status_message = self.produce_status_message_v3();
         let heartbeat_message = self.produce_heartbeat_message();
         debug!("Broadcasting heartbeat message: {:?}", heartbeat_message);
 
@@ -1340,6 +1987,14 @@ impl SynchronizationProtocolHandler {
     pub fn relay_blocks(
         &self, io: &dyn NetworkContext, need_to_relay: Vec<H256>,
     ) -> Result<(), Error> {
+        // DESIGN NOTE (G-MN-6 in docs/flow-audit.md):
+        // We only broadcast `NewBlockHashes` (digests), never the full
+        // `NewBlock` body. Peers fetch the body on demand via the
+        // GetBlocks request flow. This is intentional bandwidth saving
+        // at the cost of one extra round-trip latency for block
+        // propagation. If propagation latency becomes a complaint at
+        // higher block rates, revisit by adding an opt-in `NewBlock`
+        // path for low-latency peers (e.g. peers in the same datacentre).
         if !need_to_relay.is_empty() && !self.catch_up_mode() {
             let new_block_hash_msg: Box<dyn Message> =
                 Box::new(NewBlockHashes {
@@ -1494,6 +2149,7 @@ impl SynchronizationProtocolHandler {
             );
             match tx_msg.send(io, &peer_id) {
                 Ok(_) => {
+                    TX_PROPAGATE_BROADCAST_OK.inc(1);
                     trace!(
                         "{:02} <- Transactions ({} entries)",
                         peer_id,
@@ -1501,6 +2157,7 @@ impl SynchronizationProtocolHandler {
                     );
                 }
                 Err(e) => {
+                    TX_PROPAGATE_BROADCAST_FAILED.inc(1);
                     warn!(
                         "failed to propagate transaction ids to peer, id: {}, err: {}",
                         peer_id, e
@@ -1603,7 +2260,14 @@ impl SynchronizationProtocolHandler {
         let cancelled_requests = self.request_manager.resend_waiting_requests(
             io,
             !self.catch_up_mode(),
-            self.need_block_from_archive_node(),
+            // Layer-5 fix: do NOT bias re-batched GetBlocks toward Archive
+            // peers. `RequestBatcher::insert` discards the per-request
+            // preferred_node_type and `get_batched_requests` re-stamps it from
+            // this flag, so leaving it true would reinstate the archive
+            // confinement that `preferred_peer_node_type_for_get_block` now
+            // avoids. Treat all peers equally for body fetch. See §3b in
+            // docs/internal/archive-bodyfetch-investigation.md.
+            false,
         );
         self.handle_cancelled_requests(cancelled_requests);
     }
@@ -1880,12 +2544,22 @@ impl NetworkProtocolHandler for SynchronizationProtocolHandler {
         let (msg_id, rlp) = match decode_msg(raw) {
             Some(msg) => msg,
             None => {
+                let raw_prefix: Vec<u8> =
+                    raw.iter().copied().take(12).collect();
+                warn!(
+                    "Invalid sync payload received: peer={} protocol={:?} raw_len={} raw_prefix={:?} {}",
+                    peer,
+                    io.get_protocol(),
+                    raw.len(),
+                    raw_prefix,
+                    self.peer_debug_context(peer),
+                );
                 return self.handle_error(
                     io,
                     peer,
                     msgid::INVALID,
                     ErrorKind::InvalidMessageFormat.into(),
-                )
+                );
             }
         };
 
@@ -1960,6 +2634,31 @@ impl NetworkProtocolHandler for SynchronizationProtocolHandler {
             }
             CHECK_REQUEST_TIMER => {
                 self.remove_expired_flying_request(io);
+                self.rescue_missing_frontier_dependencies(io);
+                let seed_ready = self.graph.take_seed_ready_headers();
+                if !seed_ready.is_empty() {
+                    debug!(
+                        "re-requesting {} header(s) whose RandomX seed is \
+                         known now",
+                        seed_ready.len()
+                    );
+                    self.request_block_headers(
+                        io, None, seed_ready, true, /* ignore_db */
+                    );
+                }
+                // Body-sync unification (§5.20): drain `block_to_fill_set`
+                // regardless of phase. In CatchUpSyncBlock with backpressure
+                // engaged (sync_consensus_block_lag >= 256), no other path
+                // was requesting bodies — request_epochs took the
+                // headers-only branch (need_requesting_blocks=false) and
+                // rescue_missing_frontier_dependencies also fetches only
+                // headers. block_to_fill_set (populated by the §5.19 fix)
+                // grew unbounded and consensus wedged because it couldn't
+                // execute without bodies. This tick (500ms) keeps bodies
+                // flowing at all times; `request_block_bodies` is a no-op
+                // when the set is empty (n_blocks_to_request == 0 → early
+                // return) so this is safe in Normal too.
+                self.request_block_bodies(io);
             }
             HEARTBEAT_TIMER => {
                 self.send_heartbeat(io);

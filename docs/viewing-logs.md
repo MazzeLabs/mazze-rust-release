@@ -1,7 +1,7 @@
 # Viewing Mazze Logs
 
 ## Zurich development phase
-While the Mazze network is in the Zurich development phase, logs are stored in the `run/logs` directory by default with a higher verbosity level (DEBUG).
+While the Mazze network is in the Zurich development phase, logs are stored in the repo-root `logs` directory by default with a higher verbosity level (DEBUG).
 This is to ensure that the Mazze team can monitor the network and identify any issues that may arise.
 This verbosity level will be reduced to INFO after the mainnet launch.
 
@@ -18,7 +18,7 @@ docker logs -f mazze-miner
 ```
 
 ## Source Build Installation
-Logs are stored in the `run/logs` directory by default.
+Logs are stored in the repo-root `logs` directory by default.
 
 ```bash
 # Node logs

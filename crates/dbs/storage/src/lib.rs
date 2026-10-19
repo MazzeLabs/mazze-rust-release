@@ -42,6 +42,11 @@ pub mod storage_dir {
                 .iter()
                 .collect::<PathBuf>();
         pub static ref STORAGE_DIR: PathBuf = "storage_db".into();
+        /// Dedicated MDBX env for the snapshot tier (Phase 5c). NOT
+        /// shared with the hot env — snapshots are cold, bulky, and
+        /// have their own writer-lock domain per design doc §2.3.0.
+        pub static ref SNAPSHOT_MDBX_DIR: PathBuf =
+            ["storage_db", "mdbx_snapshot"].iter().collect::<PathBuf>();
     }
 }
 
@@ -102,39 +107,165 @@ impl ProvideExtraSnapshotSyncConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+/// MDBX commit durability tier. Wired on top of libmdbx's
+/// `SyncMode` — the runtime default is libmdbx's `Durable` (fsync
+/// on every commit), which is fine for a bank but crushes write
+/// throughput on a testnet where a merge can be many chunk-txns
+/// and every fsync stalls concurrent reads.
+///
+/// This knob was flagged in design doc R3.4 as "wire it or delete
+/// it" — 5e deleted the (dead) enum; the 2026-07-08 fleet fork
+/// incident reintroduced the case for wiring it (see fleet
+/// incident report §5 recommendation #6). Fleet operators pick
+/// per node profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MdbxSyncMode {
-    /// Flush metadata on commit for maximum durability.
-    Safe,
-    /// Skip metadata syncs to speed up writes at the cost of resilience.
-    Relaxed,
+    /// libmdbx `SyncMode::Durable` — fsync data + meta on every
+    /// commit. Full crash-safety, worst throughput. Use on
+    /// operator archives that hold canonical history.
+    Durable,
+    /// libmdbx `SyncMode::NoMetaSync` — sync data pages, defer
+    /// meta-page fsync. ~2x write throughput vs Durable per the
+    /// libmdbx docs. On crash you may lose the last few
+    /// committed txns (data itself is preserved). Good for
+    /// full-fast miners.
+    NoMetaSync,
+    /// libmdbx `SyncMode::SafeNoSync` — asynchronous mmap
+    /// flushes; data still page-locally consistent
+    /// (transaction-atomic), just not durably synced to platter
+    /// on every commit. Up to 10x throughput per the libmdbx
+    /// docs. Recommended default for testnet nodes since a
+    /// crash-loss of the last few seconds of state is
+    /// re-syncable from peers.
+    SafeNoSync,
+    /// libmdbx `SyncMode::UtterlyNoSync` — no fsync at all,
+    /// database file relies on OS page cache flush. Ceiling
+    /// throughput at the cost of "on system power loss, the
+    /// database may be corrupt beyond recovery". Only for
+    /// throwaway benchmarks; never for a networked node.
+    UtterlyNoSync,
 }
 
 impl Default for MdbxSyncMode {
     fn default() -> Self {
-        MdbxSyncMode::Safe
+        // Phase-0 throughput: default to SafeNoSync. Durable fsync's every
+        // commit, and block-data writes are one-commit-per-put (bodies, tx-index
+        // per tx, receipts), so at a few hundred TPS a full-state node does
+        // hundreds of serialized fsyncs/s and falls behind block production ->
+        // body debt -> arena cap -> fork. SafeNoSync keeps the mmap async
+        // (~10x commit throughput); the only exposure is that a hard crash may
+        // lose the most recent commits, which are trivially re-synced from peers.
+        // Appropriate for this PoW testnet fleet. See docs/internal/throughput-plan-3000tps.md.
+        MdbxSyncMode::SafeNoSync
+    }
+}
+
+impl MdbxSyncMode {
+    /// Convert to the libmdbx wire enum. Kept behind this
+    /// wrapper so the storage crate is the only place that
+    /// depends on the libmdbx flag surface.
+    pub(crate) fn to_libmdbx(self) -> libmdbx::SyncMode {
+        match self {
+            MdbxSyncMode::Durable => libmdbx::SyncMode::Durable,
+            MdbxSyncMode::NoMetaSync => libmdbx::SyncMode::NoMetaSync,
+            MdbxSyncMode::SafeNoSync => libmdbx::SyncMode::SafeNoSync,
+            MdbxSyncMode::UtterlyNoSync => {
+                libmdbx::SyncMode::UtterlyNoSync
+            }
+        }
+    }
+
+    /// Parse `"durable" | "nometasync" | "safenosync" |
+    /// "utterlynosync"` (case-insensitive) — the string format
+    /// hydra.toml accepts.
+    pub fn from_str_lossy(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "durable" | "safe" => Some(MdbxSyncMode::Durable),
+            "nometasync" | "no_meta_sync" | "no-meta-sync" => {
+                Some(MdbxSyncMode::NoMetaSync)
+            }
+            "safenosync" | "safe_no_sync" | "safe-no-sync"
+            | "relaxed" => Some(MdbxSyncMode::SafeNoSync),
+            "utterlynosync" | "utterly_no_sync" => {
+                Some(MdbxSyncMode::UtterlyNoSync)
+            }
+            _ => None,
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct MdbxConfig {
     pub map_size_mb: Option<u64>,
-    pub max_readers: Option<u32>,
+    /// Durability tier for the hot env's rw_txn commits. See
+    /// [`MdbxSyncMode`]. Recommended: `SafeNoSync` on testnet
+    /// miners, `Durable` on operator archives.
     pub sync_mode: MdbxSyncMode,
+    /// `SafeNoSync` only: make a steady (fsynced) point once this many
+    /// MB are unsynced (0 = no size threshold). Applies to the hot and
+    /// the snapshot env.
+    pub autosync_mb: u64,
+    /// `SafeNoSync` only: make a steady point once the oldest unsynced
+    /// commit is this old, checked at the next commit (0 = no period).
+    pub autosync_period_ms: u64,
 }
 
 impl Default for MdbxConfig {
     fn default() -> Self {
         Self {
             map_size_mb: Some(crate::impls::defaults::DEFAULT_MDBX_MAP_SIZE_MB),
-            max_readers: None,
             sync_mode: MdbxSyncMode::default(),
+            autosync_mb: crate::impls::defaults::DEFAULT_MDBX_AUTOSYNC_MB,
+            autosync_period_ms:
+                crate::impls::defaults::DEFAULT_MDBX_AUTOSYNC_PERIOD_MS,
         }
     }
 }
 
+/// Geometry knobs for the dedicated snapshot MDBX env (Phase 5c).
+///
+/// Distinct from [`MdbxConfig`] because snapshot storage has a
+/// different profile: cold, bulky, growth-enabled ceiling per node
+/// profile (archives keep 100+ generations, full-fast retains a
+/// short floor). Sharing the hot env's pinned 64 GB ceiling would
+/// halt the node at a snapshot boundary once the merged tier
+/// crossed it — see design doc §2.3.0 / §2.3.1.
+#[derive(Debug, Clone)]
+pub struct SnapshotMdbxConfig {
+    /// Initial map size in MB. Small (1-2 GB) so a fresh node
+    /// doesn't over-commit disk; MDBX grows on demand.
+    pub initial_mb: u64,
+    /// Maximum map size in MB — the ceiling the env grows toward.
+    /// Size for retention: `(2-3× peak state) × (max retained
+    /// snapshots) × safety_margin`, uncompressed. Archives want
+    /// this much higher than full-fast.
+    pub max_mb: u64,
+    /// Growth step in MB. Larger steps → fewer file-growth
+    /// syscalls at write bursts, at the cost of more slack
+    /// between grows.
+    pub growth_step_mb: u64,
+}
+
+impl Default for SnapshotMdbxConfig {
+    fn default() -> Self {
+        Self {
+            initial_mb: crate::impls::defaults::DEFAULT_SNAPSHOT_MDBX_INITIAL_MB,
+            max_mb: crate::impls::defaults::DEFAULT_SNAPSHOT_MDBX_MAX_MB,
+            growth_step_mb:
+                crate::impls::defaults::DEFAULT_SNAPSHOT_MDBX_GROWTH_STEP_MB,
+        }
+    }
+}
+
+/// Selects the *hot* state-DB backend. Only `Mdbx` after Phase
+/// 5e — the ParityDB fallback and every paritydb impl file went
+/// with it. Kept as an enum (instead of a bare `MdbxConfig`) so
+/// a future backend (e.g. a per-space storage split) can add a
+/// variant without rippling through call sites.
 #[derive(Debug, Clone)]
 pub enum StateDbBackend {
+    /// Memory-mapped MDBX — RAM-speed reads for revm, MVCC
+    /// concurrent readers.
     Mdbx(MdbxConfig),
 }
 
@@ -167,10 +298,17 @@ pub struct StorageConfiguration {
     pub enable_single_mpt_storage: bool,
     pub single_mpt_space: Option<Space>,
     pub keep_snapshot_before_stable_checkpoint: bool,
-    pub use_isolated_db_for_mpt_table: bool,
-    pub use_isolated_db_for_mpt_table_height: Option<u64>,
     pub keep_era_genesis_snapshot: bool,
     pub state_db_backend: StateDbBackend,
+    /// Geometry for the dedicated Phase 5c snapshot MDBX env
+    /// (`storage_db/mdbx_snapshot/`). Independent of
+    /// [`StateDbBackend`] — the snapshot env is opened whenever the
+    /// hot env is on MDBX (5b+ makes that mandatory).
+    pub snapshot_mdbx_config: SnapshotMdbxConfig,
+    /// Directory that hosts the dedicated snapshot MDBX env. Set
+    /// alongside `path_storage_dir` so operators can mount it on a
+    /// larger/slower cold disk without moving the hot tier.
+    pub path_snapshot_mdbx_dir: PathBuf,
 }
 
 impl StorageConfiguration {
@@ -214,10 +352,11 @@ impl StorageConfiguration {
             enable_single_mpt_storage: false,
             single_mpt_space: None,
             keep_snapshot_before_stable_checkpoint: true,
-            use_isolated_db_for_mpt_table: false,
-            use_isolated_db_for_mpt_table_height: None,
             keep_era_genesis_snapshot: false,
             state_db_backend: StateDbBackend::default(),
+            snapshot_mdbx_config: SnapshotMdbxConfig::default(),
+            path_snapshot_mdbx_dir: mazze_data_path
+                .join(&*storage_dir::SNAPSHOT_MDBX_DIR),
         }
     }
 }
@@ -238,11 +377,12 @@ pub use self::{
         snapshot_sync::{FullSyncVerifier, MptSlicer},
         state_proof::StateProof,
         storage_db::{
-            kvdb_paritydb::KvdbParitydb,
-            kvdb_sqlite::{KvdbSqlite, KvdbSqliteStatements},
-            snapshot_db_manager_paritydb::SnapshotDbManagerParitydb,
-            snapshot_db_manager_sqlite::SnapshotDbManagerSqlite,
-            sqlite::SqliteConnection,
+            kvdb_mdbx::{
+                rw_stats as mdbx_rw_stats, BatchOp, KvdbMdbx, KvdbMdbxStats,
+                MdbxEnv,
+            },
+            mdbx_columns::{Column as MdbxColumn, NUM_COLUMNS as MDBX_NUM_COLUMNS},
+            snapshot_db_manager_mdbx::SnapshotDbManagerMdbx,
         },
     },
     replicated_state::ReplicatedState,

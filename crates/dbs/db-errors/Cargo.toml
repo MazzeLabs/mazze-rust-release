@@ -11,7 +11,6 @@ primitives = { path = "../../primitives" }
 mazze-types = { path = "../../mazze_types" }
 rlp = "0.4.0"
 error-chain = { version = "0.12.4", default-features = false }
-sqlite = "0.25"
 strfmt = "0.1"
 
 [lints.rust]

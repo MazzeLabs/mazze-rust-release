@@ -25,6 +25,7 @@
 //! Client-side stratum job dispatcher and mining notifier handler
 
 use crate::miner::work_notify::NotifyWork;
+use lazy_static::lazy_static;
 use log::{info, trace, warn};
 use mazze_stratum::{
     Error as StratumServiceError, JobDispatcher, PushWorkHandler,
@@ -34,6 +35,7 @@ use mazze_types::{H256, U256};
 use mazzecore::pow::{
     validate, PowComputer, ProofOfWorkProblem, ProofOfWorkSolution,
 };
+use metrics::{Counter, CounterUsize};
 use parking_lot::Mutex;
 use std::{
     collections::HashSet,
@@ -41,6 +43,35 @@ use std::{
     net::{AddrParseError, SocketAddr},
     sync::{mpsc, Arc},
 };
+
+lazy_static! {
+    /// Stratum share outcomes. accepted = nonce validated and forwarded;
+    /// duplicate = same nonce already accepted; invalid_pow = nonce did
+    /// not meet boundary; stale = problem no longer in recent window.
+    /// See docs/flow-audit.md G-MN-1.
+    static ref STRATUM_SHARE_ACCEPTED: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("stratum", "shares_accepted");
+    static ref STRATUM_SHARE_DUPLICATE: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("stratum", "shares_duplicate");
+    static ref STRATUM_SHARE_INVALID_POW: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("stratum", "shares_invalid_pow");
+    static ref STRATUM_SHARE_STALE: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("stratum", "shares_stale");
+}
+
+/// A share accepted by the stratum dispatcher, tagged with the `pow_hash`
+/// (`ProofOfWorkProblem::block_hash`) of the job it solves.
+///
+/// The nonce alone does not identify the job: at low difficulty a nonce that
+/// meets the boundary of the job the miner solved also meets the boundary of
+/// other jobs in the window with probability ~1/difficulty each, so matching
+/// by re-validating the nonce against the window picks the wrong (oldest)
+/// template most of the time. Blockgen matches on `pow_hash` instead.
+#[derive(Debug, Copy, Clone)]
+pub struct StratumSolution {
+    pub pow_hash: H256,
+    pub solution: ProofOfWorkSolution,
+}
 
 /// Configures stratum server options.
 #[derive(Debug, PartialEq, Clone)]
@@ -115,7 +146,7 @@ impl fmt::Display for PayloadError {
 /// Job dispatcher for stratum service
 pub struct StratumJobDispatcher {
     recent_problems: Mutex<Vec<(ProofOfWorkProblem, HashSet<U256>)>>,
-    solution_sender: Mutex<mpsc::Sender<ProofOfWorkSolution>>,
+    solution_sender: Mutex<mpsc::Sender<StratumSolution>>,
     pow: Arc<PowComputer>,
     window_size: usize,
 }
@@ -141,7 +172,23 @@ impl JobDispatcher for StratumJobDispatcher {
             let mut found = false;
             for (pow_prob, solved_nonce) in probs.iter_mut() {
                 if pow_prob.block_hash == payload.pow_hash {
+                    // One block per problem. A second valid nonce for an
+                    // already-solved template would make blockgen mine an
+                    // identical sibling block (same parent and contents),
+                    // widening the DAG for nothing: a multi-threaded miner
+                    // submitting every thread's nonce pushed the fleet to ~7
+                    // blocks/s on 2026-10-10.
+                    if !solved_nonce.is_empty() && !solved_nonce.contains(&sol.nonce) {
+                        STRATUM_SHARE_DUPLICATE.inc(1);
+                        return Err(StratumServiceError::InvalidSolution(
+                            format!(
+                                "Problem already solved! worker_id = {}",
+                                payload.worker_id
+                            ).into(),
+                        ));
+                    }
                     if solved_nonce.contains(&sol.nonce) {
+                        STRATUM_SHARE_DUPLICATE.inc(1);
                         return Err(StratumServiceError::InvalidSolution(
                             format!(
                                 "Problem already solved with nonce = {}! worker_id = {}",
@@ -150,12 +197,14 @@ impl JobDispatcher for StratumJobDispatcher {
                         ));
                     } else if validate(self.pow.clone(), pow_prob, &sol) {
                         solved_nonce.insert(sol.nonce);
+                        STRATUM_SHARE_ACCEPTED.inc(1);
                         info!(
                             "Stratum worker {} mined a block!",
                             payload.worker_id
                         );
                         found = true;
                     } else {
+                        STRATUM_SHARE_INVALID_POW.inc(1);
                         return Err(StratumServiceError::InvalidSolution(
                             format!(
                                 "Incorrect Nonce! worker_id = {}!",
@@ -167,6 +216,7 @@ impl JobDispatcher for StratumJobDispatcher {
                 }
             }
             if !found {
+                STRATUM_SHARE_STALE.inc(1);
                 return Err(StratumServiceError::InvalidSolution(
                     format!(
                         "Solution for a stale job! worker_id = {}",
@@ -176,7 +226,10 @@ impl JobDispatcher for StratumJobDispatcher {
                 ));
             }
 
-            match self.solution_sender.lock().send(sol) {
+            match self.solution_sender.lock().send(StratumSolution {
+                pow_hash: payload.pow_hash,
+                solution: sol,
+            }) {
                 Ok(_) => {}
                 Err(e) => {
                     warn!("{}", e);
@@ -191,7 +244,7 @@ impl JobDispatcher for StratumJobDispatcher {
 impl StratumJobDispatcher {
     /// New stratum job dispatcher given the miner and client
     fn new(
-        solution_sender: mpsc::Sender<ProofOfWorkSolution>,
+        solution_sender: mpsc::Sender<StratumSolution>,
         pow: Arc<PowComputer>, pow_window_size: usize,
     ) -> StratumJobDispatcher {
         StratumJobDispatcher {
@@ -284,7 +337,7 @@ impl Stratum {
     /// stratum service
     pub fn start(
         options: &Options, pow: Arc<PowComputer>, pow_window_size: usize,
-        solution_sender: mpsc::Sender<ProofOfWorkSolution>,
+        solution_sender: mpsc::Sender<StratumSolution>,
     ) -> Result<Stratum, Error> {
         use std::net::IpAddr;
 

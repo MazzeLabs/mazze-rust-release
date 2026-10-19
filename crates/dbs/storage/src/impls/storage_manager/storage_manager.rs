@@ -2,19 +2,25 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-/// The in mem snapshot_info map and the on disk snapshot_info_db is always in
-/// sync.
+/// The in-mem snapshot_info map and the on-disk MDBX column
+/// `SnapshotInfo` are always in sync.
+///
+/// Phase 5b: swapped from `KvdbParitydb` on its own paritydb env
+/// to `KvdbMdbx` on the shared hot-tier MDBX env
+/// ([`MdbxColumn::SnapshotInfo`]). No more per-subsystem paritydb
+/// envs; the whole storage layer talks to one env after 5b.
 pub struct PersistedSnapshotInfoMap {
     // Db to persist snapshot_info.
-    snapshot_info_db: KvdbParitydb,
+    snapshot_info_db: crate::impls::storage_db::kvdb_mdbx::KvdbMdbx,
     // In memory snapshot_info_map_by_epoch.
     snapshot_info_map_by_epoch: HashMap<EpochId, SnapshotInfo>,
 }
 
 impl PersistedSnapshotInfoMap {
-    fn new(snapshot_info_db: KvdbParitydb) -> Result<Self> {
+    fn new(
+        snapshot_info_db: crate::impls::storage_db::kvdb_mdbx::KvdbMdbx,
+    ) -> Result<Self> {
         let mut result = Self {
-            // The map is loaded later
             snapshot_info_map_by_epoch: Default::default(),
             snapshot_info_db,
         };
@@ -28,6 +34,9 @@ impl PersistedSnapshotInfoMap {
         let rlp_bytes = snapshot_info.rlp_bytes();
         self.snapshot_info_map_by_epoch
             .insert(epoch.clone(), snapshot_info);
+        // KvdbMdbx implements KeyValueDbTrait; `put` is the same
+        // signature the paritydb variant exposed.
+        use crate::storage_db::key_value_db::KeyValueDbTrait;
         self.snapshot_info_db.put(epoch.as_ref(), &rlp_bytes)?;
         Ok(())
     }
@@ -42,6 +51,7 @@ impl PersistedSnapshotInfoMap {
 
     fn remove(&mut self, epoch: &EpochId) -> Result<()> {
         self.snapshot_info_map_by_epoch.remove(epoch);
+        use crate::storage_db::key_value_db::KeyValueDbTrait;
         self.snapshot_info_db.delete(epoch.as_ref())?;
         Ok(())
     }
@@ -54,10 +64,14 @@ impl PersistedSnapshotInfoMap {
     }
 
     fn load_persist_state(&mut self) -> Result<()> {
+        // MDBX iteration: read the whole column into a Vec via
+        // `iter_range_owned` and rebuild the in-mem map. The
+        // per-epoch entries fit trivially in memory (dozens to
+        // low thousands even on archive nodes).
         for (key, value) in self
             .snapshot_info_db
-            .kvdb
-            .iter(self.snapshot_info_db.col)
+            .iter_range_owned(b"", None)?
+            .into_iter()
         {
             if key.len() != EpochId::len_bytes() {
                 return Err(DecoderError::RlpInvalidLength.into());
@@ -121,6 +135,36 @@ pub struct StorageManager {
 
     pub persist_state_from_initialization:
         RwLock<Option<(Option<EpochId>, HashSet<EpochId>, u64, Option<u64>)>>,
+
+    /// Hot-tier MDBX environment, opened at startup when
+    /// `storage_conf.state_db_backend == StateDbBackend::Mdbx(_)`.
+    /// `None` for the `ParityDb` fallback. Consumers (executor's live
+    /// state cache, revm's `MazzeDatabase`) reach it via
+    /// [`StorageManager::mdbx_env`].
+    ///
+    /// **Wiring status**: this field is *opened* by Phase B+C of the
+    /// storage cleanup plan but not yet *consumed* — see
+    /// docs/storage-architecture.md for the next integration step.
+    mdbx_env: Option<Arc<crate::impls::storage_db::kvdb_mdbx::MdbxEnv>>,
+    /// Dedicated MDBX env for the Phase 5c snapshot tier at
+    /// `storage_db/mdbx_snapshot/`. NOT shared with `mdbx_env`
+    /// because snapshot data is cold, bulky, and has its own
+    /// writer-lock domain (see design doc §2.3.0). Opened
+    /// **growth-enabled** so the map can grow up to
+    /// `SnapshotMdbxConfig::max_mb` — the capacity gauge fires a
+    /// warn well before it hits.
+    ///
+    /// **Wiring status (pre-work #3)**: opened, exposed via
+    /// [`Self::snapshot_mdbx_env`], gauge-monitored via
+    /// [`Self::sample_snapshot_mdbx_capacity`]. Consumed by
+    /// `SnapshotDbManagerMdbx` in the 5c main commit.
+    snapshot_mdbx_env:
+        Option<Arc<crate::impls::storage_db::kvdb_mdbx::MdbxEnv>>,
+    /// Snapshot env's configured `max_bytes` cached alongside the
+    /// env for the capacity-percentage gauge — avoids re-multiplying
+    /// on every sample and keeps the alert threshold checkable in
+    /// one place.
+    snapshot_mdbx_max_bytes: u64,
 }
 
 impl MallocSizeOf for StorageManager {
@@ -157,10 +201,27 @@ impl Drop for DeltaDbReleaser {
     }
 }
 
-// TODO: Add support for cancellation and io throttling.
+/// State of an in-flight snapshot-creation background thread.
+///
+/// Cancellation: `cancel_requested` is set by
+/// [`StorageManager::maintain_snapshots_main_chain_confirmed`] when
+/// the snapshot's target is determined to be on a non-canonical fork.
+/// The background thread checks the flag at merge-step boundaries
+/// (see [`SnapshotDbManagerParityDb::new_snapshot_by_merging`]) and,
+/// on `true`, aborts early, deletes the temp directory, and returns
+/// `Err(ErrorKind::SnapshotCowCancelled)` so the joiner knows the
+/// result is a cancellation rather than a genuine failure.
+///
+/// See `docs/checkpoint-snapshot-lifecycle.md` §5.2 and Phase B.1 of
+/// the lifecycle plan.
 pub struct InProgressSnapshotTask {
     snapshot_info: SnapshotInfo,
     thread_handle: Option<thread::JoinHandle<Result<()>>>,
+    /// Set to `true` to request that the background thread abort at
+    /// the next merge-step boundary. Wrapped in `Arc` so the thread
+    /// closure can observe the same flag without re-locking the
+    /// outer `RwLock<InProgressSnapshotTask>`.
+    cancel_requested: Arc<AtomicBool>,
 }
 
 impl InProgressSnapshotTask {
@@ -180,9 +241,45 @@ impl InProgressSnapshotTask {
             None
         }
     }
+
+    /// Request that this in-flight snapshot be cancelled at the next
+    /// merge-step boundary. Non-blocking; safe to call multiple times.
+    /// The background thread is responsible for releasing temp-dir
+    /// resources and returning `Err(SnapshotCowCancelled)`. See
+    /// `docs/checkpoint-snapshot-lifecycle.md` §5.2.
+    pub fn request_cancel(&self) {
+        self.cancel_requested
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Shared handle to the cancel flag. The background thread holds
+    /// one of these and polls it at merge-step boundaries.
+    pub fn cancel_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel_requested)
+    }
 }
 
 impl StorageManager {
+    /// `safenosync`: bound the lag of the last steady point by size and
+    /// time instead of letting libmdbx fsync on (almost) every commit.
+    fn apply_mdbx_autosync(
+        env: &crate::impls::storage_db::kvdb_mdbx::MdbxEnv,
+        cfg: &crate::MdbxConfig, which: &str,
+    ) -> Result<()> {
+        if cfg.sync_mode != crate::MdbxSyncMode::SafeNoSync {
+            return Ok(());
+        }
+        env.set_autosync(
+            cfg.autosync_mb.saturating_mul(1024 * 1024),
+            cfg.autosync_period_ms,
+        )?;
+        info!(
+            "MDBX {} env: safenosync auto-sync at {} MB / {} ms unsynced",
+            which, cfg.autosync_mb, cfg.autosync_period_ms
+        );
+        Ok(())
+    }
+
     pub fn new_arc(
         /* TODO: Add node type, full node or archive node */
         storage_conf: StorageConfiguration,
@@ -196,21 +293,126 @@ impl StorageManager {
             fs::create_dir_all(storage_dir)?;
         }
 
-        let snapshot_info_config = db::ParityDbOpenConfig {
-            columns: 1,
-            compression: None,
-            disable_wal: false,
-            stats: false,
+        // G-NET-2 — Surface the retention-knob value loud at startup
+        // because its safe value is a NETWORK-AGGREGATE concern, not a
+        // per-node one. If every operator flips it to `false`, fresh
+        // joiners fall off into genesis replay even though no
+        // individual node looks wrong. See docs/flow-audit.md §5.8.
+        if storage_conf.keep_snapshot_before_stable_checkpoint {
+            info!(
+                "storage: keep_snapshot_before_stable_checkpoint=true (default). \
+                 This node retains the pre-stable snapshot generation so a fresh \
+                 joiner can still bootstrap via this peer right after an era \
+                 rollover. See docs/checkpoint-snapshot-lifecycle.md §6."
+            );
+        } else {
+            warn!(
+                "storage: keep_snapshot_before_stable_checkpoint=FALSE. \
+                 If a fresh joiner connects right after an era rollover and \
+                 every connected peer of theirs also runs with this setting, \
+                 they will fall back to multi-day genesis replay even though \
+                 the network has consensus. Recommended only for explicitly \
+                 disk-constrained archive variants. See docs/flow-audit.md §5.8 \
+                 + docs/checkpoint-snapshot-lifecycle.md §6."
+            );
+        }
+
+        // Phase 5e: `StateDbBackend` is now `Mdbx`-only — the
+        // ParityDB fallback went with the paritydb impl files.
+        // The env is still `Option<Arc<MdbxEnv>>` for API-shape
+        // parity with getters/wiring downstream; it is always
+        // `Some` under the current single-variant enum.
+        let mdbx_env = {
+            let crate::StateDbBackend::Mdbx(cfg) =
+                &storage_conf.state_db_backend;
+            let mdbx_dir = storage_dir.join("mdbx");
+            let map_size_bytes = cfg
+                .map_size_mb
+                .unwrap_or(
+                    crate::impls::defaults::DEFAULT_MDBX_MAP_SIZE_MB,
+                )
+                .saturating_mul(1024 * 1024)
+                as usize;
+            let sync_mode = cfg.sync_mode.to_libmdbx();
+            let env =
+                crate::impls::storage_db::kvdb_mdbx::MdbxEnv::open_with_map_size_and_sync(
+                    &mdbx_dir,
+                    map_size_bytes,
+                    sync_mode,
+                )?;
+            info!(
+                "Opened MDBX hot tier at {} (map_size={} MB, sync_mode={:?})",
+                mdbx_dir.display(),
+                map_size_bytes / (1024 * 1024),
+                cfg.sync_mode
+            );
+            Self::apply_mdbx_autosync(&env, cfg, "hot")?;
+            Some(env)
         };
-        let snapshot_info_settings = db::paritydb_settings(
-            storage_conf.path_snapshot_info_db.clone(),
-            &snapshot_info_config,
-        )?;
-        let snapshot_info_db = db::open_database(&snapshot_info_settings)?;
-        let snapshot_info_kvdb = KvdbParitydb {
-            kvdb: snapshot_info_db.key_value(),
-            col: 0,
+
+        // Phase 5c pre-work #3: open the dedicated snapshot MDBX env
+        // with a growth-enabled geometry. This env is separate from
+        // the hot `mdbx_env` — snapshot data is cold, bulky, and has
+        // its own writer-lock domain per design doc §2.3.0. The
+        // physical dir is created lazily by `open_with_geometry` so
+        // fresh nodes don't need extra setup. `SnapshotDbManagerMdbx`
+        // will consume the env in the 5c main commit; pre-work #3
+        // just opens it and stands up the capacity gauge.
+        let snapshot_cfg = &storage_conf.snapshot_mdbx_config;
+        let snapshot_initial_bytes =
+            (snapshot_cfg.initial_mb as usize).saturating_mul(1024 * 1024);
+        let snapshot_max_bytes =
+            (snapshot_cfg.max_mb as usize).saturating_mul(1024 * 1024);
+        let snapshot_growth_bytes = (snapshot_cfg.growth_step_mb as usize)
+            .saturating_mul(1024 * 1024);
+        let snapshot_mdbx_env = {
+            // Reuse the hot-env sync mode for the snapshot env —
+            // operators pick one durability tier per node profile;
+            // the snapshot env's writes are only during era merges
+            // + destroy so a slightly relaxed sync is safe (a
+            // partial snapshot on crash is reconstructed by
+            // `scan_persist_state`'s marker-driven recovery).
+            let crate::StateDbBackend::Mdbx(hot_cfg) =
+                &storage_conf.state_db_backend;
+            let sync_mode = hot_cfg.sync_mode.to_libmdbx();
+            let env = crate::impls::storage_db::kvdb_mdbx::MdbxEnv
+                ::open_with_geometry_and_sync(
+                    &storage_conf.path_snapshot_mdbx_dir,
+                    snapshot_initial_bytes,
+                    snapshot_max_bytes,
+                    snapshot_growth_bytes,
+                    sync_mode,
+                )?;
+            info!(
+                "Opened MDBX snapshot tier at {} (initial={} MB, \
+                 max={} MB, growth_step={} MB, sync_mode={:?})",
+                storage_conf.path_snapshot_mdbx_dir.display(),
+                snapshot_cfg.initial_mb,
+                snapshot_cfg.max_mb,
+                snapshot_cfg.growth_step_mb,
+                hot_cfg.sync_mode
+            );
+            Self::apply_mdbx_autosync(&env, hot_cfg, "snapshot")?;
+            Some(env)
         };
+        let snapshot_mdbx_max_bytes = snapshot_max_bytes as u64;
+
+        // Snapshot info now lives in `MdbxColumn::SnapshotInfo` on
+        // the shared MDBX env — no per-subsystem paritydb any more.
+        let snapshot_info_kvdb = {
+            use crate::impls::storage_db::{
+                kvdb_mdbx::KvdbMdbx, mdbx_columns::Column,
+            };
+            KvdbMdbx::with_column(
+                Arc::clone(
+                    mdbx_env
+                        .as_ref()
+                        .expect("MDBX env just opened above"),
+                ),
+                Column::SnapshotInfo.id(),
+            )
+        };
+
         let snapshot_info_map =
             PersistedSnapshotInfoMap::new(snapshot_info_kvdb)?;
 
@@ -219,9 +421,24 @@ impl StorageManager {
             in_progress_snapshot_finish_signal_receiver,
         ) = channel();
 
+        // Phase 4c cutover: DeltaDbManager is now the MDBX-native
+        // impl (see `impls/state_manager.rs`). It requires the
+        // shared MDBX env; fail loudly if the operator has us in
+        // paritydb-only mode.
+        let delta_env = mdbx_env
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| ErrorKind::Msg(
+                "DeltaDbManagerMdbx requires the shared MDBX env; \
+                 set `state_db_type = \"mdbx\"` in hydra.toml to \
+                 enable it. See docs/internal/\
+                 storage-delta-mpt-migration.md §2.4.".to_string()
+            ))?;
         let delta_db_manager = Arc::new(DeltaDbManager::new(
+            delta_env,
             storage_conf.path_delta_mpts_dir.clone(),
         )?);
+
         let new_storage_manager_result = Ok(Arc::new(Self {
             delta_db_manager: delta_db_manager.clone(),
             delta_mpt_open_db_lru: Arc::new(OpenDeltaDbLru::new(
@@ -229,12 +446,21 @@ impl StorageManager {
                 storage_conf.max_open_mpt_count,
             )?),
             snapshot_manager: Box::new(SnapshotManager::<SnapshotDbManager> {
+                // Phase 5c wiring: SnapshotDbManagerMdbx takes the
+                // dedicated snapshot env opened above +
+                // `snapshot_path` (kept for API parity) +
+                // max_open_snapshots. Phase 5d deleted the
+                // `use_isolated_db_for_mpt_table*` knobs the
+                // paritydb constructor accepted — the mode was
+                // already non-functional (design doc §3 / R1.3).
                 snapshot_db_manager: SnapshotDbManager::new(
+                    Arc::clone(
+                        snapshot_mdbx_env.as_ref().expect(
+                            "snapshot MDBX env just opened above",
+                        ),
+                    ),
                     storage_conf.path_snapshot_dir.clone(),
                     storage_conf.max_open_snapshots,
-                    storage_conf.use_isolated_db_for_mpt_table,
-                    storage_conf.use_isolated_db_for_mpt_table_height,
-                    storage_conf.consensus_param.era_epoch_count,
                 )?,
             }),
             delta_mpts_id_gen: Default::default(),
@@ -262,6 +488,9 @@ impl StorageManager {
             storage_conf,
             intermediate_trie_root_merkle: RwLock::new(None),
             persist_state_from_initialization: RwLock::new(None),
+            mdbx_env,
+            snapshot_mdbx_env,
+            snapshot_mdbx_max_bytes,
         }));
 
         let storage_manager_arc =
@@ -408,6 +637,39 @@ impl StorageManager {
             .read()
             .get(snapshot_epoch_id)
             .map(Clone::clone)
+    }
+
+    pub fn latest_snapshot_epoch_height(&self) -> Option<u64> {
+        self.snapshot_info_map_by_epoch
+            .read()
+            .get_map()
+            .values()
+            .map(|snapshot| snapshot.height)
+            .max()
+    }
+
+    /// G-NET-1 — Lowest height we still have a snapshot for. The
+    /// `NULL_EPOCH` genesis-window synthetic entry has height 0 and
+    /// is excluded so peers see a meaningful retention floor (a real
+    /// snapshot, not the genesis sentinel).
+    pub fn earliest_snapshot_epoch_height(&self) -> Option<u64> {
+        self.snapshot_info_map_by_epoch
+            .read()
+            .get_map()
+            .iter()
+            .filter(|(epoch_id, _)| **epoch_id != NULL_EPOCH)
+            .map(|(_, snapshot)| snapshot.height)
+            .min()
+    }
+
+    pub fn available_snapshot_count(&self) -> usize {
+        self.snapshot_info_map_by_epoch.read().get_map().len()
+    }
+
+    /// G-NET-1 — Surface the retention-knob value to higher layers
+    /// (RPC, heartbeat). See docs/flow-audit.md §5.8.
+    pub fn keeps_pre_stable_snapshot(&self) -> bool {
+        self.storage_conf.keep_snapshot_before_stable_checkpoint
     }
 
     pub fn get_delta_mpt(
@@ -634,10 +896,36 @@ impl StorageManager {
                 in_progress_snapshot_info.clone();
             let task_finished_sender_cloned =
                 this.in_progress_snapshot_finish_signaler.clone();
+
+            // Cancel handle: shared between the task entry on
+            // `in_progress_snapshotting_tasks` (so external code can
+            // request cancellation via `InProgressSnapshotTask::request_cancel`)
+            // and the background thread closure (so it can poll the
+            // flag at well-defined boundaries — see Phase B.1 in
+            // `docs/checkpoint-snapshot-lifecycle.md`).
+            let cancel_requested = Arc::new(AtomicBool::new(false));
+            let cancel_for_thread = Arc::clone(&cancel_requested);
+
+            // Phase E — bump the in-flight gauge on spawn. The
+            // corresponding decrement is at the end of the thread
+            // closure (see the matching `snapshot_in_flight_adjust(-1)`
+            // call before `task_result`).
+            snapshot_in_flight_adjust(1);
             let thread_handle = thread::Builder::new()
                 .name("Background Snapshotting".into()).spawn(move || {
-                // TODO: add support for cancellation and io throttling.
+                use std::sync::atomic::Ordering;
+                let bg_start = std::time::Instant::now();
                 let f = || -> Result<()> {
+                    // Early-out: if cancellation requested before the
+                    // merge starts, abort cleanly. The temp dir
+                    // hasn't been created yet so nothing to clean.
+                    if cancel_for_thread.load(Ordering::SeqCst) {
+                        info!(
+                            "Background Snapshotting: cancellation requested before merge start (epoch_id={:?})",
+                            snapshot_epoch_id
+                        );
+                        return Ok(());
+                    }
                     let (mut snapshot_info_map_locked, new_snapshot_info) = match maybe_delta_db {
                         None => {
                             in_progress_snapshot_info_cloned.merkle_root = MERKLE_NULL_NODE;
@@ -655,7 +943,35 @@ impl StorageManager {
                                     recover_mpt_with_kv_snapshot_exist)?
                         }
                     };
+                    // Post-merge cancellation gate. The merge runs to
+                    // completion (we don't preempt mid-merge to avoid
+                    // refactoring the merge internals), but if a fork
+                    // was confirmed non-canonical while we were
+                    // merging, we skip registration AND clean up the
+                    // freshly-renamed snapshot directory so a phantom
+                    // entry doesn't leak to peers. See Phase B.1 in
+                    // docs/checkpoint-snapshot-lifecycle.md.
+                    if cancel_for_thread.load(Ordering::SeqCst) {
+                        info!(
+                            "Background Snapshotting: cancellation requested mid-merge, discarding snapshot {:?}",
+                            snapshot_epoch_id
+                        );
+                        // Drop the write lock before destroying so we
+                        // don't hold it across the filesystem op.
+                        drop(snapshot_info_map_locked);
+                        let _ = this
+                            .snapshot_manager
+                            .get_snapshot_db_manager()
+                            .destroy_snapshot(&snapshot_epoch_id);
+                        SNAPSHOT_CANCELLED_TOTAL.mark(1);
+                        return Ok(());
+                    }
+
                     if let Err(e) = this.register_new_snapshot(new_snapshot_info.clone(), &mut snapshot_info_map_locked) {
+                        // Phase E — distinguish register-time failure
+                        // (C.1 / C.4 also bump their own dedicated
+                        // counters; this catches everything else).
+                        SNAPSHOT_FAILED_REGISTER_TOTAL.mark(1);
                         error!(
                             "Failed to register new snapshot {:?} {:?}.",
                             snapshot_epoch_id, new_snapshot_info
@@ -743,11 +1059,20 @@ impl StorageManager {
                 };
 
                 let task_result = f();
+                // Phase E — record total wall time spent in this bg
+                // thread (whether merge committed, cancelled, or
+                // errored) and decrement the in-flight gauge. Failure
+                // also bumps the dedicated `failed_total.merge_error`
+                // counter for alerting.
+                let elapsed_ms = bg_start.elapsed().as_millis() as usize;
+                SNAPSHOT_CREATION_DURATION_MS_TOTAL.mark(elapsed_ms);
                 if task_result.is_err() {
+                    SNAPSHOT_FAILED_MERGE_TOTAL.mark(1);
                     warn!(
                         "Failed to create snapshot for epoch_id {:?} with error {:?}",
                         snapshot_epoch_id, task_result.as_ref().unwrap_err());
                 }
+                snapshot_in_flight_adjust(-1);
 
                 task_result
             })?;
@@ -757,6 +1082,7 @@ impl StorageManager {
                 Arc::new(RwLock::new(InProgressSnapshotTask {
                     snapshot_info: in_progress_snapshot_info,
                     thread_handle: Some(thread_handle),
+                    cancel_requested,
                 })),
             );
         }
@@ -769,8 +1095,99 @@ impl StorageManager {
         self: &Arc<Self>, new_snapshot_info: SnapshotInfo,
         snapshot_info_map_locked: &mut PersistedSnapshotInfoMap,
     ) -> Result<()> {
+        self.register_new_snapshot_impl(
+            new_snapshot_info,
+            snapshot_info_map_locked,
+            true,
+        )
+    }
+
+    /// Register the parent of a snapshot restored by full-sync. The node
+    /// never had that parent's data or its own parent: the entry only
+    /// anchors the restored snapshot's delta chain. C.4 would reject it
+    /// for its missing grandparent, failing every fast-sync restore at the
+    /// last step (m6, 2026-10-18: 560000 restored, its parent 540000
+    /// rejected for parent 520000, retried in a loop).
+    pub fn register_restored_parent_snapshot(
+        self: &Arc<Self>, parent_snapshot_info: SnapshotInfo,
+        snapshot_info_map_locked: &mut PersistedSnapshotInfoMap,
+    ) -> Result<()> {
+        self.register_new_snapshot_impl(
+            parent_snapshot_info,
+            snapshot_info_map_locked,
+            false,
+        )
+    }
+
+    fn register_new_snapshot_impl(
+        self: &Arc<Self>, new_snapshot_info: SnapshotInfo,
+        snapshot_info_map_locked: &mut PersistedSnapshotInfoMap,
+        check_parent_linkage: bool,
+    ) -> Result<()> {
         debug!("register_new_snapshot: info={:?}", new_snapshot_info);
         let snapshot_epoch_id = new_snapshot_info.get_snapshot_epoch_id();
+
+        // ----------------------------------------------------------------
+        // C.1 — Merkle-root sanity check.
+        //
+        // A snapshot with `merkle_root == H256::zero()` is the result of
+        // a default-initialised `SnapshotInfo` or a bug in
+        // `new_snapshot_by_merging`. `MERKLE_NULL_NODE` is the legitimate
+        // root for the genesis-window NULL_EPOCH parent path. Anything
+        // else that's zero is a bug or corruption.
+        //
+        // Note: a deeper cross-check (against the consensus-layer
+        // `StateRootWithAuxInfo` for this epoch) requires reaching the
+        // BlockDataManager, which lives in a different crate. Tracked
+        // as a follow-up enhancement — see
+        // `docs/checkpoint-snapshot-lifecycle.md` Phase C.1 status
+        // table.
+        if new_snapshot_info.merkle_root == MerkleHash::default()
+            && new_snapshot_info.merkle_root != MERKLE_NULL_NODE
+        {
+            SNAPSHOT_INVALID_ROOT_TOTAL.mark(1);
+            error!(
+                "register_new_snapshot REJECTED: snapshot {:?} has zero merkle_root and parent != NULL_EPOCH. \
+                 Likely a default-initialised SnapshotInfo or a merge bug. info={:?}",
+                snapshot_epoch_id, new_snapshot_info
+            );
+            bail!(ErrorKind::Msg(format!(
+                "snapshot {:?} rejected: zero merkle_root with non-null parent",
+                snapshot_epoch_id
+            )));
+        }
+
+        // ----------------------------------------------------------------
+        // C.4 — Parent-linkage validation.
+        //
+        // A snapshot whose parent isn't in `snapshot_info_map_by_epoch`
+        // (and isn't the special NULL_EPOCH genesis-window parent) is
+        // orphaned: its KV/MPT data has no usable delta-chain ancestor
+        // and the snapshot can't be served to peers. Either parent
+        // pruning raced ahead, or the producer mis-computed the parent
+        // linkage. Either way, refuse the registration.
+        if check_parent_linkage
+            && new_snapshot_info.parent_snapshot_epoch_id != NULL_EPOCH
+            && snapshot_info_map_locked
+                .get(&new_snapshot_info.parent_snapshot_epoch_id)
+                .is_none()
+        {
+            SNAPSHOT_ORPHAN_REJECTED_TOTAL.mark(1);
+            error!(
+                "register_new_snapshot REJECTED: snapshot {:?} has parent {:?} which is not in snapshot_info_map_by_epoch. \
+                 Either parent was pruned or producer mis-computed linkage. info={:?}",
+                snapshot_epoch_id,
+                new_snapshot_info.parent_snapshot_epoch_id,
+                new_snapshot_info
+            );
+            bail!(ErrorKind::Msg(format!(
+                "snapshot {:?} rejected: parent {:?} not registered",
+                snapshot_epoch_id, new_snapshot_info.parent_snapshot_epoch_id
+            )));
+        }
+
+        SNAPSHOT_REGISTERED_TOTAL.mark(1);
+        // ----------------------------------------------------------------
         // Register intermediate MPT for the new snapshot.
         let mut snapshot_associated_mpts_locked =
             self.snapshot_associated_mpts_by_epoch.write();
@@ -1216,6 +1633,67 @@ impl StorageManager {
                 }
             }
         }
+        // §D.3 prevention — protect the ancestor chain of every surviving
+        // snapshot from pruning. Aggressive retention (full-fast keeps the
+        // bare minimum) could otherwise remove a pre-stable parent while its
+        // child survives, breaking the snapshot delta chain. That orphan is
+        // harmless while the node runs but trips the D.3 startup invariant on
+        // the next restart — observed live crashing the mining leader and
+        // halting the chain. Here we walk up from each surviving snapshot and
+        // drop any ancestor that pruning slated for removal. Pure filtering:
+        // it only ever RETAINS more snapshots, never removes additional ones,
+        // so it cannot make the delta chain worse. The D.3 self-heal in
+        // `load`/startup is the backstop for any orphan predating this fix.
+        {
+            let removing: HashSet<EpochId> = old_main_snapshots_to_remove
+                .iter()
+                .chain(non_main_snapshots_to_remove.iter())
+                .cloned()
+                .collect();
+            let current_snapshots = self.current_snapshots.read();
+            let parent_of: HashMap<EpochId, EpochId> = current_snapshots
+                .iter()
+                .map(|s| {
+                    (
+                        s.get_snapshot_epoch_id().clone(),
+                        s.parent_snapshot_epoch_id.clone(),
+                    )
+                })
+                .collect();
+            let mut protected = HashSet::new();
+            for s in current_snapshots.iter() {
+                if removing.contains(s.get_snapshot_epoch_id()) {
+                    continue; // being removed; not a survivor to protect for
+                }
+                // Walk the full ancestor chain so protection is transitive.
+                let mut p = s.parent_snapshot_epoch_id.clone();
+                while p != NULL_EPOCH {
+                    if removing.contains(&p) {
+                        protected.insert(p.clone());
+                    }
+                    match parent_of.get(&p) {
+                        Some(next) => p = next.clone(),
+                        None => break,
+                    }
+                }
+            }
+            drop(current_snapshots);
+            if !protected.is_empty() {
+                warn!(
+                    "D.3 prevention: retaining {} ancestor snapshot(s) that \
+                     pruning would have orphaned (keeps the delta chain intact \
+                     across restart)",
+                    protected.len()
+                );
+                old_main_snapshots_to_remove
+                    .retain(|e| !protected.contains(e));
+                non_main_snapshots_to_remove
+                    .retain(|e| !protected.contains(e));
+                old_main_snapshot_infos_to_remove
+                    .retain(|e| !protected.contains(e));
+            }
+        }
+
         if !non_main_snapshots_to_remove.is_empty()
             || !old_main_snapshots_to_remove.is_empty()
         {
@@ -1239,16 +1717,28 @@ impl StorageManager {
             )?;
         }
 
-        // TODO: implement in_progress_snapshot cancellation.
-        /*
+        // Cancellation of in-flight snapshots whose targets have been
+        // confirmed non-canonical. We *signal* cancellation via the
+        // per-task `cancel_requested` flag; the background thread
+        // checks it before merge-start and again before registration
+        // and self-cleans the temp/renamed snapshot dir. The thread
+        // is **not** joined here — that would block this maintenance
+        // call indefinitely.
+        //
+        // See Phase B.1 in docs/checkpoint-snapshot-lifecycle.md.
         if !in_progress_snapshot_to_cancel.is_empty() {
-            let mut in_progress_snapshotting_locked =
-                self.in_progress_snapshotting_tasks.write();
-            for epoch_id in in_progress_snapshot_to_cancel {
-                unimplemented!();
+            let in_progress_snapshotting_locked =
+                self.in_progress_snapshotting_tasks.read();
+            for epoch_id in &in_progress_snapshot_to_cancel {
+                if let Some(task) = in_progress_snapshotting_locked.get(epoch_id) {
+                    task.read().request_cancel();
+                    info!(
+                        "maintain_snapshots_main_chain_confirmed: requested cancellation for in-progress snapshot {:?}",
+                        epoch_id
+                    );
+                }
             }
         }
-        */
 
         info!("maintain_snapshots_main_chain_confirmed: finished");
         Ok(())
@@ -1270,10 +1760,14 @@ impl StorageManager {
         for snapshot_epoch_id in old_main_snapshots_to_remove {
             self.snapshot_manager
                 .remove_old_main_snapshot(&snapshot_epoch_id)?;
+            // Phase E — retention-driven prune of an old main snapshot.
+            SNAPSHOT_PRUNED_TOTAL.mark(1);
         }
         for snapshot_epoch_id in non_main_snapshots_to_remove {
             self.snapshot_manager
                 .remove_non_main_snapshot(&snapshot_epoch_id)?;
+            // Phase E — non-main (forked-off) snapshot pruned.
+            SNAPSHOT_PRUNED_TOTAL.mark(1);
         }
 
         drop(current_snapshots_locked);
@@ -1310,7 +1804,90 @@ impl StorageManager {
         Ok(())
     }
 
+    /// Returns the hot-tier MDBX environment if the node was
+    /// configured with `state_db_backend = Mdbx` (the default).
+    /// Returns `None` when the operator pinned to ParityDB for the
+    /// rollout fallback.
+    ///
+    /// Consumers — primarily the executor's live-state cache and revm's
+    /// `MazzeDatabase` adapter — use this handle to open per-column
+    /// `KvdbMdbx` views for fast account/storage reads. See
+    /// docs/storage-architecture.md §3 for the planned column layout.
+    pub fn mdbx_env(
+        &self,
+    ) -> Option<Arc<crate::impls::storage_db::kvdb_mdbx::MdbxEnv>> {
+        self.mdbx_env.clone()
+    }
+
+    /// Handle to the dedicated snapshot MDBX env — the growth-
+    /// enabled cold tier at `storage_db/mdbx_snapshot/`. Returns
+    /// `None` iff the node was pinned to `ParityDb` (a rollout
+    /// escape hatch already rejected in `new_arc` — kept `Option`
+    /// for parallel shape with `mdbx_env`). Consumed by
+    /// `SnapshotDbManagerMdbx` in the Phase 5c main commit.
+    pub fn snapshot_mdbx_env(
+        &self,
+    ) -> Option<Arc<crate::impls::storage_db::kvdb_mdbx::MdbxEnv>> {
+        self.snapshot_mdbx_env.clone()
+    }
+
+    /// Sample the snapshot env's occupancy and republish it into
+    /// the `mdbx_snapshot.bytes_used` and
+    /// `mdbx_snapshot.map_pct_used_x100` gauges. Emits a `warn!`
+    /// when occupancy crosses [`SNAPSHOT_MDBX_CAPACITY_WARN_PCT`]
+    /// so operators can raise `snapshot_mdbx_max_mb` in hydra.toml
+    /// before hitting `MDBX_MAP_FULL`.
+    ///
+    /// Cheap: one `mdbx_stat` call on col-0. Called at each
+    /// [`Self::log_usage`] tick.
+    pub fn sample_snapshot_mdbx_capacity(&self) {
+        let env = match &self.snapshot_mdbx_env {
+            Some(e) => Arc::clone(e),
+            None => return,
+        };
+        // The snapshot env owns col-0; other columns are reserved
+        // in the design doc but not yet allocated, so col-0 stats
+        // is the whole env's disk footprint today.
+        let kvdb = crate::impls::storage_db::kvdb_mdbx::KvdbMdbx
+            ::with_column(env, 0);
+        let stats = match kvdb.stats() {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    "sample_snapshot_mdbx_capacity: stats() failed: {}",
+                    e
+                );
+                return;
+            }
+        };
+        SNAPSHOT_MDBX_BYTES_USED.update(stats.bytes_used as usize);
+        let Some(pct_x100) = snapshot_mdbx_pct_x100(
+            stats.bytes_used,
+            self.snapshot_mdbx_max_bytes,
+        ) else {
+            return; // max_bytes == 0: gauge left untouched.
+        };
+        SNAPSHOT_MDBX_MAP_PCT_USED_X100.update(pct_x100 as usize);
+        let pct = pct_x100 / 100;
+        if pct >= SNAPSHOT_MDBX_CAPACITY_WARN_PCT {
+            warn!(
+                "mdbx_snapshot capacity at {}.{:02}% ({} / {} \
+                 MB) — raise `snapshot_mdbx_max_mb` in hydra.toml \
+                 and restart before hitting MDBX_MAP_FULL.",
+                pct,
+                pct_x100 % 100,
+                stats.bytes_used / (1024 * 1024),
+                self.snapshot_mdbx_max_bytes / (1024 * 1024)
+            );
+        }
+    }
+
     pub fn log_usage(&self) {
+        // Refresh the snapshot-env capacity gauge at the same
+        // cadence as other storage-usage logging — cheap `mdbx_stat`
+        // on col-0.
+        self.sample_snapshot_mdbx_capacity();
+
         let mut delta_mpts = HashMap::new();
         for (_snapshot_epoch_id, associated_delta_mpts) in
             &*self.snapshot_associated_mpts_by_epoch.read()
@@ -1445,6 +2022,97 @@ impl StorageManager {
             .collect::<Vec<_>>();
         snapshots.sort_by(|x, y| x.height.partial_cmp(&y.height).unwrap());
 
+        // ----------------------------------------------------------------
+        // D.3 — Startup invariant on the snapshot delta chain.
+        //
+        // Every retained snapshot whose parent is NOT `NULL_EPOCH` must
+        // have that parent still present in `snapshot_info_map_by_epoch`.
+        // If the parent is missing, the delta chain is broken: the
+        // executor can't apply forward epochs because it has no
+        // ancestor state to deltas-against. This typically happens
+        // when a previous run with
+        // `keep_snapshot_before_stable_checkpoint = false` pruned the
+        // pre-stable parent snapshot while its child is still retained
+        // (see `extra_snapshots_to_keep_predicate` in this file).
+        //
+        // Refuse to start instead of crashing later with an opaque
+        // executor error. Operator action is in the bail message.
+        // See `docs/checkpoint-snapshot-lifecycle.md` Phase D.3.
+        // §D.3 self-heal — auto-repair instead of refusing to start. A
+        // snapshot whose parent is missing has a broken delta chain (the
+        // executor can't apply forward epochs without the parent's state).
+        // Rather than `bail!` and wedge the node on every subsequent restart,
+        // delete the orphan (and, transitively, any child that depended on
+        // it) and continue — the missing state is rebuilt via catch-up
+        // replay. Iterating in ascending height order means removing an
+        // orphan from `snapshot_info_map` immediately flags its child on a
+        // later iteration (the child's parent is now gone from the map), so
+        // cascades resolve in a single pass. This is exactly the "delete the
+        // orphan snapshot" operator recovery the old bail message documented,
+        // done automatically. Root cause of the orphan is aggressive snapshot
+        // pruning removing a pre-stable parent while a child is retained (see
+        // the parent-protection guard in
+        // `maintain_snapshots_main_chain_confirmed`); this heal is the safety
+        // net. Observed live: a full-fast node that pruned a pre-stable parent
+        // while running crashed on its next restart, taking down the mining
+        // leader and halting the chain.
+        let mut healed_orphans = HashSet::new();
+        // The OLDEST retained snapshot is the BASE of the retention window:
+        // retention legitimately pruned *its* parent, and a snapshot is a
+        // self-contained full materialization of state that forward epochs
+        // delta against — so a missing parent at the base is EXPECTED, not a
+        // broken chain. Only snapshots ABOVE the base with a missing parent are
+        // genuine mid-chain gaps. Previously this self-heal deleted the base
+        // too: once retention first pruned the base's parent (around epoch
+        // 360,000 on the 5-node testnet), the next restart destroyed the base
+        // snapshot itself, and the executor then hit `.expect("State exists")`
+        // at epoch 360,005 — killing the mining leader and halting the chain.
+        // `snapshots` is sorted ascending by height, so the base = min height.
+        //
+        // The genesis snapshot (height 0) does not count as the base: a node
+        // that fast-synced from a trusted checkpoint keeps the genesis
+        // snapshot it started with below the restored snapshot, whose parent
+        // it never had. Counting genesis as the base deleted the restored
+        // snapshot and, by cascade, every later one on the first restart --
+        // all state gone (local fast-sync joiner, 2026-10-18).
+        let base_height = snapshots
+            .iter()
+            .map(|s| s.height)
+            .find(|h| *h > 0)
+            .or_else(|| snapshots.first().map(|s| s.height));
+        for snapshot_info in snapshots.iter() {
+            if Some(snapshot_info.height) == base_height {
+                // Base of the retention window: its pruned parent is expected;
+                // the snapshot is complete and usable on its own. Never delete.
+                continue;
+            }
+            let parent_id = &snapshot_info.parent_snapshot_epoch_id;
+            if *parent_id != NULL_EPOCH
+                && snapshot_info_map.get(parent_id).is_none()
+            {
+                let snapshot_id =
+                    snapshot_info.get_snapshot_epoch_id().clone();
+                warn!(
+                    "D.3 self-heal: retained snapshot {:?} (height {}) has \
+                     missing parent {:?}; deleting the orphan and continuing \
+                     (catch-up replay will be longer). Likely cause: \
+                     aggressive snapshot pruning removed the pre-stable \
+                     parent while the child was still retained.",
+                    snapshot_id, snapshot_info.height, parent_id,
+                );
+                snapshot_info_map.remove(&snapshot_id)?;
+                self.snapshot_manager
+                    .get_snapshot_db_manager()
+                    .destroy_snapshot(&snapshot_id)?;
+                healed_orphans.insert(snapshot_id);
+            }
+        }
+        if !healed_orphans.is_empty() {
+            snapshots.retain(|s| {
+                !healed_orphans.contains(s.get_snapshot_epoch_id())
+            });
+        }
+
         let current_snapshots = &mut *self.current_snapshots.write();
         *current_snapshots = snapshots;
 
@@ -1487,9 +2155,16 @@ fn extra_snapshots_to_keep_predicate(
                 // the execution of the epochs following
                 // stable_genesis can go through a normal path where both
                 // snapshot and intermediate delta mpt exist.
-                // TODO:
-                //  this is a corner case which should be addressed, so that we
-                //  can don't really need the snapshot prior to the checkpoint.
+                //
+                // The historical corner case here — operators setting
+                // `keep_snapshot_before_stable_checkpoint = false` and
+                // ending up with an unexecutable orphan child — is now
+                // guarded against by D.3's startup invariant in
+                // `load_persist_state`: if pruning ever produces a
+                // child whose parent is gone, the node refuses to
+                // start with an actionable error pointing at this
+                // config knob. See
+                // `docs/checkpoint-snapshot-lifecycle.md` Phase D.3.
                 let check_next_snapshot_height = height
                     + (storage_conf.consensus_param.snapshot_epoch_count
                         as u64);
@@ -1574,9 +2249,7 @@ use crate::{
         },
         errors::*,
         state_manager::{DeltaDbManager, SnapshotDb, SnapshotDbManager},
-        storage_db::{
-            snapshot_debug::check_key_value_load,
-        },
+        storage_db::snapshot_debug::check_key_value_load,
         storage_manager::snapshot_manager::SnapshotManager,
     },
     snapshot_manager::SnapshotManagerTrait,
@@ -1585,9 +2258,9 @@ use crate::{
         SnapshotInfo, SnapshotKeptToProvideSyncStatus,
     },
     utils::guarded_value::GuardedValue,
-    DeltaMpt, DeltaMptIdGen, DeltaMptIterator, KeyValueDbTrait, KvdbParitydb,
-    OpenDeltaDbLru, ProvideExtraSnapshotSyncConfig, StateIndex,
-    StateRootWithAuxInfo, StorageConfiguration,
+    DeltaMpt, DeltaMptIdGen, DeltaMptIterator, KeyValueDbTrait,
+    OpenDeltaDbLru, ProvideExtraSnapshotSyncConfig,
+    StateIndex, StateRootWithAuxInfo, StorageConfiguration,
 };
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use mazze_internal_common::{
@@ -1596,13 +2269,193 @@ use mazze_internal_common::{
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use primitives::{EpochId, MerkleHash, MERKLE_NULL_NODE, NULL_EPOCH};
 use rlp::{Decodable, DecoderError, Encodable, Rlp};
+use lazy_static::lazy_static;
+use metrics::{register_meter_with_group, Meter};
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
     fs,
     sync::{
+        atomic::AtomicBool,
         mpsc::{channel, Sender},
         Arc, Weak,
     },
     thread::{self, JoinHandle},
 };
+
+/// Phase E — Atomic backing for the `snapshot.in_flight` gauge. The
+/// `Gauge` trait only exposes `update`, so we keep the source of truth
+/// here and push the value into the gauge on every change.
+static SNAPSHOT_IN_FLIGHT_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+lazy_static! {
+    /// Bumped when a background snapshot-creation thread observes
+    /// `cancel_requested` (set by `maintain_snapshots_main_chain_confirmed`
+    /// when the snapshot's target is determined to be on a
+    /// non-canonical fork) and self-aborts before registration. See
+    /// Phase B.1 in `docs/checkpoint-snapshot-lifecycle.md`.
+    static ref SNAPSHOT_CANCELLED_TOTAL: Arc<dyn Meter> =
+        register_meter_with_group("snapshot", "cancelled_total");
+
+    /// Bumped when `register_new_snapshot` accepts a new snapshot
+    /// after passing all sanity checks (merkle_root, parent linkage).
+    static ref SNAPSHOT_REGISTERED_TOTAL: Arc<dyn Meter> =
+        register_meter_with_group("snapshot", "registered_total");
+
+    /// Bumped when `register_new_snapshot` rejects a snapshot for a
+    /// zero merkle_root on a non-NULL_EPOCH parent. Indicates either a
+    /// default-init bug or merge corruption. See Phase C.1.
+    static ref SNAPSHOT_INVALID_ROOT_TOTAL: Arc<dyn Meter> =
+        register_meter_with_group("snapshot", "invalid_root_at_registration_total");
+
+    /// Bumped when `register_new_snapshot` rejects a snapshot because
+    /// its parent snapshot has been pruned or never existed. See
+    /// Phase C.4.
+    static ref SNAPSHOT_ORPHAN_REJECTED_TOTAL: Arc<dyn Meter> =
+        register_meter_with_group("snapshot", "orphan_rejected_at_registration_total");
+
+    /// Phase E — Bumped when the background snapshot thread returns
+    /// `Err` (anywhere in `new_snapshot_by_merging` — disk full, MPT
+    /// corruption, lock contention, etc.). Distinct from
+    /// `cancelled_total` (B.1, voluntary fork-cancellation) and from
+    /// `invalid_root_at_registration_total` / `orphan_rejected_at_registration_total`
+    /// (C.1 / C.4, rejected at registration after a successful merge).
+    static ref SNAPSHOT_FAILED_MERGE_TOTAL: Arc<dyn Meter> =
+        register_meter_with_group("snapshot", "failed_total.merge_error");
+
+    /// Phase E — Bumped on the catch-all `Err` return from
+    /// `register_new_snapshot` that isn't the merkle-root / orphan
+    /// reject. Captures DB-layer write failures during registration.
+    static ref SNAPSHOT_FAILED_REGISTER_TOTAL: Arc<dyn Meter> =
+        register_meter_with_group("snapshot", "failed_total.register_error");
+
+    /// Phase E — Bumped on every `destroy_snapshot` call from
+    /// `StorageManager` (retention pruning + non-canonical-fork
+    /// cleanup). Doesn't fire from `register_new_snapshot`'s reject
+    /// paths because those never wrote anything to disk.
+    static ref SNAPSHOT_PRUNED_TOTAL: Arc<dyn Meter> =
+        register_meter_with_group("snapshot", "pruned_total");
+
+    /// Phase E — Cumulative milliseconds spent inside the background
+    /// snapshot thread between spawn and completion (whether the
+    /// merge committed, was cancelled, or errored). Divide by
+    /// `cancelled + registered + failed_merge` for a mean per-snapshot
+    /// cost. Cheap to maintain — one extra `Instant::elapsed` per
+    /// snapshot.
+    static ref SNAPSHOT_CREATION_DURATION_MS_TOTAL: Arc<dyn Meter> =
+        register_meter_with_group("snapshot", "creation_duration_ms_total");
+
+    /// Phase E — Gauge of the current number of in-flight snapshot
+    /// background threads. Sustained `> 1` over multiple minutes
+    /// indicates a stuck merge or a stuck joiner; should normally be
+    /// 0 with brief spikes to 1 around era boundaries.
+    static ref SNAPSHOT_IN_FLIGHT_GAUGE: Arc<dyn metrics::Gauge<usize>> =
+        metrics::GaugeUsize::register_with_group("snapshot", "in_flight");
+
+    /// Phase 5c — Bytes actually occupied on disk by the dedicated
+    /// snapshot MDBX env (`storage_db/mdbx_snapshot/`). Sampled from
+    /// `KvdbMdbxStats::bytes_used` on the col-0 handle at each
+    /// `log_usage` tick. Snapshot data is uncompressed and the env's
+    /// map has a hard `max_mb` ceiling — this gauge is the earliest
+    /// warning of a full-map halt.
+    static ref SNAPSHOT_MDBX_BYTES_USED: Arc<dyn metrics::Gauge<usize>> =
+        metrics::GaugeUsize::register_with_group("mdbx_snapshot", "bytes_used");
+
+    /// Phase 5c — `bytes_used` as a percentage of the env's
+    /// configured `max_mb`. This is the operator-facing number: the
+    /// alert threshold at 80% is enforced by a `warn!` in
+    /// `sample_snapshot_mdbx_capacity`. Multiplied by 100 (i.e. an
+    /// integer 0..=10_000 encodes 0.00-100.00%) so we don't lose
+    /// resolution against a `Gauge<usize>`.
+    static ref SNAPSHOT_MDBX_MAP_PCT_USED_X100: Arc<dyn metrics::Gauge<usize>> =
+        metrics::GaugeUsize::register_with_group(
+            "mdbx_snapshot",
+            "map_pct_used_x100",
+        );
+}
+
+/// The operator-alert threshold at which `sample_snapshot_mdbx_capacity`
+/// emits a warn-level log. Kept below 100 so operators have runway to
+/// raise `snapshot_mdbx_max_mb` in hydra.toml + restart before the map
+/// fills. See design doc §2.3.1.
+const SNAPSHOT_MDBX_CAPACITY_WARN_PCT: u64 = 80;
+
+/// Phase E — Helper that adjusts the in-flight count and republishes
+/// it into the gauge. Called on bg-thread spawn (delta=+1) and on
+/// completion (delta=-1).
+fn snapshot_in_flight_adjust(delta: i64) {
+    let new_value = if delta >= 0 {
+        SNAPSHOT_IN_FLIGHT_COUNT
+            .fetch_add(delta as usize, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(delta as usize)
+    } else {
+        let dec = (-delta) as usize;
+        let prev = SNAPSHOT_IN_FLIGHT_COUNT
+            .fetch_sub(dec, std::sync::atomic::Ordering::SeqCst);
+        prev.saturating_sub(dec)
+    };
+    SNAPSHOT_IN_FLIGHT_GAUGE.update(new_value);
+}
+
+/// Pure integer arithmetic for the `mdbx_snapshot.map_pct_used_x100`
+/// gauge — returns the occupancy as basis-points × 100 (i.e. an
+/// integer 0..=10_000 encodes 0.00-100.00%). Returns `None` when
+/// `max_bytes == 0` so the caller can leave the gauge untouched
+/// instead of publishing a bogus zero. Multiplies through `u128` so
+/// `bytes_used × 10_000` cannot overflow at any plausible map size.
+fn snapshot_mdbx_pct_x100(bytes_used: u64, max_bytes: u64) -> Option<u64> {
+    if max_bytes == 0 {
+        return None;
+    }
+    let pct_x100 =
+        (bytes_used as u128).saturating_mul(10_000) / max_bytes as u128;
+    Some(pct_x100 as u64)
+}
+
+#[cfg(test)]
+mod snapshot_mdbx_gauge_tests {
+    use super::snapshot_mdbx_pct_x100;
+
+    #[test]
+    fn zero_bytes_used() {
+        assert_eq!(snapshot_mdbx_pct_x100(0, 1024 * 1024).unwrap(), 0);
+    }
+
+    #[test]
+    fn half_full() {
+        // 512 MB out of 1024 MB → 50.00% → 5000.
+        let mb: u64 = 1024 * 1024;
+        assert_eq!(
+            snapshot_mdbx_pct_x100(512 * mb, 1024 * mb).unwrap(),
+            5000
+        );
+    }
+
+    #[test]
+    fn full_and_over_full() {
+        let m = 1024;
+        // Exactly full → 10_000 (100.00%).
+        assert_eq!(snapshot_mdbx_pct_x100(m, m).unwrap(), 10_000);
+        // Over-full (page rounding can push bytes_used past max) —
+        // must not overflow; integer division just returns > 10_000.
+        assert_eq!(snapshot_mdbx_pct_x100(m * 2, m).unwrap(), 20_000);
+    }
+
+    #[test]
+    fn zero_max_returns_none() {
+        // Sentinel path for the "disabled" case; caller uses this to
+        // skip the gauge update.
+        assert!(snapshot_mdbx_pct_x100(1_000_000, 0).is_none());
+    }
+
+    #[test]
+    fn huge_bytes_used_does_not_overflow() {
+        // 1 EB used, 32 GB ceiling — the intermediate multiply must
+        // stay inside u128.
+        let one_eb = 1u64 << 60;
+        let max = 32u64 * 1024 * 1024 * 1024;
+        let pct = snapshot_mdbx_pct_x100(one_eb, max).unwrap();
+        assert!(pct > 100_000_000);
+    }
+}

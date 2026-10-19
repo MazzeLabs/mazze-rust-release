@@ -6,9 +6,10 @@ use crate::rpc::{
     error_codes::{internal_error_msg, invalid_params_msg},
     types::{
         call_request::rpc_call_request_network,
-        errors::check_rpc_address_network, MazzeFeeHistory, RpcAddress,
-        SponsorInfo, StatOnGasLoad, StorageCollateralInfo, TokenSupplyInfo,
-        WrapTransaction, U64 as HexU64,
+        errors::check_rpc_address_network, MazzeFeeHistory,
+        RpcAddress, SponsorInfo, StatOnGasLoad,
+        StorageCollateralInfo, TokenSupplyInfo, WrapTransaction,
+        U64 as HexU64,
     },
 };
 use blockgen::BlockGenerator;
@@ -349,7 +350,9 @@ impl RpcImpl {
             TransactionWithSignature::from_raw(&raw.into_vec()),
         )?;
 
-        if !(tx.is_shielded() && tx.is_unsigned()) && tx.recover_public().is_err() {
+        if !(tx.is_shielded() && tx.is_unsigned())
+            && tx.recover_public().is_err()
+        {
             bail!(invalid_params(
                 "tx",
                 "Can not recover pubkey for Ethereum like tx"
@@ -429,11 +432,15 @@ impl RpcImpl {
         }
         let (signed_trans, failed_trans) =
             self.tx_pool.insert_new_transactions(vec![tx]);
-        // FIXME: how is it possible?
         if signed_trans.len() + failed_trans.len() > 1 {
-            // This should never happen
-            error!("insert_new_transactions failed, invalid length of returned result vector {}", signed_trans.len() + failed_trans.len());
-            Ok(H256::zero().into())
+            let result_len = signed_trans.len() + failed_trans.len();
+            error!(
+                "insert_new_transactions returned an unexpected result length {}",
+                result_len
+            );
+            bail!(internal_error_msg(
+                "transaction pool returned an unexpected result length"
+            ))
         } else if signed_trans.len() + failed_trans.len() == 0 {
             // For tx in transactions_pubkey_cache, we simply ignore them
             debug!("insert_new_transactions ignores inserted transactions");
@@ -1362,11 +1369,20 @@ impl RpcImpl {
             .get_main_chain_and_weight(height_range)?)
     }
 
-    fn get_executed_info(&self, block_hash: H256) -> RpcResult<(H256, H256)> {
+    /// `get_executed_info` for the debug API.
+    pub fn debug_get_executed_info(
+        &self, block_hash: H256,
+    ) -> RpcResult<(H256, H256)> {
+        self.get_executed_info(block_hash)
+    }
+
+    pub fn get_executed_info(
+        &self, block_hash: H256,
+    ) -> RpcResult<(H256, H256)> {
         let commitment = self
             .consensus
             .get_data_manager()
-            .get_epoch_execution_commitment(&block_hash)
+            .get_epoch_execution_commitment_with_db(&block_hash)
             .ok_or(JsonRpcError::invalid_params(
                 "No receipts root. Possibly never main?".to_owned(),
             ))?;
@@ -2128,6 +2144,8 @@ impl Mazze for MazzeHandler {
                 -> BoxFuture<U256>;
             fn get_status(&self) -> JsonRpcResult<RpcStatus>;
             fn get_client_version(&self) -> JsonRpcResult<String>;
+            fn get_node_version(&self) -> JsonRpcResult<serde_json::Value>;
+            fn get_consensus_debug(&self) -> JsonRpcResult<serde_json::Value>;
             fn account_pending_info(&self, addr: RpcAddress) -> BoxFuture<Option<AccountPendingInfo>>;
             fn account_pending_transactions(&self, address: RpcAddress, maybe_start_nonce: Option<U256>, maybe_limit: Option<U64>) -> BoxFuture<AccountPendingTransactions>;
             fn fee_history(&self, block_count: HexU64, newest_block: EpochNumber, reward_percentiles: Vec<f64>) -> BoxFuture<MazzeFeeHistory>;
@@ -2263,6 +2281,7 @@ impl LocalRpc for LocalRpcImpl {
 
         to self.rpc_impl {
             fn current_sync_phase(&self) -> JsonRpcResult<String>;
+            fn debug_get_executed_info(&self, block_hash: H256) -> JsonRpcResult<(H256, H256)>;
             fn consensus_graph_state(&self) -> JsonRpcResult<ConsensusGraphStates>;
             fn epoch_receipts(&self, epoch: BlockHashOrEpochNumber, include_eth_recepits: Option<bool>,) -> JsonRpcResult<Option<Vec<Vec<RpcReceipt>>>>;
             fn epoch_receipt_proof_by_transaction(&self, tx_hash: H256) -> JsonRpcResult<Option<EpochReceiptProof>>;

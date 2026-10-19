@@ -10,12 +10,12 @@ use crate::{
     },
     sync::{
         message::{
-            msgid, Context, DynamicCapability, Handleable, KeyContainer,
-            SnapshotManifestResponse,
+            msgid, Context, DynamicCapability, EpochBlockHashes, Handleable,
+            KeyContainer, PreComputedRelatedData, SnapshotManifestResponse,
         },
         request_manager::{AsAny, Request},
         state::storage::{RangedManifest, SnapshotSyncCandidate},
-        Error, ProtocolConfiguration, SYNC_PROTO_V1, SYNC_PROTO_V3,
+        Error, ProtocolConfiguration, SYNC_PROTO_V1,
     },
 };
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
@@ -40,11 +40,16 @@ pub struct SnapshotManifestRequest {
 
 build_msg_with_request_id_impl! {
     SnapshotManifestRequest, msgid::GET_SNAPSHOT_MANIFEST,
-    "SnapshotManifestRequest", SYNC_PROTO_V1, SYNC_PROTO_V3
+    "SnapshotManifestRequest", SYNC_PROTO_V1, SYNC_PROTO_V1
 }
 
 impl Handleable for SnapshotManifestRequest {
     fn handle(self, ctx: &Context) -> Result<(), Error> {
+        info!(
+            "SnapshotManifestRequest from peer={:?}: is_initial={}",
+            ctx.node_id,
+            self.is_initial_request(),
+        );
         // TODO Handle the case where we cannot serve the snapshot
         let snapshot_merkle_root;
         let manifest = match RangedManifest::load(
@@ -59,43 +64,113 @@ impl Handleable for SnapshotManifestRequest {
                 m
             }
             _ => {
-                // Return an empty response to indicate that we cannot serve the
-                // state
-                ctx.send_response(&SnapshotManifestResponse {
-                    request_id: self.request_id,
-                    ..Default::default()
-                })?;
+                // Empty response — server can't serve this snapshot.
+                // Client sees an all-zero merkle_root and fails loud at
+                // chunk verification, never silently accepts state.
+                let mut response = SnapshotManifestResponse::default();
+                response.request_id = self.request_id;
+                ctx.send_response(&response)?;
                 return Ok(());
             }
         };
-        if self.is_initial_request() {
-            let (state_root_vec, receipt_blame_vec, bloom_blame_vec) =
-                self.get_blame_states(ctx).unwrap_or_default();
-            let block_receipts =
-                self.get_block_receipts(ctx).unwrap_or_default();
 
-            debug!("handle SnapshotManifestRequest {:?}", self,);
-            ctx.send_response(&SnapshotManifestResponse {
-                request_id: self.request_id,
-                manifest,
-                snapshot_merkle_root,
-                state_root_vec,
-                receipt_blame_vec,
-                bloom_blame_vec,
-                block_receipts,
-            })
+        // Build the legacy field block (state_root_vec / blame vecs /
+        // block_receipts / merkle_root) used by both validation paths.
+        let (state_root_vec, receipt_blame_vec, bloom_blame_vec) =
+            if self.is_initial_request() {
+                self.get_blame_states(ctx).unwrap_or_default()
+            } else {
+                Default::default()
+            };
+        let block_receipts = if self.is_initial_request() {
+            match self.get_block_receipts(ctx) {
+                Some(r) => r,
+                None => {
+                    // The receipts of the snapshot's reward window are gone
+                    // (a full node GCs execution results): the requester
+                    // cannot validate the snapshot, so do not offer it.
+                    // Shipping the manifest without them made every
+                    // requester reject it as invalid and drop this peer.
+                    debug!(
+                        "cannot serve snapshot {:?}: its reward-window \
+                         receipts are not available here",
+                        self.snapshot_to_sync.get_snapshot_epoch_id()
+                    );
+                    let mut response = SnapshotManifestResponse::default();
+                    response.request_id = self.request_id;
+                    ctx.send_response(&response)?;
+                    return Ok(());
+                }
+            }
         } else {
-            ctx.send_response(&SnapshotManifestResponse {
+            Default::default()
+        };
+        let snapshot_merkle_root = if self.is_initial_request() {
+            snapshot_merkle_root
+        } else {
+            Default::default()
+        };
+
+        // Always ship the pre-computed RelatedData on the initial
+        // request — this is what lets a fresh trusted-checkpoint joiner
+        // bypass the consensus-derived validation walks. On
+        // range-continuation manifests it stays at Default (the client
+        // doesn't re-validate on continuation).
+        let pre_computed = if self.is_initial_request() {
+            // Build a legacy-shape response on the stack so the V5
+            // producer can read it the same way it did in the
+            // multi-version era. The on-wire response below copies
+            // these fields into the canonical struct directly.
+            let legacy = LegacyResponseSnapshot {
                 request_id: self.request_id,
-                manifest,
-                snapshot_merkle_root: Default::default(),
-                state_root_vec: Default::default(),
-                receipt_blame_vec: Default::default(),
-                bloom_blame_vec: Default::default(),
-                block_receipts: Default::default(),
-            })
-        }
+                manifest: manifest.clone(),
+                snapshot_merkle_root,
+                state_root_vec: state_root_vec.clone(),
+                receipt_blame_vec: receipt_blame_vec.clone(),
+                bloom_blame_vec: bloom_blame_vec.clone(),
+                block_receipts: block_receipts.clone(),
+            };
+            self.build_pre_computed_related_data(ctx, &legacy)
+                .unwrap_or_else(|| {
+                    debug!(
+                        "V5 producer: could not build PreComputedRelatedData \
+                         for snapshot {:?}; shipping default (client fails \
+                         loud at chunk verification if anchor is wrong)",
+                        self.snapshot_to_sync.get_snapshot_epoch_id(),
+                    );
+                    PreComputedRelatedData::default()
+                })
+        } else {
+            PreComputedRelatedData::default()
+        };
+
+        let response = SnapshotManifestResponse {
+            request_id: self.request_id,
+            protocol_version: 1,
+            manifest,
+            state_root_vec,
+            receipt_blame_vec,
+            bloom_blame_vec,
+            block_receipts,
+            snapshot_merkle_root,
+            pre_computed,
+        };
+        ctx.send_response(&response)
     }
+}
+
+/// Thin shim used only by `build_pre_computed_related_data` — that
+/// helper was written against the legacy field set, so we hand it a
+/// struct with the same shape rather than re-fitting it to the new
+/// canonical struct (which also carries `pre_computed`).
+pub(crate) struct LegacyResponseSnapshot {
+    pub request_id: u64,
+    pub manifest: RangedManifest,
+    pub snapshot_merkle_root: primitives::MerkleHash,
+    pub state_root_vec: Vec<StateRoot>,
+    pub receipt_blame_vec: Vec<H256>,
+    pub bloom_blame_vec: Vec<H256>,
+    pub block_receipts: Vec<BlockExecutionResult>,
 }
 
 impl SnapshotManifestRequest {
@@ -113,6 +188,106 @@ impl SnapshotManifestRequest {
 
     pub fn is_initial_request(&self) -> bool {
         self.trusted_blame_block.is_some()
+    }
+
+    /// V5 producer: assemble the `PreComputedRelatedData` payload from
+    /// the server's local consensus + storage state. Returns `None`
+    /// when any required field can't be looked up (in which case the
+    /// caller ships an empty payload — a V5 client without
+    /// trusted-checkpoint mode then falls back to V4 validation, and
+    /// a V5 client WITH trusted-checkpoint fails loud on the empty
+    /// merkle_root vs chunks check). See docs/fast-sync-design.md §5.13.
+    fn build_pre_computed_related_data(
+        &self, ctx: &Context, response: &LegacyResponseSnapshot,
+    ) -> Option<PreComputedRelatedData> {
+        let snapshot_epoch_id =
+            *self.snapshot_to_sync.get_snapshot_epoch_id();
+        let trusted_blame_hash = self.trusted_blame_block?;
+
+        let data_man = &ctx.manager.graph.data_man;
+        let storage_manager =
+            data_man.storage_manager.get_storage_manager();
+
+        // 1) SnapshotInfo for the requested snapshot.
+        let snapshot_info =
+            storage_manager.get_snapshot_info_at_epoch(&snapshot_epoch_id)?;
+
+        // 2) Parent SnapshotInfo (length-0 vec means "no parent").
+        let parent_snapshot_info_vec =
+            if snapshot_info.parent_snapshot_epoch_id
+                == primitives::NULL_EPOCH
+            {
+                Vec::new()
+            } else {
+                match storage_manager.get_snapshot_info_at_epoch(
+                    &snapshot_info.parent_snapshot_epoch_id,
+                ) {
+                    Some(p) => vec![p],
+                    None => Vec::new(),
+                }
+            };
+
+        // 3) StateRootWithAuxInfo for the snapshot. The V4
+        //    validate_blame_states derives this from state_root_vec[
+        //    offset] + a walk; the server has it directly via the
+        //    epoch-execution commitment for `trusted_blame_block`'s
+        //    deferred chain. Same source the V4 validator ends up at.
+        let trusted_blame_header =
+            data_man.block_header_by_hash(&trusted_blame_hash)?;
+        let snapshot_header =
+            data_man.block_header_by_hash(&snapshot_epoch_id)?;
+        let mut deferred = trusted_blame_hash;
+        for _ in 0..DEFERRED_STATE_EPOCH_COUNT {
+            let h = data_man.block_header_by_hash(&deferred)?;
+            deferred = *h.parent_hash();
+        }
+        let commitment =
+            data_man.get_epoch_execution_commitment_with_db(&deferred)?;
+        let state_root_with_aux_info = commitment.state_root_with_aux_info;
+
+        // 4) blame_vec_offset — same calc the V4 client does.
+        let offset = trusted_blame_header
+            .height()
+            .checked_sub(
+                snapshot_header.height() + DEFERRED_STATE_EPOCH_COUNT as u64,
+            )?;
+        // Sanity: keep ourselves bounded by what's actually in
+        // state_root_vec so the client can index safely.
+        if (offset as usize) >= response.state_root_vec.len() {
+            return None;
+        }
+
+        // 5) ordered_executable_epoch_blocks for REWARD_EPOCH_COUNT
+        //    epochs walking back from the snapshot. Replaces the
+        //    fresh client's consensus.get_block_hashes_by_epoch call.
+        let mut ordered_executable_epoch_blocks = Vec::new();
+        let mut epoch_hash = snapshot_epoch_id;
+        for _ in 0..REWARD_EPOCH_COUNT {
+            let header = data_man.block_header_by_hash(&epoch_hash)?;
+            let blocks = ctx
+                .manager
+                .graph
+                .consensus
+                .get_block_hashes_by_epoch(EpochNumber::Number(
+                    header.height(),
+                ))
+                .ok()?;
+            ordered_executable_epoch_blocks.push(EpochBlockHashes {
+                hashes: blocks,
+            });
+            if header.height() == 0 {
+                break;
+            }
+            epoch_hash = *header.parent_hash();
+        }
+
+        Some(PreComputedRelatedData {
+            snapshot_info,
+            parent_snapshot_info: parent_snapshot_info_vec,
+            state_root_with_aux_info,
+            blame_vec_offset: offset,
+            ordered_executable_epoch_blocks,
+        })
     }
 
     /// This function returns the receipts of REWARD_EPOCH_COUNT epochs

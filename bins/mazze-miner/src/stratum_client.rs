@@ -1,6 +1,6 @@
 use futures::{SinkExt, StreamExt};
 use log::{debug, error, info, trace, warn};
-use mazze_types::U256;
+use mazze_types::{H256, U256};
 use mazzecore::pow::{ProofOfWorkProblem, ProofOfWorkSolution};
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
@@ -13,9 +13,11 @@ pub struct StratumClient {
     framed: Framed<TcpStream, LinesCodec>,
     miner: Miner,
     current_job: Option<ProofOfWorkProblem>,
+    /// Pow hashes of jobs already solved (bounded); see the solution arm.
+    submitted_jobs: std::collections::VecDeque<H256>,
     stratum_secret: String,
     solution_receiver:
-        tokio::sync::broadcast::Receiver<(ProofOfWorkSolution, u64)>,
+        tokio::sync::broadcast::Receiver<(ProofOfWorkSolution, H256, u64)>,
 }
 
 impl StratumClient {
@@ -23,6 +25,7 @@ impl StratumClient {
         addr: &str, stratum_secret: &str, miner: Miner,
         solution_receiver: tokio::sync::broadcast::Receiver<(
             ProofOfWorkSolution,
+            H256,
             u64,
         )>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -34,6 +37,7 @@ impl StratumClient {
             framed,
             miner,
             current_job: None,
+            submitted_jobs: std::collections::VecDeque::new(),
             stratum_secret: stratum_secret.to_string(),
             solution_receiver,
         })
@@ -41,13 +45,24 @@ impl StratumClient {
 
     async fn subscribe(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         info!("Sending subscription request");
+        // Protocol note (G-MN-5 in docs/flow-audit.md):
+        // The stratum server stores `stratum_secret` as a 64-hex H256 in
+        // hydra.toml, but compares it via `keccak(received_string) ==
+        // configured_h256`. So the operator must put `keccak(<plaintext>)`
+        // hex in hydra.toml and the miner must send the *plaintext* here.
+        // The previous hardcoded "test" assumed the node was configured
+        // with keccak("test"); we now use the configured value so a single
+        // shared config file works.
+        let secret = if self.stratum_secret.is_empty() {
+            // Backwards-compatible default that matched the prior behaviour.
+            "test".to_string()
+        } else {
+            self.stratum_secret.clone()
+        };
         let request = json!({
             "id": self.miner.worker_id,
             "method": "mining.subscribe",
-            // TODO: investigate why self.stratum_secret is not working
-            // (same config file used in miner and node too)
-            // "params": ["999", self.stratum_secret]
-            "params": ["999", "test"]
+            "params": ["999", secret]
         });
         let request_json = serde_json::to_string(&request)?;
         trace!("Subscription request JSON: {}", request_json);
@@ -126,13 +141,23 @@ impl StratumClient {
                         }
                     }
                 }
-                Ok((solution, block_height)) = solution_receiver.recv() => {
+                Ok((solution, pow_hash, block_height)) = solution_receiver.recv() => {
                     info!("Received solution: {:?}, block_height: {}", solution.nonce, block_height);
-                    if let Some(problem) = &self.current_job {
-                        if block_height == problem.block_height {
-                            self.submit_share(&solution).await?;
-                        }
+                    // One solution per job: every worker thread can find its
+                    // own nonce for the same template, and submitting them all
+                    // makes the node mine identical sibling blocks (same parent
+                    // and contents) -- it widened the DAG and pushed the block
+                    // rate to ~7/s on 2026-10-10. Submit under the job the nonce
+                    // was found for (the node rejects stale ones).
+                    if self.submitted_jobs.contains(&pow_hash) {
+                        debug!("Skipping extra solution for already-solved job {:?}", pow_hash);
+                        continue;
                     }
+                    if self.submitted_jobs.len() >= 64 {
+                        self.submitted_jobs.pop_front();
+                    }
+                    self.submitted_jobs.push_back(pow_hash);
+                    self.submit_share(&solution, &pow_hash, block_height).await?;
                 }
             }
         }
@@ -151,28 +176,25 @@ impl StratumClient {
     }
 
     async fn submit_share(
-        &mut self, solution: &ProofOfWorkSolution,
+        &mut self, solution: &ProofOfWorkSolution, pow_hash: &H256,
+        block_height: u64,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(problem) = &self.current_job {
-            info!("Submitting share for job: {}", problem.block_height);
-            let request = json!({
-                "id": format!("{}-{}", solution.nonce, problem.block_height),
-                "method": "mining.submit",
-                "params": [
-                    self.miner.worker_name, // Worker names
-                    problem.block_height.to_string(), // Job ID (assuming block height is used as job ID)
-                    format!("0x{:x}", solution.nonce), // Nonce
-                    format!("0x{:x}", problem.block_hash), // PoW Hash
-                ]
-            });
-            let request_json = serde_json::to_string(&request)?;
-            trace!("Submit share request JSON: {}", request_json);
-            self.framed.send(request_json).await?;
-            info!("Share submission sent: worker_id={}, job_id={}, nonce={}, pow_hash={}",
-                self.miner.worker_name, problem.block_height, solution.nonce, problem.block_hash);
-        } else {
-            warn!("Attempted to submit share without a current job");
-        }
+        info!("Submitting share for job: {}", block_height);
+        let request = json!({
+            "id": format!("{}-{}", solution.nonce, block_height),
+            "method": "mining.submit",
+            "params": [
+                self.miner.worker_name, // Worker names
+                block_height.to_string(), // Job ID (block height)
+                format!("0x{:x}", solution.nonce), // Nonce
+                format!("0x{:x}", pow_hash), // PoW hash of the solved job
+            ]
+        });
+        let request_json = serde_json::to_string(&request)?;
+        trace!("Submit share request JSON: {}", request_json);
+        self.framed.send(request_json).await?;
+        info!("Share submission sent: worker_id={}, job_id={}, nonce={}, pow_hash={}",
+            self.miner.worker_name, block_height, solution.nonce, pow_hash);
         Ok(())
     }
 }

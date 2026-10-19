@@ -22,6 +22,10 @@ use hibitset::{BitSet, BitSetLike, DrainableBitSet};
 use mazze_parameters::{consensus::*, consensus_internal::*};
 use mazze_storage::{storage_db::SnapshotDbManagerTrait, StateIndex};
 use mazze_types::H256;
+use metrics::{
+    register_meter_with_group, Counter, CounterUsize, Gauge, GaugeUsize, Meter,
+    MeterTimer,
+};
 use parking_lot::Mutex;
 use primitives::{MERKLE_NULL_NODE, NULL_EPOCH};
 use std::{
@@ -30,6 +34,35 @@ use std::{
     slice::Iter,
     sync::Arc,
 };
+
+lazy_static! {
+    /// Per-phase breakdown of `on_new_block` timing. The aggregate
+    /// `consensus_on_new_block_timer` (in consensus/mod.rs) was previously
+    /// the only signal. See docs/flow-audit.md G-CN-1.
+    static ref PREACTIVATE_TIMER: Arc<dyn Meter> =
+        register_meter_with_group("timer", "consensus::preactivate_block");
+    static ref ACTIVATE_TIMER: Arc<dyn Meter> =
+        register_meter_with_group("timer", "consensus::activate_block");
+    /// Counter incremented each time the main chain changes. The "depth"
+    /// field of a reorg (number of blocks rolled back) is exposed as a
+    /// separate gauge updated on each reorg. See docs/flow-audit.md G-CC-1.
+    static ref MAIN_CHAIN_CHANGES: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "consensus",
+            "main_chain_changes",
+        );
+    static ref REORG_LAST_DEPTH: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("consensus", "reorg_last_depth");
+    /// Era transitions. Low-frequency but high-impact events. See
+    /// docs/flow-audit.md G-CC-2.
+    static ref ERA_TRANSITIONS: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("consensus", "era_transitions");
+    static ref CUR_ERA_GENESIS_HEIGHT: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group(
+            "consensus",
+            "cur_era_genesis_height",
+        );
+}
 
 // TODO: Remove this
 #[allow(dead_code)]
@@ -171,6 +204,7 @@ impl ConsensusNewBlockHandler {
                 inner.arena[me].data.force_confirm = new_era_block_arena_index;
             }
         }
+        let legacy_block_count = new_era_legacy_block_arena_index_set.len();
         // reassign the parent for outside era blocks
         for v in new_era_legacy_block_arena_index_set {
             let me = *v;
@@ -281,6 +315,16 @@ impl ConsensusNewBlockHandler {
 
         inner.cur_era_genesis_block_arena_index = new_era_block_arena_index;
         inner.cur_era_genesis_height = new_era_height;
+        ERA_TRANSITIONS.inc(1);
+        CUR_ERA_GENESIS_HEIGHT.update(new_era_height as usize);
+        // `legacy_blocks`: blocks kept in the arena but outside the new era
+        // genesis' subtree, now out-era (era_block = NULL); any child of one
+        // is inserted as an out-era stub. Normally a handful of forks.
+        info!(
+            "era advanced: new_era_height={}, new_era_arena_index={}, \
+             legacy_blocks={}",
+            new_era_height, new_era_block_arena_index, legacy_block_count
+        );
 
         let cur_era_hash = inner.arena[new_era_block_arena_index].hash.clone();
         let stable_era_arena_index =
@@ -295,6 +339,7 @@ impl ConsensusNewBlockHandler {
         inner.data_man.set_cur_consensus_era_genesis_hash(
             &cur_era_hash,
             &stable_era_hash,
+            inner.cur_era_genesis_height,
         );
         inner
             .data_man
@@ -656,8 +701,10 @@ impl ConsensusNewBlockHandler {
             != inner.expected_difficulty(&inner.arena[parent].hash)
         {
             warn!(
-                "Partially invalid due to wrong difficulty. {:?}",
-                inner.arena[new].hash
+                "Partially invalid due to wrong difficulty. {:?} block_diff={} {}",
+                inner.arena[new].hash,
+                inner.arena[new].difficulty,
+                inner.explain_expected_difficulty(parent)
             );
             return false;
         }
@@ -707,7 +754,10 @@ impl ConsensusNewBlockHandler {
     fn recycle_tx_in_block(
         &self, inner: &ConsensusGraphInner, block_hash: &H256,
     ) {
-        info!("recycle_tx_in_block: block_hash={:?}", block_hash);
+        // Fires on every recycled block; at 4 bps that's ~345k log lines
+        // per day at info. Demoted to trace so the info channel stays
+        // useful for actual events.
+        trace!("recycle_tx_in_block: block_hash={:?}", block_hash);
         if let Some(block) = inner
             .data_man
             .block_by_hash(block_hash, true /* update_cache */)
@@ -785,12 +835,30 @@ impl ConsensusNewBlockHandler {
         if !inner.header_only && !self.conf.bench_mode {
             // Stable block must have a blame vector that does not stretch
             // beyond the new genesis
-            if !inner.arena[stable_main_block].data.state_valid.unwrap() {
-                if inner.arena[stable_main_block]
+            // `None`: a fast-synced node assumes the blocks between its two
+            // trusted checkpoints valid without computing a verdict (m6,
+            // 2026-10-18: unwrap panicked at the first checkpoint after
+            // joining). Only a known-invalid stable block constrains it.
+            if inner.arena[stable_main_block].data.state_valid == Some(false)
+            {
+                // recover_state_valid marks blocks invalid from the header
+                // blames of a trusted block without filling blame_info; a
+                // fast-synced node never computes it for them (m6). The
+                // header blame is the same quantity.
+                let stable_blame = match inner.arena[stable_main_block]
                     .data
                     .blame_info
-                    .unwrap()
-                    .blame as u64
+                {
+                    Some(info) => info.blame as u64,
+                    None => self
+                        .data_man
+                        .block_header_by_hash(
+                            &inner.arena[stable_main_block].hash,
+                        )
+                        .map(|h| h.blame() as u64)
+                        .unwrap_or(0),
+                };
+                if stable_blame
                     + new_genesis_height
                     + DEFERRED_STATE_EPOCH_COUNT
                     >= inner.cur_era_stable_height
@@ -1183,6 +1251,10 @@ impl ConsensusNewBlockHandler {
             inner.main_chain_metadata.push(Default::default());
             extend_main = true;
             main_changed = true;
+            // extend_main is the common "just appended one new tip" case.
+            // Count it for the rate; depth=0 distinguishes from reorgs.
+            MAIN_CHAIN_CHANGES.inc(1);
+            REORG_LAST_DEPTH.update(0);
             fork_at = inner.main_index_to_height(old_main_chain_len)
         } else {
             let lca = inner.lca(last, me);
@@ -1226,6 +1298,19 @@ impl ConsensusNewBlockHandler {
                 // The new subtree is heavier, update main chain
                 let fork_main_index = inner.height_to_main_index(fork_at);
                 assert!(fork_main_index < inner.main_chain.len());
+                // Reorg depth = how many blocks we are rolling back from the
+                // previous main chain tip. A 1-block "reorg" is the normal
+                // case for extend_main; a deep reorg is a warning sign.
+                let reorg_depth =
+                    inner.main_chain.len().saturating_sub(fork_main_index);
+                MAIN_CHAIN_CHANGES.inc(1);
+                REORG_LAST_DEPTH.update(reorg_depth);
+                if reorg_depth > 1 {
+                    info!(
+                        "main chain reorg at height {}: rolling back {} blocks",
+                        fork_at, reorg_depth
+                    );
+                }
                 for discarded_idx in inner.main_chain.split_off(fork_main_index)
                 {
                     // Reset the epoch_number of the discarded fork
@@ -1442,6 +1527,7 @@ impl ConsensusNewBlockHandler {
                 inner.data_man.set_cur_consensus_era_genesis_hash(
                     genesis_hash,
                     stable_hash,
+                    inner.cur_era_genesis_height,
                 );
                 inner.initial_stable_future = None;
                 debug!(
@@ -1491,6 +1577,18 @@ impl ConsensusNewBlockHandler {
             }
         }
 
+        // `capped_fork_at` was computed before the stable height and the
+        // checkpoint moved above. In steady state they move one era at a
+        // time and the new era genesis stays below it, but during catch-up
+        // they can jump past it (two checkpoints in the same second on a
+        // restarted archive), and every height-indexed lookup below then
+        // underflowed `height - cur_era_genesis_height` ("attempt to subtract
+        // with overflow" in height_to_main_index, consensus worker panic).
+        // Re-apply the same cap against the updated stable height: epochs
+        // that just became stable need no reprocessing here.
+        let capped_fork_at =
+            max(inner.cur_era_stable_height + 1, capped_fork_at);
+
         // send updated main chain to pubsub
         let from = capped_fork_at;
         let to = inner.main_index_to_height(inner.main_chain.len());
@@ -1531,7 +1629,8 @@ impl ConsensusNewBlockHandler {
             }
             // We can not assume that confirmed epoch are already executed,
             // but we can assume that the deferred block are executed.
-            self.data_man
+            if let Err(err) = self
+                .data_man
                 .storage_manager
                 .get_storage_manager()
                 .maintain_state_confirmed(
@@ -1541,8 +1640,12 @@ impl ConsensusNewBlockHandler {
                     confirmed_height,
                     &self.data_man.state_availability_boundary,
                 )
-                // FIXME: propogate error.
-                .expect(&concat!(file!(), ":", line!(), ":", column!()));
+            {
+                error!(
+                    "Failed to maintain confirmed state at epoch {}: {}",
+                    confirmed_height, err
+                );
+            }
             self.set_block_tx_packed(inner, me);
             self.delayed_tx_recycle_in_skipped_blocks(inner, capped_fork_at);
 
@@ -1617,6 +1720,7 @@ impl ConsensusNewBlockHandler {
                     state_at = state_availability_boundary.lower_bound + 1;
                 }
             }
+            inner.data_man.sample_state_availability_metrics();
 
             // Apply transactions in the determined total order
             while state_at < to_state_pos {
@@ -1644,6 +1748,61 @@ impl ConsensusNewBlockHandler {
         );
     }
 
+    /// WARN (rate-limited) when a block is about to be inserted as an
+    /// out-era stub although its parent sits above the current era genesis.
+    /// That is either a legacy fork (a branch forked below the era genesis,
+    /// rare) or a block delivered before its parent / under a parent that
+    /// was wrongly turned into a stub -- the failure that freezes the pivot
+    /// for good, since every descendant is stubbed too. The first stub's
+    /// details are logged right away, the volume after it is summarised.
+    fn report_stub_above_era_genesis(
+        &self, inner: &ConsensusGraphInner, hash: &H256,
+        block_header: &primitives::BlockHeader, parent_index: Option<usize>,
+    ) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LAST_REPORT_SECS: AtomicU64 = AtomicU64::new(0);
+        static SUPPRESSED: AtomicU64 = AtomicU64::new(0);
+
+        let parent_hash = block_header.parent_hash();
+        let parent_height = match parent_index {
+            Some(i) => inner.arena[i].height,
+            None => match self.data_man.block_header_by_hash(parent_hash) {
+                Some(h) => h.height(),
+                None => return,
+            },
+        };
+        if parent_height <= inner.cur_era_genesis_height {
+            return;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let last = LAST_REPORT_SECS.load(Ordering::Relaxed);
+        if now < last + 60 {
+            SUPPRESSED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        LAST_REPORT_SECS.store(now, Ordering::Relaxed);
+        let suppressed = SUPPRESSED.swap(0, Ordering::Relaxed);
+        warn!(
+            "consensus: inserting block {:?} (height {}) as an out-era stub \
+             although its parent {:?} (height {}) is above the era genesis \
+             (height {}): parent {}. Every descendant will be stubbed too. \
+             {} similar stub(s) in the last minute.",
+            hash,
+            block_header.height(),
+            parent_hash,
+            parent_height,
+            inner.cur_era_genesis_height,
+            match parent_index {
+                None => "is not in consensus (delivered out of order?)",
+                Some(_) => "is itself an out-era stub/legacy block",
+            },
+            suppressed,
+        );
+    }
+
     /// The top level function invoked by ConsensusGraph to insert a new block.
     pub fn on_new_block(
         &self, inner: &mut ConsensusGraphInner, meter: &ConfirmationMeter,
@@ -1657,6 +1816,27 @@ impl ConsensusNewBlockHandler {
             "insert new block into consensus: header_only={:?} block={:?}",
             inner.header_only, &block_header
         );
+        // A block must enter the arena once. A second `inner.insert` for the
+        // same hash creates a shadow node and re-points
+        // `hash_to_arena_indices` at it; later children hang off the shadow
+        // and, once an era checkpoint lands on the original lineage, the
+        // shadow becomes out-era legacy and every later block is stubbed
+        // (m6, 2026-10-17). The sync graph delivers each block once
+        // (`SynchronizationGraph::send_to_consensus`); this is the backstop.
+        if let Some(&existing) = inner.hash_to_arena_indices.get(hash) {
+            if *hash != self.data_man.get_cur_consensus_era_genesis_hash() {
+                warn!(
+                    "consensus: ignoring duplicate delivery of block {:?} \
+                     (height {}): already in the arena at index {} \
+                     (out-era stub: {})",
+                    hash,
+                    block_header.height(),
+                    existing,
+                    inner.arena[existing].era_block == NULL,
+                );
+            }
+            return;
+        }
         let parent_hash = block_header.parent_hash();
         let parent_index = inner.hash_to_arena_indices.get(&parent_hash);
         let me = if parent_index.is_none()
@@ -1666,6 +1846,12 @@ impl ConsensusNewBlockHandler {
             debug!(
                 "parent={:?} not in consensus graph or not in the genesis subtree, inserted as an out-era block stub",
                 parent_hash
+            );
+            self.report_stub_above_era_genesis(
+                inner,
+                hash,
+                &block_header,
+                parent_index.copied(),
             );
             let block_status_in_db = self
                 .data_man
@@ -1713,6 +1899,7 @@ impl ConsensusNewBlockHandler {
                 // already filled field. We do not run
                 // preactivate_block() on them.
                 let block_status = if inner.arena[me].era_block != NULL {
+                    let _t = MeterTimer::time_func(PREACTIVATE_TIMER.as_ref());
                     self.preactivate_block(inner, me)
                 } else {
                     if inner.arena[me].data.partial_invalid {
@@ -1751,6 +1938,7 @@ impl ConsensusNewBlockHandler {
                             me, inner.arena[me].hash
                         );
                     }
+                    let _t = MeterTimer::time_func(ACTIVATE_TIMER.as_ref());
                     self.activate_block(inner, me, meter, &mut queue);
                 }
                 // Now we are going to check all invalid blocks in the delay
@@ -1871,6 +2059,7 @@ impl ConsensusNewBlockHandler {
                     .push(inner.arena[inner.main_chain[main_index]].hash);
             }
         }
+        self.data_man.sample_state_availability_metrics();
 
         if inner.main_chain.len() < DEFERRED_STATE_EPOCH_COUNT as usize {
             return;
@@ -1922,16 +2111,26 @@ impl ConsensusNewBlockHandler {
             .storage_manager
             .get_storage_manager()
             .get_snapshot_epoch_count();
+        // Phase 5d: the `use_isolated_db_for_mpt_table` recovery
+        // path was already non-functional (paritydb ignored the
+        // flag; see design doc §3 / R1.3) and is gone under the
+        // MDBX cutover — the MPT lives in the same env as KV, no
+        // separate dir to recover. `recover_latest_mpt_snapshot_if_needed`
+        // was deleted in the same commit.
         let mut need_set_intermediate_trie_root_merkle = false;
-        let max_snapshot_epoch_index_has_mpt = self
-            .recover_latest_mpt_snapshot_if_needed(
-                inner,
-                &mut start_compute_epoch_main_index,
-                start_main_index,
-                end_index,
-                &mut need_set_intermediate_trie_root_merkle,
-                snapshot_epoch_count as u64,
-            );
+        let max_snapshot_epoch_index_has_mpt: Option<usize> = Some(end_index);
+        // Clear the stashed persist state so downstream callers
+        // don't consult stale data. The MDBX
+        // `scan_persist_state` in `StorageManager::load_persist_state`
+        // reads and clears it later; we drop here in case it
+        // survived a previous restart.
+        inner
+            .data_man
+            .storage_manager
+            .get_storage_manager()
+            .persist_state_from_initialization
+            .write()
+            .take();
         self.set_intermediate_trie_root_merkle(
             inner,
             start_compute_epoch_main_index,
@@ -1940,6 +2139,13 @@ impl ConsensusNewBlockHandler {
         );
 
         let confirmed_epoch_num = meter.get_confirmed_epoch_num();
+        // Progress/profile of the forced recompute (timing only): time spent
+        // in reward-info assembly, epoch execution and state maintenance.
+        let cms_started = std::time::Instant::now();
+        let mut cms_window_started = cms_started;
+        let mut cms_window_epochs = 0u64;
+        let mut cms_total_epochs = 0u64;
+        let mut cms_t = [std::time::Duration::ZERO; 3];
         for main_index in start_main_index + 1..end_index {
             let main_arena_index = inner.main_chain[main_index];
             let main_hash = inner.arena[main_arena_index].hash;
@@ -1963,24 +2169,27 @@ impl ConsensusNewBlockHandler {
                     .upper_bound += 1;
             }
 
-            info!(
+            debug!(
                 "construct_main_state: index {} height {} compute_epoch {}.",
                 main_index, height, compute_epoch,
             );
 
             if compute_epoch {
+                let t0 = std::time::Instant::now();
                 let reward_execution_info = self
                     .executor
                     .get_reward_execution_info(inner, main_arena_index);
+                cms_t[0] += t0.elapsed();
 
                 let recover_mpt_during_construct_main_state =
                     max_snapshot_epoch_index_has_mpt.map_or(true, |idx| {
                         main_index > idx + snapshot_epoch_count as usize
                     });
-                info!(
+                debug!(
                     "compute epoch recovery flag {}",
                     recover_mpt_during_construct_main_state
                 );
+                let t1 = std::time::Instant::now();
                 let executed = self.executor.compute_epoch(
                     EpochExecutionTask::new(
                         main_arena_index,
@@ -1992,6 +2201,8 @@ impl ConsensusNewBlockHandler {
                     None,
                     recover_mpt_during_construct_main_state,
                 );
+                cms_t[1] += t1.elapsed();
+                let t2 = std::time::Instant::now();
                 if !executed {
                     warn!(
                         "construct_main_state failed for epoch {:?}",
@@ -2027,6 +2238,32 @@ impl ConsensusNewBlockHandler {
                             ":",
                             column!()
                         ));
+                }
+                cms_t[2] += t2.elapsed();
+                cms_window_epochs += 1;
+                cms_total_epochs += 1;
+                if cms_window_epochs == 1000 || main_index + 1 == end_index {
+                    let wall = cms_window_started.elapsed().as_secs_f64();
+                    let n = cms_window_epochs as f64;
+                    info!(
+                        "construct_main_state progress: height {} \
+                         ({}/{} epochs, {:.1}s total) window: {} epochs \
+                         in {:.1}s = {:.2} ep/s; ms/ep reward_info={:.2} \
+                         compute={:.2} maintain={:.2}",
+                        height,
+                        cms_total_epochs,
+                        end_index.saturating_sub(start_compute_epoch_main_index),
+                        cms_started.elapsed().as_secs_f64(),
+                        cms_window_epochs,
+                        wall,
+                        n / wall.max(1e-9),
+                        cms_t[0].as_secs_f64() * 1e3 / n,
+                        cms_t[1].as_secs_f64() * 1e3 / n,
+                        cms_t[2].as_secs_f64() * 1e3 / n,
+                    );
+                    cms_window_started = std::time::Instant::now();
+                    cms_window_epochs = 0;
+                    cms_t = [std::time::Duration::ZERO; 3];
                 }
             }
         }
@@ -2121,246 +2358,6 @@ impl ConsensusNewBlockHandler {
         }
 
         force_compute_index
-    }
-
-    fn recover_latest_mpt_snapshot_if_needed(
-        &self, inner: &mut ConsensusGraphInner,
-        start_compute_epoch_main_index: &mut usize, start_main_index: usize,
-        end_index: usize, need_set_intermediate_trie_root_merkle: &mut bool,
-        snapshot_epoch_count: u64,
-    ) -> Option<usize> {
-        if !self.conf.inner_conf.use_isolated_db_for_mpt_table {
-            return Some(end_index);
-        }
-
-        let (
-            temp_snapshot_db_existing,
-            removed_snapshots,
-            latest_snapshot_epoch_height,
-            max_snapshot_epoch_height_has_mpt,
-        ) = if let Some((
-            temp_snapshot_db_existing,
-            removed_snapshots,
-            latest_snapshot_epoch_height,
-            max_snapshot_epoch_height_has_mpt,
-        )) = inner
-            .data_man
-            .storage_manager
-            .get_storage_manager()
-            .persist_state_from_initialization
-            .write()
-            .take()
-        {
-            (
-                temp_snapshot_db_existing,
-                removed_snapshots,
-                max(latest_snapshot_epoch_height, inner.cur_era_stable_height),
-                max_snapshot_epoch_height_has_mpt,
-            )
-        } else {
-            (None, HashSet::new(), inner.cur_era_stable_height, None)
-        };
-
-        debug!("latest snapshot epoch height: {}, temp snapshot status: {:?}, max snapshot epoch height has mpt: {:?}, removed snapshots {:?}",
-            latest_snapshot_epoch_height, temp_snapshot_db_existing, max_snapshot_epoch_height_has_mpt, removed_snapshots);
-
-        if removed_snapshots.len() == 1
-            && removed_snapshots.contains(&NULL_EPOCH)
-        {
-            debug!("special case for synced snapshot");
-            return Some(end_index);
-        }
-
-        if max_snapshot_epoch_height_has_mpt
-            .is_some_and(|h| h == latest_snapshot_epoch_height)
-        {
-            inner
-                .data_man
-                .storage_manager
-                .get_storage_manager()
-                .get_snapshot_manager()
-                .get_snapshot_db_manager()
-                .recreate_latest_mpt_snapshot()
-                .unwrap();
-
-            info!(
-                "snapshot for epoch height {} is still not use mpt database",
-                start_compute_epoch_main_index
-            );
-            return Some(end_index);
-        }
-
-        // maximum epoch need to compute
-        let maximum_height_to_create_next_snapshot =
-            latest_snapshot_epoch_height + snapshot_epoch_count * 2;
-        let index =
-            inner.height_to_main_index(maximum_height_to_create_next_snapshot);
-        if *start_compute_epoch_main_index > index {
-            warn!("start_compute_epoch_main_index is greater than maximum epoch need to compute {}", index);
-            *start_compute_epoch_main_index = index;
-        }
-
-        // Find the closest ear prior to the start_compute_epoch_height
-        let start_compute_epoch_height = inner.arena
-            [inner.main_chain[*start_compute_epoch_main_index]]
-            .height;
-        info!(
-            "current start compute epoch height {}",
-            start_compute_epoch_height
-        );
-
-        let recovery_latest_mpt_snapshot =
-            if self.conf.inner_conf.recovery_latest_mpt_snapshot
-                || start_compute_epoch_height <= latest_snapshot_epoch_height
-                || (temp_snapshot_db_existing.is_some()
-                    && latest_snapshot_epoch_height
-                        < start_compute_epoch_height
-                    && start_compute_epoch_height
-                        <= latest_snapshot_epoch_height + snapshot_epoch_count)
-            {
-                true
-            } else {
-                let mut max_epoch_height = 0;
-                for main_index in (start_main_index..end_index)
-                    .step_by(snapshot_epoch_count as usize)
-                {
-                    let main_arena_index = inner.main_chain[main_index];
-                    let main_hash = inner.arena[main_arena_index].hash;
-
-                    debug!(
-                        "snapshot main_index {} height {} ",
-                        main_index, inner.arena[main_arena_index].height
-                    );
-
-                    if removed_snapshots.contains(&main_hash) {
-                        max_epoch_height = max(
-                            max_epoch_height,
-                            inner.arena[main_arena_index].height,
-                        );
-                    }
-                }
-
-                // snapshots after latest_snapshot_epoch_height is removed
-                latest_snapshot_epoch_height < max_epoch_height
-            };
-
-        // if the latest_snapshot_epoch_height is greater than
-        // start_compute_epoch_height, the latest MPT snapshot is dirty
-        if recovery_latest_mpt_snapshot {
-            let era_main_epoch_height = if start_compute_epoch_height
-                <= inner.cur_era_stable_height + snapshot_epoch_count
-            {
-                debug!("snapshot for cur_era_stable_height must be exist");
-                inner.cur_era_stable_height
-            } else {
-                (start_compute_epoch_height - snapshot_epoch_count - 1)
-                    / self.conf.inner_conf.era_epoch_count
-                    * self.conf.inner_conf.era_epoch_count
-            };
-
-            if era_main_epoch_height > latest_snapshot_epoch_height {
-                panic!("era_main_epoch_height is greater than latest_snapshot_epoch_height, this should not happen");
-            }
-
-            debug!(
-                "need recovery latest mpt snapshot, start compute epoch height {}, era main epoch height {}",
-                start_compute_epoch_height, era_main_epoch_height
-            );
-
-            if start_compute_epoch_height <= era_main_epoch_height {
-                unreachable!("start_compute_epoch_height {} is smaller than era_main_epoch_height {}", start_compute_epoch_height, era_main_epoch_height);
-            } else if start_compute_epoch_height
-                <= era_main_epoch_height + snapshot_epoch_count
-            {
-                if start_compute_epoch_height % snapshot_epoch_count == 1 {
-                    *need_set_intermediate_trie_root_merkle = true;
-                }
-            } else if start_compute_epoch_height
-                <= era_main_epoch_height + snapshot_epoch_count * 2
-            {
-                // nothing need to do
-            } else {
-                let new_height =
-                    era_main_epoch_height + snapshot_epoch_count * 2;
-                let new_index = inner.height_to_main_index(new_height);
-
-                info!("reset start_compute_epoch_main_index to {}", new_index);
-                *start_compute_epoch_main_index = new_index;
-            }
-
-            let era_main_hash = if era_main_epoch_height == 0 {
-                NULL_EPOCH
-            } else {
-                inner
-                    .get_main_hash_from_epoch_number(era_main_epoch_height)
-                    .expect("main hash should be exist")
-            };
-
-            let snapshot_db_manager = inner
-                .data_man
-                .storage_manager
-                .get_storage_manager()
-                .get_snapshot_manager()
-                .get_snapshot_db_manager();
-
-            snapshot_db_manager.update_latest_snapshot_id(
-                era_main_hash.clone(),
-                era_main_epoch_height,
-            );
-
-            if max_snapshot_epoch_height_has_mpt
-                .is_some_and(|height| height >= era_main_epoch_height)
-            {
-                // mpt snapshot will be created from empty
-                snapshot_db_manager.recreate_latest_mpt_snapshot().unwrap();
-            } else {
-                let main_hash_before_era = if era_main_epoch_height == 0 {
-                    None
-                } else {
-                    Some(
-                        inner
-                            .get_main_hash_from_epoch_number(
-                                era_main_epoch_height - snapshot_epoch_count,
-                            )
-                            .expect("main hash should be exist"),
-                    )
-                };
-
-                // use ear snapshot replace latest
-                snapshot_db_manager
-                    .recovery_latest_mpt_snapshot_from_checkpoint(
-                        &era_main_hash,
-                        main_hash_before_era,
-                    )
-                    .unwrap();
-            }
-
-            max_snapshot_epoch_height_has_mpt.and_then(|v| {
-                if v >= inner.cur_era_stable_height {
-                    Some(inner.height_to_main_index(v))
-                } else {
-                    None
-                }
-            })
-        } else {
-            if temp_snapshot_db_existing.is_some()
-                && latest_snapshot_epoch_height + snapshot_epoch_count
-                    < start_compute_epoch_height
-                && start_compute_epoch_height
-                    <= latest_snapshot_epoch_height + 2 * snapshot_epoch_count
-            {
-                inner
-                    .data_man
-                    .storage_manager
-                    .get_storage_manager()
-                    .get_snapshot_manager()
-                    .get_snapshot_db_manager()
-                    .set_reconstruct_snapshot_id(temp_snapshot_db_existing);
-            }
-
-            debug!("the latest MPT snapshot is valid");
-            Some(end_index)
-        }
     }
 
     fn set_intermediate_trie_root_merkle(

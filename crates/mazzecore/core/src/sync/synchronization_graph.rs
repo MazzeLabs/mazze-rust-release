@@ -5,7 +5,7 @@
 use std::{
     cmp::max,
     collections::{BinaryHeap, HashMap, HashSet, VecDeque},
-    mem, panic,
+    mem,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -15,7 +15,7 @@ use std::{
 };
 
 use futures::executor::block_on;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use slab::Slab;
 use tokio02::sync::mpsc::error::TryRecvError;
 use unexpected::{Mismatch, OutOfBounds};
@@ -34,14 +34,17 @@ use primitives::{
 };
 
 use crate::{
-    block_data_manager::{BlockDataManager, BlockStatus},
+    block_data_manager::{BlockDataManager, BlockStatus, LocalBlockInfo},
     channel::Channel,
     consensus::SharedConsensusGraph,
     error::{BlockError, Error, ErrorKind},
-    pow::{PowComputer, ProofOfWorkConfig},
+    pow::{asert_difficulty, PowComputer, ProofOfWorkConfig},
     state_exposer::{SyncGraphBlockState, STATE_EXPOSER},
     statistics::SharedStatistics,
-    sync::synchronization_protocol_handler::FutureBlockContainer,
+    sync::{
+        fast_sync_anchor::AnchorPair,
+        synchronization_protocol_handler::FutureBlockContainer,
+    },
     verification::*,
     ConsensusGraph, Notifications,
 };
@@ -58,14 +61,52 @@ lazy_static! {
     static ref SYNC_GRAPH_OLD_ERA_FRONTIER_SIZE: Arc<dyn Gauge<usize>> =
         GaugeUsize::register_with_group("sync_graph", "old_era_frontier_size");
     static ref SYNC_GRAPH_NOT_READY_FRONTIER_SIZE: Arc<dyn Gauge<usize>> =
-        GaugeUsize::register_with_group("sync_graph", "not_ready_frontier_size");
+        GaugeUsize::register_with_group(
+            "sync_graph",
+            "not_ready_frontier_size"
+        );
+    // DoS guard counters. See docs/security-audit.md finding H-2.
+    static ref SYNC_GRAPH_REJECTED_OVER_CAP: Arc<dyn Meter> =
+        register_meter_with_group(
+            "sync_graph",
+            "orphan_inserts_rejected_over_cap_total"
+        );
+    // Forward headers deferred (not rejected) because our execution has
+    // fallen behind their RandomX-seed epoch. A climbing rate here means a
+    // node is catching up across a >1-RandomX-epoch gap. See the seed-miss
+    // handling in `insert_block_header` and the "falling behind shouldn't be
+    // fatal" fix.
+    static ref SYNC_GRAPH_SEED_DEFERRED: Arc<dyn Meter> =
+        register_meter_with_group(
+            "sync_graph",
+            "forward_headers_seed_deferred_total"
+        );
 }
+
+/// Hard cap on the sync-graph arena. New `insert_block_header` calls
+/// past this threshold are rejected with `BlockHeaderInsertionResult::Invalid`
+/// so a single misbehaving peer can't blow up the node's memory.
+///
+/// The realistic working set (a normal era's worth of headers plus a
+/// few orphans) is well under this number — see era_epoch_count =
+/// 20 000 in `docs/chain-model.md`. Tuned conservatively to give legit
+/// catch-up plenty of headroom. See docs/security-audit.md finding H-2.
+///
+/// In healthy operation the arena is kept near one era by
+/// `try_clear_old_era_blocks` (driven by consensus era-genesis
+/// advancement); this cap is only a DoS ceiling, not the working bound.
+const SYNC_GRAPH_ARENA_HARD_CAP: usize = 200_000;
 
 const NULL: usize = !0;
 const BLOCK_INVALID: u8 = 0;
 const BLOCK_HEADER_ONLY: u8 = 1;
 const BLOCK_HEADER_GRAPH_READY: u8 = 2;
 const BLOCK_GRAPH_READY: u8 = 3;
+
+/// §5.18 — last time (unix seconds) the frontier-stuck diagnostic logged,
+/// so it fires at most every ~30s rather than every tick.
+static STUCK_FRONTIER_DIAG_LAST_SECS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Copy, Clone)]
 pub struct SyncGraphConfig {
@@ -117,6 +158,13 @@ pub struct SynchronizationGraphNode {
     pub referrers: Vec<usize>,
     /// the timestamp in seconds when graph_status updated
     pub last_update_timestamp: u64,
+    /// Whether this block has been handed to the consensus worker. A block
+    /// can become deliverable twice -- at BLOCK_HEADER_GRAPH_READY in a
+    /// header-to-consensus phase and again at BLOCK_GRAPH_READY when its
+    /// body arrives (body sync runs in every phase, §5.20) -- but consensus
+    /// must see it exactly once, and only after its parent and referees.
+    /// See `SynchronizationGraph::send_to_consensus`.
+    pub sent_to_consensus: bool,
 }
 
 #[derive(DeriveMallocSizeOf)]
@@ -239,10 +287,18 @@ impl SynchronizationGraphInner {
             genesis_hash, genesis_block_index
         );
 
-        // inner.old_era_blocks_frontier.push_back(genesis_block_index);
-        // inner
-        //     .old_era_blocks_frontier_set
-        //     .insert(genesis_block_index);
+        // Seed old-era GC with genesis. This was commented out in 9e8dddb
+        // (PoS removal), which left `old_era_blocks_frontier` empty on every
+        // from-genesis start: `try_clear_old_era_blocks` then never reclaimed
+        // anything, the arena grew by every block ever produced (4.7M vs the
+        // 200k cap after 72 days), and outside catch-up every orphan header
+        // was dropped at the H-2 cap — fragmenting the fleet node by node.
+        // (Restarts from DB masked it: there the era genesis enters with
+        // `parent_reclaimed` and seeds the frontier.)
+        inner.old_era_blocks_frontier.push_back(genesis_block_index);
+        inner
+            .old_era_blocks_frontier_set
+            .insert(genesis_block_index);
 
         inner
     }
@@ -274,17 +330,89 @@ impl SynchronizationGraphInner {
     }
 
     fn update_metrics(&self) {
-        SYNC_GRAPH_ARENA_SIZE.update(self.arena.len());
+        let arena_size = self.arena.len();
+        SYNC_GRAPH_ARENA_SIZE.update(arena_size);
         SYNC_GRAPH_OLD_ERA_FRONTIER_SIZE
             .update(self.old_era_blocks_frontier_set.len());
         SYNC_GRAPH_NOT_READY_FRONTIER_SIZE
             .update(self.not_ready_blocks_frontier.len());
+
+        // Fleet incident 2026-07-08 report §5 recommendation #7:
+        // fleet TOMLs don't wire metrics egress, so
+        // `sync_graph.orphan_inserts_rejected_over_cap_total`
+        // used to increment invisibly and the arena silently
+        // filled ~11h post-relaunch. Log a rate-limited warn in-
+        // process whenever the arena crosses tripwire fractions,
+        // so at least operators tailing the log see it early.
+        //
+        // Kept as static atomics to avoid a lock on the hot
+        // insert path — worst case is a duplicate log line
+        // across two threads at the exact same tick, which is
+        // fine.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // Last logged bucket: 0 = below 75%, 1 = 75-90%, 2 = >90%.
+        static LAST_BUCKET: AtomicUsize = AtomicUsize::new(0);
+        let pct = arena_size * 100 / SYNC_GRAPH_ARENA_HARD_CAP;
+        let bucket = if pct >= 90 {
+            2usize
+        } else if pct >= 75 {
+            1usize
+        } else {
+            0usize
+        };
+        let prev = LAST_BUCKET.swap(bucket, Ordering::Relaxed);
+        if bucket > prev {
+            match bucket {
+                1 => info!(
+                    "sync-graph arena at {}% of cap ({}/{}). GC \
+                     health monitor: watch old_era_frontier_size + \
+                     execution catch-up rate. See H-2 guard.",
+                    pct, arena_size, SYNC_GRAPH_ARENA_HARD_CAP
+                ),
+                2 => warn!(
+                    "sync-graph arena at {}% of cap ({}/{}). \
+                     ORPHAN-REJECT threshold imminent. Over-cap \
+                     orphans now route to `AtCapacity` (soft drop, \
+                     no peer disconnect) after the 2026-07-08 \
+                     fleet fork fix, so peers stay in the mesh — \
+                     but headers WILL be dropped and the tip may \
+                     stall until GC catches up.",
+                    pct, arena_size, SYNC_GRAPH_ARENA_HARD_CAP
+                ),
+                _ => {}
+            }
+        } else if bucket < prev {
+            // Recovery — log so operators see the ramp end.
+            info!(
+                "sync-graph arena recovered to {}% of cap ({}/{}).",
+                pct, arena_size, SYNC_GRAPH_ARENA_HARD_CAP
+            );
+        }
     }
 
     fn try_clear_old_era_blocks(&mut self) {
         let backlog = self.old_era_blocks_frontier.len();
+        // Fleet incident 2026-07-08 report §5 recommendation #4 —
+        // proportional drain. The prior cap `min(256, max(2, backlog/8))`
+        // drained at most 256 entries per call regardless of how
+        // deep the backlog was, so under a header flood the arena
+        // grew faster than GC could reclaim and hit the H-2 hard
+        // cap ~11h post-relaunch (observed on m3 at 03:05:05 UTC on
+        // 2026-07-08; then again 13 days later — m3 arena stuck at
+        // 240k/200k, tip frozen at epoch 200,316). The higher
+        // ceiling here (was 256, now 16k) lets GC keep pace with
+        // realistic ingest bursts without changing the correctness
+        // guarantees (all skipped entries still respect the
+        // is_graph_ready_in_db gate below). Divisor tightened
+        // from /8 to /2 for the same reason.
+        //
+        // This is only ONE HALF of rec #4 — the second half
+        // ("expire never-consensus-processed headers older than N
+        // eras" — closes the immortal-foreign-fork-header hole) is
+        // deferred because it touches correctness and needs its
+        // own review pass.
         let max_num_of_cleared_blocks =
-            std::cmp::min(256, std::cmp::max(2, backlog / 8));
+            std::cmp::min(16_384, std::cmp::max(2, backlog / 2));
         let mut num_cleared = 0;
         let era_genesis = self.get_genesis_in_current_era();
         let genesis_seq_num = self
@@ -295,6 +423,11 @@ impl SynchronizationGraphInner {
             .expect("local_block_info for genesis must exist")
             .get_seq_num();
         let mut era_genesis_in_frontier = false;
+        // Frontier entries not yet persisted by consensus. They must be
+        // re-queued, not dropped: a popped-and-skipped entry stays in the
+        // arena and `old_era_blocks_frontier_set` but is never revisited, so
+        // its whole child subtree would become uncollectable.
+        let mut not_ready_yet = Vec::new();
 
         while let Some(index) = self.old_era_blocks_frontier.pop_front() {
             if index == era_genesis {
@@ -318,6 +451,7 @@ impl SynchronizationGraphInner {
                 // The blocks pushed to `old_era_blocks_frontier` are all
                 // BlockGraphReady, so it's ensured that they will be inserted
                 // into consensus and their local block infos will be persisted.
+                not_ready_yet.push(index);
                 continue;
             }
 
@@ -367,8 +501,20 @@ impl SynchronizationGraphInner {
             }
 
             self.old_era_blocks_frontier_set.remove(&index);
+            // Drop it from the not-ready frontier too: a GC'd index left there
+            // made every later frontier walk index a freed arena slot
+            // ("invalid key" panics in IO workers on a restarted m3).
+            self.not_ready_blocks_frontier.remove(&index);
             self.arena.remove(index);
             self.hash_to_arena_indices.remove(&hash);
+            // Purge from the body-fill set too. Old-era GC used to drop the
+            // arena/header state but leave the hash in `block_to_fill_set`
+            // forever; a later body arrival for the GC'd block then hits the
+            // `Ignored` early-return in `insert_block` (also non-removing), so
+            // the entry was immortal. Accumulated across a run this bloated the
+            // fill set to ~every block since genesis and starved the body drain
+            // (0-tx desync root cause).
+            self.block_to_fill_set.remove(&hash);
             // only remove block header in memory cache
             self.data_man
                 .remove_block_header(&hash, false /* remove_db */);
@@ -379,6 +525,7 @@ impl SynchronizationGraphInner {
             }
         }
 
+        self.old_era_blocks_frontier.extend(not_ready_yet);
         if era_genesis_in_frontier {
             self.old_era_blocks_frontier.push_front(era_genesis);
         }
@@ -389,6 +536,7 @@ impl SynchronizationGraphInner {
         let me = self.arena.insert(SynchronizationGraphNode {
             graph_status: BLOCK_INVALID,
             block_ready: false,
+            sent_to_consensus: false,
             parent_reclaimed: false,
             parent: NULL,
             children: Vec::new(),
@@ -438,6 +586,8 @@ impl SynchronizationGraphInner {
                 BLOCK_HEADER_ONLY
             },
             block_ready: is_genesis,
+            // The era genesis is consensus' own root.
+            sent_to_consensus: is_genesis,
             parent_reclaimed: false,
             parent: NULL,
             children: Vec::new(),
@@ -520,7 +670,20 @@ impl SynchronizationGraphInner {
                     || info.get_instance_id() == self.data_man.get_instance_id()
             }
         } else {
-            false
+            // A header persisted below the era genesis without a local block
+            // info is history below a fast-sync anchor (fetched by the
+            // anchor bootstrap): outside the genesis subtree, so it counts
+            // as processed exactly like a pre-checkpoint block.
+            match self.data_man.block_header_by_hash(parent_or_referee_hash) {
+                Some(h) => {
+                    let genesis =
+                        self.data_man.get_cur_consensus_era_genesis_hash();
+                    self.data_man
+                        .block_height_by_hash(&genesis)
+                        .map_or(false, |g| h.height() < g)
+                }
+                None => false,
+            }
         }
     }
 
@@ -597,6 +760,83 @@ impl SynchronizationGraphInner {
             && self.arena[index].block_ready
     }
 
+    /// §5.18 diagnostic — explain why a not-ready frontier block cannot be
+    /// promoted to `BLOCK_GRAPH_READY`: which parent/referee is blocking and
+    /// in what state, plus whether its body is present. Read-only; mirrors
+    /// `new_to_be_graph_ready`'s checks. Used to pin the graph-promotion
+    /// deadlock observed on wedged archive nodes (a block stuck not-ready
+    /// with `missing_bodies == 0`). See docs/fast-sync-design.md §5.18.
+    fn diagnose_frontier_stuck(&self, index: usize) -> String {
+        let node = &self.arena[index];
+        let hash = node.block_header.hash();
+        let height = node.block_header.height();
+        let genesis_hash = self.data_man.get_cur_consensus_era_genesis_hash();
+        let genesis_seq_num = self
+            .data_man
+            .local_block_info_by_hash(&genesis_hash)
+            .map(|i| i.get_seq_num())
+            .unwrap_or(0);
+        let mut blockers: Vec<String> = Vec::new();
+
+        if node.parent == NULL {
+            let ph = node.block_header.parent_hash();
+            if !node.parent_reclaimed
+                && !self.is_graph_ready_in_db(ph, genesis_seq_num)
+            {
+                blockers.push(format!(
+                    "parent {:?} ABSENT (not in arena, not graph-ready-in-db)",
+                    ph
+                ));
+            }
+        } else if self.arena[node.parent].graph_status < BLOCK_GRAPH_READY {
+            blockers.push(format!(
+                "parent idx={} {:?} status={}",
+                node.parent,
+                self.arena[node.parent].block_header.hash(),
+                self.arena[node.parent].graph_status,
+            ));
+        }
+
+        let mut in_mem = HashSet::new();
+        for &r in &node.referees {
+            in_mem.insert(self.arena[r].block_header.hash());
+            if self.arena[r].graph_status < BLOCK_GRAPH_READY {
+                blockers.push(format!(
+                    "referee idx={} {:?} status={}",
+                    r,
+                    self.arena[r].block_header.hash(),
+                    self.arena[r].graph_status,
+                ));
+            }
+        }
+        for rh in node.block_header.referee_hashes() {
+            if !in_mem.contains(rh)
+                && !self.is_graph_ready_in_db(rh, genesis_seq_num)
+            {
+                blockers.push(format!("referee {:?} ABSENT", rh));
+            }
+        }
+
+        if !node.block_ready {
+            blockers.push("block_ready=false (body missing/unverified)".into());
+        }
+
+        format!(
+            "frontier-diag block={:?} height={} status={} block_ready={} \
+             blockers=[{}]",
+            hash,
+            height,
+            node.graph_status,
+            node.block_ready,
+            if blockers.is_empty() {
+                "NONE — promotable now (transient, or a promotion logic gap)"
+                    .into()
+            } else {
+                blockers.join(" | ")
+            },
+        )
+    }
+
     // Get parent (height, timestamp, gas_limit, difficulty)
     // This function assumes that the
     // parent and referee information MUST exist in memory or in disk.
@@ -640,6 +880,42 @@ impl SynchronizationGraphInner {
             parent_gas_limit,
             parent_difficulty,
         )
+    }
+
+    /// Header-only bounds for the ASERT difficulty of block `index`. See
+    /// `verify_header_graph_ready_block`.
+    fn asert_header_bounds(
+        &self, index: usize, parent_difficulty: U256,
+    ) -> (U256, U256) {
+        let initial: U256 = self.pow_config.initial_difficulty.into();
+        let parent_hash = *self.arena[index].block_header.parent_hash();
+        let parent_header = match self.data_man.block_header_by_hash(&parent_hash)
+        {
+            Some(h) => h,
+            None => return (initial, U256::max_value()),
+        };
+        let dt = self
+            .data_man
+            .block_header_by_hash(parent_header.parent_hash())
+            .map(|gp| parent_header.timestamp().saturating_sub(gp.timestamp()))
+            // Unknown grandparent: allow any decrease.
+            .unwrap_or(u64::MAX / 2_000_000);
+        let t = self.pow_config.block_generation_period;
+        let h = mazze_parameters::pow::ASERT_HALF_LIFE_SECS;
+        let lower = asert_difficulty(&parent_difficulty, 0, dt, t, h, &initial);
+        let upper = asert_difficulty(
+            &parent_difficulty,
+            mazze_parameters::pow::ASERT_MAX_BLOCK_CONTRIBUTION,
+            0,
+            t,
+            h,
+            &initial,
+        );
+        let lower = lower
+            .saturating_sub(lower / 50 + 2)
+            .max(initial);
+        let upper = upper.saturating_add(upper / 50 + 2);
+        (lower, upper)
     }
 
     fn verify_header_graph_ready_block(
@@ -730,8 +1006,9 @@ impl SynchronizationGraphInner {
             let initial_difficulty: U256 =
                 self.pow_config.initial_difficulty.into();
 
-            if parent_height
-                < self.pow_config.difficulty_adjustment_epoch_period()
+            if (self.pow_config.test_mode
+                && !self.pow_config.asert_in_test_mode)
+                || parent_height == 0
             {
                 if my_diff != initial_difficulty {
                     difficulty_invalid = true;
@@ -739,24 +1016,19 @@ impl SynchronizationGraphInner {
                     max_diff = initial_difficulty;
                 }
             } else {
-                let last_period_upper = (parent_height
-                    / self.pow_config.difficulty_adjustment_epoch_period())
-                    * self.pow_config.difficulty_adjustment_epoch_period();
-                if last_period_upper != parent_height {
-                    // parent_epoch should not trigger difficulty adjustment
-                    if my_diff != parent_difficulty {
-                        difficulty_invalid = true;
-                        min_diff = parent_difficulty;
-                        max_diff = parent_difficulty;
-                    }
-                } else {
-                    let (lower, upper) =
-                        self.pow_config.get_adjustment_bound(parent_difficulty);
-                    min_diff = lower;
-                    max_diff = upper;
-                    if my_diff < min_diff || my_diff > max_diff {
-                        difficulty_invalid = true;
-                    }
+                // Per-block ASERT. The exact value needs DAG past-block
+                // counts and is checked in consensus (wrong difficulty =>
+                // partial invalid). Here we bound it from header data only,
+                // as a cheap pre-filter: relative to the parent, a child moves
+                // by 2^((n*T - dt)/H) where dt = ts(parent) - ts(grandparent)
+                // and n = the parent's ASERT contribution in [1, cap]. The
+                // margin absorbs integer rounding of both difficulties.
+                let (lower, upper) =
+                    self.asert_header_bounds(index, parent_difficulty);
+                min_diff = lower;
+                max_diff = upper;
+                if my_diff < min_diff || my_diff > max_diff {
+                    difficulty_invalid = true;
                 }
             }
 
@@ -920,7 +1192,26 @@ pub struct SynchronizationGraph {
     pub future_blocks: FutureBlockContainer,
 
     machine: Arc<Machine>,
+
+    /// The trusted checkpoints a fresh fast-sync node is rooting its chain
+    /// at, while it collects what that needs (docs/fast-sync-design.md
+    /// §5.19). Headers up to the stable checkpoint's height are persisted
+    /// without entering the graph: the bootstrap authenticates the ones it
+    /// uses by hash, and the graph is rebuilt from the root afterwards.
+    pub fast_sync_anchor: Mutex<Option<AnchorPair>>,
+
+    /// Headers deferred because their RandomX seed was not known yet
+    /// (hash -> height), re-requested once it is (`take_seed_ready_headers`).
+    /// Header sync requests epochs far ahead of the best epoch, so the
+    /// headers of the next RandomX epoch often arrive before its seed -- the
+    /// pivot one RandomX epoch below them -- is persisted, and nothing asked
+    /// for them again: the node stalled at every RandomX boundary until a
+    /// restart (local cluster with a 400-epoch RandomX period).
+    seed_deferred_headers: Mutex<HashMap<H256, u64>>,
 }
+
+/// Bound on `SynchronizationGraph::seed_deferred_headers`.
+const MAX_SEED_DEFERRED_HEADERS: usize = 100_000;
 
 impl MallocSizeOf for SynchronizationGraph {
     fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
@@ -985,10 +1276,20 @@ impl SynchronizationGraph {
             consensus_unprocessed_count: consensus_unprocessed_count.clone(),
             new_block_hashes: notifications.new_block_hashes.clone(),
             machine,
+            fast_sync_anchor: Mutex::new(None),
+            seed_deferred_headers: Default::default(),
         };
 
         // It receives `BLOCK_GRAPH_READY` blocks in order and handles them in
         // `ConsensusGraph`
+        //
+        // KNOWN THROUGHPUT CEILING (G-CN-3 in docs/flow-audit.md):
+        // This is the single OS thread that drives `ConsensusGraph`. Every
+        // block flows through it serially. At sustained block rates above
+        // ~10 bps with realistic outlier_barrier sizes, this thread is the
+        // bottleneck. Parallelisation requires splitting `ConsensusGraphInner`
+        // into per-shard arenas with topological-merge handoff; out of scope
+        // for this audit but tracked as the next architectural lever.
         thread::Builder::new()
             .name("Consensus Worker".into())
             .spawn(move || {
@@ -1018,10 +1319,23 @@ impl SynchronizationGraph {
                         };
 
                         match maybe_item {
-                            // FIXME: We need to investigate why duplicate hash may send to the consensus worker
                             Ok(hash) => if !reverse_map.contains_key(&hash) {
                                 debug!("Worker thread receive: block = {}", hash);
-                                let header = data_man.block_header_by_hash(&hash).expect("Header must exist before sending to the consensus worker!");
+                                let header = match data_man.block_header_by_hash(&hash) {
+                                    Some(h) => h,
+                                    None => {
+                                        // Should never happen — the sender is
+                                        // expected to persist the header before
+                                        // notifying. Log and skip rather than
+                                        // crash the consensus worker thread.
+                                        error!(
+                                            "consensus worker: missing header for {}, skipping",
+                                            hash
+                                        );
+                                        consensus_unprocessed_count.fetch_sub(1, Ordering::SeqCst);
+                                        continue 'inner;
+                                    }
+                                };
 
                                 let mut cnt: usize = 0;
                                 let parent_hash = header.parent_hash();
@@ -1043,7 +1357,17 @@ impl SynchronizationGraph {
                                     counter_map.insert(hash, cnt);
                                 }
                             } else {
-                                warn!("Duplicate block = {} sent to the consensus worker", hash);
+                                trace!(
+                                    "Ignore duplicate consensus worker notification for {}",
+                                    hash
+                                );
+                                // Every notification was counted by the
+                                // sender; a dropped duplicate must be
+                                // uncounted too, or `is_consensus_worker_busy`
+                                // stays true forever and
+                                // CatchUpCheckpointPhase::start spins holding
+                                // the phase lock (m2 froze, 2026-10-10).
+                                consensus_unprocessed_count.fetch_sub(1, Ordering::SeqCst);
                             },
                             Err(TryRecvError::Empty) => break 'inner,
                             Err(TryRecvError::Closed) => break 'outer,
@@ -1051,13 +1375,43 @@ impl SynchronizationGraph {
                     }
                     if let Some((_, hash)) = priority_queue.pop() {
                         CONSENSUS_WORKER_QUEUE.dequeue(1);
-                        let successors = reverse_map.remove(&hash).unwrap();
+                        let successors = match reverse_map.remove(&hash) {
+                            Some(s) => s,
+                            None => {
+                                error!(
+                                    "consensus worker: reverse_map inconsistency for {}; skipping successors",
+                                    hash
+                                );
+                                Vec::new()
+                            }
+                        };
                         for succ in successors {
-                            let cnt_tuple = counter_map.get_mut(&succ).unwrap();
-                            *cnt_tuple -= 1;
-                            if *cnt_tuple == 0 {
+                            let remaining = match counter_map.get_mut(&succ) {
+                                Some(c) => {
+                                    *c -= 1;
+                                    *c
+                                }
+                                None => {
+                                    error!(
+                                        "consensus worker: counter_map inconsistency for successor {}; skipping",
+                                        succ
+                                    );
+                                    continue;
+                                }
+                            };
+                            if remaining == 0 {
                                 counter_map.remove(&succ);
-                                let header_succ = data_man.block_header_by_hash(&succ).expect("Header must exist before sending to the consensus worker!");
+                                let header_succ = match data_man.block_header_by_hash(&succ) {
+                                    Some(h) => h,
+                                    None => {
+                                        error!(
+                                            "consensus worker: missing header for successor {}, dropping from queue",
+                                            succ
+                                        );
+                                        consensus_unprocessed_count.fetch_sub(1, Ordering::SeqCst);
+                                        continue;
+                                    }
+                                };
                                 let parent_succ = header_succ.parent_hash();
                                 let epoch_number = consensus.get_block_epoch_number(parent_succ).unwrap_or(0);
                                 priority_queue.push((epoch_number, succ));
@@ -1086,6 +1440,95 @@ impl SynchronizationGraph {
         self.inner
             .read()
             .get_genesis_hash_and_height_in_current_era()
+    }
+
+    /// A header below the era genesis (or beside it) that we have no record
+    /// of cannot take part in our consensus: it is outside the genesis
+    /// subtree, so it could only become an out-era stub. Record it as a
+    /// pre-checkpoint block -- what a checkpointed node has for every block
+    /// it saw before its checkpoint -- so the blocks above the genesis that
+    /// reference it become graph-ready instead of waiting for its ancestors
+    /// forever. A node rooted at a fast-sync anchor has no other record of
+    /// the history below the anchor (docs/fast-sync-design.md §5.19).
+    /// Returns false (and records nothing) for a header in the era.
+    pub fn record_pre_era_header(&self, header: &BlockHeader) -> bool {
+        let genesis_hash = self.data_man.get_cur_consensus_era_genesis_hash();
+        let genesis_height =
+            match self.data_man.block_height_by_hash(&genesis_hash) {
+                Some(h) => h,
+                None => return false,
+            };
+        let hash = header.hash();
+        if header.height() > genesis_height
+            || (header.height() == genesis_height && hash == genesis_hash)
+        {
+            return false;
+        }
+        if self.data_man.local_block_info_by_hash(&hash).is_none() {
+            self.data_man
+                .insert_block_header(hash, Arc::new(header.clone()), true);
+            self.data_man.insert_local_block_info(
+                &hash,
+                LocalBlockInfo::new(
+                    BlockStatus::Valid,
+                    0, /* before every era genesis */
+                    self.data_man.get_instance_id(),
+                ),
+            );
+        }
+        true
+    }
+
+    /// Deferred headers whose RandomX seed is known now; they are removed
+    /// from the deferred set and must be requested again.
+    pub fn take_seed_ready_headers(&self) -> Vec<H256> {
+        let mut deferred = self.seed_deferred_headers.lock();
+        if deferred.is_empty() {
+            return Vec::new();
+        }
+        let db = &self.data_man.db_manager;
+        let mut known_seed: HashMap<u64, bool> = HashMap::new();
+        let l = mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
+        let ready: Vec<H256> = deferred
+            .iter()
+            .filter(|(_, height)| {
+                *known_seed.entry(**height / l).or_insert_with(|| {
+                    db.try_get_current_seed_hash(**height).is_some()
+                })
+            })
+            .map(|(hash, _)| *hash)
+            .collect();
+        for hash in &ready {
+            deferred.remove(hash);
+        }
+        ready
+    }
+
+    /// Run `switch` (which moves the consensus era genesis) and rebuild the
+    /// in-memory graph rooted at the new era genesis, dropping every block
+    /// in it, all under the graph lock so no reader sees an era genesis
+    /// that is not in the graph. Used when a fast-sync node re-roots its
+    /// (still empty) chain at a trusted checkpoint; the headers above it are
+    /// then synced again like after a restart.
+    pub fn reroot_at_era_genesis(
+        &self, switch: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let inner = &mut *self.inner.write();
+        switch()?;
+        let genesis_hash = self.data_man.get_cur_consensus_era_genesis_hash();
+        let genesis_header = self
+            .data_man
+            .block_header_by_hash(&genesis_hash)
+            .ok_or("era genesis header missing")?;
+        *inner = SynchronizationGraphInner::with_genesis_block(
+            genesis_header,
+            inner.pow_config.clone(),
+            inner.pow.clone(),
+            inner.config,
+            self.data_man.clone(),
+            inner.machine.clone(),
+        );
+        Ok(())
     }
 
     /// Compute the expected difficulty for a block given its
@@ -1120,19 +1563,39 @@ impl SynchronizationGraph {
         // Recover the initial sequence number in consensus graph
         // based on the sequence number of genesis block in db.
         let genesis_hash = self.data_man.get_cur_consensus_era_genesis_hash();
-        let genesis_local_info =
-            self.data_man.local_block_info_by_hash(&genesis_hash);
-        if genesis_local_info.is_none() {
-            // Local info of genesis block must exist.
-            panic!(
-                "failed to get local block info from db for genesis[{}]",
-                genesis_hash
-            );
-        }
-        let genesis_seq_num = genesis_local_info.unwrap().get_seq_num();
-        self.consensus.set_initial_sequence_number(genesis_seq_num);
         let genesis_header =
-            self.data_man.block_header_by_hash(&genesis_hash).unwrap();
+            match self.data_man.block_header_by_hash(&genesis_hash) {
+                Some(header) => header,
+                None => {
+                    error!(
+                        "failed to recover DAG from db: missing era-genesis header [{}]",
+                        genesis_hash
+                    );
+                    return;
+                }
+            };
+        let genesis_seq_num =
+            match self.data_man.local_block_info_by_hash(&genesis_hash) {
+                Some(info) => info.get_seq_num(),
+                None => {
+                    let fallback_seq_num = genesis_header.height();
+                    warn!(
+                        "missing local block info for era genesis [{}], fallback seq_num={} (from height)",
+                        genesis_hash,
+                        fallback_seq_num
+                    );
+                    self.data_man.insert_local_block_info(
+                        &genesis_hash,
+                        LocalBlockInfo::new(
+                            BlockStatus::Valid,
+                            fallback_seq_num,
+                            self.data_man.get_instance_id(),
+                        ),
+                    );
+                    fallback_seq_num
+                }
+            };
+        self.consensus.set_initial_sequence_number(genesis_seq_num);
         debug!(
             "Get current genesis_block hash={:?}, height={}, seq_num={}",
             genesis_hash,
@@ -1303,6 +1766,26 @@ impl SynchronizationGraph {
                 debug!("BlockIndex {} parent_index {} hash {:?} is header graph ready", index,
                            inner.arena[index].parent, inner.arena[index].block_header.hash());
 
+                // §5.19 body-request-targeting fix: register the block in
+                // `block_to_fill_set` so `request_block_bodies` will fetch
+                // its body. Otherwise the set is only snapshotted once, in
+                // `CatchUpFillBlockBodyPhase::start` (from
+                // `consensus.get_blocks_needing_bodies()`), and blocks that
+                // reach HEADER_GRAPH_READY *after* that snapshot — e.g. via
+                // the frontier-rescue-fetched-header path, or after any
+                // seed-defer reconciliation — are never enqueued for body
+                // fetch. Their `block_ready` stays `false` forever, so
+                // `check_not_ready_frontier` cannot promote them past
+                // status=2 (BLOCK_HEADER_GRAPH_READY), and consensus wedges
+                // at the pivot below (observed live on m1: frontier-diag
+                // pinned the block at height 17525, status=2,
+                // block_ready=false, `missing_bodies: 0`). The remove-on-
+                // body-arrival paths at lines 920 / 2158 keep it bounded.
+                if !inner.arena[index].block_ready {
+                    let h = inner.arena[index].block_header.hash();
+                    inner.block_to_fill_set.insert(h);
+                }
+
                 let r = inner.verify_header_graph_ready_block(index);
 
                 if need_to_verify && r.is_err() {
@@ -1342,15 +1825,7 @@ impl SynchronizationGraph {
                     );
                 }
                 if insert_to_consensus {
-                    CONSENSUS_WORKER_QUEUE.enqueue(1);
-
-                    self.consensus_unprocessed_count
-                        .fetch_add(1, Ordering::SeqCst);
-                    assert!(
-                        self.new_block_hashes
-                            .send(inner.arena[index].block_header.hash(),),
-                        "consensus receiver dropped"
-                    );
+                    self.send_to_consensus(inner, index);
 
                     // maintain not_ready_blocks_frontier
                     inner.not_ready_blocks_frontier.remove(&index);
@@ -1405,10 +1880,113 @@ impl SynchronizationGraph {
     ) -> (BlockHeaderInsertionResult, Vec<H256>) {
         let _timer = MeterTimer::time_func(SYNC_INSERT_HEADER.as_ref());
         self.statistics.inc_sync_graph_inserted_header_count();
+
+        // Fast-sync anchor bootstrap (docs/fast-sync-design.md §5.19): the
+        // anchor, its epoch and the chain below it down to the RandomX seed
+        // it needs are only persisted. The bootstrap authenticates them by
+        // walking parent hashes down from the configured anchor hash; none
+        // is ever inserted into our graph or ordered by our consensus.
+        if persistent {
+            let anchor_height = self
+                .fast_sync_anchor
+                .lock()
+                .as_ref()
+                .map(|a| a.stable.checkpoint_height);
+            if let Some(anchor_height) = anchor_height {
+                if header.height() <= anchor_height {
+                    self.data_man.insert_block_header(
+                        header.hash(),
+                        Arc::new(header.clone()),
+                        true,
+                    );
+                    return (
+                        BlockHeaderInsertionResult::TemporarySkipped,
+                        Vec::new(),
+                    );
+                }
+            }
+        }
+
+        // Compute the RandomX hash before taking the graph lock: it is the
+        // expensive part of verifying a header (and consensus reuses it), so
+        // IO workers inserting headers in parallel must not serialize on it.
+        if need_to_verify && header.pow_hash.is_none() && !self.is_consortium()
+        {
+            if let Some(seed) = self
+                .data_man
+                .db_manager
+                .try_get_current_seed_hash(header.height())
+            {
+                VerificationConfig::get_or_fill_header_pow_hash(
+                    &self.pow, header, &seed,
+                );
+            }
+        }
+
         let inner = &mut *self.inner.write();
         if inner.locked_for_catchup {
             // Ignore received headers when we are downloading block bodies.
             return (BlockHeaderInsertionResult::TemporarySkipped, Vec::new());
+        }
+        // DoS guard: bound the in-memory arena to prevent a misbehaving
+        // peer from filling RAM with unresolvable orphan headers. The
+        // cap fires only when **not** in catch-up — during catch-up
+        // (cold-start replay, snapshot-sync, archive-mode header
+        // ingest) the arena legitimately grows past the cap until the
+        // first era checkpoint clears it via `try_clear_old_era_blocks`.
+        //
+        // Threat model recap: the H-2 DoS attacker we're guarding
+        // against is "peer floods orphans on an already-synced node",
+        // which is structurally distinct from "operator-supervised
+        // catch-up". See `docs/security-audit.md` finding H-2 and
+        // `docs/chain-model.md` §3 (catch-up bypass).
+        if !self.verification_config.catch_up_mode()
+            && inner.arena.len() >= SYNC_GRAPH_ARENA_HARD_CAP
+        {
+            // Deadlock safety net: reject ONLY orphan headers (parent not in
+            // the graph) — those are the RAM-filling flood the H-2 guard
+            // targets. A header whose parent is already present extends a
+            // known chain and MUST be admitted even at cap: rejecting it
+            // (e.g. our own freshly-mined block, or the next pivot block)
+            // would freeze the tip, which freezes stable-checkpoint
+            // advancement, which freezes arena GC — a permanent deadlock.
+            // Chain-extending blocks are PoW-verified downstream so admitting
+            // them is not a cheap flood vector. In healthy operation the
+            // mining backpressure in `on_mined_block` keeps the arena well
+            // below the cap; this guard only matters if it is somehow reached.
+            let parent_present =
+                inner.hash_to_arena_indices.contains_key(header.parent_hash());
+            if !parent_present {
+                SYNC_GRAPH_REJECTED_OVER_CAP.mark(1);
+                warn!(
+                    "Dropping ORPHAN header {} — sync-graph arena at cap \
+                     ({}/{}) outside catch-up. Peer NOT penalised: the \
+                     header may be well-formed, only our local backlog is \
+                     full (see H-2 guard + `AtCapacity` variant).",
+                    header.hash(),
+                    inner.arena.len(),
+                    SYNC_GRAPH_ARENA_HARD_CAP
+                );
+                // AtCapacity, NOT Invalid — a fresh block from a
+                // faster peer LOOKS like an orphan to a lagging
+                // peer; routing to Invalid → Failure → disconnect
+                // systematically drops exactly the peers we need
+                // to catch up with. That cascade fragmented the
+                // fleet into a 3-way miner fork on 2026-07-08
+                // (see fleet incident report).
+                return (BlockHeaderInsertionResult::AtCapacity, Vec::new());
+            }
+            // Chain-extending block at cap: try to reclaim old-era blocks to
+            // bound growth, then admit it so the pivot can keep advancing.
+            inner.try_clear_old_era_blocks();
+            warn!(
+                "sync-graph arena at cap ({}/{}) but admitting chain-extending \
+                 header {} (parent present) to avoid a pivot deadlock — arena \
+                 GC is lagging; check execution/checkpoint backpressure.",
+                inner.arena.len(),
+                SYNC_GRAPH_ARENA_HARD_CAP,
+                header.hash()
+            );
         }
         let hash = header.hash();
 
@@ -1417,10 +1995,102 @@ impl SynchronizationGraph {
             return (BlockHeaderInsertionResult::Invalid, Vec::new());
         }
 
-        let block_seed_hash = self
+        if local_info_opt.is_none() && self.record_pre_era_header(header) {
+            return (
+                BlockHeaderInsertionResult::AlreadyProcessedInConsensus,
+                Vec::new(),
+            );
+        }
+
+        // Resolve the RandomX seed for this block's epoch. If the
+        // lookup misses (non-genesis epoch, seed not in DB), we
+        // **reject** the block rather than fall back to a zero seed
+        // — a zero seed bypasses PoW verification in `verify_pow`,
+        // which would silently accept invalid blocks, and it makes the
+        // PoW quality that classifies heavy/timer blocks (and so the
+        // consensus ordering) differ from every other node. See
+        // docs/security-audit.md finding H-1. A node anchored at a
+        // fast-sync checkpoint has the seeds below the anchor recorded
+        // by the anchor bootstrap (`anchored_seed_hash_from_db`).
+        let block_seed_hash = match self
             .data_man
             .db_manager
-            .get_current_seed_hash(header.height());
+            .try_get_current_seed_hash(header.height())
+        {
+            Some(h) => h,
+            None => {
+                if header.height() > self.consensus.best_epoch_number() {
+                    // "Falling behind shouldn't be fatal." The seed for
+                    // this block's RandomX epoch lives ~RANDOMX_EPOCH_LENGTH
+                    // blocks below it and is only available once we've
+                    // EXECUTED that far. A node whose execution has fallen
+                    // more than one RandomX epoch behind the header tip
+                    // (e.g. after an OOM/restart, or a slow peer) therefore
+                    // can't yet resolve the seed for legitimate forward
+                    // headers. Previously we marked such a header `Invalid`
+                    // and the caller dropped the peer — which both wedged
+                    // catch-up (every forward header rejected) and tore
+                    // down the very peers we needed to catch up from.
+                    //
+                    // Since this header is strictly ahead of our best epoch
+                    // it is plausibly canonical chain we simply haven't
+                    // executed up to yet, so DEFER it (`TemporarySkipped`)
+                    // instead of rejecting: the peer stays connected and the
+                    // header is re-tried once execution advances enough to
+                    // provide the seed. This does NOT accept the block (no
+                    // zero-seed PoW bypass) and memory stays bounded by
+                    // `SYNC_GRAPH_ARENA_HARD_CAP`, so it doesn't widen the
+                    // H-1 surface. A seed-miss at-or-below our best epoch is
+                    // the genuinely-anomalous case (DB inconsistency or a
+                    // back-dated attacker block) and stays `Invalid` below.
+                    SYNC_GRAPH_SEED_DEFERRED.mark(1);
+                    {
+                        let mut deferred = self.seed_deferred_headers.lock();
+                        if deferred.len() < MAX_SEED_DEFERRED_HEADERS {
+                            deferred.insert(header.hash(), header.height());
+                        }
+                    }
+                    // Name the missing seed once a minute: a node that keeps
+                    // deferring the same height is wedged on it.
+                    {
+                        use std::sync::atomic::{AtomicU64, Ordering};
+                        static LAST: AtomicU64 = AtomicU64::new(0);
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        if now >= LAST.load(Ordering::Relaxed) + 60 {
+                            LAST.store(now, Ordering::Relaxed);
+                            let l = mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
+                            warn!(
+                                "deferring header {:?} at height {}: its \
+                                 RandomX seed (the pivot at height {}) is \
+                                 not known here yet (best epoch {})",
+                                header.hash(),
+                                header.height(),
+                                (header.height() / l).saturating_sub(1) * l,
+                                self.consensus.best_epoch_number(),
+                            );
+                        }
+                    }
+                    return (
+                        BlockHeaderInsertionResult::TemporarySkipped,
+                        Vec::new(),
+                    );
+                } else {
+                    warn!(
+                        "Rejecting block {}: seed lookup missed at height {} at-or-below best epoch {} (DB inconsistency or back-dated attacker block)",
+                        header.hash(),
+                        header.height(),
+                        self.consensus.best_epoch_number(),
+                    );
+                    return (
+                        BlockHeaderInsertionResult::Invalid,
+                        Vec::new(),
+                    );
+                }
+            }
+        };
 
         if let Some(info) = local_info_opt {
             // If the block is ordered before current era genesis or it has
@@ -1463,11 +2133,17 @@ impl SynchronizationGraph {
             );
         }
 
-        // skip check for consortium currently
+        // PoW bypass C/D — every silent skip is now counter-instrumented.
+        // See docs/chain-model.md §3 and the `pow_metrics` module in
+        // crates/mazzecore/core/src/verification.rs.
         debug!("is_consortium={:?}", self.is_consortium());
         let verification_passed = if need_to_verify {
-            self.is_consortium()
-                || !(self.parent_or_referees_invalid(header)
+            if self.is_consortium() {
+                crate::verification::pow_metrics::SKIPPED_CONSORTIUM
+                    .mark(1);
+                true
+            } else {
+                !(self.parent_or_referees_invalid(header)
                     || self
                         .verification_config
                         .verify_header_params(
@@ -1483,8 +2159,23 @@ impl SynchronizationGraph {
                             Err(e)
                         })
                         .is_err())
+            }
         } else {
-            if !bench_mode && !self.is_consortium() {
+            if bench_mode {
+                // Locally-mined block in bench mode — we accept it
+                // without verifying. WARN-level because a *production*
+                // node hitting this path means somebody flipped
+                // bench_mode by mistake.
+                warn!(
+                    "PoW verification bypassed: bench_mode accepting locally-mined block {:?} without re-checking nonce",
+                    header.hash()
+                );
+                crate::verification::pow_metrics::BENCH_MODE_FAILURE
+                    .mark(1);
+            } else if self.is_consortium() {
+                crate::verification::pow_metrics::SKIPPED_CONSORTIUM
+                    .mark(1);
+            } else {
                 info!(
                     "sync graph verify_pow called for block: {:?}",
                     header.hash()
@@ -1584,6 +2275,102 @@ impl SynchronizationGraph {
         }
     }
 
+    /// Hand block `index` to the consensus worker -- at most once per
+    /// sync-graph node, and only after every predecessor (parent, referees)
+    /// in the sync graph that is header-graph-ready but was not handed over
+    /// yet.
+    ///
+    /// Two invariants of the consensus side depend on this:
+    ///
+    /// * Exactly-once. A block becomes deliverable at
+    ///   BLOCK_HEADER_GRAPH_READY in a header-to-consensus phase and again at
+    ///   BLOCK_GRAPH_READY when its body arrives (body sync runs in every
+    ///   phase since §5.20). The consensus worker only drops a repeat while
+    ///   the first copy is still queued, and `ConsensusGraphInner::insert`
+    ///   has no duplicate guard: each repeat became a second ("shadow") arena
+    ///   node and `hash_to_arena_indices` was re-pointed at it, so later
+    ///   children hung off the shadow copy. An era checkpoint on the original
+    ///   lineage then turned the whole shadow into out-era legacy
+    ///   (era_block = NULL) while the hashes still mapped to it, and every
+    ///   later block was inserted as an out-era stub: the pivot froze for
+    ///   good (reproduced in sync::tests).
+    /// * Parent first. A block whose parent is not in consensus when the
+    ///   worker processes it is inserted as an out-era stub, permanently,
+    ///   together with all its descendants. A block can reach
+    ///   BLOCK_HEADER_GRAPH_READY through a call that does not insert into
+    ///   consensus (`insert_to_consensus = false`, e.g. a body response for a
+    ///   header-less block) while its child is then handed over by a call
+    ///   that does. Either path fits the m6 freeze (2026-10-17, epoch
+    ///   484767: every block after the pivot child e2f5b15f was a stub);
+    ///   no checkpoint formed during that run, so the second is the likelier.
+    fn send_to_consensus(
+        &self, inner: &mut SynchronizationGraphInner, index: usize,
+    ) {
+        if inner.arena[index].sent_to_consensus {
+            return;
+        }
+        // Iterative post-order DFS over not-yet-sent predecessors. A node
+        // pushed twice (diamond) is skipped once it has been marked sent.
+        let mut stack = vec![(index, false)];
+        let mut order = Vec::new();
+        while let Some((i, expanded)) = stack.pop() {
+            if inner.arena[i].sent_to_consensus {
+                continue;
+            }
+            if expanded {
+                inner.arena[i].sent_to_consensus = true;
+                order.push(i);
+                continue;
+            }
+            stack.push((i, true));
+            let node = &inner.arena[i];
+            for p in std::iter::once(node.parent)
+                .chain(node.referees.iter().copied())
+            {
+                if p != NULL
+                    && !inner.arena[p].sent_to_consensus
+                    && inner.arena[p].graph_status >= BLOCK_HEADER_GRAPH_READY
+                {
+                    stack.push((p, false));
+                }
+            }
+        }
+        for i in order {
+            let h = inner.arena[i].block_header.hash();
+            if i != index {
+                // Keep `not_ready_blocks_frontier` as the header-to-consensus
+                // send path does (for `index` the caller maintains it).
+                inner.not_ready_blocks_frontier.remove(&i);
+                let children: Vec<usize> = inner.arena[i]
+                    .children
+                    .iter()
+                    .copied()
+                    .filter(|c| {
+                        inner.arena[*c].graph_status < BLOCK_HEADER_GRAPH_READY
+                    })
+                    .collect();
+                for c in children {
+                    inner.not_ready_blocks_frontier.insert(c);
+                }
+                warn!(
+                    "send_to_consensus: {:?} (height {}) had not been handed \
+                     to consensus before its descendant {:?}; sending it \
+                     first",
+                    h,
+                    inner.arena[i].block_header.height(),
+                    inner.arena[index].block_header.hash(),
+                );
+            }
+            CONSENSUS_WORKER_QUEUE.enqueue(1);
+            self.consensus_unprocessed_count
+                .fetch_add(1, Ordering::SeqCst);
+            assert!(
+                self.new_block_hashes.send(h),
+                "consensus receiver dropped"
+            );
+        }
+    }
+
     fn set_graph_ready(
         &self, inner: &mut SynchronizationGraphInner, index: usize,
     ) {
@@ -1599,11 +2386,9 @@ impl SynchronizationGraph {
 
         let h = inner.arena[index].block_header.hash();
         debug!("Block {:?} is graph ready", h);
-        CONSENSUS_WORKER_QUEUE.enqueue(1);
-
-        self.consensus_unprocessed_count
-            .fetch_add(1, Ordering::SeqCst);
-        assert!(self.new_block_hashes.send(h), "consensus receiver dropped");
+        // In a header-to-consensus phase the block was usually handed to
+        // consensus already, at BLOCK_HEADER_GRAPH_READY; this is then a no-op.
+        self.send_to_consensus(inner, index);
 
         if inner.config.enable_state_expose {
             STATE_EXPOSER.sync_graph.lock().ready_block_vec.push(
@@ -1700,12 +2485,21 @@ impl SynchronizationGraph {
             if let Some(index) = inner.hash_to_arena_indices.get(&hash) {
                 inner.arena[*index].block_ready
             } else {
-                // Sync graph is cleaned after inserting the header, so we can
-                // ignore the block body
+                // Sync graph is cleaned after inserting the header (old-era
+                // GC), so we can ignore the block body. Drop the hash from the
+                // body-fill set as well: the block no longer exists here, so the
+                // drain must stop re-requesting its body forever.
+                inner.block_to_fill_set.remove(&hash);
                 return BlockInsertionResult::Ignored;
             };
 
         if contains_block {
+            // The body is already here (e.g. loaded from the DB when the
+            // graph was recovered), so the block needs no filling. Leaving it
+            // in `block_to_fill_set` made it immortal: m2 restarted with 1.67M
+            // such entries, `missing_bodies` never fell, and header sync
+            // stayed gated on the fill debt (2026-10-19).
+            inner.block_to_fill_set.remove(&hash);
             return BlockInsertionResult::AlreadyProcessed;
         }
 
@@ -1752,6 +2546,20 @@ impl SynchronizationGraph {
                 _ => {}
             };
         }
+
+        // The body has now arrived and passed the tx-root check (the
+        // RequestAgain path returned above, keeping its hash for refetch), so
+        // this block no longer needs filling. Drop it from `block_to_fill_set`
+        // unconditionally. THIS is the core 0-tx-desync fix: the Normal-phase
+        // path below (propagate_graph_status -> set_graph_ready) never removed
+        // the hash, so the set grew to ~every block since genesis and the
+        // body-request drain -- picking <=400 of an UNORDERED set-difference --
+        // selected the one frontier body a node actually needed with
+        // probability ~400/260k, freezing consensus for tens of minutes. (The
+        // locked-for-catchup branch below already removed it; this covers the
+        // Normal path. Invalid blocks are additionally purged via
+        // process_invalid_blocks.)
+        inner.block_to_fill_set.remove(&hash);
 
         let block = Arc::new(block);
         if inner.arena[me].graph_status != BLOCK_INVALID {
@@ -1839,6 +2647,24 @@ impl SynchronizationGraph {
         self.data_man.cached_block_count()
     }
 
+    /// Current number of nodes in the sync-graph arena. Grows with blocks
+    /// admitted above the current era genesis and shrinks as
+    /// `try_clear_old_era_blocks` GCs old-era blocks after a checkpoint forms.
+    /// Used as a LOCAL mining-backpressure signal (Guard D in `on_mined_block`):
+    /// when checkpoint formation (`make_checkpoint_at`, O(arena)) falls behind
+    /// era production, the arena bloats past its hard cap and every subsequent
+    /// formation gets O(N)-slower — a collapse. Throttling mining on this local
+    /// size lets GC catch up. Reading it takes the inner read lock.
+    pub fn arena_len(&self) -> usize {
+        self.inner.read().arena.len()
+    }
+
+    /// The sync-graph arena hard cap, exposed so callers (mining backpressure)
+    /// can size their thresholds relative to it.
+    pub fn arena_hard_cap(&self) -> usize {
+        SYNC_GRAPH_ARENA_HARD_CAP
+    }
+
     /// Remove all blocks which have not been updated for a long time. We
     /// maintain a set `not_ready_blocks_frontier` which is the root nodes in
     /// the parental tree formed by not graph ready blocks. Find all expire
@@ -1853,7 +2679,11 @@ impl SynchronizationGraph {
         let all_not_ready: HashSet<_> = inner.get_future(frontier);
         let mut expire_set = HashSet::new();
         for index in all_not_ready {
-            if inner.arena[index].last_update_timestamp + expire_time < now {
+            let ts = match inner.arena.get(index) {
+                Some(node) => node.last_update_timestamp,
+                None => continue,
+            };
+            if ts + expire_time < now {
                 expire_set.insert(index);
             }
         }
@@ -1878,12 +2708,151 @@ impl SynchronizationGraph {
         inner.remove_blocks(&index_set_and_future);
     }
 
+    pub fn consensus_unprocessed_count(&self) -> usize {
+        self.consensus_unprocessed_count.load(Ordering::SeqCst)
+    }
+
     pub fn is_consensus_worker_busy(&self) -> bool {
         self.consensus_unprocessed_count.load(Ordering::SeqCst) != 0
     }
 
     pub fn is_fill_block_completed(&self) -> bool {
         self.inner.read().block_to_fill_set.is_empty()
+    }
+
+    /// Collect missing header dependencies for blocks currently stranded in
+    /// the not-ready frontier. This complements the normal dependency
+    /// requests triggered while handling fresh header responses.
+    pub fn collect_missing_frontier_dependencies(
+        &self, limit: usize,
+    ) -> Vec<H256> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let inner = self.inner.read();
+        if inner.locked_for_catchup {
+            return Vec::new();
+        }
+
+        let genesis_hash = self.data_man.get_cur_consensus_era_genesis_hash();
+        let genesis_seq_num =
+            match self.data_man.local_block_info_by_hash(&genesis_hash) {
+                Some(info) => info.get_seq_num(),
+                None => return Vec::new(),
+            };
+
+        let mut requested = HashSet::new();
+        let mut missing = Vec::new();
+        let frontier_snapshot: Vec<usize> = inner
+            .not_ready_blocks_frontier
+            .get_frontier()
+            .iter()
+            .copied()
+            .collect();
+
+        for index in frontier_snapshot {
+            let node = match inner.arena.get(index) {
+                Some(node) => node,
+                None => continue,
+            };
+
+            if node.parent == NULL
+                && !node.parent_reclaimed
+                && !inner.is_graph_ready_in_db(
+                    node.block_header.parent_hash(),
+                    genesis_seq_num,
+                )
+            {
+                let parent = *node.block_header.parent_hash();
+                if requested.insert(parent) {
+                    missing.push(parent);
+                    if missing.len() >= limit {
+                        break;
+                    }
+                }
+            }
+
+            let referee_hash_in_mem: HashSet<_> = node
+                .referees
+                .iter()
+                .map(|referee| inner.arena[*referee].block_header.hash())
+                .collect();
+
+            for referee_hash in node.block_header.referee_hashes() {
+                if referee_hash_in_mem.contains(referee_hash)
+                    || inner.is_graph_ready_in_db(referee_hash, genesis_seq_num)
+                {
+                    continue;
+                }
+
+                if requested.insert(*referee_hash) {
+                    missing.push(*referee_hash);
+                    if missing.len() >= limit {
+                        break;
+                    }
+                }
+            }
+
+            if missing.len() >= limit {
+                break;
+            }
+        }
+
+        missing
+    }
+
+    /// §5.23 recovery: collect frontier blocks whose header is graph-ready
+    /// but body is still missing (`block_ready == false`). These are the
+    /// symptomatic stuck blocks — same hash recurring in the §5.18
+    /// frontier-diag every 30s. The caller uses this list to force-clear
+    /// the request manager's in-flight set (which may falsely think the
+    /// block was already requested) and to re-request the body.
+    pub fn collect_stuck_frontier_bodies(&self) -> Vec<H256> {
+        let inner = self.inner.read();
+        // NOTE: previously this early-returned `Vec::new()` when
+        // `locked_for_catchup` (i.e. during CatchUpFillBlockBodyPhase). That
+        // created a DEADLOCK: if a frontier body is orphaned in the request
+        // manager's in-flight set — so the regular drain's
+        // `.difference(&in_flight_blocks)` filter skips it forever, 0 GetBlocks
+        // go out, missing_bodies frozen — the fill never completes,
+        // `complete_filling_block_bodies` keeps returning false,
+        // `locked_for_catchup` never clears, and THIS recovery (the only path
+        // that clears the orphaned in-flight entry + priority re-requests it,
+        // see §5.26 in `request_block_bodies`) stays disabled. The missing body
+        // keeps the lock set; the lock keeps the recovery off. This collection
+        // is read-only and its caller only mutates request-manager /
+        // `block_to_fill_set` state — never the sync/consensus graph that
+        // `locked_for_catchup` protects — so it is safe to run during catch-up,
+        // and necessary to break the deadlock. Observed live: fleet wedged with
+        // 1 not-ready frontier body present only on a forked peer.
+        let mut stuck = Vec::new();
+        for &idx in inner.not_ready_blocks_frontier.get_frontier().iter() {
+            let node = match inner.arena.get(idx) {
+                Some(node) => node,
+                None => continue,
+            };
+            if !node.block_ready {
+                stuck.push(node.block_header.hash());
+            }
+        }
+        stuck
+    }
+
+    /// §5.23 recovery: idempotently ensure the given hashes are in
+    /// `block_to_fill_set` so `request_block_bodies` will fetch them.
+    /// The §5.19 fix already inserts here at HEADER_GRAPH_READY
+    /// transition; this defensive re-insertion covers the case where
+    /// a block reached HEADER_GRAPH_READY under a code path that
+    /// bypassed that insertion, leaving it permanently unfetched.
+    pub fn reinsert_to_fill_set(&self, hashes: &[H256]) {
+        if hashes.is_empty() {
+            return;
+        }
+        let mut inner = self.inner.write();
+        for h in hashes {
+            inner.block_to_fill_set.insert(*h);
+        }
     }
 
     /// Construct the states along the main chain, set all
@@ -1902,6 +2871,21 @@ impl SynchronizationGraph {
 
             // Iterating over `hash_to_arena_indices` might be more efficient
             // than iterating over `arena`.
+            // §5.24: collect the indices that transition here so we can
+            // scrub them from `not_ready_blocks_frontier`. The
+            // BLOCK_HEADER_GRAPH_READY → BLOCK_GRAPH_READY transition here
+            // bypasses `set_graph_ready`, which is the only site that
+            // maintains the frontier. Without this cleanup, the newly-ready
+            // blocks stay pinned in the frontier forever with status=3,
+            // block_ready=true — `check_not_ready_frontier` keeps sampling
+            // them every second, `set_graph_ready` never re-runs (already
+            // GRAPH_READY), and consensus stalls behind them. Observed live
+            // on m3 (mining node, post-restart): 4 frontier blocks at
+            // heights 662-665 status=3 block_ready=true, blockers=[NONE —
+            // promotable now (transient, or a promotion logic gap)] for
+            // hours; sync/consensus lag 1430 → chain frozen at epoch 664
+            // while the rest of the fleet reached epoch 47k+.
+            let mut promoted_here: Vec<usize> = Vec::new();
             let to_remove = {
                 let arena = &mut inner.arena;
                 inner
@@ -1912,6 +2896,7 @@ impl SynchronizationGraph {
                         if graph_node.graph_status == BLOCK_HEADER_GRAPH_READY {
                             graph_node.block_ready = true;
                             graph_node.graph_status = BLOCK_GRAPH_READY;
+                            promoted_here.push(*index);
                         }
                         if graph_node.graph_status != BLOCK_GRAPH_READY {
                             Some(*index)
@@ -1922,6 +2907,46 @@ impl SynchronizationGraph {
                     .collect()
             };
             inner.remove_blocks(&to_remove);
+            for idx in &promoted_here {
+                inner.not_ready_blocks_frontier.remove(idx);
+            }
+
+            // A block promoted here becomes GRAPH_READY in the sync graph,
+            // so its children will be handed to consensus -- but nothing
+            // guaranteed the block itself ever reached consensus (e.g. its
+            // header became ready while the graph was locked for catch-up).
+            // Consensus then inserts every descendant as an out-era stub
+            // and stops growing for good (local harness: archive frozen at
+            // epoch 162 after FillBlockBody). Hand the missing ones to the
+            // consensus worker now, parents first, exactly like
+            // `set_graph_ready` does.
+            let mut missing: HashSet<usize> = HashSet::new();
+            for i in promoted_here.iter().copied() {
+                if !inner.arena.contains(i) || inner.arena[i].sent_to_consensus
+                {
+                    continue;
+                }
+                if self
+                    .consensus
+                    .contains_block(&inner.arena[i].block_header.hash())
+                {
+                    // Delivered through an earlier sync-graph node for the
+                    // same hash; never deliver it twice.
+                    inner.arena[i].sent_to_consensus = true;
+                } else {
+                    missing.insert(i);
+                }
+            }
+            if !missing.is_empty() {
+                warn!(
+                    "complete_filling_block_bodies: {} promoted block(s) were \
+                     not in consensus; sending them now",
+                    missing.len()
+                );
+                for i in inner.topological_sort(missing) {
+                    self.send_to_consensus(inner, i);
+                }
+            }
 
             // Check if we skip some block bodies. It's either because they are
             // never retrieved after a long time, or they have invalid
@@ -1943,6 +2968,7 @@ impl SynchronizationGraph {
                 // Send blocks in topological order.
                 let sorted_blocks = inner.topological_sort(all_block_indices);
                 for i in sorted_blocks {
+                    inner.arena[i].sent_to_consensus = true;
                     self.consensus
                         .on_new_block(&inner.arena[i].block_header.hash());
                 }
@@ -1977,6 +3003,75 @@ impl SynchronizationGraph {
             // `CatchUpFillBlockBodyPhase`.
             return;
         }
+
+        // §5.18 diagnostic (read-only, rate-limited to ~30s): dump WHY the
+        // not-ready frontier blocks can't promote. On a healthy node the
+        // sampled blocks turn over each time; on a WEDGED node the SAME
+        // block + same blocker recurs every 30s — pinning the deadlock from
+        // logs without an instrumented build.
+        {
+            use std::sync::atomic::Ordering as AtOrd;
+            let now_secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let last = STUCK_FRONTIER_DIAG_LAST_SECS.load(AtOrd::Relaxed);
+            if now_secs.saturating_sub(last) >= 30 {
+                STUCK_FRONTIER_DIAG_LAST_SECS.store(now_secs, AtOrd::Relaxed);
+                let frontier: Vec<usize> = inner
+                    .not_ready_blocks_frontier
+                    .get_frontier()
+                    .iter()
+                    .copied()
+                    .collect();
+                if !frontier.is_empty() {
+                    warn!(
+                        "§5.18 frontier-diag: {} not-ready frontier block(s); \
+                         sampling up to 5 (same block recurring => wedged):",
+                        frontier.len()
+                    );
+                    for b in frontier.iter().take(5) {
+                        warn!("  {}", inner.diagnose_frontier_stuck(*b));
+                    }
+                }
+            }
+        }
+
+        // §5.24 self-heal: sweep any stale BLOCK_GRAPH_READY entries out
+        // of the frontier before the normal promotion loop. These are
+        // left behind when `complete_filling_block_bodies` (bulk
+        // HEADER_GRAPH_READY → GRAPH_READY transition) forgets to call
+        // the frontier-remove path. Without this, `check_not_ready_frontier`
+        // keeps sampling them every tick and `set_graph_ready` never
+        // re-runs (already GRAPH_READY), leaving them permanently pinned.
+        // Applies to any node that ran through the checkpoint / fill
+        // path prior to §5.24 landing — including nodes upgraded in-
+        // place with retained DB state.
+        {
+            let stale: Vec<usize> = inner
+                .not_ready_blocks_frontier
+                .get_frontier()
+                .iter()
+                .copied()
+                .filter(|&b| {
+                    inner
+                        .arena
+                        .get(b)
+                        .map_or(false, |n| n.graph_status == BLOCK_GRAPH_READY)
+                })
+                .collect();
+            if !stale.is_empty() {
+                debug!(
+                    "§5.24 self-heal: dropping {} stale GRAPH_READY \
+                     entries from not_ready_blocks_frontier",
+                    stale.len()
+                );
+                for idx in &stale {
+                    inner.not_ready_blocks_frontier.remove(idx);
+                }
+            }
+        }
+
         // Iterate over generic not_ready frontier instead of obsolete PoS frontier.
         let frontier_snapshot: Vec<usize> = inner
             .not_ready_blocks_frontier
@@ -2096,6 +3191,24 @@ pub enum BlockHeaderInsertionResult {
     Invalid,
     // The header is received when we have locked sync graph.
     TemporarySkipped,
+    /// The header is a well-formed orphan that could not be admitted
+    /// because the sync-graph arena is at
+    /// [`SYNC_GRAPH_ARENA_HARD_CAP`] (see the H-2 guard at
+    /// `insert_block_header_inner`). Semantically different from
+    /// [`Self::Invalid`]:
+    /// - `Invalid` = the peer sent malformed/wrong-chain data →
+    ///   punish + disconnect.
+    /// - `AtCapacity` = our local backlog is full; the header
+    ///   itself is probably fine → drop silently, do NOT punish
+    ///   the sender.
+    ///
+    /// Callers surface this via the sync-protocol handler as a
+    /// non-disconnecting error (`RequestNotFound`-style) so the
+    /// peer stays in the mesh. See fleet incident report,
+    /// 2026-07-08: era-140k arena-cap cascade fragmented the
+    /// mesh into three miner forks because over-cap orphans were
+    /// routed to `Invalid` → `Failure` → disconnect.
+    AtCapacity,
 }
 
 impl BlockHeaderInsertionResult {
@@ -2105,6 +3218,17 @@ impl BlockHeaderInsertionResult {
 
     pub fn is_invalid(&self) -> bool {
         matches!(self, BlockHeaderInsertionResult::Invalid)
+    }
+
+    /// True iff this outcome represents a peer-side fault worthy
+    /// of a disconnect. `Invalid` = malformed / wrong-chain =
+    /// yes. `AtCapacity` = local backlog full = no.
+    pub fn is_peer_fault(&self) -> bool {
+        matches!(self, BlockHeaderInsertionResult::Invalid)
+    }
+
+    pub fn is_at_capacity(&self) -> bool {
+        matches!(self, BlockHeaderInsertionResult::AtCapacity)
     }
 
     pub fn should_process_body(&self) -> bool {

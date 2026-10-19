@@ -2,10 +2,20 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
+use mazze_eth_vm::RevmExec;
+use mazze_types::Space;
 use mazze_vm_interpreter::{Factory as EvmFactory, VMType};
 use mazze_vm_types::{ActionParams, Exec, Spec};
 
-/// Virtual machine factory
+/// Virtual machine factory.
+///
+/// Routing rule (genesis-default, no transition flag):
+/// - `Space::Ethereum` (eSpace) → [`RevmExec`] (revm 40, target = `PRAGUE`)
+/// - `Space::Native`            → custom interpreter
+///
+/// The cross-space internal contract is dispatched in `make_executable()`
+/// *before* `create()` is called, so its routing is unaffected by this
+/// split — both directions flow through the bridge above the VM layer.
 #[derive(Default, Clone)]
 pub struct VmFactory {
     evm_factory: EvmFactory,
@@ -15,7 +25,13 @@ impl VmFactory {
     pub fn create(
         &self, params: ActionParams, spec: &Spec, depth: usize,
     ) -> Box<dyn Exec> {
-        self.evm_factory.create(params, spec, depth)
+        match params.space {
+            Space::Ethereum => {
+                let gas = params.gas;
+                Box::new(RevmExec::new(params, gas, spec))
+            }
+            Space::Native => self.evm_factory.create(params, spec, depth),
+        }
     }
 
     pub fn new(cache_size: usize) -> Self {

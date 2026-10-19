@@ -87,8 +87,23 @@ fn on_new_decoded_block(
                 );
             if insert_result.is_new_valid() {
                 need_to_relay.extend(to_relay);
-            } else {
+            } else if insert_result.is_peer_fault() {
+                // `Invalid` = malformed / wrong-chain data.
+                // Punish + disconnect via the sync-protocol handler.
                 return Err(Error::from_kind(ErrorKind::InvalidBlock));
+            } else {
+                // `AtCapacity` (our local arena is full — see the H-2
+                // guard) / `TemporarySkipped` (sync graph was locked)
+                // / `AlreadyProcessed*` (we already have it). NONE of
+                // these are peer faults; drop silently so the peer
+                // stays in the mesh. Return empty relay list — we
+                // haven't inserted the block, nothing to gossip.
+                //
+                // Rejecting fresh NEW_BLOCK gossip as `InvalidBlock`
+                // was the trigger for the 2026-07-08 fleet fork:
+                // arena-cap → InvalidBlock → Failure → disconnect →
+                // three-way miner fork. See fleet incident report.
+                return Ok(Vec::new());
             }
         }
     }

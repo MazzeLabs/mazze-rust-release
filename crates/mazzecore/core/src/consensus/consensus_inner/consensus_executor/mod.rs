@@ -3,6 +3,7 @@
 // See http://www.gnu.org/licenses/
 
 mod epoch_execution;
+mod exec_profile;
 
 use core::convert::TryFrom;
 use std::{
@@ -10,7 +11,7 @@ use std::{
     convert::From,
     fmt::{Debug, Formatter},
     sync::{
-        atomic::{AtomicBool, Ordering::Relaxed},
+        atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed},
         mpsc::{channel, RecvError, Sender, TryRecvError},
         Arc,
     },
@@ -36,8 +37,8 @@ use mazze_types::{
     Space, H160, H256, KECCAK_EMPTY_BLOOM, U256, U512,
 };
 use metrics::{
-    register_meter_with_group, register_timer_with_group, Meter, MeterTimer,
-    ScopeTimer, Timer,
+    register_meter_with_group, register_timer_with_group, Counter, CounterUsize,
+    Meter, MeterTimer, ScopeTimer, Timer,
 };
 use primitives::{
     compute_block_number, receipt::BlockReceipts, Block, BlockHeader,
@@ -76,6 +77,7 @@ use alloy_rpc_types_trace::geth::GethDebugTracingOptions;
 
 use self::epoch_execution::{GethTask, VirtualCall};
 
+
 lazy_static! {
     static ref CONSENSIS_EXECUTION_TIMER: Arc<dyn Meter> =
         register_meter_with_group("timer", "consensus::handle_epoch_execution");
@@ -88,6 +90,38 @@ lazy_static! {
         register_meter_with_group("system_metrics", "good_tps");
     static ref CONSENSUS_STATE_COMMIT_TIMER: Arc<dyn Timer> =
         register_timer_with_group("timer", "consensus::state_commit");
+    /// Executor's optimistic-execution path uses `try_write()` on the
+    /// consensus inner lock. A miss means the consensus thread was holding
+    /// the write lock when the executor had nothing else to do — usually
+    /// fine, but if these spike during a lag it indicates contention.
+    /// See docs/flow-audit.md G-ST-5.
+    static ref OPTIMISTIC_EXEC_LOCK_MISSES: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "executor",
+            "optimistic_lock_misses",
+        );
+    /// Number of epoch blocks that received zero base reward
+    /// (`no_reward` flag was set during preactivation). Tracks how much
+    /// hashpower the network is throwing away on partial-invalid or
+    /// non-rewarded blocks.
+    static ref REWARDS_BLOCKS_NO_REWARD: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("rewards", "blocks_no_reward");
+    /// Number of epoch blocks whose reward was non-trivially reduced by
+    /// outlier penalty (>50% of base reward burned). High counts indicate
+    /// hashpower fragmentation or adaptive-DAG conditions.
+    /// See docs/flow-audit.md G-MN-3.
+    static ref REWARDS_BLOCKS_HEAVY_OUTLIER_PENALTY: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "rewards",
+            "blocks_heavy_outlier_penalty",
+        );
+    /// Number of epoch blocks whose reward was zero because their PoW
+    /// quality was below the epoch difficulty.
+    static ref REWARDS_BLOCKS_LOW_POW: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group(
+            "rewards",
+            "blocks_low_pow_quality",
+        );
 }
 
 const STATE_INIT_RETRIES: usize = 8;
@@ -141,9 +175,21 @@ pub struct EpochExecutionTask {
     epoch_block_hashes: Vec<H256>,
     start_block_number: u64,
     reward_info: Option<RewardExecutionInfo>,
-    // TODO:
-    //  on_local_main should be computed at the beginning of the
-    //  epoch execution, not to be set from task.
+    // INVARIANT (G-ST-4 in docs/flow-audit.md):
+    // `on_local_main` is set by the consensus thread at task-enqueue time
+    // and is **not** re-checked inside the executor thread. This is safe
+    // today because:
+    //   1. The consensus thread is the sole writer of `main_chain`;
+    //   2. Once a task is enqueued, the executor sees a snapshot of the
+    //      chain state through `epoch_block_hashes` and `reward_info`;
+    //   3. If the main chain reorgs after enqueue, the executor still
+    //      processes this task and a subsequent task corrects the state.
+    // The ideal fix is to derive `on_local_main` from `inner.main_chain`
+    // at execution time, but doing so requires re-acquiring the consensus
+    // lock from inside the executor, which would re-introduce the
+    // contention the executor was designed to avoid. Until that lock is
+    // split, this remains a producer-side invariant rather than an
+    // executor-side check.
     on_local_main: bool,
     force_recompute: bool,
 }
@@ -182,6 +228,18 @@ pub struct ConsensusExecutor {
     /// The sender to send tasks to be executed by `self.thread`
     sender: Mutex<Sender<ExecutionTask>>,
 
+    /// Depth of the execution backlog: the number of `ExecuteEpoch`
+    /// tasks that have been `enqueue_epoch`'d but not yet pulled off the
+    /// channel by the worker. The channel itself is unbounded, and each
+    /// queued task pins a reward-window of `Arc<Block>`s, so during
+    /// catch-up (where block download can vastly outrun single-threaded
+    /// execution) this backlog is what balloons memory to OOM. The sync
+    /// layer reads this via `pending_execution_count()` to throttle
+    /// downloads — see the download↔execution backpressure fix.
+    /// Optimistic tasks the worker generates itself are NOT counted (they
+    /// never sit in the channel).
+    pending_exec: AtomicUsize,
+
     /// The state indicating whether the thread should be stopped
     stopped: AtomicBool,
 
@@ -213,6 +271,7 @@ impl ConsensusExecutor {
         let executor_raw = ConsensusExecutor {
             thread: Mutex::new(None),
             sender: Mutex::new(sender),
+            pending_exec: AtomicUsize::new(0),
             stopped: AtomicBool::new(false),
             handler: handler.clone(),
             consensus_graph_bench_mode: bench_mode,
@@ -234,25 +293,32 @@ impl ConsensusExecutor {
                     // Consensus Inner lock, if we wait on
                     // inner lock here we may get deadlock.
                     match receiver.try_recv() {
-                        Ok(task) => Some(task),
+                        // `true` = pulled off the channel (counts against
+                        // `pending_exec`); optimistic tasks use `false`.
+                        Ok(task) => Some((task, true)),
                         Err(TryRecvError::Empty) => {
                             // The channel is empty, so we try to optimistically
                             // get later epochs to execute.
-                            consensus_inner
-                                .try_write()
-                                .and_then(|mut inner| {
-                                    executor_thread
-                                        .get_optimistic_execution_task(
-                                            &mut *inner,
+                            match consensus_inner.try_write() {
+                                Some(mut inner) => executor_thread
+                                    .get_optimistic_execution_task(
+                                        &mut *inner,
+                                    )
+                                    .map(|task| {
+                                        debug!(
+                                            "Get optimistic_execution_task {:?}",
+                                            task
+                                        );
+                                        (
+                                            ExecutionTask::ExecuteEpoch(task),
+                                            false,
                                         )
-                                })
-                                .map(|task| {
-                                    debug!(
-                                        "Get optimistic_execution_task {:?}",
-                                        task
-                                    );
-                                    ExecutionTask::ExecuteEpoch(task)
-                                })
+                                    }),
+                                None => {
+                                    OPTIMISTIC_EXEC_LOCK_MISSES.inc(1);
+                                    None
+                                }
+                            }
                         }
                         Err(TryRecvError::Disconnected) => {
                             info!("Channel disconnected, stop thread");
@@ -260,8 +326,8 @@ impl ConsensusExecutor {
                         }
                     }
                 };
-                let task = match maybe_task {
-                    Some(task) => task,
+                let (task, from_channel) = match maybe_task {
+                    Some(pair) => pair,
                     None => {
                         //  Even optimistic tasks are all finished, so we block
                         // and wait for  new execution
@@ -271,7 +337,7 @@ impl ConsensusExecutor {
                         // case, so this waiting will
                         // not prevent new optimistic tasks from being executed.
                         match receiver.recv() {
-                            Ok(task) => task,
+                            Ok(task) => (task, true),
                             Err(RecvError) => {
                                 info!("Channel receive error, stop thread");
                                 break;
@@ -279,6 +345,16 @@ impl ConsensusExecutor {
                         }
                     }
                 };
+                // Drain the backlog gauge for channel-sourced ExecuteEpoch
+                // tasks (the ones `enqueue_epoch` counted). Optimistic and
+                // GetResult/Stop tasks never incremented it.
+                if from_channel {
+                    if let ExecutionTask::ExecuteEpoch(_) = &task {
+                        executor_thread
+                            .pending_exec
+                            .fetch_sub(1, Relaxed);
+                    }
+                }
                 if !executor_thread.handle_execution_work(task) {
                     // `task` is `Stop`, so just stop.
                     break;
@@ -329,10 +405,8 @@ impl ConsensusExecutor {
                 }))
                 .is_err()
             {
-                return Err(
-                    "Consensus execution worker stopped unexpectedly"
-                        .to_string(),
-                );
+                return Err("Consensus execution worker stopped unexpectedly"
+                    .to_string());
             }
             match receiver.recv() {
                 Ok(Some(result)) => Ok(result),
@@ -356,10 +430,10 @@ impl ConsensusExecutor {
                         ));
                     }
                 }
-                Err(RecvError) => Err(
-                    "Consensus execution worker stopped unexpectedly"
-                        .to_string(),
-                ),
+                Err(RecvError) => {
+                    Err("Consensus execution worker stopped unexpectedly"
+                        .to_string())
+                }
             }
         }
     }
@@ -436,6 +510,7 @@ impl ConsensusExecutor {
             }
             inner.get_main_block_arena_index(opt_height)
         };
+        inner.data_man.sample_state_availability_metrics();
 
         // `on_local_main` is set to `true` because when we later skip its
         // execution on main chain, we will not notify tx pool, so we
@@ -677,13 +752,30 @@ impl ConsensusExecutor {
     /// holding inner lock.
     pub fn enqueue_epoch(&self, task: EpochExecutionTask) -> bool {
         if !self.consensus_graph_bench_mode {
-            self.sender
+            // Count the task before it enters the unbounded channel; roll
+            // back if the send fails so the gauge can't drift upward.
+            self.pending_exec.fetch_add(1, Relaxed);
+            let ok = self
+                .sender
                 .lock()
                 .send(ExecutionTask::ExecuteEpoch(task))
-                .is_ok()
+                .is_ok();
+            if !ok {
+                self.pending_exec.fetch_sub(1, Relaxed);
+            }
+            ok
         } else {
             true
         }
+    }
+
+    /// Number of `ExecuteEpoch` tasks waiting in the execution channel
+    /// (enqueued but not yet pulled by the worker). The sync layer uses
+    /// this to throttle block downloads so the backlog — and the
+    /// `Arc<Block>`s each task pins — can't grow without bound during
+    /// catch-up. See the download↔execution backpressure fix.
+    pub fn pending_execution_count(&self) -> usize {
+        self.pending_exec.load(Relaxed)
     }
 
     /// Execute the epoch synchronously.
@@ -975,14 +1067,20 @@ impl ConsensusExecutionHandler {
         &self, main_block: &Block,
         recover_mpt_during_construct_main_state: bool,
     ) -> DbResult<State> {
-        let state_root_with_aux_info = &self
-            .data_man
-            .get_epoch_execution_commitment(
-                main_block.block_header.parent_hash(),
-            )
-            // Unwrapping is safe because the state exists.
-            .unwrap()
-            .state_root_with_aux_info;
+        // Previously `.unwrap()` — a missing parent execution commitment is a
+        // recoverable data gap, not a reason to kill the consensus worker.
+        // Bind the guard so the read-lock (and the borrowed commitment) live
+        // through the StateIndex construction below.
+        let commitment_guard = self.data_man.get_epoch_execution_commitment(
+            main_block.block_header.parent_hash(),
+        );
+        let state_root_with_aux_info = match &*commitment_guard {
+            Some(commitment) => &commitment.state_root_with_aux_info,
+            None => bail!(
+                "new_state: parent execution commitment missing for {:?}",
+                main_block.block_header.parent_hash()
+            ),
+        };
 
         let state_index = StateIndex::new_for_next_epoch(
             main_block.block_header.parent_hash(),
@@ -991,16 +1089,26 @@ impl ConsensusExecutionHandler {
             self.data_man.get_snapshot_epoch_count(),
         );
 
-        let storage = self
+        let storage = match self
             .data_man
             .storage_manager
             .get_state_for_next_epoch(
                 state_index,
                 recover_mpt_during_construct_main_state,
-            )
-            ?
-            // Unwrapping is safe because the state exists.
-            .expect("State exists");
+            )? {
+            Some(storage) => storage,
+            // Previously `.expect("State exists")` — this fired at epoch
+            // 360,005 when the base snapshot (pre-stable parent) had been
+            // pruned, hard-killing the mining leader and halting the chain.
+            // A missing base state is recoverable (re-sync the snapshot), so
+            // return an error and let `compute_epoch`'s retry-then-skip path
+            // handle it instead of panicking.
+            None => bail!(
+                "new_state: base state unavailable (snapshot pruned?) for the \
+                 epoch after {:?}",
+                main_block.block_header.parent_hash()
+            ),
+        };
 
         let state_db = StateDb::new(storage);
         State::new(state_db)
@@ -1054,6 +1162,13 @@ impl ConsensusExecutionHandler {
         // FIXME: Currently we make the snapshotting decision when committing
         // FIXME: a new state.
 
+        let mut prof = exec_profile::EpochTimer::start();
+        // §B1: the block-number index, receipts / traces / tx index and
+        // reward results this epoch writes are committed together in one
+        // MDBX transaction, flushed before the state commit below (so a
+        // crash can never leave a state commit or execution commitment
+        // without them, as before). Early returns flush on drop.
+        let write_buffer = self.data_man.db_manager.buffer_writes();
         // persist block number index
         // note: we need to persist before execution because in some cases,
         // execution is skipped. when `compute_epoch` is called, it is
@@ -1105,6 +1220,7 @@ impl ConsensusExecutionHandler {
             epoch_blocks.len(),
         );
 
+        prof.mark(exec_profile::Phase::Pre);
         let mut state = match self
             .new_state(main_block, recover_mpt_during_construct_main_state)
         {
@@ -1115,14 +1231,10 @@ impl ConsensusExecutionHandler {
                 loop {
                     warn!(
                         "Consensus state init failed (attempt {}/{}): {}",
-                        attempt,
-                        STATE_INIT_RETRIES,
-                        last_err
+                        attempt, STATE_INIT_RETRIES, last_err
                     );
                     if attempt >= STATE_INIT_RETRIES {
-                        warn!(
-                            "Consensus state init failed, skipping epoch"
-                        );
+                        warn!("Consensus state init failed, skipping epoch");
                         return false;
                     }
                     thread::sleep(Duration::from_millis(
@@ -1139,24 +1251,57 @@ impl ConsensusExecutionHandler {
                 }
             }
         };
+        prof.mark(exec_profile::Phase::NewState);
 
-        let epoch_receipts = self
-            .process_epoch_transactions(
-                *epoch_hash,
-                &mut state,
-                &epoch_blocks,
-                start_block_number,
-                on_local_main,
-                /* virtual_call */ None,
-            )
-            // TODO: maybe propagate the error all the way up so that the
-            // program may restart by itself.
-            .expect("Can not handle db error in consensus, crashing.");
+        let epoch_receipts = match self.process_epoch_transactions(
+            *epoch_hash,
+            &mut state,
+            &epoch_blocks,
+            start_block_number,
+            on_local_main,
+            /* virtual_call */ None,
+        ) {
+            Ok(receipts) => receipts,
+            // Previously `.expect(...)` hard-crashed the node on any DB error
+            // mid-execution. Nothing is committed yet (commit is below), so the
+            // half-built `state` is simply discarded; skip the epoch and let it
+            // be retried rather than taking down the mining leader / halting the
+            // chain.
+            Err(err) => {
+                warn!(
+                    "compute_epoch: process_epoch_transactions db error for \
+                     epoch {:?}, skipping epoch: {}",
+                    epoch_hash, err
+                );
+                return false;
+            }
+        };
+        prof.mark(exec_profile::Phase::Evm);
 
         let current_block_number =
             start_block_number + epoch_receipts.len() as u64 - 1;
 
         if let Some(reward_execution_info) = reward_execution_info {
+            // Fix A: warm the PoW-quality cache for every block in the epoch in
+            // PARALLEL before the serial reward loop reads it. Each pow lookup
+            // is a RandomX hash; done serially on the single execution thread it
+            // dominates catch-up (profiled at ~100ms/block in light mode). The
+            // hashes are independent and deterministic, and the shared
+            // PowComputer cache (RwLock LruCache) plus the RandomX VM pool are
+            // already accessed concurrently by IO workers, so par_iter here just
+            // pre-populates the cache — the reward loop below then hits it.
+            // Combined with full-dataset RandomX (pow/cache.rs) this collapses
+            // the reward+pow phase from the dominant cost to a few ms.
+            use rayon::prelude::*;
+            epoch_blocks.par_iter().for_each(|block| {
+                let _ = VerificationConfig::get_or_compute_header_pow_quality(
+                    &self.data_man.pow,
+                    &block.block_header,
+                    &self.data_man.db_manager.get_current_seed_hash(
+                        block.block_header.height(),
+                    ),
+                );
+            });
             let spec = self
                 .machine
                 .spec(current_block_number, main_block.block_header.height());
@@ -1171,12 +1316,29 @@ impl ConsensusExecutionHandler {
                 spec,
             );
         }
+        prof.mark(exec_profile::Phase::RewardPow);
+        drop(write_buffer);
+        prof.mark(exec_profile::Phase::Flush);
 
         let _commit_timer =
             ScopeTimer::time_scope(CONSENSUS_STATE_COMMIT_TIMER.clone());
-        let commit_result = state
+        let commit_result = match state
             .commit(*epoch_hash, debug_record.as_deref_mut())
-            .expect(&concat!(file!(), ":", line!(), ":", column!()));
+        {
+            Ok(result) => result,
+            // Previously `.expect(...)` crashed on a commit DB error. The
+            // commit is atomic (nothing persisted on error); skip and retry
+            // instead of halting the chain.
+            Err(err) => {
+                warn!(
+                    "compute_epoch: state.commit db error for epoch {:?}, \
+                     skipping epoch: {}",
+                    epoch_hash, err
+                );
+                return false;
+            }
+        };
+        prof.mark(exec_profile::Phase::Commit);
 
         if on_local_main {
             self.notify_txpool(&commit_result, epoch_hash);
@@ -1189,18 +1351,25 @@ impl ConsensusExecutionHandler {
             BlockHeaderBuilder::compute_block_logs_bloom_hash(&epoch_receipts),
         );
 
-        let epoch_execution_commitment = self
-            .data_man
-            .get_epoch_execution_commitment(&epoch_hash)
-            .unwrap();
-        debug!(
-            "compute_epoch: on_local_main={}, epoch={:?} state_root={:?} receipt_root={:?}, logs_bloom_hash={:?}",
-            on_local_main, epoch_hash, commit_result.state_root, epoch_execution_commitment.receipts_root, epoch_execution_commitment.logs_bloom_hash,
-        );
+        // Read-back of the commitment just inserted above; used only for the
+        // debug log. Guard against a missing entry instead of `.unwrap()`.
+        if let Some(epoch_execution_commitment) =
+            &*self.data_man.get_epoch_execution_commitment(&epoch_hash)
+        {
+            debug!(
+                "compute_epoch: on_local_main={}, epoch={:?} state_root={:?} receipt_root={:?}, logs_bloom_hash={:?}",
+                on_local_main, epoch_hash, commit_result.state_root, epoch_execution_commitment.receipts_root, epoch_execution_commitment.logs_bloom_hash,
+            );
+        }
         self.data_man
             .state_availability_boundary
             .write()
             .adjust_upper_bound(&main_block.block_header);
+        prof.mark(exec_profile::Phase::Post);
+        prof.finish(
+            epoch_blocks.len(),
+            epoch_blocks.iter().map(|b| b.transactions.len()).sum(),
+        );
         true
     }
 
@@ -1224,13 +1393,14 @@ impl ConsensusExecutionHandler {
                 .read()
                 .check_availability(main_block_header.height(), epoch_hash)
             {
-                self.tx_pool
-                    .set_best_executed_epoch(StateIndex::new_for_readonly(
-                        epoch_hash,
-                        &state_root,
-                    ))
-                    // FIXME: propogate error.
-                    .expect(&concat!(file!(), ":", line!(), ":", column!()));
+                if let Err(err) = self.tx_pool.set_best_executed_epoch(
+                    StateIndex::new_for_readonly(epoch_hash, &state_root),
+                ) {
+                    error!(
+                        "Failed to update txpool best executed epoch for skipped epoch {:?}: {}",
+                        epoch_hash, err
+                    );
+                }
             }
         }
         self.data_man
@@ -1243,28 +1413,43 @@ impl ConsensusExecutionHandler {
     fn notify_txpool(
         &self, commit_result: &StateCommitResult, epoch_hash: &H256,
     ) {
-        // FIXME: We may want to propagate the error up.
-
         let accounts_for_txpool = commit_result.accounts_for_txpool.clone();
         {
             debug!("Notify epoch[{}]", epoch_hash);
 
             // TODO: use channel to deliver the message.
             let txpool_clone = self.tx_pool.clone();
-            std::thread::Builder::new()
+            if let Err(err) = std::thread::Builder::new()
                 .name("txpool_update_state".into())
-                .spawn(move || {
-                    txpool_clone.notify_modified_accounts(accounts_for_txpool);
+                .spawn({
+                    let txpool_clone = txpool_clone.clone();
+                    let accounts_for_txpool = accounts_for_txpool.clone();
+                    move || {
+                        txpool_clone
+                            .notify_modified_accounts(accounts_for_txpool);
+                    }
                 })
-                .expect("can not notify tx pool to start state");
+            {
+                error!(
+                    "Failed to spawn txpool state update thread for epoch {:?}: {}",
+                    epoch_hash, err
+                );
+                txpool_clone.notify_modified_accounts(accounts_for_txpool);
+            }
         }
 
-        self.tx_pool
-            .set_best_executed_epoch(StateIndex::new_for_readonly(
-                epoch_hash,
-                &commit_result.state_root,
-            ))
-            .expect(&concat!(file!(), ":", line!(), ":", column!()));
+        if let Err(err) =
+            self.tx_pool
+                .set_best_executed_epoch(StateIndex::new_for_readonly(
+                    epoch_hash,
+                    &commit_result.state_root,
+                ))
+        {
+            error!(
+                "Failed to update txpool best executed epoch for committed epoch {:?}: {}",
+                epoch_hash, err
+            );
+        }
     }
 
     fn compute_block_base_reward(
@@ -1307,6 +1492,7 @@ impl ConsensusExecutionHandler {
             let no_reward = reward_info.epoch_block_no_reward[enum_idx];
 
             if no_reward {
+                REWARDS_BLOCKS_NO_REWARD.inc(1);
                 epoch_block_total_rewards.push(U256::from(0));
                 if debug_record.is_some() {
                     let debug_out = debug_record.as_mut().unwrap();
@@ -1325,6 +1511,7 @@ impl ConsensusExecutionHandler {
                 let mut reward = if pow_quality >= *epoch_difficulty {
                     base_reward_per_block
                 } else {
+                    REWARDS_BLOCKS_LOW_POW.inc(1);
                     debug!(
                         "Block {} pow_quality {} is less than epoch_difficulty {}!",
                         block.hash(), pow_quality, epoch_difficulty
@@ -1357,6 +1544,21 @@ impl ConsensusExecutionHandler {
                     // Lint.ThenChange(consensus/mod.rs#OUTLIER_PENALTY_1)
 
                     debug_assert!(reward > outlier_penalty);
+                    // Flag heavy outlier penalty (>50% of base reward).
+                    // At 4 bps with normal DAG structure this should be
+                    // rare; sustained occurrence means the network is
+                    // burning a lot of issued reward.
+                    if outlier_penalty * U512::from(2) > reward {
+                        REWARDS_BLOCKS_HEAVY_OUTLIER_PENALTY.inc(1);
+                        info!(
+                            "block {} heavy outlier-penalty: base={}, \
+                             penalty={}, final={}",
+                            block.hash(),
+                            base_reward_per_block,
+                            outlier_penalty,
+                            reward - outlier_penalty,
+                        );
+                    }
                     reward -= outlier_penalty;
 
                     if debug_record.is_some() {

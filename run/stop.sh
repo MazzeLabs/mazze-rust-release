@@ -6,6 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PID_FILES=(
   "$SCRIPT_DIR/node_pid_dev.txt"
   "$SCRIPT_DIR/node_pid.txt"
+  "$SCRIPT_DIR/node_pid_full_fast.txt"
+  "$SCRIPT_DIR/node_pid_archive.txt"
   "$SCRIPT_DIR/miner_pid.txt"
   "$SCRIPT_DIR/miner_pid_dev.txt"
 )
@@ -47,19 +49,15 @@ for PID_FILE in "${PID_FILES[@]}"; do
   fi
 done
 
-if [[ "$found_pid_file" -eq 0 ]]; then
-  echo "No PID files found; trying to locate running mazze processes..."
-  mapfile -t pids < <(pgrep -f "mazze.*--config .*hydra.*\\.toml" || true)
-  if [[ ${#pids[@]} -eq 0 ]]; then
-    mapfile -t pids < <(pgrep -f "target/(debug|release)/mazze" || true)
-  fi
-  if [[ ${#pids[@]} -eq 0 ]]; then
-    echo "No mazze processes found."
-  else
-    for pid in "${pids[@]}"; do
-      kill_pid "$pid" "pgrep" || true
-    done
-  fi
-fi
+# ALWAYS sweep for any remaining node/miner binaries, even if some PID files
+# were found. The per-type start scripts use different PID files
+# (node_pid_full_fast.txt / node_pid_archive.txt), and a leftover miner_pid.txt
+# must not cause us to skip killing a still-running node. Match the binary by
+# name so we never touch this shell.
+self=$$
+for pid in $(pgrep -x mazze 2>/dev/null) $(pgrep -x mazze-miner 2>/dev/null); do
+  [[ "$pid" == "$self" ]] && continue
+  kill_pid "$pid" "sweep" || true
+done
 
 echo "Stop process completed."

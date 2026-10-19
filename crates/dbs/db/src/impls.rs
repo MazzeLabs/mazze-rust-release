@@ -23,13 +23,7 @@ use kvdb::{DBOp, DBTransaction, DBValue, IoStats, IoStatsKind, KeyValueDB};
 use parity_db::{CompressionType, Db as ParityDb, Options as ParityOptions};
 use parity_util_mem::{MallocSizeOf, MallocSizeOfOps};
 use std::{
-    convert::TryInto,
-    fs,
-    io,
-    iter,
-    path::PathBuf,
-    str::FromStr,
-    sync::Arc,
+    convert::TryInto, fs, io, iter, path::PathBuf, str::FromStr, sync::Arc,
 };
 
 pub struct SystemDB {
@@ -87,7 +81,12 @@ pub struct ParityDbOpenConfig {
 
 impl Default for ParityDbOpenConfig {
     fn default() -> Self {
-        Self { columns: 0, compression: None, disable_wal: false, stats: false }
+        Self {
+            columns: 0,
+            compression: None,
+            disable_wal: false,
+            stats: false,
+        }
     }
 }
 
@@ -96,10 +95,12 @@ pub fn paritydb_settings(
 ) -> io::Result<DatabaseSettings> {
     fs::create_dir_all(&path)?;
 
-    let columns: u8 = config
-        .columns
-        .try_into()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "paritydb columns must fit into u8"))?;
+    let columns: u8 = config.columns.try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "paritydb columns must fit into u8",
+        )
+    })?;
 
     let mut options = ParityOptions::with_columns(&path, columns);
     options.sync_wal = !config.disable_wal;
@@ -132,7 +133,8 @@ pub fn open_database(settings: &DatabaseSettings) -> io::Result<Arc<SystemDB>> {
             let parity_db = ParityDb::open_or_create(&options)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
             info!("Open ParityDB successfully ({:?})", settings.path);
-            let kvdb: Arc<dyn KeyValueStore> = Arc::new(ParityKeyValueDb::new(parity_db, *columns));
+            let kvdb: Arc<dyn KeyValueStore> =
+                Arc::new(ParityKeyValueDb::new(parity_db, *columns));
             let sys_db = SystemDB::new(kvdb);
             Ok(Arc::new(sys_db))
         }
@@ -147,15 +149,21 @@ struct ParityKeyValueDb {
 
 impl ParityKeyValueDb {
     fn new(inner: ParityDb, columns: u8) -> Self {
-        Self { inner: Arc::new(inner), columns }
+        Self {
+            inner: Arc::new(inner),
+            columns,
+        }
     }
 
     fn col_id(&self, col: u32) -> io::Result<parity_db::ColId> {
-        let col_u8: u8 = col
-            .try_into()
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "column out of range"))?;
+        let col_u8: u8 = col.try_into().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "column out of range")
+        })?;
         if col_u8 >= self.columns {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "column out of range"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "column out of range",
+            ));
         }
         Ok(col_u8)
     }
@@ -195,7 +203,8 @@ impl KeyValueDB for ParityKeyValueDb {
     fn get_by_prefix(&self, col: u32, prefix: &[u8]) -> Option<Box<[u8]>> {
         let col = self.col_id(col).ok()?;
         let mut iter = self.iterator(col, Some(prefix)).ok()?;
-        iter.find(|(key, _)| key.starts_with(prefix)).map(|(k, _)| k)
+        iter.find(|(key, _)| key.starts_with(prefix))
+            .map(|(k, _)| k)
     }
 
     fn write_buffered(&self, transaction: DBTransaction) {
@@ -206,7 +215,9 @@ impl KeyValueDB for ParityKeyValueDb {
         for op in transaction.ops {
             match op {
                 DBOp::Insert { col, key, value } => match self.col_id(col) {
-                    Ok(col_id) => buffer.push((col_id, key.to_vec(), Some(value))),
+                    Ok(col_id) => {
+                        buffer.push((col_id, key.to_vec(), Some(value)))
+                    }
                     Err(e) => {
                         error!("ParityDB write failed: {}", e);
                         return;
@@ -232,7 +243,9 @@ impl KeyValueDB for ParityKeyValueDb {
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 
-    fn iter<'a>(&'a self, col: u32) -> Box<dyn Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a> {
+    fn iter<'a>(
+        &'a self, col: u32,
+    ) -> Box<dyn Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a> {
         match self.col_id(col).and_then(|id| self.iterator(id, None)) {
             Ok(iter) => Box::new(iter),
             Err(e) => {
@@ -245,10 +258,15 @@ impl KeyValueDB for ParityKeyValueDb {
     fn iter_from_prefix<'a>(
         &'a self, col: u32, prefix: &'a [u8],
     ) -> Box<dyn Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a> {
-        match self.col_id(col).and_then(|id| self.iterator(id, Some(prefix))) {
+        match self
+            .col_id(col)
+            .and_then(|id| self.iterator(id, Some(prefix)))
+        {
             Ok(iter) => {
                 let prefix_vec = prefix.to_vec();
-                Box::new(iter.take_while(move |(key, _)| key.starts_with(prefix_vec.as_slice())))
+                Box::new(iter.take_while(move |(key, _)| {
+                    key.starts_with(prefix_vec.as_slice())
+                }))
             }
             Err(e) => {
                 warn!("ParityDB iteration failed: {}", e);
@@ -280,7 +298,10 @@ impl<'a> Iterator for ParityIterator<'a> {
         loop {
             match self.inner.next() {
                 Ok(Some((key, value))) => {
-                    return Some((key.into_boxed_slice(), value.into_boxed_slice()))
+                    return Some((
+                        key.into_boxed_slice(),
+                        value.into_boxed_slice(),
+                    ))
                 }
                 Ok(None) => return None,
                 Err(e) => {

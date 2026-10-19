@@ -6,10 +6,12 @@ mod cache;
 
 use crate::block_data_manager::BlockDataManager;
 use cache::RandomXCacheBuilder;
+use lru_time_cache::LruCache;
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;
 use mazze_parameters::pow::*;
 use mazze_types::{BigEndianHash, H256, U256, U512};
+use metrics::{Counter, CounterUsize, Gauge, GaugeUsize};
 use parking_lot::RwLock;
 use static_assertions::_core::str::FromStr;
 use std::{
@@ -17,6 +19,22 @@ use std::{
     convert::TryFrom,
     sync::Arc,
 };
+
+/// Bounded pow-hash memoization capacity (§5.21). Sized to cover ~2h of
+/// steady-state chain at ~5 blocks/s × ~15 verify-passes per header —
+/// generous headroom. Each entry is ~144 B (96 B key + 32 B value +
+/// LRU overhead), so 100k entries ≈ ~15 MB, dwarfed by state MPT pages.
+const POW_HASH_CACHE_CAPACITY: usize = 100_000;
+
+lazy_static! {
+    /// Difficulty retargets are high-signal but low-frequency: emit
+    /// info-level logs + a counter for "we retargeted" + a gauge for
+    /// the latest target value. See docs/flow-audit.md G-MN-2.
+    static ref DIFFICULTY_RETARGETS: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("pow", "difficulty_retargets");
+    static ref DIFFICULTY_CURRENT: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("pow", "current_target_difficulty");
+}
 
 #[cfg(target_endian = "big")]
 compile_error!("The PoW implementation requires little-endian platform");
@@ -115,6 +133,10 @@ pub struct ProofOfWorkConfig {
     pub stratum_port: u16,
     pub stratum_secret: Option<H256>,
     pub pow_problem_window_size: usize,
+    /// TEST-ONLY: run per-block ASERT even in test mode (test mode otherwise
+    /// pins every block to the initial difficulty). Lets the local harness
+    /// (scripts/local-restart-repro.sh) exercise difficulty agreement.
+    pub asert_in_test_mode: bool,
 }
 
 impl ProofOfWorkConfig {
@@ -133,6 +155,7 @@ impl ProofOfWorkConfig {
                 stratum_port,
                 stratum_secret,
                 pow_problem_window_size,
+                asert_in_test_mode: false,
             }
         } else {
             ProofOfWorkConfig {
@@ -144,6 +167,7 @@ impl ProofOfWorkConfig {
                 stratum_port,
                 stratum_secret,
                 pow_problem_window_size,
+                asert_in_test_mode: false,
             }
         }
     }
@@ -262,6 +286,19 @@ pub fn compute_inv_x_times_2_pow_256_floor(x: &U256) -> U256 {
 
 pub struct PowComputer {
     cache_builder: Arc<RandomXCacheBuilder>,
+    /// Memoization for `compute()`. Keyed by (input, seed_hash) where
+    /// `input = block_hash ‖ nonce_le`. The (block_hash, nonce,
+    /// seed_hash) triple deterministically produces the RandomX hash,
+    /// so repeated queries for the same header — e.g. weight
+    /// recomputation during GHAST pivot selection, catch-up graph
+    /// promotion, executor reward calculation — hit the cache instead
+    /// of re-running the ~ms-scale RandomX VM. §5.21 wedge on m1 at
+    /// the era boundary was driven by ~79 recomputes/sec for headers
+    /// that had already been hashed; with this cache the same set is
+    /// answered from memory. LruCache is Sync-safe behind the outer
+    /// RwLock (see the `unsafe impl Sync` below — RandomX bits are
+    /// unchanged; only the surrounding wrapper adds a lock).
+    pow_hash_cache: RwLock<LruCache<([u8; 64], H256), H256>>,
 }
 
 unsafe impl Send for PowComputer {}
@@ -271,6 +308,9 @@ impl PowComputer {
     pub fn new(seed_hash: H256) -> Self {
         PowComputer {
             cache_builder: RandomXCacheBuilder::new(seed_hash.into()),
+            pow_hash_cache: RwLock::new(LruCache::with_capacity(
+                POW_HASH_CACHE_CAPACITY,
+            )),
         }
     }
 
@@ -286,6 +326,15 @@ impl PowComputer {
             buf
         };
 
+        // §5.21 memoization: same (input, seed_hash) always produces
+        // the same RandomX hash; skip the VM if we've seen this
+        // header before. On m1 this collapsed ~79 recomputes/sec
+        // into cache hits, unwedging the era-boundary catchup.
+        let key = (input, *seed_hash);
+        if let Some(cached) = self.pow_hash_cache.write().get(&key) {
+            return *cached;
+        }
+
         let handle = self
             .cache_builder
             .get_vm_handler(seed_hash.as_fixed_bytes());
@@ -293,11 +342,20 @@ impl PowComputer {
         let hash_bytes = vm.hash(&input);
         let hash = H256::from_slice(&hash_bytes.as_ref());
 
+        self.pow_hash_cache.write().insert(key, hash);
         hash
     }
 
     pub fn get_seed_hash(&self) -> H256 {
         self.cache_builder.get_seed_hash().into()
+    }
+
+    /// See `RandomXCacheBuilder::set_chain_seeds`.
+    pub fn set_chain_seeds(&self, current: &H256, next: Option<&H256>) {
+        self.cache_builder.set_chain_seeds(
+            current.as_fixed_bytes(),
+            next.map(|n| n.as_fixed_bytes()),
+        );
     }
 }
 
@@ -313,6 +371,59 @@ pub fn validate(
         &nonce,
         &problem.boundary,
     )
+}
+
+/// ASERT difficulty (aserti3-2d style, Bitcoin Cash since 2020), expressed
+/// on difficulty instead of target:
+///
+///   D = D_anchor * 2^((blocks * T - secs) / H)
+///
+/// `blocks` / `secs` are the DAG blocks and the seconds between the anchor
+/// and the parent. Ahead of schedule (more blocks than time allows) raises
+/// difficulty, behind lowers it, exponentially with half-life H. There is no
+/// window to fall out of (no oscillation) and no period boundary to wait for
+/// (no stall when hashrate disappears). Integer-only so every node computes
+/// the same value; 2^frac uses the aserti3-2d cubic (error < 0.013%).
+pub fn asert_difficulty(
+    anchor_difficulty: &U256, blocks: u64, secs: u64,
+    target_block_period_us: u64, half_life_secs: u64, min_difficulty: &U256,
+) -> U256 {
+    let ideal_us = blocks as i128 * target_block_period_us as i128;
+    let actual_us = secs as i128 * 1_000_000;
+    let half_life_us = half_life_secs as i128 * 1_000_000;
+    // Exponent in 16.16 fixed point, floored.
+    let exponent = ((ideal_us - actual_us) * 65536).div_euclid(half_life_us);
+    let shifts = exponent >> 16;
+    let frac = (exponent & 0xffff) as u128;
+    let factor = 65536u128
+        + ((195_766_423_245_049u128 * frac
+            + 971_821_376u128 * frac * frac
+            + 5_127u128 * frac * frac * frac
+            + (1u128 << 47))
+            >> 48);
+
+    let mut d = U512::from(*anchor_difficulty) * U512::from(factor);
+    if shifts >= 0 {
+        if shifts > 256 {
+            return U256::max_value();
+        }
+        d = d << (shifts as usize);
+    } else if -shifts >= 512 {
+        d = U512::zero();
+    } else {
+        d = d >> ((-shifts) as usize);
+    }
+    d = d >> 16;
+
+    if d > U512::from(U256::max_value()) {
+        return U256::max_value();
+    }
+    let d = U256::try_from(d).unwrap();
+    if d < *min_difficulty {
+        *min_difficulty
+    } else {
+        d
+    }
 }
 
 /// This function computes the target difficulty of the next period
@@ -384,6 +495,24 @@ where
     data_man
         .target_difficulty_manager
         .set(*cur_hash, target_diff);
+
+    // Surface the retarget as an info-level event. Direction lets
+    // operators tell at a glance whether the network is speeding up or
+    // slowing down without parsing two big numbers.
+    let direction = if target_diff > cur_difficulty {
+        "up"
+    } else if target_diff < cur_difficulty {
+        "down"
+    } else {
+        "unchanged"
+    };
+    info!(
+        "PoW difficulty retarget at epoch {}: {} -> {} ({}). block_count={}, timespan_s={}",
+        epoch, cur_difficulty, target_diff, direction, block_count,
+        max_time.saturating_sub(min_time)
+    );
+    DIFFICULTY_RETARGETS.inc(1);
+    DIFFICULTY_CURRENT.update(target_diff.low_u64() as usize);
 
     target_diff
 }
@@ -500,4 +629,81 @@ fn test_pow() {
 
     let start_nonce = 0x2333333333u64 & (!0x1f);
     pow.compute(&U256::from(start_nonce), &block_hash, &H256::default());
+}
+
+/// Regression for the 2026-10-08 seed race: threads alternating between two
+/// seeds on one shared `PowComputer` must always get the hash for the seed
+/// they asked for (the old single-context builder could hand out a VM bound
+/// to the other seed).
+#[test]
+fn test_pow_multi_seed_concurrent() {
+    let seed_a = H256::from_low_u64_be(1);
+    let seed_b = H256::from_low_u64_be(2);
+    let block_hash = H256::from_low_u64_be(0xabcdef);
+    let nonces: Vec<U256> = (0..8u64).map(U256::from).collect();
+
+    // Reference hashes from independent light-mode computers.
+    let reference = |seed: &H256, nonce: &U256| -> H256 {
+        let ctx = std::sync::Arc::new(rust_randomx::Context::new(
+            seed.as_bytes(),
+            false,
+        ));
+        let vm = rust_randomx::Hasher::new(ctx);
+        let mut buf = [0u8; 64];
+        buf[..32].copy_from_slice(block_hash.as_bytes());
+        nonce.to_little_endian(&mut buf[32..64]);
+        H256::from_slice(vm.hash(&buf).as_ref())
+    };
+    let expected: Vec<(H256, H256)> = nonces
+        .iter()
+        .map(|n| (reference(&seed_a, n), reference(&seed_b, n)))
+        .collect();
+
+    let pow = std::sync::Arc::new(PowComputer::new(seed_a));
+    let handles: Vec<_> = (0..4)
+        .map(|t| {
+            let pow = pow.clone();
+            let nonces = nonces.clone();
+            let expected = expected.clone();
+            std::thread::spawn(move || {
+                for (i, n) in nonces.iter().enumerate() {
+                    let (seed, want) = if (i + t) % 2 == 0 {
+                        (seed_a, expected[i].0)
+                    } else {
+                        (seed_b, expected[i].1)
+                    };
+                    assert_eq!(pow.compute(n, &block_hash, &seed), want);
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+}
+
+#[test]
+fn test_asert_difficulty() {
+    let min = U256::from(5);
+    let d0 = U256::from(1_000_000);
+    let t = 250_000; // 0.25 s
+    let h = 900;
+    // On schedule: unchanged.
+    assert_eq!(asert_difficulty(&d0, 3600, 900, t, h, &min), d0);
+    // One half-life ahead of schedule: doubles; behind: halves.
+    assert_eq!(asert_difficulty(&d0, 3600, 0, t, h, &min), d0 * 2);
+    assert_eq!(asert_difficulty(&d0, 0, 900, t, h, &min), d0 / 2);
+    // Half a half-life ahead: ~sqrt(2).
+    let r = asert_difficulty(&d0, 1800, 0, t, h, &min).low_u64();
+    assert!((1_413_900..=1_414_400).contains(&r), "{}", r);
+    // Monotonic in elapsed time, and floored at the minimum.
+    let a = asert_difficulty(&d0, 1000, 300, t, h, &min);
+    let b = asert_difficulty(&d0, 1000, 301, t, h, &min);
+    assert!(b <= a);
+    assert_eq!(asert_difficulty(&d0, 0, 1_000_000, t, h, &min), min);
+    // Saturates instead of overflowing.
+    assert_eq!(
+        asert_difficulty(&U256::max_value(), 1_000_000, 0, t, h, &min),
+        U256::max_value()
+    );
 }

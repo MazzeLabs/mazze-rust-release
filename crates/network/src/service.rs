@@ -1276,6 +1276,10 @@ impl NetworkServiceInner {
                             );
                         }
                         UpdateNodeOperation::Remove => {
+                            warn!(
+                                "Blacklisting peer due to Remove decision: peer={} reason={} remote={} via=token",
+                                id, reason, remote
+                            );
                             self.node_db.write().set_blacklisted(&id);
                         }
                     }
@@ -1347,6 +1351,10 @@ impl NetworkServiceInner {
                             );
                         }
                         UpdateNodeOperation::Remove => {
+                            warn!(
+                                "Blacklisting peer due to Remove decision: peer={} reason={} remote={} via=node_id",
+                                node_id, reason, remote
+                            );
                             self.node_db.write().set_blacklisted(node_id);
                         }
                     }

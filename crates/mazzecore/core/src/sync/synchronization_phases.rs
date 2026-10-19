@@ -4,18 +4,26 @@
 
 use crate::{
     sync::{
+        fast_sync_anchor::{
+            check_anchor_block_numbers, choose_anchor_pair,
+            FastSyncAnchorBootstrap,
+        },
         message::DynamicCapability,
         state::{SnapshotChunkSync, Status},
         synchronization_protocol_handler::SynchronizationProtocolHandler,
         synchronization_state::SynchronizationState,
         SharedSynchronizationGraph,
     },
-    ConsensusGraph,
+    ConsensusGraph, NodeType,
 };
-use mazze_internal_common::StateAvailabilityBoundary;
+use mazze_internal_common::{
+    EpochExecutionCommitment, StateAvailabilityBoundary,
+};
 use mazze_parameters::sync::CATCH_UP_EPOCH_LAG_THRESHOLD;
+use mazze_types::H256;
+use metrics::{Counter, CounterUsize, Gauge, GaugeUsize};
 use network::NetworkContext;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::{
     collections::HashMap,
     sync::{
@@ -25,6 +33,21 @@ use std::{
     thread,
     time::{self, Instant},
 };
+
+lazy_static! {
+    /// Current sync phase as an ordinal (matches SyncPhaseType discriminant).
+    /// 0 = CatchUpRecoverBlockHeaderFromDB, ..., 5 = Normal.
+    /// See docs/flow-audit.md G-CC-3.
+    static ref SYNC_PHASE_ORDINAL: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("sync_phase", "current_ordinal");
+    /// Number of phase transitions since startup.
+    static ref SYNC_PHASE_TRANSITIONS: Arc<dyn Counter<usize>> =
+        CounterUsize::register_with_group("sync_phase", "transitions");
+    /// Duration in seconds spent in the previous phase (updated on each
+    /// transition).
+    static ref SYNC_PHASE_LAST_DURATION_SECS: Arc<dyn Gauge<usize>> =
+        GaugeUsize::register_with_group("sync_phase", "last_phase_secs");
+}
 
 /// Both Archive and Full node go through the following phases:
 ///     CatchUpRecoverBlockHeaderFromDB --> CatchUpSyncBlockHeader -->
@@ -78,7 +101,29 @@ impl SynchronizationPhaseManagerInner {
     pub fn get_phase(
         &self, phase_type: SyncPhaseType,
     ) -> Arc<dyn SynchronizationPhaseTrait> {
-        self.phases.get(&phase_type).unwrap().clone()
+        if let Some(p) = self.phases.get(&phase_type) {
+            return p.clone();
+        }
+        // Phases are populated at startup via register_phase(); a miss here
+        // means the manager was constructed without all phases registered.
+        // Fall back to the conservative initial-recovery phase rather than
+        // crashing the protocol handler. If even that is missing we have no
+        // safe phase to run with — panic with a clear diagnostic.
+        error!(
+            "SynchronizationPhaseManager: requested phase {:?} not registered; \
+             falling back to CatchUpRecoverBlockHeaderFromDB",
+            phase_type
+        );
+        self.phases
+            .get(&SyncPhaseType::CatchUpRecoverBlockHeaderFromDB)
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!(
+                    "SynchronizationPhaseManager has no phases registered; \
+                     cannot recover (requested={:?})",
+                    phase_type
+                )
+            })
     }
 
     pub fn get_current_phase(&self) -> Arc<dyn SynchronizationPhaseTrait> {
@@ -101,6 +146,9 @@ impl SynchronizationPhaseManagerInner {
 
 pub struct SynchronizationPhaseManager {
     inner: RwLock<SynchronizationPhaseManagerInner>,
+    /// Instant at which the current phase was entered. Used to compute
+    /// SYNC_PHASE_LAST_DURATION_SECS on each transition.
+    phase_started_at: Mutex<Instant>,
 }
 
 impl SynchronizationPhaseManager {
@@ -110,10 +158,12 @@ impl SynchronizationPhaseManager {
         sync_graph: SharedSynchronizationGraph,
         state_sync: Arc<SnapshotChunkSync>, consensus: Arc<ConsensusGraph>,
     ) -> Self {
+        SYNC_PHASE_ORDINAL.update(initial_phase_type as usize);
         let sync_manager = SynchronizationPhaseManager {
             inner: RwLock::new(SynchronizationPhaseManagerInner::new(
                 initial_phase_type,
             )),
+            phase_started_at: Mutex::new(Instant::now()),
         };
 
         sync_manager.register_phase(Arc::new(
@@ -157,6 +207,17 @@ impl SynchronizationPhaseManager {
         &self, phase_type: SyncPhaseType, io: &dyn NetworkContext,
         sync_handler: &SynchronizationProtocolHandler,
     ) {
+        // Record how long we spent in the previous phase, then stamp the
+        // new one.
+        {
+            let mut started = self.phase_started_at.lock();
+            let elapsed = started.elapsed().as_secs() as usize;
+            SYNC_PHASE_LAST_DURATION_SECS.update(elapsed);
+            *started = Instant::now();
+        }
+        SYNC_PHASE_ORDINAL.update(phase_type as usize);
+        SYNC_PHASE_TRANSITIONS.inc(1);
+
         self.inner.write().change_phase_to(phase_type);
         let current_phase = self.get_current_phase();
         current_phase.start(io, sync_handler);
@@ -248,9 +309,15 @@ impl SynchronizationPhaseTrait for CatchUpSyncBlockHeaderPhase {
     }
 
     fn next(
-        &self, _io: &dyn NetworkContext,
-        _sync_handler: &SynchronizationProtocolHandler,
+        &self, io: &dyn NetworkContext,
+        sync_handler: &SynchronizationProtocolHandler,
     ) -> SyncPhaseType {
+        // A fresh fast-sync node first roots its chain at a trusted
+        // checkpoint (CatchUpCheckpointPhase), then comes back here to sync
+        // the headers above it. See docs/fast-sync-design.md §5.19.
+        if self.graph.consensus.fast_sync_bootstrap_pending() {
+            return SyncPhaseType::CatchUpCheckpoint;
+        }
         let median_epoch = match self.syn.median_epoch_from_normal_peers() {
             None => {
                 return if self.syn.allow_phase_change_without_peer() {
@@ -266,10 +333,25 @@ impl SynchronizationPhaseTrait for CatchUpSyncBlockHeaderPhase {
             self.graph.consensus.best_epoch_number(),
             median_epoch
         );
-        // FIXME: OK, what if the chain height is close, or even local height is
-        // FIXME: larger, but the chain forked earlier very far away?
         if self.graph.consensus.catch_up_completed(median_epoch) {
-            return SyncPhaseType::CatchUpCheckpoint;
+            // §5.22 genesis-with-peers escape: if the whole fleet is at
+            // genesis (peer_median == 0 && best_epoch == 0), the
+            // terminal-share check will never succeed because peers'
+            // `latest_block_hashes` are empty (nobody has produced yet).
+            // Without this fallback the last-to-restart node stays
+            // pinned in CatchUpSyncBlockHeader forever, blocking
+            // relaunch step 8 until timeout — observed live as m6
+            // wedging every restart. Genesis is unambiguously the
+            // shared terminal here; transition directly.
+            if median_epoch == 0
+                && self.graph.consensus.best_epoch_number() == 0
+            {
+                return SyncPhaseType::CatchUpCheckpoint;
+            }
+            if normal_peers_share_known_terminal(&self.syn, &self.graph) {
+                return SyncPhaseType::CatchUpCheckpoint;
+            }
+            sync_handler.request_missing_terminals(io);
         }
 
         self.phase_type()
@@ -280,6 +362,11 @@ impl SynchronizationPhaseTrait for CatchUpSyncBlockHeaderPhase {
         sync_handler: &SynchronizationProtocolHandler,
     ) {
         info!("start phase {:?}", self.name());
+        if self.graph.consensus.fast_sync_bootstrap_pending() {
+            // Nothing to sync from the true genesis: `next` moves on to
+            // anchoring at a trusted checkpoint.
+            return;
+        }
         let (_, cur_era_genesis_height) =
             self.graph.get_genesis_hash_and_height_in_current_era();
         *sync_handler.latest_epoch_requested.lock() =
@@ -296,6 +383,10 @@ pub struct CatchUpCheckpointPhase {
     /// Is `true` if we have the state locally and do not need to sync
     /// checkpoints. Only set when the phase starts.
     has_state: AtomicBool,
+
+    /// Roots a fresh fast-sync node at a trusted checkpoint before
+    /// anything else (docs/fast-sync-design.md §5.19).
+    anchor_bootstrap: FastSyncAnchorBootstrap,
 }
 
 impl CatchUpCheckpointPhase {
@@ -303,6 +394,64 @@ impl CatchUpCheckpointPhase {
         CatchUpCheckpointPhase {
             state_sync,
             has_state: AtomicBool::new(false),
+            anchor_bootstrap: Default::default(),
+        }
+    }
+
+    /// Fresh node with `trusted_checkpoints`: pick an anchor, collect what
+    /// rooting the chain there needs, root it, then sync the headers above
+    /// it like a node restarted from that checkpoint.
+    fn drive_anchor_bootstrap(
+        &self, io: &dyn NetworkContext,
+        sync_handler: &SynchronizationProtocolHandler,
+    ) -> SyncPhaseType {
+        let graph = &sync_handler.graph;
+        let anchor = {
+            let mut chosen = graph.fast_sync_anchor.lock();
+            if chosen.is_none() {
+                // Wait for peers: the choice depends on their tip.
+                let median = match sync_handler.syn.median_epoch_from_normal_peers() {
+                    Some(m) => m,
+                    None => return self.phase_type(),
+                };
+                let config = graph.consensus.get_config();
+                *chosen = choose_anchor_pair(
+                    &config.trusted_checkpoints,
+                    median,
+                    config.inner_conf.era_epoch_count,
+                );
+                match &*chosen {
+                    Some(p) => info!(
+                        "fast-sync anchor: rooting at checkpoint height={} \
+                         hash={:?} block_number={}, stable checkpoint \
+                         height={} (peer median epoch {})",
+                        p.root.checkpoint_height,
+                        p.root.checkpoint_hash,
+                        p.root.block_number,
+                        p.stable.checkpoint_height,
+                        median
+                    ),
+                    None => error!(
+                        "fast-sync anchor: trusted_checkpoints has no two \
+                         consecutive era checkpoints"
+                    ),
+                }
+            }
+            match &*chosen {
+                Some(a) => a.clone(),
+                None => return self.phase_type(),
+            }
+        };
+        if !self.anchor_bootstrap.collect(&anchor, io, sync_handler) {
+            return self.phase_type();
+        }
+        match self.anchor_bootstrap.anchor(&anchor, sync_handler) {
+            Ok(()) => SyncPhaseType::CatchUpSyncBlockHeader,
+            Err(e) => {
+                error!("fast-sync anchor: cannot root the chain: {}", e);
+                self.anchor_bootstrap.reset();
+                self.phase_type()
+            }
         }
     }
 }
@@ -323,7 +472,21 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
         if self.has_state.load(AtomicOrdering::SeqCst) {
             return SyncPhaseType::CatchUpFillBlockBodyPhase;
         }
+        if sync_handler.graph.consensus.fast_sync_bootstrap_pending() {
+            return self.drive_anchor_bootstrap(io, sync_handler);
+        }
         let epoch_to_sync = sync_handler.graph.consensus.get_to_sync_epoch_id();
+        // Fresh-network bootstrap: the true genesis has no prior checkpoint to
+        // state-sync. On a from-genesis launch every peer is also at genesis and
+        // cannot serve a snapshot, so checkpoint sync would block forever. We
+        // already have the genesis state locally, so mark it and proceed; this
+        // only triggers when epoch_to_sync == true genesis (never on an
+        // established chain whose to-sync checkpoint is past genesis).
+        if epoch_to_sync == sync_handler.graph.data_man.true_genesis.hash() {
+            self.has_state.store(true, AtomicOrdering::SeqCst);
+            return SyncPhaseType::CatchUpFillBlockBodyPhase;
+        }
+
         let current_era_genesis = sync_handler
             .graph
             .data_man
@@ -334,9 +497,89 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
             io,
             sync_handler,
         );
+        // Body sync without a downloaded snapshot executes from the stable
+        // checkpoint, so it needs that state locally. A node rooted at a
+        // trusted checkpoint (§5.19) or one that lost its state has none: the
+        // fallback panicked in construct_main_state ("epoch_execution_
+        // commitment for stable hash must exist in disk", local joiner whose
+        // peers all sent unusable manifests and dropped). Keep trying the
+        // checkpoint sync instead.
+        let body_sync_possible = {
+            let stable = sync_handler
+                .graph
+                .data_man
+                .get_cur_consensus_era_stable_hash();
+            stable == sync_handler.graph.data_man.true_genesis.hash()
+                || sync_handler
+                    .graph
+                    .data_man
+                    .get_epoch_execution_commitment_with_db(&stable)
+                    .is_some()
+        };
+        if sync_handler.syn.allow_phase_change_without_peer()
+            && sync_handler.syn.peers.read().is_empty()
+            && self.state_sync.status() == Status::Inactive
+            && body_sync_possible
+        {
+            warn!(
+                "No peers available for checkpoint sync at {:?}; continuing with local body sync",
+                epoch_to_sync
+            );
+            *sync_handler.synced_epoch_id.lock() = None;
+            return SyncPhaseType::CatchUpFillBlockBodyPhase;
+        }
+        if self.state_sync.status() == Status::Invalid {
+            if !body_sync_possible {
+                warn!(
+                    "Checkpoint sync is unavailable for {:?} and there is no \
+                     local state to body-sync from; retrying the checkpoint \
+                     sync",
+                    epoch_to_sync
+                );
+                self.state_sync.reset();
+                return self.phase_type();
+            }
+            warn!(
+                "Checkpoint sync is unavailable for {:?}; falling back to legacy body sync",
+                epoch_to_sync
+            );
+            *sync_handler.synced_epoch_id.lock() = None;
+            return SyncPhaseType::CatchUpFillBlockBodyPhase;
+        }
         if self.state_sync.status() == Status::Completed {
             self.state_sync.restore_execution_state(sync_handler);
-            *sync_handler.synced_epoch_id.lock() = Some(epoch_to_sync);
+            // The state now available is that of the snapshot actually
+            // restored, which is a newer forward candidate (D.2) when no
+            // peer served `epoch_to_sync`.
+            let synced = self
+                .state_sync
+                .completed_snapshot_epoch_id()
+                .unwrap_or(epoch_to_sync);
+            if synced != epoch_to_sync {
+                info!(
+                    "checkpoint sync restored forward candidate {:?} instead \
+                     of {:?}",
+                    synced, epoch_to_sync
+                );
+            }
+            *sync_handler.synced_epoch_id.lock() = Some(synced);
+            let epoch_to_sync = synced;
+
+            // The snapshot is a block of our own consensus graph: the stable
+            // checkpoint it elected (a fast-sync node rooted its graph at a
+            // trusted checkpoint below it first, §5.19). Never re-root the
+            // graph AT the snapshot: the epochs right above it reward epochs
+            // below it, which would no longer be in the graph (the former
+            // trusted-snapshot re-anchor computed a different state there),
+            // and the sync graph would keep its old root.
+            if !sync_handler.graph.consensus.contains_block(&epoch_to_sync) {
+                warn!(
+                    "checkpoint sync completed for {:?}, which is not in the \
+                     consensus graph",
+                    epoch_to_sync
+                );
+            }
+
             SyncPhaseType::CatchUpFillBlockBodyPhase
         } else {
             self.phase_type()
@@ -348,23 +591,56 @@ impl SynchronizationPhaseTrait for CatchUpCheckpointPhase {
         sync_handler: &SynchronizationProtocolHandler,
     ) {
         info!("start phase {:?}", self.name());
+        self.state_sync.reset();
+        self.has_state.store(false, AtomicOrdering::SeqCst);
+        *sync_handler.synced_epoch_id.lock() = None;
         sync_handler.graph.inner.write().locked_for_catchup = true;
+        // The consensus worker MUST drain before picking the sync target: the
+        // body-fill set is derived from consensus state, so headers still
+        // queued would never get their bodies requested and the executor
+        // later panics on a missing body (m2, 2026-10-10, when this wait was
+        // capped at 30 s). Waiting is unbounded; the only way it hangs is a
+        // leaked busy count (see the consensus worker), so log loudly.
+        let wait_start = time::Instant::now();
+        let mut next_warn = time::Duration::from_secs(30);
         while sync_handler.graph.is_consensus_worker_busy() {
-            //Thread sleep for 10ms to avoid busy-waiting
+            if wait_start.elapsed() > next_warn {
+                warn!(
+                    "CatchUpCheckpointPhase: waiting {:?} for the consensus \
+                     worker to drain ({} unprocessed)",
+                    wait_start.elapsed(),
+                    sync_handler.graph.consensus_unprocessed_count()
+                );
+                next_warn += time::Duration::from_secs(30);
+            }
             thread::sleep(time::Duration::from_millis(1));
         }
+        self.anchor_bootstrap.reset();
+        if sync_handler.graph.consensus.fast_sync_bootstrap_pending() {
+            // `next` roots the chain at a trusted checkpoint first.
+            *sync_handler.graph.fast_sync_anchor.lock() = None;
+            return;
+        }
+        check_anchor_block_numbers(sync_handler);
         let current_era_genesis = sync_handler
             .graph
             .data_man
             .get_cur_consensus_era_genesis_hash();
         let epoch_to_sync = sync_handler.graph.consensus.get_to_sync_epoch_id();
 
-        // FIXME: what happens if the snapshot before epoch_to_sync is
-        // corrupted?
-        if let Some(commitment) = sync_handler
-            .graph
-            .data_man
-            .load_epoch_execution_commitment_from_db(&epoch_to_sync)
+        // Fresh-network bootstrap: nothing to checkpoint-sync at the true
+        // genesis (see CatchUpCheckpointPhase::next). Skip straight to body sync.
+        if epoch_to_sync == sync_handler.graph.data_man.true_genesis.hash() {
+            info!(
+                "CatchUpCheckpointPhase: at true genesis, skipping checkpoint \
+                 state sync and proceeding from genesis"
+            );
+            self.has_state.store(true, AtomicOrdering::SeqCst);
+            return;
+        }
+
+        if let Some(commitment) =
+            load_checkpoint_state_if_available(sync_handler, &epoch_to_sync)
         {
             info!("CatchUpCheckpointPhase: commitment for epoch {:?} exists, skip state sync. \
                 commitment={:?}", epoch_to_sync, commitment);
@@ -446,12 +722,23 @@ impl SynchronizationPhaseTrait for CatchUpFillBlockBodyPhase {
             // `state_availability_boundary` to
             // `[cur_era_stable_height, cur_era_stable_height]`.
             if let Some(epoch_synced) = &*sync_handler.synced_epoch_id.lock() {
-                let epoch_synced_height = self
+                let epoch_synced_height = match self
                     .graph
                     .data_man
                     .block_header_by_hash(epoch_synced)
-                    .expect("Header for checkpoint exists")
-                    .height();
+                {
+                    Some(h) => h.height(),
+                    None => {
+                        error!(
+                            "CatchUpFillBlockBodyPhase: missing header for \
+                             synced checkpoint {:?}; aborting phase start so \
+                             the sync state machine can re-derive the \
+                             checkpoint",
+                            epoch_synced
+                        );
+                        return;
+                    }
+                };
                 *self.graph.data_man.state_availability_boundary.write() =
                     StateAvailabilityBoundary::new(
                         *epoch_synced,
@@ -467,12 +754,21 @@ impl SynchronizationPhaseTrait for CatchUpFillBlockBodyPhase {
             } else {
                 let cur_era_stable_hash =
                     self.graph.data_man.get_cur_consensus_era_stable_hash();
-                let cur_era_stable_height = self
+                let cur_era_stable_height = match self
                     .graph
                     .data_man
                     .block_header_by_hash(&cur_era_stable_hash)
-                    .expect("stable era block header must exist")
-                    .height();
+                {
+                    Some(h) => h.height(),
+                    None => {
+                        error!(
+                            "CatchUpFillBlockBodyPhase: missing stable era \
+                             header {:?}; aborting phase start",
+                            cur_era_stable_hash
+                        );
+                        return;
+                    }
+                };
                 *self.graph.data_man.state_availability_boundary.write() =
                     StateAvailabilityBoundary::new(
                         cur_era_stable_hash,
@@ -481,6 +777,7 @@ impl SynchronizationPhaseTrait for CatchUpFillBlockBodyPhase {
                         full_state_space,
                     );
             }
+            self.graph.data_man.sample_state_availability_metrics();
             self.graph.inner.write().block_to_fill_set =
                 self.graph.consensus.get_blocks_needing_bodies();
             sync_handler.request_block_bodies(io);
@@ -488,16 +785,32 @@ impl SynchronizationPhaseTrait for CatchUpFillBlockBodyPhase {
     }
 }
 
+/// How long `best_epoch_number` may stay flat, while we are meaningfully
+/// behind the peer median, before we conclude block-sync is wedged
+/// (an unrecoverable not-ready-frontier / graph-promotion deadlock — see
+/// docs/fast-sync-design.md §5.18) and escape to checkpoint fast-sync.
+/// Generous so a legitimately slow (but progressing) catch-up never trips
+/// it; far below the multi-hour wedges it replaces.
+const CATCH_UP_BLOCK_STUCK_ESCAPE_DEADLINE: time::Duration =
+    time::Duration::from_secs(600);
+
 pub struct CatchUpSyncBlockPhase {
     pub syn: Arc<SynchronizationState>,
     pub graph: SharedSynchronizationGraph,
+    /// `(last_observed_best_epoch, time_of_last_forward_progress)`, used to
+    /// detect a wedged block-sync and escape to fast-sync.
+    stuck_tracker: Mutex<(u64, Instant)>,
 }
 
 impl CatchUpSyncBlockPhase {
     pub fn new(
         syn: Arc<SynchronizationState>, graph: SharedSynchronizationGraph,
     ) -> Self {
-        CatchUpSyncBlockPhase { syn, graph }
+        CatchUpSyncBlockPhase {
+            syn,
+            graph,
+            stuck_tracker: Mutex::new((0, Instant::now())),
+        }
     }
 }
 
@@ -511,10 +824,9 @@ impl SynchronizationPhaseTrait for CatchUpSyncBlockPhase {
     }
 
     fn next(
-        &self, _io: &dyn NetworkContext,
+        &self, io: &dyn NetworkContext,
         sync_handler: &SynchronizationProtocolHandler,
     ) -> SyncPhaseType {
-        // FIXME: use target_height instead.
         let median_epoch = match self.syn.median_epoch_from_normal_peers() {
             None => {
                 return if self.syn.allow_phase_change_without_peer() {
@@ -526,15 +838,75 @@ impl SynchronizationPhaseTrait for CatchUpSyncBlockPhase {
             }
             Some(epoch) => epoch,
         };
-        // FIXME: OK, what if the chain height is close, or even local height is
-        // FIXME: larger, but the chain forked earlier very far away?
-        if self.graph.consensus.best_epoch_number()
-            + CATCH_UP_EPOCH_LAG_THRESHOLD
-            >= median_epoch
-        {
-            sync_handler.graph.consensus.enter_normal_phase();
-            return SyncPhaseType::Normal;
+        // Use the median normal-peer epoch as a conservative exit signal.
+        // Normal sync will return to catch-up if the node falls behind again.
+        let best_epoch = self.graph.consensus.best_epoch_number();
+        if best_epoch + CATCH_UP_EPOCH_LAG_THRESHOLD >= median_epoch {
+            if normal_peers_share_known_terminal(&self.syn, &self.graph) {
+                sync_handler.graph.consensus.enter_normal_phase();
+                return SyncPhaseType::Normal;
+            }
+            sync_handler.request_missing_terminals(io);
+            return self.phase_type();
         }
+
+        // Wedge escape (§5.18). We are meaningfully behind the peer median.
+        // If `best_epoch` makes NO forward progress for the deadline, block
+        // sync is deadlocked (a not-ready frontier whose dependencies the
+        // node can neither promote nor fetch — observed live on the archive
+        // nodes). Rather than spin forever, fall back to checkpoint
+        // fast-sync — BUT only when a fast-sync target actually exists
+        // (a configured/baked era checkpoint), otherwise we'd thrash
+        // CatchUpSyncBlock<->CatchUpCheckpoint with nothing to sync to.
+        {
+            let mut tracker = self.stuck_tracker.lock();
+            if best_epoch > tracker.0 {
+                *tracker = (best_epoch, Instant::now());
+            } else if tracker.1.elapsed()
+                > CATCH_UP_BLOCK_STUCK_ESCAPE_DEADLINE
+                // Archive nodes must NEVER escape to fast-sync: their
+                // contract is to keep ALL history, so skipping ahead to a
+                // snapshot would violate it. An archive recovers only by
+                // back-filling the gap block-by-block (the peers HAVE the
+                // data); the graph-promotion deadlock is the bug to fix for
+                // them, not to route around. full/mining DON'T keep full
+                // history, so escaping to a recent snapshot is correct.
+                // See docs/fast-sync-design.md §5.18.
+                && sync_handler.node_type() != NodeType::Archive
+                && !sync_handler
+                    .graph
+                    .consensus
+                    .trusted_checkpoint_candidates()
+                    .is_empty()
+            {
+                warn!(
+                    "CatchUpSyncBlock WEDGED: best_epoch stuck at {} for {:?} \
+                     while peer median is {} (behind by {}). Block-sync graph \
+                     can't advance; escaping to CatchUpCheckpoint fast-sync. \
+                     See docs/fast-sync-design.md §5.18.",
+                    best_epoch,
+                    tracker.1.elapsed(),
+                    median_epoch,
+                    median_epoch.saturating_sub(best_epoch),
+                );
+                // Reset so we give the re-entered checkpoint sync a full
+                // deadline before any further escape.
+                *tracker = (best_epoch, Instant::now());
+                return SyncPhaseType::CatchUpCheckpoint;
+            }
+        }
+
+        // Body-sync unification (§5.20): keep draining `block_to_fill_set`
+        // on every phase tick (1s via CHECK_CATCH_UP_MODE_TIMER). The
+        // 500ms CHECK_REQUEST_TIMER also drains it, so combined we get
+        // 2–3 dispatches per second — enough to keep the max_inflight
+        // window (400, or 64 under backpressure) refilled at production
+        // rates. Without this, a node stayed in CatchUpSyncBlock forever
+        // if its median_peer_epoch outran its best_epoch by more than
+        // CATCH_UP_EPOCH_LAG_THRESHOLD (observed live on m1: epoch stuck
+        // at 1199, missing_bodies climbing 12k → 22k over 20 min while
+        // the log emitted only `request_block_headers: []`).
+        sync_handler.request_block_bodies(io);
 
         self.phase_type()
     }
@@ -550,6 +922,12 @@ impl SynchronizationPhaseTrait for CatchUpSyncBlockPhase {
             (cur_era_genesis_height, Instant::now(), 0, 0);
 
         sync_handler.request_epochs(io);
+        // Body-sync unification (§5.20): CatchUpSyncBlock now also drives
+        // body-fetch, subsuming the responsibility that used to belong
+        // exclusively to CatchUpFillBlockBodyPhase. Without this, a node
+        // entering CatchUpSyncBlock under backpressure would fetch only
+        // headers and never drain `block_to_fill_set`, wedging consensus.
+        sync_handler.request_block_bodies(io);
     }
 }
 
@@ -576,9 +954,36 @@ impl SynchronizationPhaseTrait for NormalSyncPhase {
 
     fn next(
         &self, _io: &dyn NetworkContext,
-        _sync_handler: &SynchronizationProtocolHandler,
+        sync_handler: &SynchronizationProtocolHandler,
     ) -> SyncPhaseType {
-        // FIXME: handle the case where we need to switch back phase
+        let best_epoch = sync_handler.graph.consensus.best_epoch_number();
+        if let Some(median_epoch) =
+            sync_handler.syn.median_epoch_from_normal_peers()
+        {
+            if best_epoch + CATCH_UP_EPOCH_LAG_THRESHOLD < median_epoch {
+                sync_handler.graph.consensus.leave_normal_phase();
+                return SyncPhaseType::CatchUpSyncBlock;
+            }
+        } else if let Some(all_median) =
+            sync_handler.syn.median_epoch_from_all_peers()
+        {
+            // premature-Normal safety net. The primary signal above only
+            // considers peers advertising Normal phase; when none do (mesh
+            // split, or all peers are themselves catching up) it returns
+            // `None` and we would sit wedged in Normal forever even while far
+            // behind the network. Fall back to the median `best_epoch` across
+            // ALL peers: if we are meaningfully behind it, we either exited to
+            // Normal prematurely or fell behind after a split, and must resume
+            // catch-up. Re-entering is self-correcting — if we are actually up
+            // to date, CatchUpSyncBlock exits straight back to Normal — so the
+            // asymmetry (cheap false catch-up vs. catastrophic permanent
+            // divergence) is deliberately biased toward recovery. Median keeps
+            // one lying peer from trapping us.
+            if best_epoch + CATCH_UP_EPOCH_LAG_THRESHOLD < all_median {
+                sync_handler.graph.consensus.leave_normal_phase();
+                return SyncPhaseType::CatchUpSyncBlock;
+            }
+        }
         self.phase_type()
     }
 
@@ -589,4 +994,70 @@ impl SynchronizationPhaseTrait for NormalSyncPhase {
         info!("start phase {:?}", self.name());
         sync_handler.request_missing_terminals(io);
     }
+}
+
+fn normal_peers_share_known_terminal(
+    syn: &SynchronizationState, graph: &SharedSynchronizationGraph,
+) -> bool {
+    let peers = syn.peers.read();
+    let mut saw_normal_peer = false;
+
+    for (_, peer_lock) in peers.iter() {
+        let peer = peer_lock.read();
+        if !peer
+            .capabilities
+            .contains(DynamicCapability::NormalPhase(true))
+        {
+            continue;
+        }
+        saw_normal_peer = true;
+        if peer
+            .latest_block_hashes
+            .iter()
+            .any(|hash| graph.contains_block_header(hash))
+        {
+            return true;
+        }
+    }
+
+    !saw_normal_peer
+}
+
+fn load_checkpoint_state_if_available(
+    sync_handler: &SynchronizationProtocolHandler, epoch_to_sync: &H256,
+) -> Option<EpochExecutionCommitment> {
+    let data_man = &sync_handler.graph.data_man;
+    let storage_manager = data_man.storage_manager.get_storage_manager();
+    if storage_manager
+        .get_snapshot_info_at_epoch(epoch_to_sync)
+        .is_none()
+    {
+        debug!(
+            "Checkpoint {:?} has execution commitment but no snapshot metadata; resync state",
+            epoch_to_sync
+        );
+        return None;
+    }
+
+    let snapshot_manager = storage_manager.get_snapshot_manager();
+    match snapshot_manager.get_snapshot_by_epoch_id(epoch_to_sync, true, false)
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            warn!(
+                "Checkpoint {:?} has execution commitment but no snapshot db; resync state",
+                epoch_to_sync
+            );
+            return None;
+        }
+        Err(err) => {
+            warn!(
+                "Checkpoint {:?} snapshot open failed: {}; resync state",
+                epoch_to_sync, err
+            );
+            return None;
+        }
+    }
+
+    data_man.load_epoch_execution_commitment_from_db(epoch_to_sync)
 }

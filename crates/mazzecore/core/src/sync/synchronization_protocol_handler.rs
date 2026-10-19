@@ -1203,7 +1203,27 @@ impl SynchronizationProtocolHandler {
         // ~26/s). Bounded per tick so one call never holds up the IO worker.
         const LOCAL_BODY_LOOKUPS_PER_TICK: usize = 4096;
         let mut local_hits = HashSet::new();
-        for hash in to_request_blocks.iter().take(LOCAL_BODY_LOOKUPS_PER_TICK) {
+        {
+            // Entries whose body is already in the graph only need dropping.
+            let inner = &mut *self.graph.inner.write();
+            for hash in to_request_blocks.iter() {
+                let ready = inner
+                    .hash_to_arena_indices
+                    .get(hash)
+                    .map(|i| inner.arena[*i].block_ready);
+                if ready != Some(false) {
+                    inner.block_to_fill_set.remove(hash);
+                    local_hits.insert(*hash);
+                }
+            }
+        }
+        let db_candidates: Vec<H256> = to_request_blocks
+            .iter()
+            .filter(|h| !local_hits.contains(*h))
+            .take(LOCAL_BODY_LOOKUPS_PER_TICK)
+            .copied()
+            .collect();
+        for hash in &db_candidates {
             if let Some(block) = self.graph.data_man.block_from_db(hash) {
                 self.graph.insert_block(
                     block, true,  /* need_to_verify */

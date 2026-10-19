@@ -2427,6 +2427,12 @@ impl SynchronizationGraph {
             };
 
         if contains_block {
+            // The body is already here (e.g. loaded from the DB when the
+            // graph was recovered), so the block needs no filling. Leaving it
+            // in `block_to_fill_set` made it immortal: m2 restarted with 1.67M
+            // such entries, `missing_bodies` never fell, and header sync
+            // stayed gated on the fill debt (2026-10-19).
+            inner.block_to_fill_set.remove(&hash);
             return BlockInsertionResult::AlreadyProcessed;
         }
 

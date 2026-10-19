@@ -318,3 +318,12 @@ fn proof_wire_format() {
         }
     }
 }
+
+#[test]
+#[ignore]
+fn ps1_query_count() {
+    let air = Tx2Air::new(HEIGHT);
+    let shape = FriShape { cap_height: 0, log_blowup: 6, max_log_arity: 3, query_pow_bits: 16 };
+    let (q, bits) = proven_queries(&air, shape, 128);
+    println!("PS1 queries {q} proven bits {bits}");
+}

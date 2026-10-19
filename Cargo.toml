@@ -15,6 +15,7 @@ members = [
     "crates/dbs/db-errors",
     "crates/network",
     "crates/primitives",
+    "crates/shielded_pq",
     "crates/secret_store",
     "crates/transactiongen",
     "bins/mazze_store",

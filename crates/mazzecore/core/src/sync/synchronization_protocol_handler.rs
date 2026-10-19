@@ -1203,34 +1203,44 @@ impl SynchronizationProtocolHandler {
         // ~26/s). Bounded per tick so one call never holds up the IO worker.
         const LOCAL_BODY_LOOKUPS_PER_TICK: usize = 4096;
         let mut local_hits = HashSet::new();
+        // Headers of blocks still waiting for a body. Taken from the graph:
+        // `block_from_db` would decode the header again and recompute its
+        // RandomX hash, and with the fill set in random height order every
+        // lookup built a new light RandomX context (m2: ~3 bodies/s, IO
+        // workers stalled on the seed cache).
+        let mut db_candidates = Vec::new();
         {
-            // Entries whose body is already in the graph only need dropping.
             let inner = &mut *self.graph.inner.write();
             for hash in to_request_blocks.iter() {
-                let ready = inner
-                    .hash_to_arena_indices
-                    .get(hash)
-                    .map(|i| inner.arena[*i].block_ready);
-                if ready != Some(false) {
-                    inner.block_to_fill_set.remove(hash);
-                    local_hits.insert(*hash);
+                match inner.hash_to_arena_indices.get(hash).copied() {
+                    Some(i) if !inner.arena[i].block_ready => {
+                        if db_candidates.len() < LOCAL_BODY_LOOKUPS_PER_TICK {
+                            db_candidates.push(
+                                inner.arena[i].block_header.clone(),
+                            );
+                        }
+                    }
+                    // Body already present, or the block left the graph:
+                    // nothing to fill.
+                    _ => {
+                        inner.block_to_fill_set.remove(hash);
+                        local_hits.insert(*hash);
+                    }
                 }
             }
         }
-        let db_candidates: Vec<H256> = to_request_blocks
-            .iter()
-            .filter(|h| !local_hits.contains(*h))
-            .take(LOCAL_BODY_LOOKUPS_PER_TICK)
-            .copied()
-            .collect();
-        for hash in &db_candidates {
-            if let Some(block) = self.graph.data_man.block_from_db(hash) {
+        for header in db_candidates {
+            let hash = header.hash();
+            if let Some(body) =
+                self.graph.data_man.db_manager.block_body_from_db(&hash)
+            {
                 self.graph.insert_block(
-                    block, true,  /* need_to_verify */
+                    Block::new((*header).clone(), body),
+                    true,  /* need_to_verify */
                     false, /* persistent: already on disk */
                     true,  /* recover_from_db */
                 );
-                local_hits.insert(*hash);
+                local_hits.insert(hash);
             }
         }
         if !local_hits.is_empty() {

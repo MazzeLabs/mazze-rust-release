@@ -1195,6 +1195,31 @@ impl SynchronizationProtocolHandler {
                     .collect();
             }
         }
+        // Bodies already on disk are inserted from the local DB instead of
+        // being requested. §5.19 queues every header that becomes
+        // HEADER_GRAPH_READY without an in-memory body, so after a restart
+        // an archive re-requested its whole history from peers (m2,
+        // 2026-10-19: 1.6M "missing" bodies it already had, fetched at
+        // ~26/s). Bounded per tick so one call never holds up the IO worker.
+        const LOCAL_BODY_LOOKUPS_PER_TICK: usize = 4096;
+        let mut local_hits = HashSet::new();
+        for hash in to_request_blocks.iter().take(LOCAL_BODY_LOOKUPS_PER_TICK) {
+            if let Some(block) = self.graph.data_man.block_from_db(hash) {
+                self.graph.insert_block(
+                    block, true,  /* need_to_verify */
+                    false, /* persistent: already on disk */
+                    true,  /* recover_from_db */
+                );
+                local_hits.insert(*hash);
+            }
+        }
+        if !local_hits.is_empty() {
+            debug!(
+                "request_block_bodies: filled {} bodies from the local DB",
+                local_hits.len()
+            );
+            to_request_blocks.retain(|h| !local_hits.contains(h));
+        }
         let n_blocks_to_request = min(
             max_inflight.saturating_sub(in_flight_blocks.len()),
             to_request_blocks.len(),

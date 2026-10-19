@@ -3,6 +3,7 @@
 // See http://www.gnu.org/licenses/
 
 mod epoch_execution;
+mod exec_profile;
 
 use core::convert::TryFrom;
 use std::{
@@ -76,8 +77,6 @@ use alloy_rpc_types_trace::geth::GethDebugTracingOptions;
 
 use self::epoch_execution::{GethTask, VirtualCall};
 
-/// Rolling counter for the per-epoch exec-profile log (see `compute_epoch`).
-static EXEC_PROFILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
     static ref CONSENSIS_EXECUTION_TIMER: Arc<dyn Meter> =
@@ -1163,6 +1162,13 @@ impl ConsensusExecutionHandler {
         // FIXME: Currently we make the snapshotting decision when committing
         // FIXME: a new state.
 
+        let mut prof = exec_profile::EpochTimer::start();
+        // §B1: the block-number index, receipts / traces / tx index and
+        // reward results this epoch writes are committed together in one
+        // MDBX transaction, flushed before the state commit below (so a
+        // crash can never leave a state commit or execution commitment
+        // without them, as before). Early returns flush on drop.
+        let write_buffer = self.data_man.db_manager.buffer_writes();
         // persist block number index
         // note: we need to persist before execution because in some cases,
         // execution is skipped. when `compute_epoch` is called, it is
@@ -1214,7 +1220,7 @@ impl ConsensusExecutionHandler {
             epoch_blocks.len(),
         );
 
-        let _t_newstate = std::time::Instant::now();
+        prof.mark(exec_profile::Phase::Pre);
         let mut state = match self
             .new_state(main_block, recover_mpt_during_construct_main_state)
         {
@@ -1245,13 +1251,8 @@ impl ConsensusExecutionHandler {
                 }
             }
         };
-        let newstate_ms = _t_newstate.elapsed().as_millis();
+        prof.mark(exec_profile::Phase::NewState);
 
-        // Profiling instrumentation (safe — timing only, no consensus impact).
-        // Breaks the per-epoch cost into EVM execution / reward+PoW / DB commit
-        // so we can target the catch-up bottleneck instead of guessing. Logged
-        // once every EXEC_PROFILE_EVERY epochs to avoid log spam.
-        let _t_exec = std::time::Instant::now();
         let epoch_receipts = match self.process_epoch_transactions(
             *epoch_hash,
             &mut state,
@@ -1275,12 +1276,11 @@ impl ConsensusExecutionHandler {
                 return false;
             }
         };
-        let exec_ms = _t_exec.elapsed().as_millis();
+        prof.mark(exec_profile::Phase::Evm);
 
         let current_block_number =
             start_block_number + epoch_receipts.len() as u64 - 1;
 
-        let _t_reward = std::time::Instant::now();
         if let Some(reward_execution_info) = reward_execution_info {
             // Fix A: warm the PoW-quality cache for every block in the epoch in
             // PARALLEL before the serial reward loop reads it. Each pow lookup
@@ -1316,9 +1316,10 @@ impl ConsensusExecutionHandler {
                 spec,
             );
         }
-        let reward_ms = _t_reward.elapsed().as_millis();
+        prof.mark(exec_profile::Phase::RewardPow);
+        drop(write_buffer);
+        prof.mark(exec_profile::Phase::Flush);
 
-        let _t_commit = std::time::Instant::now();
         let _commit_timer =
             ScopeTimer::time_scope(CONSENSUS_STATE_COMMIT_TIMER.clone());
         let commit_result = match state
@@ -1337,22 +1338,7 @@ impl ConsensusExecutionHandler {
                 return false;
             }
         };
-        let commit_ms = _t_commit.elapsed().as_millis();
-        {
-            const EXEC_PROFILE_EVERY: usize = 128;
-            let n = EXEC_PROFILE_COUNTER.fetch_add(1, Relaxed);
-            if n % EXEC_PROFILE_EVERY == 0 {
-                info!(
-                    "exec-profile epoch={} blocks={} | new_state={}ms evm={}ms reward+pow={}ms commit={}ms",
-                    epoch_hash,
-                    epoch_blocks.len(),
-                    newstate_ms,
-                    exec_ms,
-                    reward_ms,
-                    commit_ms,
-                );
-            }
-        }
+        prof.mark(exec_profile::Phase::Commit);
 
         if on_local_main {
             self.notify_txpool(&commit_result, epoch_hash);
@@ -1379,6 +1365,11 @@ impl ConsensusExecutionHandler {
             .state_availability_boundary
             .write()
             .adjust_upper_bound(&main_block.block_header);
+        prof.mark(exec_profile::Phase::Post);
+        prof.finish(
+            epoch_blocks.len(),
+            epoch_blocks.iter().map(|b| b.transactions.len()).sum(),
+        );
         true
     }
 

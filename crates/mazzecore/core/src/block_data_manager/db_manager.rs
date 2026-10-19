@@ -24,7 +24,15 @@ use primitives::{
 };
 use metrics::{Counter, CounterUsize};
 use rlp::Rlp;
-use std::{collections::HashMap, sync::Arc};
+use parking_lot::Mutex;
+use std::{
+    cell::Cell,
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
@@ -364,6 +372,32 @@ impl TableBackend {
             TableBackend::Compound(c) => c.get(k),
         }
     }
+
+    /// The single-column backend a key of this table lives in.
+    fn column_of(&self, k: &[u8]) -> &SimpleBackend {
+        match self {
+            TableBackend::Simple(b) => b,
+            TableBackend::Compound(c) => c.dispatch(k),
+        }
+    }
+}
+
+/// See [`DBManager::buffer_writes`].
+pub struct WriteBufferGuard<'a>(Option<&'a DBManager>);
+
+impl Drop for WriteBufferGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(db) = self.0 {
+            BUFFERING_FOR.with(|b| b.set(0));
+            db.flush_write_buffer();
+        }
+    }
+}
+
+thread_local! {
+    /// Address of the `DBManager` whose writes this thread currently
+    /// buffers (see `DBManager::with_write_buffer`), or 0.
+    static BUFFERING_FOR: Cell<usize> = Cell::new(0);
 }
 
 pub struct DBManager {
@@ -375,6 +409,15 @@ pub struct DBManager {
     table_backends: HashMap<DBTable, TableBackend>,
     pow: Arc<PowComputer>,
     genesis_hash: H256,
+    /// The env every table lives in (for multi-column atomic flushes).
+    env: Arc<MdbxEnv>,
+    /// §B1 write-combining: writes made inside `with_write_buffer` on the
+    /// buffering thread, `None` = delete. Visible to every reader until
+    /// flushed together in one MDBX transaction.
+    write_buffer: Mutex<HashMap<(DBTable, Vec<u8>), Option<Vec<u8>>>>,
+    /// `write_buffer.len()`, readable without the lock (readers skip the
+    /// buffer while it is empty).
+    buffered: AtomicUsize,
 }
 
 impl DBManager {
@@ -502,6 +545,9 @@ impl DBManager {
             table_backends: Self::build_table_backends(&env),
             pow,
             genesis_hash,
+            env,
+            write_buffer: Mutex::new(HashMap::new()),
+            buffered: AtomicUsize::new(0),
         }
     }
 
@@ -955,9 +1001,104 @@ impl DBManager {
         self.load_decodable_val(DBTable::Misc, GC_PROGRESS_KEY)
     }
 
+    /// §B1 write-combining. Run `f` with every write this thread makes
+    /// through this `DBManager` buffered in memory, then commit them all
+    /// in ONE MDBX transaction (instead of one transaction per key).
+    ///
+    /// While buffered, the writes are visible to every reader (reads check
+    /// the buffer first). A write of the same key by another thread drops
+    /// the buffered one (the later write wins, as without buffering). A
+    /// crash before the flush loses the buffered writes together, as if
+    /// it had happened before the first of them: callers must not let
+    /// another component act on a buffered write (persist something that
+    /// refers to it) before this returns. Nested calls join the outer
+    /// buffer.
+    pub fn with_write_buffer<T>(&self, f: impl FnOnce() -> T) -> T {
+        let _flush = self.buffer_writes();
+        f()
+    }
+
+    /// Guard form of [`Self::with_write_buffer`]: buffering ends and the
+    /// buffer is flushed when the guard is dropped.
+    pub fn buffer_writes(&self) -> WriteBufferGuard<'_> {
+        let me = self as *const Self as usize;
+        let prev = BUFFERING_FOR.with(|b| b.get());
+        if prev == me {
+            return WriteBufferGuard(None);
+        }
+        // Another DBManager buffering on this thread (tests only): flush
+        // nothing of it here, just don't capture its writes.
+        if prev != 0 {
+            return WriteBufferGuard(None);
+        }
+        BUFFERING_FOR.with(|b| b.set(me));
+        WriteBufferGuard(Some(self))
+    }
+
+    /// Commit the buffered writes in one MDBX transaction. The lock is
+    /// held until the commit is done, so a reader never misses a value
+    /// that left the buffer but is not committed yet.
+    fn flush_write_buffer(&self) {
+        let mut buffer = self.write_buffer.lock();
+        if buffer.is_empty() {
+            return;
+        }
+        let mut ops: Vec<(u32, mazze_storage::BatchOp)> =
+            Vec::with_capacity(buffer.len());
+        for ((table, key), value) in buffer.iter() {
+            let col = self.table_backends[table].column_of(key);
+            col.metrics.put_ok.inc(1);
+            ops.push((
+                col.kvdb.col,
+                match value {
+                    Some(v) => mazze_storage::BatchOp::Put(key, v),
+                    None => mazze_storage::BatchOp::Delete(key),
+                },
+            ));
+        }
+        if let Err(e) = self.env.write_multi(&ops) {
+            DB_WRITE_FAILURES.inc(ops.len());
+            error!(
+                "db buffered write of {} key(s) failed: {:?}. CACHE/DB \
+                 DIVERGENCE",
+                ops.len(),
+                e
+            );
+        }
+        drop(ops);
+        buffer.clear();
+        self.buffered.store(0, Ordering::Release);
+    }
+
+    /// Route a write: buffered (returns `None`) if this thread is inside
+    /// `with_write_buffer`, otherwise handed back (`Some(value)`) for an
+    /// immediate write after dropping any buffered write of the same key.
+    fn buffer_write(
+        &self, table: DBTable, db_key: &[u8], value: Option<Vec<u8>>,
+    ) -> Option<Option<Vec<u8>>> {
+        let me = self as *const Self as usize;
+        if BUFFERING_FOR.with(|b| b.get()) == me {
+            let mut buffer = self.write_buffer.lock();
+            buffer.insert((table, db_key.to_vec()), value);
+            self.buffered.store(buffer.len(), Ordering::Release);
+            return None;
+        }
+        if self.buffered.load(Ordering::Acquire) > 0 {
+            let mut buffer = self.write_buffer.lock();
+            if buffer.remove(&(table, db_key.to_vec())).is_some() {
+                self.buffered.store(buffer.len(), Ordering::Release);
+            }
+        }
+        Some(value)
+    }
+
     /// The functions below are private utils used by the DBManager to access
     /// database
     fn insert_to_db(&self, table: DBTable, db_key: &[u8], value: Vec<u8>) {
+        let value = match self.buffer_write(table, db_key, Some(value)) {
+            None => return,
+            Some(v) => v.expect("buffer_write hands back the value"),
+        };
         let backend = self.table_backends.get(&table).expect(
             "DBManager: no backend registered for the DBTable — \
              every variant is wired in build_table_backends",
@@ -1015,6 +1156,9 @@ impl DBManager {
     }
 
     fn remove_from_db(&self, table: DBTable, db_key: &[u8]) {
+        if self.buffer_write(table, db_key, None).is_none() {
+            return;
+        }
         let backend = self.table_backends.get(&table).expect(
             "DBManager: no backend registered for the DBTable",
         );
@@ -1022,6 +1166,12 @@ impl DBManager {
     }
 
     fn load_from_db(&self, table: DBTable, db_key: &[u8]) -> Option<Box<[u8]>> {
+        if self.buffered.load(Ordering::Acquire) > 0 {
+            let buffer = self.write_buffer.lock();
+            if let Some(v) = buffer.get(&(table, db_key.to_vec())) {
+                return v.as_ref().map(|v| v.clone().into_boxed_slice());
+            }
+        }
         let backend = self.table_backends.get(&table).expect(
             "DBManager: no backend registered for the DBTable",
         );
@@ -1227,6 +1377,93 @@ impl MallocSizeOf for DBManager {
         // no other significant Rust allocations on DBManager to
         // account for. Return 0.
         0
+    }
+}
+
+#[cfg(test)]
+mod write_buffer_tests {
+    use super::*;
+
+    fn make_db() -> (tempdir::TempDir, Arc<DBManager>) {
+        let dir = tempdir::TempDir::new("db_manager_write_buffer").unwrap();
+        let env = MdbxEnv::open(dir.path()).unwrap();
+        let db = DBManager::new(
+            env,
+            Arc::new(PowComputer::new(H256::zero())),
+            H256::zero(),
+        );
+        (dir, Arc::new(db))
+    }
+
+    /// Reads straight from MDBX, bypassing the buffer.
+    fn committed(db: &DBManager, n: u64) -> Option<H256> {
+        db.table_backends[&DBTable::HashByBlockNumber]
+            .get(&n.to_be_bytes())
+            .unwrap()
+            .map(|v| H256::db_decode(&v).unwrap())
+    }
+
+    #[test]
+    fn buffered_writes_are_visible_and_flushed_together() {
+        let (_dir, db) = make_db();
+        let (h1, h2) = (H256::from_low_u64_be(1), H256::from_low_u64_be(2));
+        db.insert_hash_by_block_number_to_db(9, &h1);
+        db.with_write_buffer(|| {
+            db.insert_hash_by_block_number_to_db(1, &h1);
+            db.insert_hash_by_block_number_to_db(2, &h1);
+            db.insert_hash_by_block_number_to_db(2, &h2);
+            db.remove_from_db(
+                DBTable::HashByBlockNumber,
+                &9u64.to_be_bytes(),
+            );
+            // Not committed yet ...
+            assert_eq!(committed(&db, 1), None);
+            assert_eq!(committed(&db, 9), Some(h1));
+            // ... but visible to this and to other threads.
+            assert_eq!(db.hash_by_block_number_from_db(&2), Some(h2));
+            assert_eq!(db.hash_by_block_number_from_db(&9), None);
+            let other = Arc::clone(&db);
+            let seen = std::thread::spawn(move || {
+                (
+                    other.hash_by_block_number_from_db(&1),
+                    other.hash_by_block_number_from_db(&9),
+                )
+            })
+            .join()
+            .unwrap();
+            assert_eq!(seen, (Some(h1), None));
+            // Nested scopes join the outer buffer.
+            db.with_write_buffer(|| {
+                db.insert_hash_by_block_number_to_db(3, &h2)
+            });
+            assert_eq!(committed(&db, 3), None);
+        });
+        assert_eq!(committed(&db, 1), Some(h1));
+        assert_eq!(committed(&db, 2), Some(h2));
+        assert_eq!(committed(&db, 3), Some(h2));
+        assert_eq!(committed(&db, 9), None);
+        assert_eq!(db.buffered.load(Ordering::Relaxed), 0);
+        // Outside a scope writes are immediate.
+        db.insert_hash_by_block_number_to_db(4, &h1);
+        assert_eq!(committed(&db, 4), Some(h1));
+    }
+
+    #[test]
+    fn direct_write_from_another_thread_wins_over_buffered_one() {
+        let (_dir, db) = make_db();
+        let (h1, h2) = (H256::from_low_u64_be(1), H256::from_low_u64_be(2));
+        let guard = db.buffer_writes();
+        db.insert_hash_by_block_number_to_db(5, &h1);
+        let other = Arc::clone(&db);
+        std::thread::spawn(move || {
+            other.insert_hash_by_block_number_to_db(5, &h2)
+        })
+        .join()
+        .unwrap();
+        assert_eq!(committed(&db, 5), Some(h2));
+        assert_eq!(db.hash_by_block_number_from_db(&5), Some(h2));
+        drop(guard);
+        assert_eq!(committed(&db, 5), Some(h2));
     }
 }
 

@@ -2139,6 +2139,13 @@ impl ConsensusNewBlockHandler {
         );
 
         let confirmed_epoch_num = meter.get_confirmed_epoch_num();
+        // Progress/profile of the forced recompute (timing only): time spent
+        // in reward-info assembly, epoch execution and state maintenance.
+        let cms_started = std::time::Instant::now();
+        let mut cms_window_started = cms_started;
+        let mut cms_window_epochs = 0u64;
+        let mut cms_total_epochs = 0u64;
+        let mut cms_t = [std::time::Duration::ZERO; 3];
         for main_index in start_main_index + 1..end_index {
             let main_arena_index = inner.main_chain[main_index];
             let main_hash = inner.arena[main_arena_index].hash;
@@ -2168,9 +2175,11 @@ impl ConsensusNewBlockHandler {
             );
 
             if compute_epoch {
+                let t0 = std::time::Instant::now();
                 let reward_execution_info = self
                     .executor
                     .get_reward_execution_info(inner, main_arena_index);
+                cms_t[0] += t0.elapsed();
 
                 let recover_mpt_during_construct_main_state =
                     max_snapshot_epoch_index_has_mpt.map_or(true, |idx| {
@@ -2180,6 +2189,7 @@ impl ConsensusNewBlockHandler {
                     "compute epoch recovery flag {}",
                     recover_mpt_during_construct_main_state
                 );
+                let t1 = std::time::Instant::now();
                 let executed = self.executor.compute_epoch(
                     EpochExecutionTask::new(
                         main_arena_index,
@@ -2191,6 +2201,8 @@ impl ConsensusNewBlockHandler {
                     None,
                     recover_mpt_during_construct_main_state,
                 );
+                cms_t[1] += t1.elapsed();
+                let t2 = std::time::Instant::now();
                 if !executed {
                     warn!(
                         "construct_main_state failed for epoch {:?}",
@@ -2226,6 +2238,32 @@ impl ConsensusNewBlockHandler {
                             ":",
                             column!()
                         ));
+                }
+                cms_t[2] += t2.elapsed();
+                cms_window_epochs += 1;
+                cms_total_epochs += 1;
+                if cms_window_epochs == 1000 || main_index + 1 == end_index {
+                    let wall = cms_window_started.elapsed().as_secs_f64();
+                    let n = cms_window_epochs as f64;
+                    info!(
+                        "construct_main_state progress: height {} \
+                         ({}/{} epochs, {:.1}s total) window: {} epochs \
+                         in {:.1}s = {:.2} ep/s; ms/ep reward_info={:.2} \
+                         compute={:.2} maintain={:.2}",
+                        height,
+                        cms_total_epochs,
+                        end_index.saturating_sub(start_compute_epoch_main_index),
+                        cms_started.elapsed().as_secs_f64(),
+                        cms_window_epochs,
+                        wall,
+                        n / wall.max(1e-9),
+                        cms_t[0].as_secs_f64() * 1e3 / n,
+                        cms_t[1].as_secs_f64() * 1e3 / n,
+                        cms_t[2].as_secs_f64() * 1e3 / n,
+                    );
+                    cms_window_started = std::time::Instant::now();
+                    cms_window_epochs = 0;
+                    cms_t = [std::time::Duration::ZERO; 3];
                 }
             }
         }

@@ -16,6 +16,9 @@ pub struct Wallet {
     /// Every leaf of the commitment tree, in position order.
     pub leaves: Vec<[u32; DIGEST]>,
     pub notes: Vec<StoredNote>,
+    /// The next self-note index (spec §9.5).
+    #[serde(default)]
+    pub next_self: u32,
 }
 
 /// A note opening: what the owner needs to spend it. As written to a file
@@ -31,6 +34,9 @@ pub struct StoredNote {
     pub position: Option<u64>,
     #[serde(default)]
     pub spent: bool,
+    /// Set for the wallet's own notes, which the seed alone can recover.
+    #[serde(default)]
+    pub self_index: Option<u32>,
 }
 
 fn elems<const N: usize>(xs: &[u32]) -> [F; N] { std::array::from_fn(|i| F::new(xs[i])) }
@@ -45,6 +51,7 @@ impl StoredNote {
             cm: note.cm(sponge).map(|x| x.as_canonical_u32()),
             position: None,
             spent: false,
+            self_index: None,
         }
     }
 
@@ -57,7 +64,7 @@ impl StoredNote {
 
 impl Wallet {
     pub fn new(seed: [u8; 32]) -> Self {
-        Wallet { seed, synced_epoch: 0, leaves: Vec::new(), notes: Vec::new() }
+        Wallet { seed, synced_epoch: 0, leaves: Vec::new(), notes: Vec::new(), next_self: 0 }
     }
 
     pub fn load(path: &str) -> Result<Self, String> {

@@ -41,6 +41,10 @@ pub struct ShieldedTxInfo {
     pub nullifiers: [Bytes; 2],
     pub output_commitments: [Bytes; 2],
     pub recovery_tag: Bytes,
+    /// The sealed recovery slot (64 bytes) and its tag (16 bytes): public,
+    /// opened only by the wallet whose seed derives `recovery_tag`.
+    pub recovery_slot: Bytes,
+    pub recovery_mac: Bytes,
     pub v_public_in: U256,
     pub v_public_out: U256,
     pub fee: U256,

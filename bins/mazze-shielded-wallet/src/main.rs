@@ -20,7 +20,15 @@
 //! mazze-shielded-wallet send       --wallet W --rpc URL --to mzs1.. --amount A --opening-out FILE
 //! mazze-shielded-wallet receive    --wallet W --opening FILE
 //! mazze-shielded-wallet unshield   --wallet W --rpc URL --to 0xADDR [--espace] --amount A
+//! mazze-shielded-wallet claim      --wallet W --rpc URL
+//! mazze-shielded-wallet restore    --wallet W --rpc URL --seed HEX
 //! ```
+//!
+//! Recovery (spec §9.5): every note the wallet keeps for itself (change,
+//! shield-in, claims) is a self-note derived from the seed, with its value
+//! sealed in the transaction's recovery slot. `restore` rebuilds them from
+//! the seed alone. Notes received from others are recoverable only once
+//! claimed into a self-note, so `claim` should run after every receipt.
 
 mod rpc;
 mod store;
@@ -33,7 +41,10 @@ use mazze_shielded_pq::{
     note::{nullifier, Note},
     ps1::ProverRandomness,
     tree::{Tree, DEPTH},
-    wallet::{build_transaction, fresh_fields, from_shielded_digest, WalletKeys},
+    wallet::{
+        build_transaction, fresh_fields, from_shielded_digest, recovery_key,
+        recovery_tag, WalletKeys, GAP_LIMIT, MAX_SELF_INDEX,
+    },
 };
 use mazze_types::{Address, H160, U256};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
@@ -133,6 +144,8 @@ fn run(args: &[String]) -> Result<(), String> {
             w.save(path)
         }
         "shield-in" => shield_in(path, &a),
+        "claim" => claim(path, &a),
+        "restore" => restore(path, &a),
         "send" => send(path, &a),
         "unshield" => unshield(path, &a),
         other => Err(format!("unknown command {other}")),
@@ -202,13 +215,6 @@ fn dummy_input(sponge: &Sponge) -> SpendIn {
 /// A dummy output: value 0 to a random owner.
 fn dummy_output() -> Note { new_note(fresh(), fresh(), 0) }
 
-fn random_recovery() -> RecoverySlot {
-    let mut r = RecoverySlot { tag: [0; 32], slot: [0; 64], mac: [0; 16] };
-    rand::rngs::OsRng.fill_bytes(&mut r.tag);
-    rand::rngs::OsRng.fill_bytes(&mut r.slot);
-    rand::rngs::OsRng.fill_bytes(&mut r.mac);
-    r
-}
 
 // ---- sync ---------------------------------------------------------------------
 
@@ -326,10 +332,11 @@ fn spend_input(ctx: &Context, w: &Wallet, tree: &Tree, i: usize) -> SpendIn {
 /// Proves and submits; returns the body hash.
 fn prove_and_submit(
     ctx: &Context, mut witness: Tx2Witness, dest: Option<ShieldedDest>,
+    recovery: RecoverySlot,
 ) -> Result<(primitives::shielded::ShieldedTxBody, Vec<u8>), String> {
     eprintln!("proving…");
     let (body, proof) =
-        build_transaction(ctx.chain, &mut witness, dest, random_recovery(), prover_randomness)?;
+        build_transaction(ctx.chain, &mut witness, dest, recovery, prover_randomness)?;
     Ok((body, proof))
 }
 
@@ -342,9 +349,14 @@ fn submit(ctx: &Context, body: &primitives::shielded::ShieldedTxBody, proof: &[u
     Ok(())
 }
 
-fn self_note(ctx: &Context, value: u64) -> Note {
-    let d = ctx.keys.diversifier(0);
-    new_note(d, ctx.keys.spend.owner(&ctx.sponge, &d), value)
+/// The next self-note, its recovery slot, and its stored form. The index
+/// advances only when the wallet is saved after a successful submission.
+fn self_note(ctx: &Context, w: &Wallet, value: u64) -> (Note, RecoverySlot, StoredNote) {
+    let i = w.next_self;
+    let note = ctx.keys.self_note(&ctx.sponge, i, value);
+    let mut stored = StoredNote::from_note(&note, &ctx.sponge);
+    stored.self_index = Some(i);
+    (note, ctx.keys.seal_recovery(i, value), stored)
 }
 
 /// Random output order, so the change is not recognisable by position.
@@ -359,10 +371,10 @@ fn shield_in(path: &str, a: &Args) -> Result<(), String> {
     if amount <= ctx.fee {
         return Err(format!("the amount must exceed the fee {}", ctx.fee));
     }
-    let mine = self_note(&ctx, amount - ctx.fee);
+    let (mine, recovery, stored) = self_note(&ctx, &w, amount - ctx.fee);
     let witness = Tx2Witness {
         inputs: [dummy_input(&ctx.sponge), dummy_input(&ctx.sponge)],
-        outputs: shuffle_outputs(mine.clone(), dummy_output()),
+        outputs: shuffle_outputs(mine, dummy_output()),
         v_in: amount,
         v_out: 0,
         fee: ctx.fee,
@@ -370,7 +382,7 @@ fn shield_in(path: &str, a: &Args) -> Result<(), String> {
         anchor: tree(&w).root(),
         out_limb_override: [None, None],
     };
-    let (body, proof) = prove_and_submit(&ctx, witness, None)?;
+    let (body, proof) = prove_and_submit(&ctx, witness, None, recovery)?;
 
     // The deposit: a signed native call to the bridge with the amount.
     let secret = mazzekey::Secret::from_slice(
@@ -385,7 +397,8 @@ fn shield_in(path: &str, a: &Args) -> Result<(), String> {
     }
     println!("deposit executed");
     submit(&ctx, &body, &proof)?;
-    w.notes.push(StoredNote::from_note(&mine, &ctx.sponge));
+    w.notes.push(stored);
+    w.next_self += 1;
     w.save(path)
 }
 
@@ -399,10 +412,10 @@ fn send(path: &str, a: &Args) -> Result<(), String> {
     let t = tree(&w);
     let input = |k: usize| inputs.get(k).map(|&i| spend_input(&ctx, &w, &t, i)).unwrap_or_else(|| dummy_input(&ctx.sponge));
     let theirs = new_note(d, owner, amount);
-    let change = self_note(&ctx, total - amount - ctx.fee);
+    let (change, recovery, stored) = self_note(&ctx, &w, total - amount - ctx.fee);
     let witness = Tx2Witness {
         inputs: [input(0), input(1)],
-        outputs: shuffle_outputs(theirs.clone(), change.clone()),
+        outputs: shuffle_outputs(theirs.clone(), change),
         v_in: 0,
         v_out: 0,
         fee: ctx.fee,
@@ -410,13 +423,14 @@ fn send(path: &str, a: &Args) -> Result<(), String> {
         anchor: t.root(),
         out_limb_override: [None, None],
     };
-    let (body, proof) = prove_and_submit(&ctx, witness, None)?;
+    let (body, proof) = prove_and_submit(&ctx, witness, None, recovery)?;
     submit(&ctx, &body, &proof)?;
     let opening = StoredNote::from_note(&theirs, &ctx.sponge);
     std::fs::write(a.get("opening-out")?, serde_json::to_string_pretty(&opening).unwrap())
         .map_err(|e| e.to_string())?;
     println!("recipient's note opening written to {}", a.get("opening-out")?);
-    w.notes.push(StoredNote::from_note(&change, &ctx.sponge));
+    w.notes.push(stored);
+    w.next_self += 1;
     w.save(path)
 }
 
@@ -430,10 +444,10 @@ fn unshield(path: &str, a: &Args) -> Result<(), String> {
     let total: u64 = inputs.iter().map(|&i| w.notes[i].value).sum();
     let t = tree(&w);
     let input = |k: usize| inputs.get(k).map(|&i| spend_input(&ctx, &w, &t, i)).unwrap_or_else(|| dummy_input(&ctx.sponge));
-    let change = self_note(&ctx, total - amount - ctx.fee);
+    let (change, recovery, stored) = self_note(&ctx, &w, total - amount - ctx.fee);
     let witness = Tx2Witness {
         inputs: [input(0), input(1)],
-        outputs: shuffle_outputs(change.clone(), dummy_output()),
+        outputs: shuffle_outputs(change, dummy_output()),
         v_in: 0,
         v_out: amount,
         fee: ctx.fee,
@@ -441,9 +455,116 @@ fn unshield(path: &str, a: &Args) -> Result<(), String> {
         anchor: t.root(),
         out_limb_override: [None, None],
     };
-    let (body, proof) = prove_and_submit(&ctx, witness, Some(ShieldedDest { space, address: to }))?;
+    let (body, proof) =
+        prove_and_submit(&ctx, witness, Some(ShieldedDest { space, address: to }), recovery)?;
     submit(&ctx, &body, &proof)?;
-    w.notes.push(StoredNote::from_note(&change, &ctx.sponge));
+    w.notes.push(stored);
+    w.next_self += 1;
+    w.save(path)
+}
+
+/// Claims received notes (spec §9.5): each is spent, together with the
+/// wallet's largest self-note, into one new self-note. Afterwards the value
+/// is recoverable from the seed and the wallet holds one large note.
+fn claim(path: &str, a: &Args) -> Result<(), String> {
+    let mut w = Wallet::load(path)?;
+    let ctx = context(&mut w, a)?;
+    let received = w
+        .notes
+        .iter()
+        .position(|n| n.self_index.is_none() && n.position.is_some() && !n.spent)
+        .ok_or("no received note to claim")?;
+    let main = (0..w.notes.len())
+        .filter(|&i| w.notes[i].self_index.is_some() && w.notes[i].position.is_some() && !w.notes[i].spent)
+        .max_by_key(|&i| w.notes[i].value);
+    let total = w.notes[received].value + main.map(|i| w.notes[i].value).unwrap_or(0);
+    if total <= ctx.fee {
+        return Err(format!("the notes ({total}) do not cover the fee {}", ctx.fee));
+    }
+    let t = tree(&w);
+    let second = main.map(|i| spend_input(&ctx, &w, &t, i)).unwrap_or_else(|| dummy_input(&ctx.sponge));
+    let (mine, recovery, stored) = self_note(&ctx, &w, total - ctx.fee);
+    let witness = Tx2Witness {
+        inputs: [spend_input(&ctx, &w, &t, received), second],
+        outputs: shuffle_outputs(mine, dummy_output()),
+        v_in: 0,
+        v_out: 0,
+        fee: ctx.fee,
+        sighash: [0; 32],
+        anchor: t.root(),
+        out_limb_override: [None, None],
+    };
+    let (body, proof) = prove_and_submit(&ctx, witness, None, recovery)?;
+    submit(&ctx, &body, &proof)?;
+    w.notes.push(stored);
+    w.next_self += 1;
+    w.save(path)
+}
+
+/// Rebuilds a wallet from the seed alone: scans every section, matches the
+/// self-note tags locally (the node never learns which tags are ours),
+/// opens their slots and rebuilds the notes. Stops after `GAP_LIMIT`
+/// consecutive missing tags.
+fn restore(path: &str, a: &Args) -> Result<(), String> {
+    let seed: [u8; 32] = hex::decode(a.get("seed")?.trim_start_matches("0x"))
+        .map_err(|e| e.to_string())?
+        .try_into()
+        .map_err(|_| "the seed is 32 bytes")?;
+    let node = Node::connect(a.get("rpc")?)?;
+    let chain = chain_id(&node)?;
+    let sponge = Sponge::new(chain);
+    let keys = WalletKeys::from_seed(&sponge, seed);
+    let mut w = Wallet::new(seed);
+
+    // Every applied transaction with its recovery slot and outputs.
+    let status = node.call("shielded_getStatus", vec![])?;
+    let executed = as_u64(&status["executedEpoch"])?;
+    let mut by_tag = HashMap::new();
+    let mut from = 0u64;
+    while from <= executed {
+        let sections = node.call(
+            "shielded_getSections",
+            vec![json!(format!("0x{:x}", from)), json!("0x3e8")],
+        )?;
+        for section in sections.as_array().ok_or("sections")? {
+            for tx in section["transactions"].as_array().ok_or("transactions")? {
+                if tx["applied"] == Value::Bool(true) {
+                    by_tag.insert(unhex(&tx["recoveryTag"])?, tx.clone());
+                }
+            }
+        }
+        from = from.saturating_add(1000);
+    }
+
+    let rkey = recovery_key(&seed);
+    let mut misses = 0;
+    let mut i = 0u32;
+    while misses < GAP_LIMIT && i < MAX_SELF_INDEX {
+        let tag = recovery_tag(&rkey, i).to_vec();
+        if let Some(tx) = by_tag.get(&tag) {
+            misses = 0;
+            let slot = RecoverySlot {
+                tag: tag.clone().try_into().unwrap(),
+                slot: unhex(&tx["recoverySlot"])?.try_into().map_err(|_| "slot length")?,
+                mac: unhex(&tx["recoveryMac"])?.try_into().map_err(|_| "mac length")?,
+            };
+            let value = keys
+                .open_recovery(i, &slot)
+                .ok_or_else(|| format!("tag {i} matched but its slot does not open"))?;
+            let note = keys.self_note(&sponge, i, value);
+            let mut stored = StoredNote::from_note(&note, &sponge);
+            stored.self_index = Some(i);
+            w.notes.push(stored);
+            w.next_self = i + 1;
+        } else {
+            misses += 1;
+        }
+        i += 1;
+    }
+    println!("recovered {} self-notes from the seed", w.notes.len());
+    // The ordinary sync rebuilds the tree, places the notes and marks the
+    // spent ones.
+    sync(&mut w, &node)?;
     w.save(path)
 }
 

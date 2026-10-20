@@ -6,7 +6,6 @@
 //! `stem` flag is the Dandelion++ phase (see `sync::dandelion`).
 
 use crate::sync::{
-    dandelion::Route,
     message::{Context, Handleable},
     Error,
 };

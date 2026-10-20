@@ -87,3 +87,105 @@ pub fn build_transaction(
         }
     }
 }
+
+// ---- recovery from the seed (spec §9.5) -----------------------------------
+
+/// Diversifier index of the wallet's own notes (change, claims).
+pub const INTERNAL: u32 = u32::MAX;
+
+/// Consecutive missing tags before a restore stops.
+pub const GAP_LIMIT: u32 = 20;
+
+/// Highest self-note index a restore looks at.
+pub const MAX_SELF_INDEX: u32 = 1 << 16;
+
+/// The recovery key: derives every self-note and its slot.
+pub fn recovery_key(seed: &[u8; 32]) -> [u8; 32] { Xof::new("mazze/rec", &[seed]).bytes() }
+
+/// The public tag of self-note `i`: single-use, unlinkable without the seed.
+pub fn recovery_tag(rkey: &[u8; 32], i: u32) -> [u8; 32] {
+    Xof::new("mazze/rec/tag", &[rkey, &i.to_le_bytes()]).bytes()
+}
+
+impl WalletKeys {
+    /// Self-note `i`: everything but the value derives from the seed, so the
+    /// wallet can rebuild it from the value its recovery slot holds. Its
+    /// hiding rests on SHAKE256 as a PRF (spec §4.2), not on fresh entropy.
+    pub fn self_note(&self, sponge: &Sponge, i: u32, value: u64) -> crate::note::Note {
+        let mut x = Xof::new("mazze/self-note", &[&recovery_key(&self.seed), &i.to_le_bytes()]);
+        let d = self.diversifier(INTERNAL);
+        crate::note::Note {
+            d,
+            owner: self.spend.owner(sponge, &d),
+            value,
+            psi: x.fields(),
+            y: x.fields(),
+        }
+    }
+
+    /// The recovery slot for self-note `i`: its tag and its encrypted value.
+    pub fn seal_recovery(&self, i: u32, value: u64) -> RecoverySlot {
+        use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit};
+        let rkey = recovery_key(&self.seed);
+        let mut plain = [0u8; 64];
+        plain[..8].copy_from_slice(&value.to_le_bytes());
+        // A single-use key per index, so the fixed nonce is never reused.
+        let key: [u8; 32] = Xof::new("mazze/rec/slot", &[&rkey, &i.to_le_bytes()]).bytes();
+        let sealed = ChaCha20Poly1305::new(&key.into())
+            .encrypt(&[0u8; 12].into(), &plain[..])
+            .expect("in-memory encryption");
+        RecoverySlot {
+            tag: recovery_tag(&rkey, i),
+            slot: sealed[..64].try_into().unwrap(),
+            mac: sealed[64..].try_into().unwrap(),
+        }
+    }
+
+    /// The value in self-note `i`'s slot, if `slot` is that slot.
+    pub fn open_recovery(&self, i: u32, slot: &RecoverySlot) -> Option<u64> {
+        use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit};
+        let rkey = recovery_key(&self.seed);
+        if slot.tag != recovery_tag(&rkey, i) {
+            return None;
+        }
+        let key: [u8; 32] = Xof::new("mazze/rec/slot", &[&rkey, &i.to_le_bytes()]).bytes();
+        let mut sealed = slot.slot.to_vec();
+        sealed.extend_from_slice(&slot.mac);
+        let plain = ChaCha20Poly1305::new(&key.into())
+            .decrypt(&[0u8; 12].into(), &sealed[..])
+            .ok()?;
+        Some(u64::from_le_bytes(plain[..8].try_into().unwrap()))
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[test]
+    fn slots_round_trip_and_stay_private() {
+        let sponge = Sponge::new(7);
+        let alice = WalletKeys::from_seed(&sponge, [1; 32]);
+        let mallory = WalletKeys::from_seed(&sponge, [2; 32]);
+        let slot = alice.seal_recovery(3, 123_456);
+        assert_eq!(alice.open_recovery(3, &slot), Some(123_456));
+        assert_eq!(alice.open_recovery(4, &slot), None, "another index");
+        assert_eq!(mallory.open_recovery(3, &slot), None, "another seed");
+        let mut tampered = slot;
+        tampered.slot[0] ^= 1;
+        assert_eq!(alice.open_recovery(3, &tampered), None, "authenticated");
+        // Tags are distinct per index and per seed.
+        assert_ne!(alice.seal_recovery(4, 1).tag, slot.tag);
+        assert_ne!(mallory.seal_recovery(3, 123_456).tag, slot.tag);
+    }
+
+    #[test]
+    fn self_notes_are_rebuilt_from_the_seed_and_value() {
+        let sponge = Sponge::new(7);
+        let a = WalletKeys::from_seed(&sponge, [1; 32]);
+        let again = WalletKeys::from_seed(&sponge, [1; 32]);
+        assert_eq!(a.self_note(&sponge, 5, 99).cm(&sponge), again.self_note(&sponge, 5, 99).cm(&sponge));
+        assert_ne!(a.self_note(&sponge, 5, 99).cm(&sponge), a.self_note(&sponge, 6, 99).cm(&sponge));
+        assert_ne!(a.self_note(&sponge, 5, 99).cm(&sponge), a.self_note(&sponge, 5, 98).cm(&sponge));
+    }
+}

@@ -16,9 +16,7 @@ use mazze_executor::shielded_engine::{
 use mazze_rpc_error::Result as JsonRpcResult;
 use mazze_shielded_pq::field::to_bytes;
 use mazze_types::{H256, U256, U64};
-use mazzecore::{
-    ConsensusGraphTrait, SharedConsensusGraph, SharedTransactionPool,
-};
+use mazzecore::{SharedConsensusGraph, SharedTransactionPool};
 use primitives::{
     shielded::{ShieldedDigest, ShieldedTxBody},
     EpochNumber,
@@ -139,6 +137,8 @@ impl ShieldedServer for ShieldedHandler {
                             digest_bytes(&body.cm_out[1]),
                         ],
                         recovery_tag: Bytes(body.recovery.tag.to_vec()),
+                        recovery_slot: Bytes(body.recovery.slot.to_vec()),
+                        recovery_mac: Bytes(body.recovery.mac.to_vec()),
                         v_public_in: U256::from(body.v_public_in),
                         v_public_out: U256::from(body.v_public_out),
                         fee: U256::from(body.fee),

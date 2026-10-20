@@ -15,7 +15,7 @@ use mazze_parameters::{
 use mazze_types::{Address, SpaceMap, H256, U256};
 use mazzecore::{
     block_parameters::*, consensus::consensus_inner::StateBlameInfo, pow::*,
-    verification::{compute_block_transactions_root, compute_transaction_root},
+    verification::compute_block_transactions_root,
     ConsensusGraph,
     ConsensusGraphTrait, SharedSynchronizationGraph,
     SharedSynchronizationService, SharedTransactionPool, Stopable,

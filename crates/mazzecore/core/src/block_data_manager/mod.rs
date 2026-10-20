@@ -1893,7 +1893,7 @@ impl BlockDataManager {
                         // deduplicate transactions for database operations.
                         let mut transaction_set = HashSet::new();
                         for b in &epoch_blocks {
-                            if let Some(transactions) =
+                            if let Some((transactions, _)) =
                                 self.db_manager.block_body_from_db(&b)
                             {
                                 for tx in transactions {

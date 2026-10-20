@@ -10,7 +10,7 @@ use crate::{
         },
         Error,
     },
-    verification::compute_transaction_root,
+    verification::compute_block_transactions_root,
 };
 use mazze_types::H256;
 use metrics::MeterTimer;
@@ -73,10 +73,13 @@ impl Handleable for GetBlockTxnResponse {
                             }
                         }
                     }
-                    let block = Block::new(header, trans);
+                    let block = Block::new(header, trans)
+                        .with_shielded(cmpct.shielded);
                     let expected_root = *block.block_header.transactions_root();
-                    let actual_root =
-                        compute_transaction_root(&block.transactions);
+                    let actual_root = compute_block_transactions_root(
+                        &block.transactions,
+                        &block.shielded,
+                    );
                     if actual_root != expected_root {
                         warn!(
                             "Recovered block transactions do not match header root, hash={}, expected_root={:?}, actual_root={:?}",

@@ -19,6 +19,10 @@ use std::{
     sync::Arc,
 };
 
+/// Marks a stored body that has a shielded section (see
+/// `Block::encode_stored_body`).
+const STORED_BODY_WITH_SHIELDED: u8 = 0x01;
+
 /// Ethereum-compatible linear block index. Computed as
 /// `epoch_start_block_number + block_index_in_epoch` (see
 /// [`crate::block_number::compute_block_number`]). This is what
@@ -210,6 +214,7 @@ impl Block {
             ),
             // reconstructed_txns constructed here will not be used
             reconstructed_txns: Vec::new(),
+            shielded: self.shielded.clone(),
         }
     }
 
@@ -236,6 +241,58 @@ impl Block {
         }
 
         Ok(transactions)
+    }
+
+    /// The body as the block database stores it. Without shielded
+    /// transactions it is the transaction list, unchanged. With them it is
+    /// `STORED_BODY_WITH_SHIELDED ‖ rlp([transactions, shielded])`; the
+    /// marker is a single-byte RLP item, which can never start the list of
+    /// the old format, so the two are unambiguous.
+    pub fn encode_stored_body(&self) -> Vec<u8> {
+        if self.shielded.is_empty() {
+            return self.encode_body_with_tx_public();
+        }
+        let mut stream = RlpStream::new_list(2);
+        stream.append_raw(&self.encode_body_with_tx_public(), 1);
+        stream.begin_list(self.shielded.len());
+        for body in &self.shielded {
+            stream.append(&**body);
+        }
+        let mut out = vec![STORED_BODY_WITH_SHIELDED];
+        out.extend_from_slice(&stream.out());
+        out
+    }
+
+    pub fn decode_stored_body(
+        bytes: &[u8],
+    ) -> Result<
+        (Vec<Arc<SignedTransaction>>, Vec<Arc<ShieldedTxBody>>),
+        DecoderError,
+    > {
+        match bytes.first() {
+            Some(&STORED_BODY_WITH_SHIELDED) => {
+                let rlp = Rlp::new(&bytes[1..]);
+                if rlp.as_raw().len() != rlp.payload_info()?.total() {
+                    return Err(DecoderError::RlpIsTooBig);
+                }
+                if rlp.item_count()? != 2 {
+                    return Err(DecoderError::RlpIncorrectListLen);
+                }
+                let transactions =
+                    Self::decode_body_with_tx_public(&rlp.at(0)?)?;
+                let shielded = rlp.list_at::<ShieldedTxBody>(1)?;
+                if shielded.is_empty() {
+                    return Err(DecoderError::Custom(
+                        "Empty shielded section must be omitted",
+                    ));
+                }
+                Ok((transactions, shielded.into_iter().map(Arc::new).collect()))
+            }
+            _ => Ok((
+                Self::decode_body_with_tx_public(&Rlp::new(bytes))?,
+                Vec::new(),
+            )),
+        }
     }
 
     pub fn encode_with_tx_public(&self) -> Vec<u8> {
@@ -319,6 +376,9 @@ pub struct CompactBlock {
     pub tx_short_ids: Vec<u8>,
     /// Store the txns reconstructed, None means not received
     pub reconstructed_txns: Vec<Option<Arc<SignedTransaction>>>,
+    /// The shielded section, carried whole: bodies are small and there is
+    /// no mempool from which to rebuild them.
+    pub shielded: Vec<Arc<ShieldedTxBody>>,
 }
 
 impl Debug for CompactBlock {
@@ -423,10 +483,16 @@ impl CompactBlock {
 impl Encodable for CompactBlock {
     fn rlp_append(&self, steam: &mut RlpStream) {
         steam
-            .begin_list(3)
+            .begin_list(3 + !self.shielded.is_empty() as usize)
             .append(&self.block_header)
             .append(&self.nonce)
             .append(&self.tx_short_ids);
+        if !self.shielded.is_empty() {
+            steam.begin_list(self.shielded.len());
+            for body in &self.shielded {
+                steam.append(&**body);
+            }
+        }
     }
 }
 
@@ -436,11 +502,25 @@ impl Decodable for CompactBlock {
         if short_ids.len() % CompactBlock::SHORT_ID_SIZE_IN_BYTES != 0 {
             return Err(DecoderError::Custom("Compact Block length Error!"));
         }
+        let shielded = match rlp.item_count()? {
+            3 => Vec::new(),
+            4 => {
+                let bodies = rlp.list_at::<ShieldedTxBody>(3)?;
+                if bodies.is_empty() {
+                    return Err(DecoderError::Custom(
+                        "Empty shielded section must be omitted",
+                    ));
+                }
+                bodies.into_iter().map(Arc::new).collect()
+            }
+            _ => return Err(DecoderError::RlpIncorrectListLen),
+        };
         Ok(CompactBlock {
             block_header: rlp.val_at(0)?,
             nonce: rlp.val_at(1)?,
             tx_short_ids: short_ids,
             reconstructed_txns: Vec::new(),
+            shielded,
         })
     }
 }
@@ -494,6 +574,46 @@ mod tests {
         let encoded = s.out();
         assert!(rlp::decode::<Block>(&encoded).is_err());
         assert!(Block::decode_with_tx_public(&Rlp::new(&encoded)).is_err());
+    }
+
+    #[test]
+    fn stored_body_keeps_the_old_format_and_the_shielded_section() {
+        // Without shielded transactions: the old body, byte for byte.
+        let plain = block(0);
+        assert_eq!(plain.encode_stored_body(), plain.encode_body_with_tx_public());
+        let (txs, shielded) =
+            Block::decode_stored_body(&plain.encode_stored_body()).unwrap();
+        assert!(txs.is_empty() && shielded.is_empty());
+
+        let b = block(2);
+        let stored = b.encode_stored_body();
+        assert_eq!(stored[0], super::STORED_BODY_WITH_SHIELDED);
+        let (_, shielded) = Block::decode_stored_body(&stored).unwrap();
+        assert_eq!(shielded, b.shielded);
+
+        let mut longer = stored.clone();
+        longer.push(0);
+        assert!(Block::decode_stored_body(&longer).is_err());
+        let mut s = RlpStream::new_list(2);
+        s.begin_list(0);
+        s.begin_list(0);
+        let mut empty = vec![super::STORED_BODY_WITH_SHIELDED];
+        empty.extend_from_slice(&s.out());
+        assert!(Block::decode_stored_body(&empty).is_err());
+    }
+
+    #[test]
+    fn compact_block_carries_the_shielded_section() {
+        let plain = block(0).to_compact();
+        let encoded = rlp::encode(&plain);
+        assert_eq!(Rlp::new(&encoded).item_count().unwrap(), 3);
+
+        let b = block(2);
+        let compact = b.to_compact();
+        let decoded: super::CompactBlock =
+            rlp::decode(&rlp::encode(&compact)).unwrap();
+        assert_eq!(decoded.shielded, b.shielded);
+        assert_eq!(decoded.hash(), b.hash());
     }
 
     #[test]

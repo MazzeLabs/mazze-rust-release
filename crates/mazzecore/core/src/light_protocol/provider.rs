@@ -808,6 +808,11 @@ impl Provider {
                 Ok(BlockTxsWithHash {
                     hash: block.hash(),
                     block_txs,
+                    shielded: block
+                        .shielded
+                        .iter()
+                        .map(|body| (**body).clone())
+                        .collect(),
                 })
             });
 

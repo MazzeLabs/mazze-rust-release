@@ -16,7 +16,7 @@ use crate::{
         message::{msgid, BlockTxsWithHash, GetBlockTxs},
     },
     message::{Message, RequestId},
-    verification::compute_transaction_root,
+    verification::compute_block_transactions_root,
     UniqueId,
 };
 use futures::future::FutureExt;
@@ -28,7 +28,7 @@ use mazze_parameters::light::{
 use mazze_types::H256;
 use network::{node_table::NodeId, NetworkContext};
 use parking_lot::RwLock;
-use primitives::SignedTransaction;
+use primitives::{shielded::ShieldedTxBody, SignedTransaction};
 use std::{future::Future, sync::Arc};
 
 #[derive(Debug)]
@@ -119,12 +119,17 @@ impl BlockTxs {
         &self, peer: &NodeId, id: RequestId,
         block_txs: impl Iterator<Item = BlockTxsWithHash>,
     ) -> Result<()> {
-        for BlockTxsWithHash { hash, block_txs } in block_txs {
+        for BlockTxsWithHash {
+            hash,
+            block_txs,
+            shielded,
+        } in block_txs
+        {
             trace!("Validating block_txs {:?} with hash {}", block_txs, hash);
 
             match self.sync_manager.check_if_requested(peer, id, &hash)? {
                 None => continue,
-                Some(_) => self.validate_and_store(hash, block_txs)?,
+                Some(_) => self.validate_and_store(hash, block_txs, shielded)?,
             };
         }
 
@@ -134,9 +139,10 @@ impl BlockTxs {
     #[inline]
     pub fn validate_and_store(
         &self, hash: H256, block_txs: Vec<SignedTransaction>,
+        shielded: Vec<ShieldedTxBody>,
     ) -> Result<()> {
         // validate block txs
-        if let Err(e) = self.validate_block_txs(hash, &block_txs) {
+        if let Err(e) = self.validate_block_txs(hash, &block_txs, &shielded) {
             // forward error to both rpc caller(s) and sync handler
             // so we need to make it clonable
             let e = ClonableError::from(e);
@@ -209,6 +215,7 @@ impl BlockTxs {
     #[inline]
     pub fn validate_block_txs(
         &self, hash: H256, txs: &Vec<SignedTransaction>,
+        shielded: &[ShieldedTxBody],
     ) -> Result<()> {
         // validate each transaction first
         for tx in txs {
@@ -217,7 +224,9 @@ impl BlockTxs {
 
         let expected = *self.ledger.header(hash)?.transactions_root();
         let txs: Vec<_> = txs.iter().map(|tx| Arc::new(tx.clone())).collect();
-        let received = compute_transaction_root(&txs);
+        let shielded: Vec<_> =
+            shielded.iter().map(|b| Arc::new(b.clone())).collect();
+        let received = compute_block_transactions_root(&txs, &shielded);
 
         if received != expected {
             bail!(ErrorKind::InvalidTxRoot {

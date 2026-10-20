@@ -571,9 +571,8 @@ impl DBManager {
             BlockHeader::db_decode(&get(DBTable::Blocks, hash.as_bytes())?)
                 .ok()?;
         let body = get(DBTable::Blocks, &block_body_key(&hash))?;
-        let transactions =
-            Block::decode_body_with_tx_public(&Rlp::new(&body)).ok()?;
-        let block = Block::new(header, transactions);
+        let (transactions, shielded) = Block::decode_stored_body(&body).ok()?;
+        let block = Block::new(header, transactions).with_shielded(shielded);
         (block.hash() == hash).then_some(block)
     }
 }
@@ -599,10 +598,11 @@ impl DBManager {
 
     /// TODO Use new_with_rlp_size
     pub fn block_from_db(&self, block_hash: &H256) -> Option<Block> {
-        Some(Block::new(
-            self.block_header_from_db(block_hash)?,
-            self.block_body_from_db(block_hash)?,
-        ))
+        let (transactions, shielded) = self.block_body_from_db(block_hash)?;
+        Some(
+            Block::new(self.block_header_from_db(block_hash)?, transactions)
+                .with_shielded(shielded),
+        )
     }
 
     pub fn insert_block_header_to_db(&self, header: &BlockHeader) {
@@ -725,18 +725,18 @@ impl DBManager {
         self.insert_to_db(
             DBTable::Blocks,
             &block_body_key(&block.hash()),
-            block.encode_body_with_tx_public(),
+            block.encode_stored_body(),
         )
     }
 
+    /// The stored transactions and shielded section of a block.
     pub fn block_body_from_db(
         &self, hash: &H256,
-    ) -> Option<Vec<Arc<SignedTransaction>>> {
+    ) -> Option<(Vec<Arc<SignedTransaction>>, Vec<Arc<primitives::shielded::ShieldedTxBody>>)> {
         let encoded =
             self.load_from_db(DBTable::Blocks, &block_body_key(hash))?;
-        let rlp = Rlp::new(&encoded);
         Some(
-            Block::decode_body_with_tx_public(&rlp)
+            Block::decode_stored_body(&encoded)
                 .expect("Wrong block rlp format!"),
         )
     }

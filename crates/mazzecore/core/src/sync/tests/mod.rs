@@ -493,3 +493,40 @@ fn test_pivot_advances_when_bodies_trail_headers_across_a_checkpoint() {
     }
     remove_test_db(db);
 }
+
+/// A block's shielded section survives the database: after the block is
+/// written and read back without the cache, the section is still there.
+#[test]
+fn shielded_section_survives_the_block_database() {
+    use crate::{pow::PowComputer, sync::utils::initialize_data_manager};
+    use mazze_executor::machine::VmFactory;
+    use primitives::{shielded::ShieldedTxBody, BlockHeaderBuilder};
+
+    let dir = "./test_shielded_body.db/";
+    let _ = fs::remove_dir_all(dir);
+    {
+        let (data_man, genesis) = initialize_data_manager(
+            dir,
+            Arc::new(PowComputer::new(H256::zero())),
+            VmFactory::new(1024),
+        );
+        let shielded: Vec<Arc<ShieldedTxBody>> = (0..3)
+            .map(|i| Arc::new(ShieldedTxBody::sample_for_tests(i)))
+            .collect();
+        let header = BlockHeaderBuilder::new()
+            .with_parent_hash(genesis.hash())
+            .with_height(1)
+            .build();
+        let block =
+            Arc::new(Block::new(header, vec![]).with_shielded(shielded.clone()));
+        data_man.insert_block(block.clone(), true);
+
+        let reloaded = data_man
+            .db_manager
+            .block_from_db(&block.hash())
+            .expect("block in the database");
+        assert_eq!(reloaded.shielded, shielded);
+        assert_eq!(reloaded.hash(), block.hash());
+    }
+    let _ = fs::remove_dir_all(dir);
+}

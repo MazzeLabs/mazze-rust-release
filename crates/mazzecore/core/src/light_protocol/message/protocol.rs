@@ -10,7 +10,7 @@ use crate::message::RequestId;
 use mazze_internal_common::ChainIdParamsDeprecated;
 use mazze_storage::{NodeMerkleProof, StateProof, TrieProof};
 use primitives::{
-    BlockHeader, BlockReceipts, Receipt, SignedTransaction, StateRoot,
+    shielded::ShieldedTxBody, BlockHeader, BlockReceipts, Receipt, SignedTransaction, StateRoot,
     StorageRoot,
 };
 
@@ -154,10 +154,47 @@ pub struct GetBlockTxs {
     pub hashes: Vec<H256>,
 }
 
-#[derive(Clone, Debug, Default, RlpEncodable, RlpDecodable)]
+/// A block's transactions. The shielded section rides along when it is not
+/// empty: a light client needs it to check `transactions_root`.
+#[derive(Clone, Debug, Default)]
 pub struct BlockTxsWithHash {
     pub hash: H256,
     pub block_txs: Vec<SignedTransaction>,
+    pub shielded: Vec<ShieldedTxBody>,
+}
+
+impl rlp::Encodable for BlockTxsWithHash {
+    fn rlp_append(&self, s: &mut rlp::RlpStream) {
+        s.begin_list(2 + !self.shielded.is_empty() as usize);
+        s.append(&self.hash);
+        s.append_list(&self.block_txs);
+        if !self.shielded.is_empty() {
+            s.append_list(&self.shielded);
+        }
+    }
+}
+
+impl rlp::Decodable for BlockTxsWithHash {
+    fn decode(rlp: &rlp::Rlp) -> Result<Self, rlp::DecoderError> {
+        let shielded = match rlp.item_count()? {
+            2 => Vec::new(),
+            3 => {
+                let bodies: Vec<ShieldedTxBody> = rlp.list_at(2)?;
+                if bodies.is_empty() {
+                    return Err(rlp::DecoderError::Custom(
+                        "Empty shielded section must be omitted",
+                    ));
+                }
+                bodies
+            }
+            _ => return Err(rlp::DecoderError::RlpIncorrectListLen),
+        };
+        Ok(BlockTxsWithHash {
+            hash: rlp.val_at(0)?,
+            block_txs: rlp.list_at(1)?,
+            shielded,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, RlpEncodable, RlpDecodable)]
@@ -313,4 +350,42 @@ pub struct StorageRootWithKey {
 pub struct StorageRoots {
     pub request_id: RequestId,
     pub roots: Vec<StorageRootWithKey>,
+}
+
+#[cfg(test)]
+mod block_txs_tests {
+    use super::BlockTxsWithHash;
+    use mazze_types::H256;
+    use primitives::shielded::ShieldedTxBody;
+    use rlp::{Rlp, RlpStream};
+
+    #[test]
+    fn old_two_item_form_still_decodes() {
+        let mut s = RlpStream::new_list(2);
+        s.append(&H256::repeat_byte(1));
+        s.begin_list(0);
+        let old = s.out();
+        let decoded: BlockTxsWithHash = rlp::decode(&old).unwrap();
+        assert!(decoded.shielded.is_empty());
+        assert_eq!(rlp::encode(&decoded), old);
+    }
+
+    #[test]
+    fn shielded_section_round_trips() {
+        let msg = BlockTxsWithHash {
+            hash: H256::repeat_byte(2),
+            block_txs: vec![],
+            shielded: vec![ShieldedTxBody::sample_for_tests(4)],
+        };
+        let encoded = rlp::encode(&msg);
+        assert_eq!(Rlp::new(&encoded).item_count().unwrap(), 3);
+        let decoded: BlockTxsWithHash = rlp::decode(&encoded).unwrap();
+        assert_eq!(decoded.shielded, msg.shielded);
+
+        let mut s = RlpStream::new_list(3);
+        s.append(&H256::repeat_byte(1));
+        s.begin_list(0);
+        s.begin_list(0);
+        assert!(rlp::decode::<BlockTxsWithHash>(&s.out()).is_err());
+    }
 }

@@ -190,11 +190,7 @@ impl Encodable for GetBlocksWithPublicResponse {
             .begin_list(self.blocks.len());
 
         for block in self.blocks.iter() {
-            stream.begin_list(2).append(&block.block_header);
-            stream.begin_list(block.transactions.len());
-            for tx in &block.transactions {
-                stream.append(tx.as_ref());
-            }
+            stream.append_raw(&block.encode_with_tx_public(), 1);
         }
     }
 }
@@ -207,11 +203,49 @@ impl Decodable for GetBlocksWithPublicResponse {
 
         for i in 0..rlp_blocks.item_count()? {
             let rlp_block = rlp_blocks.at(i)?;
-            let block = Block::decode_with_tx_public(&rlp_block)
-                .expect("Wrong block rlp format!");
-            blocks.push(block);
+            // A malformed block from a peer is a decoding error, not a panic.
+            blocks.push(Block::decode_with_tx_public(&rlp_block)?);
         }
 
         Ok(GetBlocksWithPublicResponse { request_id, blocks })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GetBlocksWithPublicResponse;
+    use primitives::{shielded::ShieldedTxBody, Block, BlockHeaderBuilder};
+    use rlp::RlpStream;
+    use std::sync::Arc;
+
+    fn block(shielded: u32) -> Block {
+        let header = BlockHeaderBuilder::new().with_height(3).build();
+        Block::new(header, vec![]).with_shielded(
+            (0..shielded)
+                .map(|i| Arc::new(ShieldedTxBody::sample_for_tests(i)))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn blocks_with_public_keep_the_shielded_section() {
+        let msg = GetBlocksWithPublicResponse {
+            request_id: 9,
+            blocks: vec![block(0), block(2)],
+        };
+        let decoded: GetBlocksWithPublicResponse =
+            rlp::decode(&rlp::encode(&msg)).unwrap();
+        assert_eq!(decoded.request_id, 9);
+        assert!(decoded.blocks[0].shielded.is_empty());
+        assert_eq!(decoded.blocks[1].shielded, msg.blocks[1].shielded);
+    }
+
+    #[test]
+    fn a_malformed_block_is_an_error_not_a_panic() {
+        let mut s = RlpStream::new_list(2);
+        s.append(&1u64);
+        s.begin_list(1);
+        s.begin_list(5).append(&0u8).append(&0u8).append(&0u8).append(&0u8).append(&0u8);
+        assert!(rlp::decode::<GetBlocksWithPublicResponse>(&s.out()).is_err());
     }
 }

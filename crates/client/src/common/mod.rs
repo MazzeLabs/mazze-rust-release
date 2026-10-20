@@ -86,11 +86,10 @@ fn load_genesis_block_from_db(
         .get(COL_BLOCKS, &body_key)
         .ok()
         .flatten()?;
-    let body =
-        primitives::Block::decode_body_with_tx_public(&Rlp::new(&body_bytes))
-            .ok()?;
+    let (body, shielded) =
+        primitives::Block::decode_stored_body(&body_bytes).ok()?;
 
-    Some(primitives::Block::new(header, body))
+    Some(primitives::Block::new(header, body).with_shielded(shielded))
 }
 
 /// Hold all top-level components for a type of client.

@@ -427,7 +427,15 @@ pub fn initialize_common_modules(
         accounts.clone(),
     ));
 
-    let runtime = Runtime::with_default_thread_count();
+    // All RPC servers share one runtime. `jsonrpc_http_threads` used to
+    // size the event loop of each HTTP server; it is now a lower bound on
+    // the workers of the shared runtime (one per CPU core by default).
+    let runtime = match conf.raw_conf.jsonrpc_http_threads {
+        Some(threads) => Runtime::with_thread_count(threads.max(
+            std::thread::available_parallelism().map_or(1, |n| n.get()),
+        )),
+        None => Runtime::with_default_thread_count(),
+    };
     let pubsub = PubSubClient::new(
         runtime.executor(),
         consensus.clone(),

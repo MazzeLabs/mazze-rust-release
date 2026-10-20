@@ -18,9 +18,17 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity Ethereum.  If not, see <http://www.gnu.org/licenses/>.
 
-use jsonrpc_tcp_server::PushMessageError;
 use mazze_types::H256;
 use std;
+
+/// Error pushing a message to a connected worker.
+#[derive(Debug)]
+pub enum PushMessageError {
+    /// The worker is not connected (any more).
+    NoSuchPeer,
+    /// The worker connection does not accept more messages.
+    Send(String),
+}
 
 #[derive(Debug, Clone)]
 pub enum Error {

@@ -3,8 +3,8 @@
 // See http://www.gnu.org/licenses/
 
 use crate::rpc::types::{BlameInfo, Block, Bytes};
-use jsonrpc_core::Result as RpcResult;
-use jsonrpc_derive::rpc;
+use mazze_rpc_error::Result as RpcResult;
+use jsonrpsee::proc_macros::rpc;
 use mazze_types::{H256, U256};
 use mazzecore::PeerInfo;
 use network::node_table::NodeId;
@@ -12,102 +12,102 @@ use std::net::SocketAddr;
 
 #[rpc(server)]
 pub trait TestRpc {
-    #[rpc(name = "sayhello")]
+    #[method(name = "sayhello", blocking)]
     fn say_hello(&self) -> RpcResult<String>;
 
-    #[rpc(name = "getblockcount")]
+    #[method(name = "getblockcount", blocking)]
     fn get_block_count(&self) -> RpcResult<u64>;
 
-    #[rpc(name = "getgoodput")]
+    #[method(name = "getgoodput", blocking)]
     fn get_goodput(&self) -> RpcResult<String>;
 
-    #[rpc(name = "generate_empty_blocks")]
+    #[method(name = "generate_empty_blocks", blocking)]
     fn generate_empty_blocks(&self, num_blocks: usize) -> RpcResult<Vec<H256>>;
 
-    #[rpc(name = "generatefixedblock")]
+    #[method(name = "generatefixedblock", blocking)]
     fn generate_fixed_block(
         &self, parent_hash: H256, referee: Vec<H256>, num_txs: usize,
         adaptive: bool, difficulty: Option<u64>,
     ) -> RpcResult<H256>;
 
-    #[rpc(name = "addnode")]
+    #[method(name = "addnode", blocking)]
     fn add_peer(&self, id: NodeId, addr: SocketAddr) -> RpcResult<()>;
 
-    #[rpc(name = "removenode")]
+    #[method(name = "removenode", blocking)]
     fn drop_peer(&self, id: NodeId, addr: SocketAddr) -> RpcResult<()>;
 
-    #[rpc(name = "getpeerinfo")]
+    #[method(name = "getpeerinfo", blocking)]
     fn get_peer_info(&self) -> RpcResult<Vec<PeerInfo>>;
 
     /// Returns the JSON of whole chain
-    #[rpc(name = "mazze_getChain")]
+    #[method(name = "mazze_getChain", blocking)]
     fn chain(&self) -> RpcResult<Vec<Block>>;
 
-    #[rpc(name = "stop")]
+    #[method(name = "stop", blocking)]
     fn stop(&self) -> RpcResult<()>;
 
-    #[rpc(name = "getnodeid")]
+    #[method(name = "getnodeid", blocking)]
     fn get_nodeid(&self, challenge: Vec<u8>) -> RpcResult<Vec<u8>>;
 
-    #[rpc(name = "addlatency")]
+    #[method(name = "addlatency", blocking)]
     fn add_latency(&self, id: NodeId, latency_ms: f64) -> RpcResult<()>;
 
-    #[rpc(name = "generateoneblock")]
+    #[method(name = "generateoneblock", blocking)]
     fn generate_one_block(
         &self, num_txs: usize, block_size_limit: usize,
     ) -> RpcResult<H256>;
 
-    #[rpc(name = "generate_one_block_with_direct_txgen")]
+    #[method(name = "generate_one_block_with_direct_txgen", blocking)]
     fn generate_one_block_with_direct_txgen(
         &self, num_txs: usize, block_size_limit: usize, num_txs_simple: usize,
         num_txs_erc20: usize,
     ) -> RpcResult<H256>;
 
-    #[rpc(name = "test_generatecustomblock")]
+    #[method(name = "test_generatecustomblock", blocking)]
     fn generate_custom_block(
         &self, parent: H256, referees: Vec<H256>, raw: Bytes,
         adaptive: Option<bool>, custom: Option<Vec<Bytes>>,
     ) -> RpcResult<H256>;
 
-    #[rpc(name = "test_generateblockwithfaketxs")]
+    #[method(name = "test_generateblockwithfaketxs", blocking)]
     fn generate_block_with_fake_txs(
         &self, raw: Bytes, adaptive: Option<bool>, tx_data_len: Option<usize>,
     ) -> RpcResult<H256>;
 
-    #[rpc(name = "test_generateblockwithblameinfo")]
+    #[method(name = "test_generateblockwithblameinfo", blocking)]
     fn generate_block_with_blame_info(
         &self, num_txs: usize, block_size_limit: usize, blame_info: BlameInfo,
     ) -> RpcResult<H256>;
 
-    #[rpc(name = "test_generate_block_with_nonce_and_timestamp")]
+    #[method(name = "test_generate_block_with_nonce_and_timestamp", blocking)]
     fn generate_block_with_nonce_and_timestamp(
         &self, parent: H256, referees: Vec<H256>, raw: Bytes, nonce: U256,
         timestamp: u64, adaptive: bool,
     ) -> RpcResult<H256>;
 
-    #[rpc(name = "get_block_status")]
+    #[method(name = "get_block_status", blocking)]
     fn get_block_status(&self, block_hash: H256) -> RpcResult<(u8, bool)>;
 
-    #[rpc(name = "expireblockgc")]
+    #[method(name = "expireblockgc", blocking)]
     fn expire_block_gc(&self, timeout: u64) -> RpcResult<()>;
 
-    #[rpc(name = "getMainChainAndWeight")]
+    #[method(name = "getMainChainAndWeight", blocking)]
     fn get_main_chain_and_weight(
         &self, height_range: Option<(u64, u64)>,
     ) -> RpcResult<Vec<(H256, U256)>>;
 
-    #[rpc(name = "getExecutedInfo")]
+    #[method(name = "getExecutedInfo", blocking)]
     fn get_executed_info(&self, block_hash: H256) -> RpcResult<(H256, H256)>;
-    #[rpc(name = "test_sendUsableGenesisAccounts")]
+    #[method(name = "test_sendUsableGenesisAccounts", blocking)]
     fn send_usable_genesis_accounts(
         &self, account_start_index: usize,
     ) -> RpcResult<Bytes>;
 
-    #[rpc(name = "set_db_crash")]
+    #[method(name = "set_db_crash", blocking)]
     fn set_db_crash(
         &self, crash_probability: f64, crash_exit_code: i32,
     ) -> RpcResult<()>;
 
-    #[rpc(name = "save_node_db")]
+    #[method(name = "save_node_db", blocking)]
     fn save_node_db(&self) -> RpcResult<()>;
 }

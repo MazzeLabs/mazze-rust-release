@@ -22,7 +22,7 @@ use crate::rpc::types::eth::Log;
 use mazze_types::{Bloom as H2048, H160, H256, U256, U64};
 
 /// Receipt
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Receipt {
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]

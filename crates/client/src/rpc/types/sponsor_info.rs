@@ -8,7 +8,7 @@ use mazze_parameters::collateral::MAZZIES_PER_STORAGE_COLLATERAL_UNIT;
 use mazze_types::U256;
 use primitives::SponsorInfo as PrimitiveSponsorInfo;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SponsorInfo {
     /// This is the address of the sponsor for gas cost of the contract.

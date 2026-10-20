@@ -2,149 +2,125 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-use futures01::{lazy, Future};
-use jsonrpc_core::{
-    BoxFuture, Metadata, Params, RemoteProcedure, Result as RpcResult,
-    RpcMethod,
+//! Per-method interception of RPC calls (throttling, metrics).
+//!
+//! The interceptor is applied to the method callbacks of a module, not to a
+//! server, so a throttled API is throttled the same way on every transport
+//! (HTTP, WebSocket and the raw TCP endpoint) and an API that is mounted
+//! without an interceptor is never throttled, exactly as with the previous
+//! `RpcProxy` over `jsonrpc-core` delegates.
+
+use jsonrpsee::{
+    types::ErrorObjectOwned, MethodCallback, MethodResponse, Methods,
 };
-use serde_json::Value;
-use std::{collections::HashMap, marker::PhantomData, sync::Arc};
+use mazze_rpc_error::Result as RpcResult;
+use std::{any::Any, sync::Arc};
 
 pub trait RpcInterceptor: Send + Sync + 'static {
-    fn before(&self, _name: &String) -> RpcResult<()>;
+    /// Called before the method runs; an error is returned to the caller
+    /// instead of running the method.
+    fn before(&self, name: &String) -> RpcResult<()>;
 
-    fn around(
-        &self, _name: &String, method_call: BoxFuture<Value>,
-    ) -> BoxFuture<Value> {
-        method_call
+    /// Returns a guard that is kept alive while the method runs.
+    fn around(&self, _name: &String) -> Option<Box<dyn Any + Send>> { None }
+}
+
+/// Returns a copy of `methods` in which every callback first runs
+/// `interceptor` (method calls, subscriptions and unsubscriptions alike).
+pub fn intercept<I: RpcInterceptor>(
+    methods: impl Into<Methods>, interceptor: I,
+) -> Methods {
+    let methods: Methods = methods.into();
+    let interceptor = Arc::new(interceptor);
+    let mut intercepted = Methods::new();
+
+    for name in methods.method_names() {
+        let callback = methods
+            .method(name)
+            .cloned()
+            .expect("name comes from the same module; qed");
+        let wrapped = wrap(name, callback, interceptor.clone());
+        intercepted
+            .verify_and_insert(name, wrapped)
+            .expect("names of a single module are unique; qed");
     }
+    intercepted
 }
 
-pub struct RpcProxy<M, T, I>
-where
-    M: Metadata,
-    T: IntoIterator<Item = (String, RemoteProcedure<M>)>,
-    I: RpcInterceptor,
-{
-    underlying: T,
-    interceptor: Arc<I>,
-    phantom: PhantomData<M>,
+fn rejected(
+    id: jsonrpsee::types::Id<'_>, e: mazze_rpc_error::Error,
+) -> MethodResponse {
+    MethodResponse::error(id, ErrorObjectOwned::from(e))
 }
 
-impl<M, T, I> RpcProxy<M, T, I>
-where
-    M: Metadata,
-    T: IntoIterator<Item = (String, RemoteProcedure<M>)>,
-    I: RpcInterceptor,
-{
-    pub fn new(underlying: T, interceptor: I) -> Self {
-        RpcProxy {
-            underlying,
-            interceptor: Arc::new(interceptor),
-            phantom: PhantomData,
+fn wrap<I: RpcInterceptor>(
+    name: &'static str, callback: MethodCallback, interceptor: Arc<I>,
+) -> MethodCallback {
+    let name = name.to_string();
+    match callback {
+        MethodCallback::Sync(cb) => {
+            MethodCallback::Sync(Arc::new(move |id, params, max, ext| {
+                if let Err(e) = interceptor.before(&name) {
+                    return rejected(id, e);
+                }
+                let _guard = interceptor.around(&name);
+                cb(id, params, max, ext)
+            }))
         }
-    }
-}
-
-impl<M, T, I> IntoIterator for RpcProxy<M, T, I>
-where
-    M: Metadata,
-    T: IntoIterator<Item = (String, RemoteProcedure<M>)>,
-    I: RpcInterceptor,
-{
-    type IntoIter =
-        std::collections::hash_map::IntoIter<String, RemoteProcedure<M>>;
-    type Item = (String, RemoteProcedure<M>);
-
-    fn into_iter(self) -> Self::IntoIter {
-        let mut intercepted = HashMap::new();
-
-        for (name, mut rp) in self.underlying.into_iter() {
-            if let RemoteProcedure::Method(method) = rp {
-                let method = RpcMethodWithInterceptor::new(
-                    name.clone(),
-                    method,
-                    self.interceptor.clone(),
-                );
-                rp = RemoteProcedure::Method(Arc::new(method));
-            }
-
-            intercepted.insert(name, rp);
-        }
-
-        intercepted.into_iter()
-    }
-}
-
-struct RpcMethodWithInterceptor<M, I>
-where
-    M: Metadata,
-    I: RpcInterceptor,
-{
-    name: String,
-    method: Arc<dyn RpcMethod<M>>,
-    interceptor: Arc<I>,
-}
-
-impl<M, I> RpcMethodWithInterceptor<M, I>
-where
-    M: Metadata,
-    I: RpcInterceptor,
-{
-    pub fn new(
-        name: String, method: Arc<dyn RpcMethod<M>>, interceptor: Arc<I>,
-    ) -> Self {
-        RpcMethodWithInterceptor {
-            name,
-            method,
-            interceptor,
-        }
-    }
-}
-
-impl<M, I> RpcMethod<M> for RpcMethodWithInterceptor<M, I>
-where
-    M: Metadata,
-    I: RpcInterceptor,
-{
-    fn call(&self, params: Params, meta: M) -> BoxFuture<Value> {
-        let name = self.name.clone();
-        let interceptor = self.interceptor.clone();
-        let before_future = lazy(move || interceptor.before(&name));
-
-        let method = self.method.clone();
-        let method_call = self.interceptor.around(
-            &self.name,
-            lazy(move || method.call(params, meta)).boxed(),
-        );
-        let method_future = before_future.and_then(move |_| method_call);
-
-        Box::new(method_future)
+        MethodCallback::Async(cb) => MethodCallback::Async(Arc::new(
+            move |id, params, conn_id, max, ext| {
+                let name = name.clone();
+                let interceptor = interceptor.clone();
+                let cb = cb.clone();
+                Box::pin(async move {
+                    if let Err(e) = interceptor.before(&name) {
+                        return rejected(id, e);
+                    }
+                    let _guard = interceptor.around(&name);
+                    cb(id, params, conn_id, max, ext).await
+                })
+            },
+        )),
+        MethodCallback::Subscription(cb) => MethodCallback::Subscription(
+            Arc::new(move |id, params, sink, state, ext| {
+                if let Err(e) = interceptor.before(&name) {
+                    let rp = rejected(id, e);
+                    return Box::pin(async move { rp });
+                }
+                cb(id, params, sink, state, ext)
+            }),
+        ),
+        MethodCallback::Unsubscription(cb) => MethodCallback::Unsubscription(
+            Arc::new(move |id, params, conn_id, max, ext| {
+                if let Err(e) = interceptor.before(&name) {
+                    return rejected(id, e);
+                }
+                cb(id, params, conn_id, max, ext)
+            }),
+        ),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::rpc::interceptor::{RpcInterceptor, RpcProxy};
-    use jsonrpc_core::{Error as RpcError, MetaIoHandler, Result as RpcResult};
-    use jsonrpc_derive::rpc;
+    use super::{intercept, RpcInterceptor};
+    use jsonrpsee::{proc_macros::rpc, RpcModule};
+    use mazze_rpc_error::{Error as RpcError, Result as RpcResult};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     };
 
-    #[rpc]
+    #[rpc(server)]
     pub trait Foo {
-        #[rpc(name = "mazze_balance")]
-        fn balance(&self, _id: usize) -> RpcResult<usize>;
+        #[method(name = "mazze_balance")]
+        fn balance(&self, id: usize) -> RpcResult<usize>;
     }
 
     struct FooImpl;
 
-    impl Foo for FooImpl {
-        fn balance(&self, id: usize) -> RpcResult<usize> {
-            Ok(id)
-        }
+    impl FooServer for FooImpl {
+        fn balance(&self, id: usize) -> RpcResult<usize> { Ok(id) }
     }
 
     #[derive(Default)]
@@ -163,64 +139,59 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_interceptor_success() {
-        let foo = FooImpl.to_delegate();
+    async fn call(module: RpcModule<()>, request: &str) -> String {
+        let (response, _) =
+            module.raw_json_request(request, 1).await.unwrap();
+        response.get().to_string()
+    }
 
-        // interceptor not handled
+    fn module_of(methods: jsonrpsee::Methods) -> RpcModule<()> {
+        let mut module = RpcModule::new(());
+        module.merge(methods).unwrap();
+        module
+    }
+
+    #[tokio::test]
+    async fn test_interceptor_success() {
         let bar = Bar::default();
         let interceptor_handled = bar.handled.clone();
-
-        let mut handler: MetaIoHandler<()> = MetaIoHandler::default();
-        handler.extend_with(RpcProxy::new(foo, bar));
+        let module = module_of(intercept(FooImpl.into_rpc(), bar));
 
         let request = r#"{"jsonrpc": "2.0", "method": "mazze_balance", "params": [8], "id": 1}"#;
         assert_eq!(
-            handler.handle_request_sync(request, ()),
-            Some(r#"{"jsonrpc":"2.0","result":8,"id":1}"#.to_string()),
+            call(module, request).await,
+            r#"{"jsonrpc":"2.0","id":1,"result":8}"#
         );
         assert_eq!(interceptor_handled.load(Ordering::SeqCst), true);
     }
 
-    #[test]
-    fn test_interceptor_failure() {
-        let foo = FooImpl.to_delegate();
-
-        // interceptor with RPC error
+    #[tokio::test]
+    async fn test_interceptor_failure() {
         let mut bar = Bar::default();
         bar.error = Some(RpcError::invalid_params("some test error"));
-
-        let mut handler: MetaIoHandler<()> = MetaIoHandler::default();
-        handler.extend_with(RpcProxy::new(foo, bar));
+        let module = module_of(intercept(FooImpl.into_rpc(), bar));
 
         let request = r#"{"jsonrpc": "2.0", "method": "mazze_balance", "params": [8], "id": 1}"#;
         assert_eq!(
-            handler.handle_request_sync(request, ()),
-            Some(r#"{"jsonrpc":"2.0","error":{"code":-32602,"message":"some test error"},"id":1}"#.to_string()),
+            call(module, request).await,
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"some test error"}}"#
         );
     }
 
-    #[test]
-    fn test_interceptor_embedded() {
-        let foo = FooImpl.to_delegate();
-
-        // interceptor 1
+    #[tokio::test]
+    async fn test_interceptor_embedded() {
         let bar = Bar::default();
         let interceptor_1_handled = bar.handled.clone();
-        let proxy_1 = RpcProxy::new(foo, bar);
+        let proxy_1 = intercept(FooImpl.into_rpc(), bar);
 
-        // interceptor 2
         let bar = Bar::default();
         let interceptor_2_handled = bar.handled.clone();
-        let proxy_2 = RpcProxy::new(proxy_1, bar);
-
-        let mut handler: MetaIoHandler<()> = MetaIoHandler::default();
-        handler.extend_with(proxy_2);
+        let module = module_of(intercept(proxy_1, bar));
 
         let request = r#"{"jsonrpc": "2.0", "method": "mazze_balance", "params": [8], "id": 1}"#;
         assert_eq!(
-            handler.handle_request_sync(request, ()),
-            Some(r#"{"jsonrpc":"2.0","result":8,"id":1}"#.to_string()),
+            call(module, request).await,
+            r#"{"jsonrpc":"2.0","id":1,"result":8}"#
         );
         assert_eq!(interceptor_1_handled.load(Ordering::SeqCst), true);
         assert_eq!(interceptor_2_handled.load(Ordering::SeqCst), true);

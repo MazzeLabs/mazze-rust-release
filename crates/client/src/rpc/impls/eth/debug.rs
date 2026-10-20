@@ -2,7 +2,7 @@ use std::convert::TryInto;
 
 use crate::rpc::{
     error_codes::invalid_params_msg,
-    traits::eth_space::debug::Debug,
+    traits::eth_space::debug::DebugServer,
     types::eth::{BlockNumber, CallRequest},
 };
 use alloy_rpc_types_trace::geth::{
@@ -12,7 +12,7 @@ use alloy_rpc_types_trace::geth::{
     TraceResult,
 };
 use geth_tracer::to_alloy_h256;
-use jsonrpc_core::Result as JsonRpcResult;
+use mazze_rpc_error::Result as JsonRpcResult;
 use mazze_types::{Space, H256};
 use mazzecore::{ConsensusGraph, SharedConsensusGraph};
 
@@ -33,7 +33,7 @@ impl GethDebugHandler {
     }
 }
 
-impl Debug for GethDebugHandler {
+impl DebugServer for GethDebugHandler {
     fn db_get(&self, _key: String) -> JsonRpcResult<Option<String>> {
         Ok(Some("To be implemented!".into()))
     }

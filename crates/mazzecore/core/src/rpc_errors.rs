@@ -34,8 +34,8 @@ error_chain! {
     }
 }
 
-pub type BoxFuture<T> = Box<
-    dyn jsonrpc_core::futures::future::Future<Item = T, Error = Error> + Send,
+pub type BoxFuture<T> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = std::result::Result<T, Error>> + Send>,
 >;
 
 impl From<JsonRpcError> for Error {
@@ -62,7 +62,7 @@ impl From<Error> for JsonRpcError {
             | ErrorKind::StateDb(_)
             | ErrorKind::Storage(_)
             | ErrorKind::Custom(_) => JsonRpcError {
-                code: jsonrpc_core::ErrorCode::ServerError(EXCEPTION_ERROR),
+                code: mazze_rpc_error::ErrorCode::ServerError(EXCEPTION_ERROR),
                 message: format!("Error processing request: {}", e),
                 data: None,
             },
@@ -77,7 +77,7 @@ impl From<Error> for JsonRpcError {
 
 pub fn invalid_params<T: Debug>(param: &str, details: T) -> JsonRpcError {
     JsonRpcError {
-        code: jsonrpc_core::ErrorCode::InvalidParams,
+        code: mazze_rpc_error::ErrorCode::InvalidParams,
         message: format!("Invalid parameters: {}", param),
         data: Some(Value::String(format!("{:?}", details))),
     }
@@ -112,7 +112,7 @@ pub fn account_result_to_rpc_result<T>(
 }
 
 use crate::light_protocol::Error as LightProtocolError;
-use jsonrpc_core::Error as JsonRpcError;
+use mazze_rpc_error::Error as JsonRpcError;
 use mazze_statedb::Error as StateDbError;
 use mazze_storage::Error as StorageError;
 use primitives::{account::AccountError, filter::FilterError};

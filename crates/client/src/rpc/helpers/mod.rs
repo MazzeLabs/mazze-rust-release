@@ -15,5 +15,5 @@ pub use self::{
     poll_manager::PollManager,
 };
 pub use epoch_queue::EpochQueue;
-pub use subscribers::{Id as SubscriberId, Subscribers};
+pub use subscribers::{notify, HexIdProvider, Id as SubscriberId, Subscribers};
 pub use variadic_value::{maybe_vec_into, VariadicValue};

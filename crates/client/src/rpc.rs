@@ -2,20 +2,12 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-use jsonrpc_core::{
-    BoxFuture, MetaIoHandler, RemoteProcedure, Result as JsonRpcResult, Value,
-};
-use jsonrpc_http_server::{
-    AccessControlAllowOrigin, DomainsValidation, Server as HttpServer,
-    ServerBuilder as HttpServerBuilder,
-};
-use jsonrpc_tcp_server::{
-    MetaExtractor as TpcMetaExtractor, Server as TcpServer,
-    ServerBuilder as TcpServerBuilder,
-};
-use jsonrpc_ws_server::{
-    MetaExtractor as WsMetaExtractor, Server as WsServer,
-    ServerBuilder as WsServerBuilder,
+use jsonrpsee::{
+    server::{
+        middleware::rpc::RpcServiceBuilder, BatchRequestConfig, Server,
+        ServerConfig, ServerHandle,
+    },
+    Methods, RpcModule,
 };
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
@@ -24,15 +16,14 @@ use std::{
 
 mod authcodes;
 pub mod error_codes;
-pub mod extractor;
 mod helpers;
-mod http_common;
+pub mod http_common;
 pub mod impls;
 pub mod informant;
 mod interceptor;
-pub mod metadata;
 pub mod rpc_apis;
-mod traits;
+pub mod tcp;
+pub mod traits;
 pub mod types;
 
 pub use mazzecore::rpc_errors::{
@@ -57,17 +48,17 @@ use self::{
         trace::TraceHandler,
     },
     traits::{
-        debug::LocalRpc,
+        debug::LocalRpcServer,
         eth_space::{
-            eth::{Eth, EthFilter},
-            eth_pubsub::EthPubSub,
-            trace::Trace as EthTrace,
+            eth::{EthFilterServer, EthServer},
+            eth_pubsub::EthPubSubServer,
+            trace::TraceServer as EthTraceServer,
         },
-        mazze::{Mazze, MazzeFilter},
-        pool::TransactionPool,
-        pubsub::PubSub,
-        test::TestRpc,
-        trace::Trace,
+        mazze::{MazzeFilterServer, MazzeServer},
+        pool::TransactionPoolServer,
+        pubsub::PubSubServer,
+        test::TestRpcServer,
+        trace::TraceServer,
     },
 };
 
@@ -82,16 +73,21 @@ use crate::{
             trace::EthTraceHandler,
             RpcImplConfiguration,
         },
-        interceptor::{RpcInterceptor, RpcProxy},
+        helpers::HexIdProvider,
+        http_common::{
+            AccessControlAllowOrigin, DomainsValidation, HttpCompatLayer,
+            NoSubscriptions,
+        },
+        interceptor::{intercept, RpcInterceptor},
         rpc_apis::{Api, ApiSet},
-        traits::eth_space::debug::Debug,
+        traits::eth_space::debug::DebugServer,
     },
 };
-use futures01::lazy;
-use jsonrpc_core::futures::Future;
 use lazy_static::lazy_static;
-pub use metadata::Metadata;
+use mazze_rpc_error::Result as JsonRpcResult;
 use metrics::{register_timer_with_group, ScopeTimer, Timer};
+use runtime::Runtime;
+use std::any::Any;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use throttling::token_bucket::{ThrottleResult, TokenBucketManager};
@@ -188,7 +184,7 @@ impl WsConfiguration {
 pub fn setup_public_rpc_apis(
     common: Arc<CommonImpl>, rpc: Arc<RpcImpl>, pubsub: PubSubClient,
     eth_pubsub: EthPubSubClient, conf: &Configuration,
-) -> MetaIoHandler<Metadata> {
+) -> RpcModule<()> {
     setup_rpc_apis(
         common,
         rpc,
@@ -203,7 +199,7 @@ pub fn setup_public_rpc_apis(
 pub fn setup_public_eth_rpc_apis(
     common: Arc<CommonImpl>, rpc: Arc<RpcImpl>, pubsub: PubSubClient,
     eth_pubsub: EthPubSubClient, conf: &Configuration,
-) -> MetaIoHandler<Metadata> {
+) -> RpcModule<()> {
     setup_rpc_apis(
         common,
         rpc,
@@ -218,7 +214,7 @@ pub fn setup_public_eth_rpc_apis(
 pub fn setup_debug_rpc_apis(
     common: Arc<CommonImpl>, rpc: Arc<RpcImpl>, pubsub: PubSubClient,
     eth_pubsub: EthPubSubClient, conf: &Configuration,
-) -> MetaIoHandler<Metadata> {
+) -> RpcModule<()> {
     let mut debug_apis = ApiSet::All.list_apis();
     if !conf.is_test_or_dev_mode() {
         debug_apis.remove(&Api::Test);
@@ -238,13 +234,13 @@ fn setup_rpc_apis(
     common: Arc<CommonImpl>, rpc: Arc<RpcImpl>, pubsub: PubSubClient,
     eth_pubsub: EthPubSubClient, throttling_conf: &Option<String>,
     throttling_section: &str, apis: HashSet<Api>,
-) -> MetaIoHandler<Metadata> {
-    let mut handler = MetaIoHandler::default();
+) -> RpcModule<()> {
+    let mut handler = RpcModule::new(());
     for api in &apis {
         match api {
             Api::Mazze => {
                 let mazze = MazzeHandler::new(common.clone(), rpc.clone())
-                    .to_delegate();
+                    .into_rpc();
                 extend_with_interceptor(
                     &mut handler,
                     &rpc.config,
@@ -265,7 +261,7 @@ fn setup_rpc_apis(
                             rpc.config.get_logs_filter_max_limit,
                             h.network.clone(),
                         )
-                        .to_delegate();
+                        .into_rpc();
 
                         extend_with_interceptor(
                             &mut handler,
@@ -285,7 +281,7 @@ fn setup_rpc_apis(
                     rpc.sync.clone(),
                     rpc.tx_pool.clone(),
                 )
-                .to_delegate();
+                .into_rpc();
                 let evm_trace_handler = EthTraceHandler {
                     trace_handler: TraceHandler::new(
                         rpc.consensus.get_data_manager().clone(),
@@ -293,7 +289,7 @@ fn setup_rpc_apis(
                         rpc.consensus.clone(),
                     ),
                 }
-                .to_delegate();
+                .into_rpc();
                 extend_with_interceptor(
                     &mut handler,
                     &rpc.config,
@@ -301,7 +297,7 @@ fn setup_rpc_apis(
                     throttling_conf,
                     throttling_section,
                 );
-                handler.extend_with(evm_trace_handler);
+                extend_with(&mut handler, evm_trace_handler);
 
                 if let Some(poll_lifetime) = rpc.config.poll_lifetime_in_seconds
                 {
@@ -314,7 +310,7 @@ fn setup_rpc_apis(
                             poll_lifetime,
                             rpc.config.get_logs_filter_max_limit,
                         )
-                        .to_delegate();
+                        .into_rpc();
 
                         extend_with_interceptor(
                             &mut handler,
@@ -327,16 +323,16 @@ fn setup_rpc_apis(
                 }
             }
             Api::Debug => {
-                handler.extend_with(
+                extend_with(&mut handler, 
                     LocalRpcImpl::new(common.clone(), rpc.clone())
-                        .to_delegate(),
+                        .into_rpc(),
                 );
             }
             Api::Pubsub => {
                 extend_with_interceptor(
                     &mut handler,
                     &rpc.config,
-                    pubsub.clone().to_delegate(),
+                    pubsub.clone().into_rpc(),
                     throttling_conf,
                     throttling_section,
                 );
@@ -346,7 +342,7 @@ fn setup_rpc_apis(
                 extend_with_interceptor(
                     &mut handler,
                     &rpc.config,
-                    eth_pubsub.clone().to_delegate(),
+                    eth_pubsub.clone().into_rpc(),
                     throttling_conf,
                     throttling_section,
                 );
@@ -354,11 +350,11 @@ fn setup_rpc_apis(
             Api::EthDebug => {
                 info!("Add geth debug method");
                 let geth_debug = GethDebugHandler::new(rpc.consensus.clone());
-                handler.extend_with(geth_debug.to_delegate());
+                extend_with(&mut handler, geth_debug.into_rpc());
             }
             Api::Test => {
-                handler.extend_with(
-                    TestRpcImpl::new(common.clone(), rpc.clone()).to_delegate(),
+                extend_with(&mut handler, 
+                    TestRpcImpl::new(common.clone(), rpc.clone()).into_rpc(),
                 );
             }
             Api::Trace => {
@@ -367,7 +363,7 @@ fn setup_rpc_apis(
                     *rpc.sync.network.get_network_type(),
                     rpc.consensus.clone(),
                 )
-                .to_delegate();
+                .into_rpc();
                 extend_with_interceptor(
                     &mut handler,
                     &rpc.config,
@@ -378,7 +374,7 @@ fn setup_rpc_apis(
             }
             Api::TxPool => {
                 let txpool =
-                    TransactionPoolHandler::new(common.clone()).to_delegate();
+                    TransactionPoolHandler::new(common.clone()).into_rpc();
                 extend_with_interceptor(
                     &mut handler,
                     &rpc.config,
@@ -393,50 +389,54 @@ fn setup_rpc_apis(
     add_meta_rpc_methods(handler, apis)
 }
 
-pub fn extend_with_interceptor<
-    T: IntoIterator<Item = (String, RemoteProcedure<Metadata>)>,
->(
-    handler: &mut MetaIoHandler<Metadata>, rpc_conf: &RpcImplConfiguration,
-    rpc_impl: T, throttling_conf: &Option<String>, throttling_section: &str,
+/// Adds `methods` to `handler`. A method that is already present is
+/// replaced, like `MetaIoHandler::extend_with` did (e.g. `trace_block` of
+/// the core space and of the eSpace when both APIs are enabled).
+fn extend_with(handler: &mut RpcModule<()>, methods: impl Into<Methods>) {
+    let methods: Methods = methods.into();
+    for name in methods.method_names() {
+        handler.remove_method(name);
+    }
+    handler
+        .merge(methods)
+        .expect("conflicting method names were removed above; qed");
+}
+
+pub fn extend_with_interceptor(
+    handler: &mut RpcModule<()>, rpc_conf: &RpcImplConfiguration,
+    rpc_impl: impl Into<Methods>, throttling_conf: &Option<String>,
+    throttling_section: &str,
 ) {
     let interceptor =
         ThrottleInterceptor::new(throttling_conf, throttling_section);
     if rpc_conf.enable_metrics {
-        handler.extend_with(RpcProxy::new(
-            rpc_impl,
-            MetricsInterceptor::new(interceptor),
-        ));
+        extend_with(
+            handler,
+            intercept(rpc_impl, MetricsInterceptor::new(interceptor)),
+        );
     } else {
-        handler.extend_with(RpcProxy::new(rpc_impl, interceptor));
+        extend_with(handler, intercept(rpc_impl, interceptor));
     }
 }
 
-fn add_meta_rpc_methods(
-    mut handler: MetaIoHandler<Metadata>, apis: HashSet<Api>,
-) -> MetaIoHandler<Metadata> {
+/// Adds `rpc_methods` (every method of `handler`) and `rpc_modules` (the
+/// names of `apis`).
+pub fn add_meta_rpc_methods(
+    mut handler: RpcModule<()>, apis: HashSet<Api>,
+) -> RpcModule<()> {
     // rpc_methods to return all available methods
     let methods: Vec<String> =
-        handler.iter().map(|(method, _)| method).cloned().collect();
-    handler.add_method("rpc_methods", move |_| {
-        let method_list = methods
-            .clone()
-            .iter()
-            .map(|m| Value::String(m.to_string()))
-            .collect();
-        Ok(Value::Array(method_list))
-    });
+        handler.method_names().map(String::from).collect();
+    handler
+        .register_method("rpc_methods", move |_, _, _| methods.clone())
+        .expect("rpc_methods is not registered by any API; qed");
 
     // rpc_modules
     let namespaces: Vec<String> =
         apis.into_iter().map(|item| format!("{}", item)).collect();
-    handler.add_method("rpc_modules", move |_| {
-        let ns = namespaces
-            .clone()
-            .iter()
-            .map(|m| Value::String(m.to_string()))
-            .collect();
-        Ok(Value::Array(ns))
-    });
+    handler
+        .register_method("rpc_modules", move |_, _, _| namespaces.clone())
+        .expect("rpc_modules is not registered by any API; qed");
 
     handler
 }
@@ -444,7 +444,7 @@ fn add_meta_rpc_methods(
 pub fn setup_public_rpc_apis_light(
     common: Arc<CommonImpl>, rpc: Arc<LightImpl>, pubsub: PubSubClient,
     eth_pubsub: EthPubSubClient, conf: &Configuration,
-) -> MetaIoHandler<Metadata> {
+) -> RpcModule<()> {
     setup_rpc_apis_light(
         common,
         rpc,
@@ -459,7 +459,7 @@ pub fn setup_public_rpc_apis_light(
 pub fn setup_debug_rpc_apis_light(
     common: Arc<CommonImpl>, rpc: Arc<LightImpl>, pubsub: PubSubClient,
     eth_pubsub: EthPubSubClient, conf: &Configuration,
-) -> MetaIoHandler<Metadata> {
+) -> RpcModule<()> {
     let mut light_debug_apis = ApiSet::All.list_apis();
     light_debug_apis.remove(&Api::Trace);
     if !conf.is_test_or_dev_mode() {
@@ -480,18 +480,18 @@ fn setup_rpc_apis_light(
     common: Arc<CommonImpl>, rpc: Arc<LightImpl>, pubsub: PubSubClient,
     eth_pubsub: EthPubSubClient, throttling_conf: &Option<String>,
     throttling_section: &str, apis: HashSet<Api>,
-) -> MetaIoHandler<Metadata> {
-    let mut handler = MetaIoHandler::default();
+) -> RpcModule<()> {
+    let mut handler = RpcModule::new(());
     for api in apis {
         match api {
             Api::Mazze => {
                 let mazze = LightMazzeHandler::new(common.clone(), rpc.clone())
-                    .to_delegate();
+                    .into_rpc();
                 let interceptor = ThrottleInterceptor::new(
                     throttling_conf,
                     throttling_section,
                 );
-                handler.extend_with(RpcProxy::new(mazze, interceptor));
+                extend_with(&mut handler, intercept(mazze, interceptor));
             }
             Api::Eth => {
                 warn!("Light nodes do not support evm ports.");
@@ -500,19 +500,19 @@ fn setup_rpc_apis_light(
                 warn!("Light nodes do not support evm ports.");
             }
             Api::Debug => {
-                handler.extend_with(
+                extend_with(&mut handler, 
                     LightDebugRpcImpl::new(common.clone(), rpc.clone())
-                        .to_delegate(),
+                        .into_rpc(),
                 );
             }
-            Api::Pubsub => handler.extend_with(pubsub.clone().to_delegate()),
+            Api::Pubsub => extend_with(&mut handler, pubsub.clone().into_rpc()),
             Api::EthPubsub => {
-                handler.extend_with(eth_pubsub.clone().to_delegate())
+                extend_with(&mut handler, eth_pubsub.clone().into_rpc())
             }
             Api::Test => {
-                handler.extend_with(
+                extend_with(&mut handler, 
                     LightTestRpcImpl::new(common.clone(), rpc.clone())
-                        .to_delegate(),
+                        .into_rpc(),
                 );
             }
             Api::Trace => {
@@ -526,20 +526,67 @@ fn setup_rpc_apis_light(
     handler
 }
 
-pub fn start_tcp<H, T>(
-    conf: TcpConfiguration, handler: H, extractor: T,
-) -> Result<Option<TcpServer>, String>
-where
-    H: Into<MetaIoHandler<Metadata>>,
-    T: TpcMetaExtractor<Metadata> + 'static,
-{
+// Limits of the HTTP and WebSocket servers. Each one is at least as
+// permissive as the effective behaviour of the previous
+// `jsonrpc-http-server` / `jsonrpc-ws-server` 15 servers.
+
+/// Maximum HTTP request body: the `jsonrpc-http-server` default (5 MiB),
+/// which the node never changed.
+pub const HTTP_MAX_REQUEST_BODY_SIZE: u32 = 5 * 1024 * 1024;
+/// Maximum HTTP response body: responses were not limited before, so use
+/// the largest value jsonrpsee accepts.
+pub const HTTP_MAX_RESPONSE_BODY_SIZE: u32 = u32::MAX;
+/// Maximum concurrent HTTP connections: hyper 0.12 did not limit them.
+pub const HTTP_MAX_CONNECTIONS: u32 = u32::MAX;
+/// Maximum concurrent WebSocket connections: the `jsonrpc-ws-server`
+/// default (100), which the node never changed.
+pub const WS_MAX_CONNECTIONS: u32 = 100;
+/// Maximum subscriptions per connection: `jsonrpc-pubsub` had no limit.
+pub const MAX_SUBSCRIPTIONS_PER_CONNECTION: u32 = u32::MAX;
+/// Messages buffered per WebSocket connection before notifications wait
+/// for the client (jsonrpsee default; the old ws-rs out buffer was bounded
+/// by `jsonrpc_ws_max_payload_bytes` instead).
+pub const WS_MESSAGE_BUFFER_CAPACITY: u32 = 1024;
+/// Batch requests: the old servers accepted batches of any length.
+pub fn batch_request_config() -> BatchRequestConfig {
+    BatchRequestConfig::Unlimited
+}
+
+pub use self::tcp::TcpServer;
+/// An HTTP RPC server.
+pub type HttpServer = RpcServerHandle;
+/// A WebSocket RPC server.
+pub type WsServer = RpcServerHandle;
+
+/// Handle of a running jsonrpsee server; dropping it stops the server.
+pub struct RpcServerHandle {
+    handle: ServerHandle,
+    local_addr: SocketAddr,
+}
+
+impl RpcServerHandle {
+    /// The address the server listens on.
+    pub fn local_addr(&self) -> SocketAddr { self.local_addr }
+}
+
+impl Drop for RpcServerHandle {
+    fn drop(&mut self) { let _ = self.handle.stop(); }
+}
+
+pub fn start_tcp(
+    conf: TcpConfiguration, handler: RpcModule<()>, runtime: &Runtime,
+) -> Result<Option<TcpServer>, String> {
     if !conf.enabled {
         return Ok(None);
     }
 
-    match TcpServerBuilder::with_meta_extractor(handler, extractor)
-        .start(&conf.address)
-    {
+    match tcp::start(
+        &conf.address,
+        handler.into(),
+        Arc::new(HexIdProvider::default()),
+        tcp::TcpLimits::default(),
+        runtime.handle(),
+    ) {
         Ok(server) => Ok(Some(server)),
         Err(io_error) => {
             Err(format!("TCP error: {} (addr = {})", io_error, conf.address))
@@ -548,21 +595,46 @@ where
 }
 
 pub fn start_http(
-    conf: HttpConfiguration, handler: MetaIoHandler<Metadata>,
+    conf: HttpConfiguration, handler: RpcModule<()>, runtime: &Runtime,
 ) -> Result<Option<HttpServer>, String> {
     if !conf.enabled {
         return Ok(None);
     }
-    let mut builder = HttpServerBuilder::new(handler);
-    if let Some(threads) = conf.threads {
-        builder = builder.threads(threads);
-    }
 
-    match builder
-        .keep_alive(conf.keep_alive)
-        .cors(conf.cors_domains.clone())
-        .start_http(&conf.address)
-    {
+    let config = ServerConfig::builder()
+        .http_only()
+        .max_request_body_size(HTTP_MAX_REQUEST_BODY_SIZE)
+        .max_response_body_size(HTTP_MAX_RESPONSE_BODY_SIZE)
+        .max_connections(HTTP_MAX_CONNECTIONS)
+        .max_subscriptions_per_connection(MAX_SUBSCRIPTIONS_PER_CONNECTION)
+        .set_batch_request_config(batch_request_config())
+        .set_id_provider(HexIdProvider::default())
+        // The old server did not time out idle new connections.
+        .set_first_request_timeout(None)
+        .build();
+    let middleware = tower::ServiceBuilder::new()
+        .layer(HttpCompatLayer::new(conf.cors_domains.clone(), conf.keep_alive));
+    let methods: Methods = handler.into();
+    let subscriptions = methods.clone();
+    let rpc_middleware = RpcServiceBuilder::new()
+        .layer_fn(move |service| NoSubscriptions::new(service, &subscriptions));
+    let builder = Server::builder()
+        .set_config(config)
+        .set_rpc_middleware(rpc_middleware)
+        .set_http_middleware(middleware);
+    let handler = methods;
+
+    let address = conf.address;
+    let start = || -> std::io::Result<RpcServerHandle> {
+        let server = runtime.handle().block_on(builder.build(address))?;
+        let local_addr = server.local_addr()?;
+        let _guard = runtime.handle().enter();
+        Ok(RpcServerHandle {
+            handle: server.start(handler),
+            local_addr,
+        })
+    };
+    match start() {
         Ok(server) => Ok(Some(server)),
         Err(io_error) => Err(format!(
             "HTTP error: {} (addr = {})",
@@ -571,21 +643,42 @@ pub fn start_http(
     }
 }
 
-pub fn start_ws<H, T>(
-    conf: WsConfiguration, handler: H, extractor: T,
-) -> Result<Option<WsServer>, String>
-where
-    H: Into<MetaIoHandler<Metadata>>,
-    T: WsMetaExtractor<Metadata> + 'static,
-{
+pub fn start_ws(
+    conf: WsConfiguration, handler: RpcModule<()>, runtime: &Runtime,
+) -> Result<Option<WsServer>, String> {
     if !conf.enabled {
         return Ok(None);
     }
 
-    match WsServerBuilder::with_meta_extractor(handler, extractor)
-        .max_payload(conf.max_payload_bytes)
-        .start(&conf.address)
-    {
+    // `jsonrpc_ws_max_payload_bytes` bounded both the incoming and the
+    // outgoing buffer of a WebSocket connection.
+    let max_payload =
+        u32::try_from(conf.max_payload_bytes).unwrap_or(u32::MAX);
+    let config = ServerConfig::builder()
+        .ws_only()
+        .max_request_body_size(max_payload)
+        .max_response_body_size(max_payload)
+        .max_connections(WS_MAX_CONNECTIONS)
+        .max_subscriptions_per_connection(MAX_SUBSCRIPTIONS_PER_CONNECTION)
+        .set_message_buffer_capacity(WS_MESSAGE_BUFFER_CAPACITY)
+        .set_batch_request_config(batch_request_config())
+        .set_id_provider(HexIdProvider::default())
+        // The old server did not time out idle new connections.
+        .set_first_request_timeout(None)
+        .build();
+    let builder = Server::builder().set_config(config);
+
+    let address = conf.address;
+    let start = || -> std::io::Result<RpcServerHandle> {
+        let server = runtime.handle().block_on(builder.build(address))?;
+        let local_addr = server.local_addr()?;
+        let _guard = runtime.handle().enter();
+        Ok(RpcServerHandle {
+            handle: server.start(handler),
+            local_addr,
+        })
+    };
+    match start() {
         Ok(server) => Ok(Some(server)),
         Err(io_error) => {
             Err(format!("WS error: {} (addr = {})", io_error, conf.address))
@@ -663,23 +756,8 @@ impl RpcInterceptor for MetricsInterceptor {
         Ok(())
     }
 
-    fn around(
-        &self, name: &String, method_call: BoxFuture<Value>,
-    ) -> BoxFuture<Value> {
-        let maybe_timer = METRICS_INTERCEPTOR_TIMERS
-            .lock()
-            .get(name)
-            .map(|timer| timer.clone());
-        let setup = lazy(move || {
-            Ok(maybe_timer
-                .as_ref()
-                .map(|timer| ScopeTimer::time_scope(timer.clone())))
-        });
-        Box::new(setup.then(|timer: Result<_, ()>| {
-            method_call.then(|r| {
-                drop(timer);
-                r
-            })
-        }))
+    fn around(&self, name: &String) -> Option<Box<dyn Any + Send>> {
+        let timer = METRICS_INTERCEPTOR_TIMERS.lock().get(name).cloned()?;
+        Some(Box::new(ScopeTimer::time_scope(timer)))
     }
 }

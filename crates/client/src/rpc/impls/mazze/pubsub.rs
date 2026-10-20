@@ -4,24 +4,16 @@
 
 use crate::rpc::{
     error_codes,
-    helpers::{EpochQueue, SubscriberId, Subscribers},
-    metadata::Metadata,
-    traits::pubsub::PubSub,
+    helpers::{notify, EpochQueue, SubscriberId, Subscribers},
+    traits::pubsub::PubSubServer,
     types::{
         pubsub::{self, SubscriptionEpoch},
         Header as RpcHeader, Log as RpcLog,
     },
 };
-use futures::{
-    compat::Future01CompatExt,
-    future::{join_all, FutureExt, TryFutureExt},
-};
+use futures::future::join_all;
 use itertools::zip;
-use jsonrpc_core::{futures::Future, Result as RpcResult};
-use jsonrpc_pubsub::{
-    typed::{Sink, Subscriber},
-    SubscriptionId,
-};
+use jsonrpsee::{PendingSubscriptionSink, SubscriptionSink};
 use mazze_addr::Network;
 use mazze_parameters::{
     consensus::DEFERRED_STATE_EPOCH_COUNT,
@@ -40,9 +32,9 @@ use std::{
     sync::{Arc, Weak},
     time::Duration,
 };
-use tokio_timer::sleep;
+use tokio::time::sleep;
 
-type Client = Sink<pubsub::Result>;
+type Client = SubscriptionSink;
 
 /// Mazze PubSub implementation.
 #[derive(Clone)]
@@ -83,8 +75,7 @@ impl PubSubClient {
             handler_clone.notify_header(&hash);
         });
 
-        // run futures@0.3 future on tokio@0.1 executor
-        handler.executor.spawn(fut.unit_error().boxed().compat());
+        handler.executor.spawn(fut);
 
         PubSubClient {
             handler,
@@ -155,8 +146,6 @@ impl PubSubClient {
             }
         };
 
-        // run futures@0.3 future on tokio@0.1 executor
-        let fut = fut.unit_error().boxed().compat();
         self.handler.executor.spawn(fut);
     }
 
@@ -216,8 +205,6 @@ impl PubSubClient {
             }
         };
 
-        // run futures@0.3 future on tokio@0.1 executor
-        let fut = fut.unit_error().boxed().compat();
         self.handler.executor.spawn(fut);
     }
 }
@@ -234,21 +221,13 @@ pub struct ChainNotificationHandler {
 impl ChainNotificationHandler {
     // notify `subscriber` about `result` in a separate task
     fn notify(exec: &Executor, subscriber: &Client, result: pubsub::Result) {
-        let fut = subscriber.notify(Ok(result)).map(|_| ()).map_err(
-            |e| warn!(target: "rpc", "Unable to send notification: {}", e),
-        );
-
-        exec.spawn(fut)
+        let subscriber = subscriber.clone();
+        exec.spawn(async move { notify(&subscriber, &result).await })
     }
 
     // notify `subscriber` about `result` asynchronously
     async fn notify_async(subscriber: &Client, result: pubsub::Result) {
-        let fut = subscriber.notify(Ok(result)).map(|_| ()).map_err(
-            |e| warn!(target: "rpc", "Unable to send notification: {}", e),
-        );
-
-        // convert futures01::Future into std::Future so that we can await
-        let _ = fut.compat().await;
+        notify(subscriber, &result).await
     }
 
     // notify each subscriber about header `hash` concurrently
@@ -383,7 +362,7 @@ impl ChainNotificationHandler {
                 Some(res) => return Some(res.block_receipts.clone()),
                 None => {
                     trace!("Cannot find receipts with {:?}/{:?}", block, main);
-                    let _ = sleep(POLL_INTERVAL_MS).compat().await;
+                    sleep(POLL_INTERVAL_MS).await;
                 }
             }
 
@@ -482,79 +461,93 @@ impl ChainNotificationHandler {
     }
 }
 
-impl PubSub for PubSubClient {
-    type Metadata = Metadata;
+/// What a validated `mazze_subscribe` call subscribes to.
+enum Subscription {
+    Heads,
+    Epochs(SubscriptionEpoch),
+    Logs(LogFilter),
+}
 
+impl PubSubClient {
+    /// Drops the bookkeeping of subscriber `id`; the epoch and log loops of
+    /// that subscriber terminate on their next epoch.
+    fn remove_subscriber(&self, id: &SubscriberId) -> bool {
+        let res0 = self.heads_subscribers.write().remove(id).is_some();
+        let res1 = self.epochs_subscribers.write().remove(id).is_some();
+        let res2 = self.logs_subscribers.write().remove(id).is_some();
+        res0 || res1 || res2
+    }
+}
+
+impl PubSubServer for PubSubClient {
     fn subscribe(
-        &self, _meta: Metadata, subscriber: Subscriber<pubsub::Result>,
-        kind: pubsub::Kind, params: Option<pubsub::Params>,
+        &self, pending: PendingSubscriptionSink, kind: pubsub::Kind,
+        params: Option<pubsub::Params>,
     ) {
-        let error = match (kind, params) {
+        let subscription = match (kind, params) {
             // --------- newHeads ---------
-            (pubsub::Kind::NewHeads, None) => {
-                self.heads_subscribers.write().push(subscriber);
-                return;
-            }
-            (pubsub::Kind::NewHeads, _) => error_codes::invalid_params(
+            (pubsub::Kind::NewHeads, None) => Ok(Subscription::Heads),
+            (pubsub::Kind::NewHeads, _) => Err(error_codes::invalid_params(
                 "newHeads",
                 "Expected no parameters.",
-            ),
+            )),
             // --------- epochs ---------
             (pubsub::Kind::Epochs, None) => {
-                let id = self.epochs_subscribers.write().push(subscriber);
-                self.start_epoch_loop(id, SubscriptionEpoch::LatestMined);
-                return;
+                Ok(Subscription::Epochs(SubscriptionEpoch::LatestMined))
             }
             (pubsub::Kind::Epochs, Some(pubsub::Params::Epochs(epoch))) => {
-                let id = self.epochs_subscribers.write().push(subscriber);
-                self.start_epoch_loop(id, epoch);
-                return;
+                Ok(Subscription::Epochs(epoch))
             }
-            (pubsub::Kind::Epochs, _) => error_codes::invalid_params(
+            (pubsub::Kind::Epochs, _) => Err(error_codes::invalid_params(
                 "epochs",
                 "Expected epoch parameter.",
-            ),
+            )),
             // --------- logs ---------
             (pubsub::Kind::Logs, None) => {
-                let id = self
-                    .logs_subscribers
-                    .write()
-                    .push(subscriber, LogFilter::default());
-
-                self.start_logs_loop(id);
-                return;
+                Ok(Subscription::Logs(LogFilter::default()))
             }
             (pubsub::Kind::Logs, Some(pubsub::Params::Logs(filter))) => {
-                match filter.into_primitive() {
-                    Err(e) => e,
-                    Ok(filter) => {
-                        let id = self
-                            .logs_subscribers
-                            .write()
-                            .push(subscriber, filter);
-
-                        self.start_logs_loop(id);
-                        return;
-                    }
-                }
+                filter.into_primitive().map(Subscription::Logs)
             }
-            (pubsub::Kind::Logs, _) => error_codes::invalid_params(
+            (pubsub::Kind::Logs, _) => Err(error_codes::invalid_params(
                 "logs",
                 "Expected filter parameter.",
-            ),
-            _ => error_codes::unimplemented(None),
+            )),
+            _ => Err(error_codes::unimplemented(None)),
         };
 
-        let _ = subscriber.reject(error);
-    }
-
-    fn unsubscribe(
-        &self, _: Option<Self::Metadata>, id: SubscriptionId,
-    ) -> RpcResult<bool> {
-        let res0 = self.heads_subscribers.write().remove(&id).is_some();
-        let res1 = self.epochs_subscribers.write().remove(&id).is_some();
-        let res2 = self.logs_subscribers.write().remove(&id).is_some();
-
-        Ok(res0 || res1 || res2)
+        let this = self.clone();
+        self.handler.executor.spawn(async move {
+            let subscription = match subscription {
+                Ok(subscription) => subscription,
+                Err(e) => return pending.reject(e).await,
+            };
+            let sink = match pending.accept().await {
+                Ok(sink) => sink,
+                // The client went away before the subscription started.
+                Err(_) => return,
+            };
+            let id = SubscriberId::of(&sink);
+            match subscription {
+                Subscription::Heads => {
+                    this.heads_subscribers.write().insert(id.clone(), sink.clone())
+                }
+                Subscription::Epochs(epoch) => {
+                    this.epochs_subscribers
+                        .write()
+                        .insert(id.clone(), sink.clone());
+                    this.start_epoch_loop(id.clone(), epoch);
+                }
+                Subscription::Logs(filter) => {
+                    this.logs_subscribers
+                        .write()
+                        .insert(id.clone(), (sink.clone(), filter));
+                    this.start_logs_loop(id.clone());
+                }
+            }
+            // `mazze_unsubscribe` or a closed connection ends the subscription.
+            sink.closed().await;
+            this.remove_subscriber(&id);
+        });
     }
 }

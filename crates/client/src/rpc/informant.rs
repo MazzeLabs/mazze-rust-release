@@ -16,8 +16,10 @@
 
 //! RPC Requests Statistics
 
-use jsonrpc_core as core;
-use jsonrpc_core::futures::future::Either;
+use jsonrpsee::{
+    core::middleware::{Batch, Notification, RpcServiceT},
+    types::Request,
+};
 use order_stat;
 use parking_lot::RwLock;
 use runtime;
@@ -193,60 +195,91 @@ pub trait ActivityNotifier: Send + Sync + 'static {
 }
 
 /// Stats-counting RPC middleware
-pub struct Middleware<T: ActivityNotifier = ClientNotifier> {
+/// jsonrpsee RPC middleware layer counting requests and roundtrip times.
+#[derive(Clone)]
+pub struct MiddlewareLayer<T: ActivityNotifier = ClientNotifier> {
     stats: Arc<RpcStats>,
-    notifier: T,
+    notifier: Arc<T>,
 }
 
-impl<T: ActivityNotifier> Middleware<T> {
+impl<T: ActivityNotifier> MiddlewareLayer<T> {
     /// Create new Middleware with stats counter and activity notifier.
     pub fn new(stats: Arc<RpcStats>, notifier: T) -> Self {
-        Middleware { stats, notifier }
+        MiddlewareLayer {
+            stats,
+            notifier: Arc::new(notifier),
+        }
     }
 }
 
-impl<M: core::Metadata, T: ActivityNotifier> core::Middleware<M>
-    for Middleware<T>
-{
-    type CallFuture = core::middleware::NoopCallFuture;
-    type Future = core::FutureResponse;
+impl<S, T: ActivityNotifier> tower::Layer<S> for MiddlewareLayer<T> {
+    type Service = Middleware<S, T>;
 
-    fn on_request<F, X>(
-        &self, request: core::Request, meta: M, process: F,
-    ) -> Either<Self::Future, X>
-    where
-        F: FnOnce(core::Request, M) -> X,
-        X: core::futures::Future<Item = Option<core::Response>, Error = ()>
-            + Send
-            + 'static,
+    fn layer(&self, service: S) -> Self::Service {
+        Middleware {
+            service,
+            stats: self.stats.clone(),
+            notifier: self.notifier.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Middleware<S, T: ActivityNotifier = ClientNotifier> {
+    service: S,
+    stats: Arc<RpcStats>,
+    notifier: Arc<T>,
+}
+
+impl<S, T> RpcServiceT for Middleware<S, T>
+where
+    S: RpcServiceT + Send + Sync + Clone + 'static,
+    T: ActivityNotifier,
+{
+    type BatchResponse = S::BatchResponse;
+    type MethodResponse = S::MethodResponse;
+    type NotificationResponse = S::NotificationResponse;
+
+    fn call<'a>(
+        &self, request: Request<'a>,
+    ) -> impl std::future::Future<Output = Self::MethodResponse> + Send + 'a
     {
         let start = time::Instant::now();
 
         self.notifier.active();
         self.stats.count_request();
 
-        let id = match request {
-            core::Request::Single(core::Call::MethodCall(ref call)) => {
-                Some(call.id.clone())
-            }
-            _ => None,
-        };
+        let id = request.id.clone().into_owned();
         let stats = self.stats.clone();
+        let service = self.service.clone();
 
-        let future = process(request, meta).map(move |res| {
+        async move {
+            let res = service.call(request).await;
             let time = start.elapsed().as_micros();
             if time > 10_000 {
                 debug!(target: "rpc", "[{:?}] Took {}ms", id, time / 1_000);
             }
             stats.add_roundtrip(time);
             res
-        });
+        }
+    }
 
-        Either::A(Box::new(future))
+    fn batch<'a>(
+        &self, requests: Batch<'a>,
+    ) -> impl std::future::Future<Output = Self::BatchResponse> + Send + 'a {
+        self.notifier.active();
+        self.stats.count_request();
+        self.service.batch(requests)
+    }
+
+    fn notification<'a>(
+        &self, n: Notification<'a>,
+    ) -> impl std::future::Future<Output = Self::NotificationResponse> + Send + 'a
+    {
+        self.service.notification(n)
     }
 }
 
-/// Client Notifier
 pub struct ClientNotifier {
     //    pub client: Arc<::ethcore::client::Client>,
 }

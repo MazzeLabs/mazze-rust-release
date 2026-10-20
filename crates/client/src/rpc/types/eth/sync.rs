@@ -22,7 +22,7 @@ use mazze_types::U256;
 use serde::{Serialize, Serializer};
 
 /// Sync info
-#[derive(Default, Debug, Serialize, PartialEq)]
+#[derive(Clone, Default, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncInfo {
     /// Starting block
@@ -38,7 +38,7 @@ pub struct SyncInfo {
 }
 
 /// Sync status
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SyncStatus {
     /// Info when syncing
     Info(SyncInfo),

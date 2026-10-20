@@ -25,7 +25,7 @@ use crate::rpc::{
 
 use bigdecimal::BigDecimal;
 use clap::crate_version;
-use jsonrpc_core::{
+use mazze_rpc_error::{
     Error as RpcError, Result as JsonRpcResult, Value as RpcValue,
 };
 use keccak_hash::keccak;
@@ -1357,7 +1357,7 @@ impl RpcImpl {
 
     pub fn get_block_blame_info(
         &self, block_hash: H256,
-    ) -> JsonRpcResult<jsonrpc_core::Value> {
+    ) -> JsonRpcResult<mazze_rpc_error::Value> {
         info!(
             "RPC Request: mazze_getBlockBlameInfo block_hash={:?}",
             block_hash
@@ -1406,7 +1406,7 @@ impl RpcImpl {
 
     pub fn get_randomx_epoch_info(
         &self, epoch_number: Option<EpochNumber>,
-    ) -> JsonRpcResult<jsonrpc_core::Value> {
+    ) -> JsonRpcResult<mazze_rpc_error::Value> {
         use mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
         info!(
             "RPC Request: mazze_getRandomXEpochInfo epoch_number={:?}",
@@ -1459,7 +1459,7 @@ impl RpcImpl {
 
     pub fn get_era_details(
         &self, selector: Option<String>,
-    ) -> JsonRpcResult<jsonrpc_core::Value> {
+    ) -> JsonRpcResult<mazze_rpc_error::Value> {
         info!("RPC Request: mazze_getEraDetails selector={:?}", selector);
         let consensus_graph = self.consensus_graph();
         let inner = consensus_graph.inner.read();

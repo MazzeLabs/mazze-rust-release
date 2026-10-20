@@ -7,7 +7,7 @@ use mazze_addr::Network;
 use mazze_types::{H256, U256};
 use primitives::Account as PrimitiveAccount;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     // This field isn't part of Account RLP but is helpful for debugging.

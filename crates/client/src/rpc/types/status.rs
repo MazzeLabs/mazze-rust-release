@@ -5,7 +5,7 @@
 use mazze_types::{H256, U64};
 use serde_derive::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChainProgress {
     /// Best pivot-chain epoch number.
@@ -22,7 +22,7 @@ pub struct ChainProgress {
     pub latest_state_epoch_number: U64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RandomXProgress {
     /// Current RandomX epoch index derived from the best epoch number.
@@ -37,7 +37,7 @@ pub struct RandomXProgress {
     pub next_transition_epoch_number: U64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EraProgress {
     /// Current era index.
@@ -50,7 +50,7 @@ pub struct EraProgress {
     pub end_epoch_number: U64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotProgress {
     /// Number of epochs between snapshot boundaries.
@@ -77,7 +77,7 @@ pub struct SnapshotProgress {
     pub keeps_pre_stable_snapshot: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
     /// Hash of the block

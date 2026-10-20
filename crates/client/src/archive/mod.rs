@@ -2,9 +2,7 @@
 // Mazze is free software and distributed under GNU General Public License.
 // See http://www.gnu.org/licenses/
 
-use jsonrpc_http_server::Server as HttpServer;
-use jsonrpc_tcp_server::Server as TcpServer;
-use jsonrpc_ws_server::Server as WsServer;
+use crate::rpc::{HttpServer, TcpServer, WsServer};
 
 use crate::{
     common::{initialize_not_light_node_modules, ClientComponents},

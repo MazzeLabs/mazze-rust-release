@@ -17,7 +17,7 @@
 
 //! RPC Error codes and error objects
 
-use jsonrpc_core::{Error, ErrorCode, Value};
+use mazze_rpc_error::{Error, ErrorCode, Value};
 use mazze_types::H256;
 use std::fmt;
 

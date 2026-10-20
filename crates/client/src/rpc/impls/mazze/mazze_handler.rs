@@ -14,7 +14,7 @@ use crate::rpc::{
 };
 use blockgen::BlockGenerator;
 use delegate::delegate;
-use jsonrpc_core::{BoxFuture, Error as JsonRpcError, Result as JsonRpcResult};
+use mazze_rpc_error::{Error as JsonRpcError, Result as JsonRpcResult};
 use mazze_execute_helper::estimation::{decode_error, EstimateExt};
 use mazze_executor::executive::{
     ExecutionError, ExecutionOutcome, TxDropError,
@@ -62,7 +62,7 @@ use crate::{
             common::{self, RpcImpl as CommonImpl},
             RpcImplConfiguration,
         },
-        traits::{debug::LocalRpc, mazze::Mazze, test::TestRpc},
+        traits::{debug::LocalRpcServer, mazze::MazzeServer, test::TestRpcServer},
         types::{
             eth::Transaction as EthTransaction, sign_call,
             Account as RpcAccount, AccountPendingInfo,
@@ -2107,18 +2107,16 @@ impl MazzeHandler {
     }
 }
 
-impl Mazze for MazzeHandler {
+impl MazzeServer for MazzeHandler {
     delegate! {
         to self.common {
             fn best_block_hash(&self) -> JsonRpcResult<H256>;
-            fn block_by_epoch_number(
-                &self, epoch_num: EpochNumber, include_txs: bool) -> BoxFuture<Option<RpcBlock>>;
-            fn block_by_hash_with_main_assumption(
-                &self, block_hash: H256, main_hash: H256, epoch_number: U64)
-                -> BoxFuture<RpcBlock>;
-            fn block_by_hash(&self, hash: H256, include_txs: bool)
-                -> BoxFuture<Option<RpcBlock>>;
-            fn block_by_block_number(&self, block_number: U64, include_txs: bool) -> BoxFuture<Option<RpcBlock>>;
+            async fn block_by_epoch_number(
+                &self, epoch_num: EpochNumber, include_txs: bool) -> mazze_rpc_error::Result<Option<RpcBlock>>;
+            async fn block_by_hash_with_main_assumption(
+                &self, block_hash: H256, main_hash: H256, epoch_number: U64) -> mazze_rpc_error::Result<RpcBlock>;
+            async fn block_by_hash(&self, hash: H256, include_txs: bool) -> mazze_rpc_error::Result<Option<RpcBlock>>;
+            async fn block_by_block_number(&self, block_number: U64, include_txs: bool) -> mazze_rpc_error::Result<Option<RpcBlock>>;
             fn confirmation_risk_by_hash(&self, block_hash: H256) -> JsonRpcResult<Option<U256>>;
             fn blocks_by_epoch(&self, num: EpochNumber) -> JsonRpcResult<Vec<H256>>;
             fn skipped_blocks_by_epoch(&self, num: EpochNumber) -> JsonRpcResult<Vec<H256>>;
@@ -2128,51 +2126,46 @@ impl Mazze for MazzeHandler {
             fn get_block_weight(&self, block_hash: H256) -> JsonRpcResult<U256>;
             fn is_adaptive_block(&self, block_hash: H256) -> JsonRpcResult<bool>;
             fn is_partial_invalid(&self, block_hash: H256) -> JsonRpcResult<bool>;
-            fn get_block_blame_info(&self, block_hash: H256) -> JsonRpcResult<jsonrpc_core::Value>;
+            fn get_block_blame_info(&self, block_hash: H256) -> JsonRpcResult<mazze_rpc_error::Value>;
             fn get_dag_tips(&self) -> JsonRpcResult<Vec<H256>>;
             fn get_skipped_block_hashes_by_epoch(&self, epoch_number: EpochNumber) -> JsonRpcResult<Vec<H256>>;
-            fn get_randomx_epoch_info(&self, epoch_number: Option<EpochNumber>) -> JsonRpcResult<jsonrpc_core::Value>;
-            fn get_era_details(&self, selector: Option<String>) -> JsonRpcResult<jsonrpc_core::Value>;
+            fn get_randomx_epoch_info(&self, epoch_number: Option<EpochNumber>) -> JsonRpcResult<mazze_rpc_error::Value>;
+            fn get_era_details(&self, selector: Option<String>) -> JsonRpcResult<mazze_rpc_error::Value>;
             fn epoch_number(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<U256>;
-            fn gas_price(&self) -> BoxFuture<U256>;
-            fn next_nonce(&self, address: RpcAddress, num: Option<BlockHashOrEpochNumber>)
-                -> BoxFuture<U256>;
+            async fn gas_price(&self) -> mazze_rpc_error::Result<U256>;
+            async fn next_nonce(&self, address: RpcAddress, num: Option<BlockHashOrEpochNumber>) -> mazze_rpc_error::Result<U256>;
             fn get_status(&self) -> JsonRpcResult<RpcStatus>;
             fn get_client_version(&self) -> JsonRpcResult<String>;
             fn get_node_version(&self) -> JsonRpcResult<serde_json::Value>;
             fn get_consensus_debug(&self) -> JsonRpcResult<serde_json::Value>;
-            fn account_pending_info(&self, addr: RpcAddress) -> BoxFuture<Option<AccountPendingInfo>>;
-            fn account_pending_transactions(&self, address: RpcAddress, maybe_start_nonce: Option<U256>, maybe_limit: Option<U64>) -> BoxFuture<AccountPendingTransactions>;
-            fn fee_history(&self, block_count: HexU64, newest_block: EpochNumber, reward_percentiles: Vec<f64>) -> BoxFuture<MazzeFeeHistory>;
-            fn max_priority_fee_per_gas(&self) -> BoxFuture<U256>;
+            async fn account_pending_info(&self, addr: RpcAddress) -> mazze_rpc_error::Result<Option<AccountPendingInfo>>;
+            async fn account_pending_transactions(&self, address: RpcAddress, maybe_start_nonce: Option<U256>, maybe_limit: Option<U64>) -> mazze_rpc_error::Result<AccountPendingTransactions>;
+            async fn fee_history(&self, block_count: HexU64, newest_block: EpochNumber, reward_percentiles: Vec<f64>) -> mazze_rpc_error::Result<MazzeFeeHistory>;
+            async fn max_priority_fee_per_gas(&self) -> mazze_rpc_error::Result<U256>;
         }
 
         to self.rpc_impl {
-            fn code(&self, addr: RpcAddress, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> BoxFuture<Bytes>;
-            fn account(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<RpcAccount>;
-            fn admin(&self, address: RpcAddress, num: Option<EpochNumber>)
-                -> BoxFuture<Option<RpcAddress>>;
-            fn sponsor_info(&self, address: RpcAddress, num: Option<EpochNumber>)
-                -> BoxFuture<SponsorInfo>;
-            fn balance(&self, address: RpcAddress, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> BoxFuture<U256>;
-            fn collateral_for_storage(&self, address: RpcAddress, num: Option<EpochNumber>)
-                -> BoxFuture<U256>;
+            async fn code(&self, addr: RpcAddress, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> mazze_rpc_error::Result<Bytes>;
+            async fn account(&self, address: RpcAddress, num: Option<EpochNumber>) -> mazze_rpc_error::Result<RpcAccount>;
+            async fn admin(&self, address: RpcAddress, num: Option<EpochNumber>) -> mazze_rpc_error::Result<Option<RpcAddress>>;
+            async fn sponsor_info(&self, address: RpcAddress, num: Option<EpochNumber>) -> mazze_rpc_error::Result<SponsorInfo>;
+            async fn balance(&self, address: RpcAddress, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> mazze_rpc_error::Result<U256>;
+            async fn collateral_for_storage(&self, address: RpcAddress, num: Option<EpochNumber>) -> mazze_rpc_error::Result<U256>;
             fn call(&self, request: CallRequest, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>)
                 -> JsonRpcResult<Bytes>;
             fn estimate_gas_and_collateral(
                 &self, request: CallRequest, epoch_number: Option<EpochNumber>)
                 -> JsonRpcResult<EstimateGasAndCollateralResponse>;
-            fn check_balance_against_transaction(
+            async fn check_balance_against_transaction(
                 &self, account_addr: RpcAddress, contract_addr: RpcAddress, gas_limit: U256, gas_price: U256, storage_limit: U256, epoch: Option<EpochNumber>,
-            ) -> BoxFuture<CheckBalanceAgainstTransactionResponse>;
-            fn get_logs(&self, filter: MazzeRpcLogFilter) -> BoxFuture<Vec<RpcLog>>;
+            ) -> mazze_rpc_error::Result<CheckBalanceAgainstTransactionResponse>;
+            async fn get_logs(&self, filter: MazzeRpcLogFilter) -> mazze_rpc_error::Result<Vec<RpcLog>>;
             fn get_block_reward_info(&self, num: EpochNumber) -> JsonRpcResult<Vec<RpcRewardInfo>>;
             fn send_raw_transaction(&self, raw: Bytes) -> JsonRpcResult<H256>;
-            fn storage_at(&self, addr: RpcAddress, pos: U256, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>)
-                -> BoxFuture<Option<H256>>;
-            fn transaction_by_hash(&self, hash: H256) -> BoxFuture<Option<RpcTransaction>>;
-            fn transaction_receipt(&self, tx_hash: H256) -> BoxFuture<Option<RpcReceipt>>;
-            fn storage_root(&self, address: RpcAddress, epoch_num: Option<EpochNumber>) -> BoxFuture<Option<StorageRoot>>;
+            async fn storage_at(&self, addr: RpcAddress, pos: U256, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> mazze_rpc_error::Result<Option<H256>>;
+            async fn transaction_by_hash(&self, hash: H256) -> mazze_rpc_error::Result<Option<RpcTransaction>>;
+            async fn transaction_receipt(&self, tx_hash: H256) -> mazze_rpc_error::Result<Option<RpcReceipt>>;
+            async fn storage_root(&self, address: RpcAddress, epoch_num: Option<EpochNumber>) -> mazze_rpc_error::Result<Option<StorageRoot>>;
             fn get_supply_info(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<TokenSupplyInfo>;
             fn get_collateral_info(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<StorageCollateralInfo>;
             fn get_fee_burnt(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<U256>;
@@ -2192,7 +2185,7 @@ impl TestRpcImpl {
     }
 }
 
-impl TestRpc for TestRpcImpl {
+impl TestRpcServer for TestRpcImpl {
     delegate! {
         to self.common {
             fn add_latency(&self, id: NodeId, latency_ms: f64) -> JsonRpcResult<()>;
@@ -2249,7 +2242,7 @@ impl LocalRpcImpl {
     }
 }
 
-impl LocalRpc for LocalRpcImpl {
+impl LocalRpcServer for LocalRpcImpl {
     delegate! {
         to self.common {
             fn txpool_content(&self, address: Option<RpcAddress>) -> JsonRpcResult<
@@ -2281,8 +2274,8 @@ impl LocalRpc for LocalRpcImpl {
             fn epoch_receipt_proof_by_transaction(&self, tx_hash: H256) -> JsonRpcResult<Option<EpochReceiptProof>>;
             fn stat_on_gas_load(&self, last_epoch: EpochNumber, time_window: U64) -> JsonRpcResult<Option<StatOnGasLoad>>;
             fn sync_graph_state(&self) -> JsonRpcResult<SyncGraphStates>;
-            fn send_transaction(
-                &self, tx: SendTxRequest, password: Option<String>) -> BoxFuture<H256>;
+            async fn send_transaction(
+                &self, tx: SendTxRequest, password: Option<String>) -> mazze_rpc_error::Result<H256>;
             fn sign_transaction(&self, tx: SendTxRequest, password: Option<String>) -> JsonRpcResult<String>;
             fn transactions_by_epoch(&self, epoch_number: U64) -> JsonRpcResult<Vec<WrapTransaction>>;
             fn transactions_by_block(&self, block_hash: H256) -> JsonRpcResult<Vec<WrapTransaction>>;

@@ -6,7 +6,7 @@ use super::super::types::LocalizedBlockTrace;
 use crate::{
     common::delegate_convert::into_jsonrpc_result,
     rpc::{
-        traits::{eth_space::trace::Trace as EthTrace, trace::Trace},
+        traits::{eth_space::trace::TraceServer as EthTraceServer, trace::TraceServer},
         types::{
             eth::{
                 BlockNumber, LocalizedTrace as EthLocalizedTrace,
@@ -19,7 +19,7 @@ use crate::{
         RpcResult,
     },
 };
-use jsonrpc_core::{Error as JsonRpcError, Result as JsonRpcResult};
+use mazze_rpc_error::{Error as JsonRpcError, Result as JsonRpcResult};
 use mazze_addr::Network;
 use mazze_execute_helper::exec_tracer::TraceFilter as PrimitiveTraceFilter;
 use mazze_types::{Space, H256};
@@ -239,7 +239,7 @@ impl TraceHandler {
     }
 }
 
-impl Trace for TraceHandler {
+impl TraceServer for TraceHandler {
     fn block_traces(
         &self, block_hash: H256,
     ) -> JsonRpcResult<Option<LocalizedBlockTrace>> {
@@ -268,7 +268,7 @@ pub struct EthTraceHandler {
     pub trace_handler: TraceHandler,
 }
 
-impl EthTrace for EthTraceHandler {
+impl EthTraceServer for EthTraceHandler {
     fn block_traces(
         &self, block_number: BlockNumber,
     ) -> JsonRpcResult<Option<Vec<EthLocalizedTrace>>> {

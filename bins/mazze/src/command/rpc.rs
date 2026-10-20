@@ -4,12 +4,21 @@
 
 use crate::command::helpers::{input_password, password_prompt};
 use clap::ArgMatches;
-use futures::future::Future;
-use jsonrpc_core::{Params, Value};
-use jsonrpc_core_client::{transports::http::connect, RawClient};
-use jsonrpc_http_server::hyper::rt;
-use serde_json::Map;
-use std::{str::FromStr, sync::mpsc::channel};
+use jsonrpsee::{
+    core::{
+        client::{ClientT, Error as ClientError},
+        params::ArrayParams,
+    },
+    http_client::HttpClientBuilder,
+};
+use serde_json::{Map, Value};
+use std::{str::FromStr, time::Duration};
+
+/// Positional parameters of an RPC call; `None` sends no parameters.
+pub enum Params {
+    None,
+    Array(Vec<Value>),
+}
 
 pub struct RpcCommand {
     pub url: String,
@@ -55,28 +64,36 @@ impl RpcCommand {
     }
 
     pub fn execute(self) -> Result<String, String> {
-        let (sender, receiver) = channel();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("{:?}", e))?;
 
-        rt::run(
-            connect::<RawClient>(self.url.as_str())
-                .and_then(move |client| {
-                    client.call_method(self.method.as_str(), self.args).then(
-                        move |result| {
-                            sender
-                                .send(result)
-                                .expect("channel should work fine");
-                            Ok(())
-                        },
-                    )
-                })
-                .map_err(|e| eprintln!("future error: {:?}", e)),
-        );
+        // The previous client had no response size limit and no timeout.
+        let client = HttpClientBuilder::default()
+            .max_response_size(u32::MAX)
+            .request_timeout(Duration::from_secs(u32::MAX as u64))
+            .build(self.url.as_str())
+            .map_err(|e| format!("{:?}", e))?;
 
-        receiver
-            .recv()
-            .expect("channel should work fine")
+        let mut params = ArrayParams::new();
+        if let Params::Array(args) = self.args {
+            for arg in args {
+                params.insert(arg).map_err(|e| format!("{:?}", e))?;
+            }
+        }
+
+        runtime
+            .block_on(client.request::<Value, _>(self.method.as_str(), params))
             .map(|result| format!("{:#}", result))
-            .map_err(|e| format!("{:?}", e))
+            .map_err(|e| match e {
+                // Same rendering as the old `jsonrpc-core-client` error.
+                ClientError::Call(e) => format!(
+                    "JsonRpcError({:?})",
+                    mazze_rpc_error::Error::from(e)
+                ),
+                e => format!("{:?}", e),
+            })
     }
 }
 

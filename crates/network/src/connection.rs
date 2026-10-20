@@ -488,7 +488,7 @@ impl Connection {
 }
 
 /// User friendly connection information that used by Debug RPC.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionDetails {
     pub token: StreamToken,

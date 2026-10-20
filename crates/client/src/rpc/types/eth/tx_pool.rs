@@ -2,7 +2,7 @@ use crate::rpc::types::eth::Transaction;
 use mazze_types::U64;
 use mazzecore::transaction_pool::TransactionStatus;
 
-#[derive(Default, Serialize)]
+#[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountPendingTransactions {
     pub pending_transactions: Vec<Transaction>,

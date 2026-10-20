@@ -22,7 +22,7 @@ use crate::rpc::{
     error_codes::{internal_error, invalid_params},
     types::eth::{BlockNumber, Log},
 };
-use jsonrpc_core::Error as RpcError;
+use mazze_rpc_error::Error as RpcError;
 use mazze_types::{Space, H160, H256};
 use mazzecore::SharedConsensusGraph;
 use primitives::{
@@ -257,7 +257,7 @@ impl EthRpcLogFilter {
 // }
 
 /// Results of the filter_changes RPC.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum FilterChanges {
     /// New logs.
     Logs(Vec<Log>),

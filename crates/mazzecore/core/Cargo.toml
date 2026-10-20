@@ -34,12 +34,12 @@ either = "1.5.3"
 error-chain = { version = "0.12.4", default-features = false }
 fallible-iterator = "0.2"
 fs_extra = "1.1.0"
-futures = {version="0.3.3", features = ["compat"]}
+futures = "0.3.3"
 hashbrown = "0.7.1"
 hibitset = { path = "../../util/hibitset" }
 itertools = "0.9"
 io = { path = "../../util/io" }
-jsonrpc-core = "15.1.0"
+mazze-rpc-error = { path = "../../util/rpc-error" }
 keccak-hash = "0.5"
 kvdb = "0.4"
 lazy_static = "1.4"
@@ -89,7 +89,6 @@ threadpool = "1.0"
 throttling = { path = "../../util/throttling" }
 toml = "0.5.8"
 tokio = { version = "1.6", features = ["full"] }
-tokio-timer = "0.2.13"
 tokio-stream = "0.1.4"
 unexpected = { git = "https://github.com/MazzeLabs/mazze-parity-deps", rev = "223e9acc6f7ba9f1b296639f08b326a72d7b92fa"  }
 strum = "0.20"

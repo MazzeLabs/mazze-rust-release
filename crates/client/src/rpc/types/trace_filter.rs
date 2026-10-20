@@ -4,7 +4,7 @@
 
 use super::{trace::ActionType, EpochNumber};
 use crate::rpc::helpers::{maybe_vec_into, VariadicValue};
-use jsonrpc_core::Error as RpcError;
+use mazze_rpc_error::Error as RpcError;
 use mazze_execute_helper::exec_tracer::TraceFilter as PrimitiveTraceFilter;
 use mazze_types::{Address, Space, H256, U64};
 use serde::{Deserialize, Serialize};

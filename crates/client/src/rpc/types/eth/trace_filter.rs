@@ -17,7 +17,7 @@
 //! Trace filter deserialization.
 
 use crate::rpc::types::eth::BlockNumber;
-use jsonrpc_core::Error as RpcError;
+use mazze_rpc_error::Error as RpcError;
 use mazze_execute_helper::exec_tracer::TraceFilter as PrimitiveTraceFilter;
 use mazze_types::{Space, H160};
 use primitives::EpochNumber;

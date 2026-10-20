@@ -1,7 +1,7 @@
 use crate::rpc::types::{
     Action as RpcMazzeAction, Bytes, LocalizedTrace as RpcMazzeLocalizedTrace,
 };
-use jsonrpc_core::Error as JsonRpcError;
+use mazze_rpc_error::Error as JsonRpcError;
 use mazze_execute_helper::exec_tracer::Outcome;
 use mazze_types::{H160, H256, U256};
 use mazze_vm_types::{
@@ -14,7 +14,7 @@ use std::{
 };
 
 /// Create response
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Create {
     /// Sender
@@ -30,7 +30,7 @@ pub struct Create {
 }
 
 /// The type of the create-like instruction.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CreateType {
     /// Not a create
@@ -52,7 +52,7 @@ impl From<MazzeCreateType> for CreateType {
 }
 
 /// Call type.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CallType {
     /// None
@@ -80,7 +80,7 @@ impl From<MazzeCallType> for CallType {
 }
 
 /// Call response
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Call {
     /// Sender
@@ -98,7 +98,7 @@ pub struct Call {
 }
 
 /// Action
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Action {
     /// Call
     Call(Call),
@@ -136,7 +136,7 @@ impl TryFrom<RpcMazzeAction> for Action {
 }
 
 /// Call Result
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CallResult {
     /// Gas used
@@ -146,7 +146,7 @@ pub struct CallResult {
 }
 
 /// Craete Result
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateResult {
     /// Gas used
@@ -158,7 +158,7 @@ pub struct CreateResult {
 }
 
 /// Response
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Res {
     /// Call
     Call(CallResult),
@@ -173,7 +173,7 @@ pub enum Res {
 }
 
 /// Trace
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct LocalizedTrace {
     /// Action
     pub action: Action,
@@ -382,7 +382,7 @@ impl Serialize for Trace {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum TraceError {
     /// Execution has been reverted with REVERT instruction.
     Reverted,

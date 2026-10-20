@@ -383,6 +383,97 @@ fn test_header_then_body_is_delivered_to_consensus_once() {
     remove_test_db(db);
 }
 
+/// A block re-delivered to consensus after a main block has already taken it
+/// into its epoch must not be executed again in a later epoch. Without the
+/// duplicate guard in `ConsensusNewBlockHandler::on_new_block` the repeat
+/// became a shadow arena node; a later block built on it (here `t`, child of
+/// `s`) reached the shadow, which is not in the past set of the previous main
+/// block, so the shadow joined the next epoch too: the epoch held one block
+/// more, every later block number shifted and the state diverged. This is how
+/// m2's from-genesis replay on 9d6249e (no 99b151e) left the network at epoch
+/// 99136 (blocks 0x3bc18a60 / 0x63bb4afe executed in epochs 99133 / 99132 and
+/// again in 99136; receipts root of 4 empty blocks instead of 2).
+#[test]
+fn test_redelivered_block_is_not_executed_in_a_second_epoch() {
+    use crate::sync::utils::create_simple_block_impl;
+    let db = "./test_redelivered_epoch.db/";
+    {
+        let (sync, consensus, _, genesis) = initialize_synchronization_graph(
+            db,
+            1,
+            1,
+            1,
+            1,
+            50000,
+            H256::default(),
+        );
+        let diff = U256::from(10);
+        let block = |parent: H256, refs: Vec<H256>, height: u64, nonce: u64| {
+            create_simple_block_impl(
+                parent,
+                refs,
+                height,
+                U256::from(nonce),
+                diff,
+                1,
+                false,
+            )
+            .1
+        };
+        let headers = |blocks: &[&Block]| {
+            for b in blocks {
+                let mut h = b.block_header.clone();
+                sync.insert_block_header(&mut h, false, true, true, true);
+            }
+            wait_consensus_drained(&sync);
+        };
+
+        // Main chain g <- a1 <- a2 <- a3; side block s (child of g) is
+        // referenced by a2, its child t by a3.
+        let g = genesis.hash();
+        let a1 = block(g, vec![], 1, 1);
+        let s = block(g, vec![], 1, 2);
+        let a2 = block(a1.hash(), vec![s.hash()], 2, 3);
+        headers(&[&a1, &s, &a2]);
+
+        // The repeat delivery (header-graph-ready, then graph-ready).
+        consensus.on_new_block(&s.hash());
+
+        let t = block(s.hash(), vec![], 2, 4);
+        let a3 = block(a2.hash(), vec![t.hash()], 3, 5);
+        headers(&[&t, &a3]);
+
+        let inner = consensus.inner.read();
+        let epoch = |main: &Block| -> Vec<H256> {
+            let idx = inner.hash_to_arena_indices[&main.hash()];
+            inner
+                .get_ordered_executable_epoch_blocks(idx)
+                .iter()
+                .map(|i| inner.arena[*i].hash)
+                .collect()
+        };
+        assert_eq!(epoch(&a1), vec![a1.hash()]);
+        assert_eq!(epoch(&a2), vec![s.hash(), a2.hash()]);
+        assert_eq!(
+            epoch(&a3),
+            vec![t.hash(), a3.hash()],
+            "a block of an earlier epoch was executed again"
+        );
+        let past = |b: &Block| {
+            let idx = inner.hash_to_arena_indices[&b.hash()];
+            inner.arena[idx].past_num_blocks()
+        };
+        // Block numbers stay consecutive: 2 blocks in a3's epoch.
+        assert_eq!(past(&a3), past(&a2) + 2);
+        assert_eq!(
+            inner.arena.len(),
+            6,
+            "duplicate consensus delivery created a shadow arena node"
+        );
+    }
+    remove_test_db(db);
+}
+
 /// A block that becomes HEADER_GRAPH_READY through a call that does not
 /// insert into consensus (e.g. a body response for a header-less block,
 /// `insert_to_consensus = false`) must still reach consensus before a child

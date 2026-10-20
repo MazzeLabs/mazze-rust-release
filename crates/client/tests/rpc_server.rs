@@ -16,7 +16,7 @@ use client::rpc::{
     rpc_apis::Api,
     start_http, start_tcp, start_ws,
     traits::{pubsub::PubSubServer, trace::TraceServer},
-    HttpConfiguration, HttpServer, TcpConfiguration, TcpServer,
+    HttpConfiguration, HttpServer, RpcLimits, TcpConfiguration, TcpServer,
     WsConfiguration, WsServer,
 };
 use jsonrpsee::{
@@ -153,6 +153,25 @@ impl Node {
 
     fn tcp(&self) -> TcpServer {
         let conf = TcpConfiguration::new(Some((127, 0, 0, 1)), Some(0));
+        start_tcp(conf, self.module(), &self.runtime).unwrap().unwrap()
+    }
+
+    fn http_with(&self, limits: RpcLimits) -> HttpServer {
+        let mut conf = HttpConfiguration::new(
+            Some((127, 0, 0, 1)),
+            Some(0),
+            None,
+            false,
+            None,
+        )
+        .with_limits(limits);
+        conf.address.set_port(0);
+        start_http(conf, self.module(), &self.runtime).unwrap().unwrap()
+    }
+
+    fn tcp_with(&self, limits: RpcLimits) -> TcpServer {
+        let conf = TcpConfiguration::new(Some((127, 0, 0, 1)), Some(0))
+            .with_limits(limits);
         start_tcp(conf, self.module(), &self.runtime).unwrap().unwrap()
     }
 }
@@ -556,4 +575,84 @@ fn ws_server() {
             .await
             .is_err());
     });
+}
+
+/// The configured limits are enforced: batch length on HTTP and TCP,
+/// response size, request line size on TCP, and subscriptions per
+/// connection.
+#[test]
+fn limits_are_enforced() {
+    let node = Node::new();
+    let batch = |n: u64| {
+        format!(
+            "[{}]",
+            (0..n)
+                .map(|i| req("rpc_modules", json!([]), i))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+
+    // Pick a response limit between a small batch and the method list.
+    let unlimited = node.http(None, false);
+    let small = post(unlimited.local_addr(), &batch(2)).body.len();
+    let large =
+        post(unlimited.local_addr(), &req("rpc_methods", json!([]), 1)).body.len();
+    assert!(small < large, "{small} vs {large}");
+    let limits = RpcLimits {
+        max_batch_size: 2,
+        max_response_bytes: ((small + large) / 2) as u32,
+        max_subscriptions_per_connection: 1,
+        tcp_max_request_bytes: 4096,
+        ..RpcLimits::default()
+    };
+
+    let server = node.http_with(limits);
+    let addr = server.local_addr();
+    let rp = json(&post(addr, &batch(2)).body);
+    assert_eq!(rp.as_array().map(Vec::len), Some(2), "{rp}");
+    let rp = json(&post(addr, &batch(3)).body);
+    assert_eq!(rp["error"]["code"], -32010, "batch over the limit: {rp}");
+    // `rpc_methods` lists every method: far more than 64 bytes.
+    let rp = json(&post(addr, &req("rpc_methods", json!([]), 1)).body);
+    assert_eq!(rp["error"]["code"], -32008, "oversized response: {rp}");
+
+    let server = node.tcp_with(limits);
+    let stream = TcpStream::connect(server.local_addr()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut send = |line: &str| {
+        writer.write_all(line.as_bytes()).unwrap();
+        writer.write_all(b"\n").unwrap();
+    };
+    send(&batch(3));
+    let rp = json(&read_line(&mut reader));
+    assert_eq!(rp["error"]["code"], -32010, "TCP batch over the limit: {rp}");
+    send(&req("rpc_methods", json!([]), 1));
+    let rp = json(&read_line(&mut reader));
+    assert_eq!(rp["error"]["code"], -32008, "TCP oversized response: {rp}");
+    send(&req("mazze_subscribe", json!(["newHeads"]), 5));
+    let rp = json(&read_line(&mut reader));
+    assert!(rp["result"].is_string(), "first subscription: {rp}");
+    send(&req("mazze_subscribe", json!(["newHeads"]), 6));
+    let rp = json(&read_line(&mut reader));
+    assert!(rp["error"].is_object(), "second subscription over the limit: {rp}");
+    // A request line over the TCP limit closes the connection.
+    send(&"x".repeat(8192));
+    let mut rest = String::new();
+    let closed = matches!(reader.read_line(&mut rest), Ok(0) | Err(_))
+        || rest.contains("error");
+    assert!(closed, "oversized TCP line accepted: {rest}");
+}
+
+#[test]
+fn default_limits() {
+    let l = RpcLimits::default();
+    assert_eq!(l.max_batch_size, 1000);
+    assert_eq!(l.max_response_bytes, 25 * 1024 * 1024);
+    assert_eq!(l.http_max_connections, 1000);
+    assert_eq!(l.ws_max_connections, 100);
+    assert_eq!(l.max_subscriptions_per_connection, 1024);
+    assert_eq!(l.tcp_max_request_bytes, 5 * 1024 * 1024);
 }

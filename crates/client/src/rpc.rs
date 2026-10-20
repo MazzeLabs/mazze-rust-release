@@ -101,6 +101,7 @@ lazy_static! {
 pub struct TcpConfiguration {
     pub enabled: bool,
     pub address: SocketAddr,
+    pub limits: RpcLimits,
 }
 
 impl TcpConfiguration {
@@ -112,7 +113,13 @@ impl TcpConfiguration {
         TcpConfiguration {
             enabled: port.is_some(),
             address: SocketAddr::V4(SocketAddrV4::new(ipv4, port.unwrap_or(0))),
+            limits: RpcLimits::default(),
         }
+    }
+
+    pub fn with_limits(mut self, limits: RpcLimits) -> Self {
+        self.limits = limits;
+        self
     }
 }
 
@@ -125,6 +132,7 @@ pub struct HttpConfiguration {
     // If it's Some, we will manually set the number of threads of HTTP RPC
     // server
     pub threads: Option<usize>,
+    pub limits: RpcLimits,
 }
 
 impl HttpConfiguration {
@@ -153,7 +161,13 @@ impl HttpConfiguration {
             },
             keep_alive,
             threads,
+            limits: RpcLimits::default(),
         }
+    }
+
+    pub fn with_limits(mut self, limits: RpcLimits) -> Self {
+        self.limits = limits;
+        self
     }
 }
 
@@ -162,6 +176,7 @@ pub struct WsConfiguration {
     pub enabled: bool,
     pub address: SocketAddr,
     pub max_payload_bytes: usize,
+    pub limits: RpcLimits,
 }
 
 impl WsConfiguration {
@@ -177,7 +192,13 @@ impl WsConfiguration {
             enabled: port.is_some(),
             address: SocketAddr::V4(SocketAddrV4::new(ipv4, port.unwrap_or(0))),
             max_payload_bytes,
+            limits: RpcLimits::default(),
         }
+    }
+
+    pub fn with_limits(mut self, limits: RpcLimits) -> Self {
+        self.limits = limits;
+        self
     }
 }
 
@@ -526,30 +547,49 @@ fn setup_rpc_apis_light(
     handler
 }
 
-// Limits of the HTTP and WebSocket servers. Each one is at least as
-// permissive as the effective behaviour of the previous
-// `jsonrpc-http-server` / `jsonrpc-ws-server` 15 servers.
+/// Server-side limits of the RPC endpoints, set from the node configuration.
+/// They bound the memory and work one client can cause; per-client request
+/// rate is limited separately by the throttling interceptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RpcLimits {
+    /// Requests in one batch (`jsonrpc_max_batch_size`).
+    pub max_batch_size: u32,
+    /// Bytes of one response on HTTP and TCP (`jsonrpc_max_response_bytes`).
+    /// WebSocket responses are bounded by `jsonrpc_ws_max_payload_bytes`.
+    pub max_response_bytes: u32,
+    /// Concurrent HTTP connections (`jsonrpc_http_max_connections`).
+    pub http_max_connections: u32,
+    /// Concurrent WebSocket connections (`jsonrpc_ws_max_connections`).
+    pub ws_max_connections: u32,
+    /// Subscriptions one connection may hold
+    /// (`jsonrpc_max_subscriptions_per_connection`).
+    pub max_subscriptions_per_connection: u32,
+    /// Bytes of one request line on the TCP endpoint
+    /// (`jsonrpc_tcp_max_request_bytes`).
+    pub tcp_max_request_bytes: u32,
+}
 
-/// Maximum HTTP request body: the `jsonrpc-http-server` default (5 MiB),
-/// which the node never changed.
+impl Default for RpcLimits {
+    fn default() -> Self {
+        RpcLimits {
+            max_batch_size: 1000,
+            max_response_bytes: 25 * 1024 * 1024,
+            http_max_connections: 1000,
+            ws_max_connections: 100,
+            max_subscriptions_per_connection: 1024,
+            tcp_max_request_bytes: HTTP_MAX_REQUEST_BODY_SIZE,
+        }
+    }
+}
+
+/// Maximum HTTP request body (5 MiB, unchanged).
 pub const HTTP_MAX_REQUEST_BODY_SIZE: u32 = 5 * 1024 * 1024;
-/// Maximum HTTP response body: responses were not limited before, so use
-/// the largest value jsonrpsee accepts.
-pub const HTTP_MAX_RESPONSE_BODY_SIZE: u32 = u32::MAX;
-/// Maximum concurrent HTTP connections: hyper 0.12 did not limit them.
-pub const HTTP_MAX_CONNECTIONS: u32 = u32::MAX;
-/// Maximum concurrent WebSocket connections: the `jsonrpc-ws-server`
-/// default (100), which the node never changed.
-pub const WS_MAX_CONNECTIONS: u32 = 100;
-/// Maximum subscriptions per connection: `jsonrpc-pubsub` had no limit.
-pub const MAX_SUBSCRIPTIONS_PER_CONNECTION: u32 = u32::MAX;
 /// Messages buffered per WebSocket connection before notifications wait
-/// for the client (jsonrpsee default; the old ws-rs out buffer was bounded
-/// by `jsonrpc_ws_max_payload_bytes` instead).
+/// for the client (jsonrpsee default).
 pub const WS_MESSAGE_BUFFER_CAPACITY: u32 = 1024;
-/// Batch requests: the old servers accepted batches of any length.
-pub fn batch_request_config() -> BatchRequestConfig {
-    BatchRequestConfig::Unlimited
+
+pub fn batch_request_config(limits: &RpcLimits) -> BatchRequestConfig {
+    BatchRequestConfig::Limit(limits.max_batch_size)
 }
 
 pub use self::tcp::TcpServer;
@@ -584,7 +624,7 @@ pub fn start_tcp(
         &conf.address,
         handler.into(),
         Arc::new(HexIdProvider::default()),
-        tcp::TcpLimits::default(),
+        tcp::TcpLimits::from(&conf.limits),
         runtime.handle(),
     ) {
         Ok(server) => Ok(Some(server)),
@@ -604,10 +644,12 @@ pub fn start_http(
     let config = ServerConfig::builder()
         .http_only()
         .max_request_body_size(HTTP_MAX_REQUEST_BODY_SIZE)
-        .max_response_body_size(HTTP_MAX_RESPONSE_BODY_SIZE)
-        .max_connections(HTTP_MAX_CONNECTIONS)
-        .max_subscriptions_per_connection(MAX_SUBSCRIPTIONS_PER_CONNECTION)
-        .set_batch_request_config(batch_request_config())
+        .max_response_body_size(conf.limits.max_response_bytes)
+        .max_connections(conf.limits.http_max_connections)
+        .max_subscriptions_per_connection(
+            conf.limits.max_subscriptions_per_connection,
+        )
+        .set_batch_request_config(batch_request_config(&conf.limits))
         .set_id_provider(HexIdProvider::default())
         // The old server did not time out idle new connections.
         .set_first_request_timeout(None)
@@ -658,10 +700,12 @@ pub fn start_ws(
         .ws_only()
         .max_request_body_size(max_payload)
         .max_response_body_size(max_payload)
-        .max_connections(WS_MAX_CONNECTIONS)
-        .max_subscriptions_per_connection(MAX_SUBSCRIPTIONS_PER_CONNECTION)
+        .max_connections(conf.limits.ws_max_connections)
+        .max_subscriptions_per_connection(
+            conf.limits.max_subscriptions_per_connection,
+        )
         .set_message_buffer_capacity(WS_MESSAGE_BUFFER_CAPACITY)
-        .set_batch_request_config(batch_request_config())
+        .set_batch_request_config(batch_request_config(&conf.limits))
         .set_id_provider(HexIdProvider::default())
         // The old server did not time out idle new connections.
         .set_first_request_timeout(None)

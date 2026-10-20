@@ -149,6 +149,17 @@ jsonrpc_http_keep_alive = true
 #
 # NEVER set this to "all" on a public bind address.
 
+# RPC server limits. They bound the memory and work a single client can
+# cause; the per-client request rate is limited separately (throttling).
+# The defaults below apply when a value is omitted.
+#
+# jsonrpc_max_batch_size = 1000                       # requests in one batch
+# jsonrpc_max_response_bytes = 26214400               # 25 MiB, HTTP and TCP responses
+# jsonrpc_http_max_connections = 1000                 # concurrent HTTP connections
+# jsonrpc_ws_max_connections = 100                    # concurrent WebSocket connections
+# jsonrpc_max_subscriptions_per_connection = 1024
+# jsonrpc_tcp_max_request_bytes = 5242880             # 5 MiB, one TCP request line
+
 # The following parameters are the ports for the node to provide rpc service. If not set,
 # the node will not start rpc services. By default, the `jsonrpc_local_http_port` is set,
 # so as to support the Mazze CLI subcommands. What's provided here is the recommended

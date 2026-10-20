@@ -49,7 +49,7 @@ use network::DiscoveryConfiguration;
 use txgen::TransactionGeneratorConfig;
 
 use crate::rpc::{
-    impls::RpcImplConfiguration, rpc_apis::ApiSet, HttpConfiguration,
+    impls::RpcImplConfiguration, rpc_apis::ApiSet, HttpConfiguration, RpcLimits,
     TcpConfiguration, WsConfiguration,
 };
 
@@ -203,6 +203,13 @@ build_config! {
         // hostile WS client. Operators serving large batched
         // subscriptions can raise this in hydra.toml.
         (jsonrpc_ws_max_payload_bytes, (usize), 10 * 1024 * 1024)
+        // RPC server limits (see `RpcLimits`).
+        (jsonrpc_max_batch_size, (u32), 1000)
+        (jsonrpc_max_response_bytes, (u32), 25 * 1024 * 1024)
+        (jsonrpc_http_max_connections, (u32), 1000)
+        (jsonrpc_ws_max_connections, (u32), 100)
+        (jsonrpc_max_subscriptions_per_connection, (u32), 1024)
+        (jsonrpc_tcp_max_request_bytes, (u32), 5 * 1024 * 1024)
         (jsonrpc_http_eth_port, (Option<u16>), None)
         (jsonrpc_ws_eth_port, (Option<u16>), None)
         // The network_id, if unset, defaults to the chain_id.
@@ -1463,6 +1470,19 @@ impl Configuration {
         }
     }
 
+    pub fn rpc_limits(&self) -> RpcLimits {
+        RpcLimits {
+            max_batch_size: self.raw_conf.jsonrpc_max_batch_size,
+            max_response_bytes: self.raw_conf.jsonrpc_max_response_bytes,
+            http_max_connections: self.raw_conf.jsonrpc_http_max_connections,
+            ws_max_connections: self.raw_conf.jsonrpc_ws_max_connections,
+            max_subscriptions_per_connection: self
+                .raw_conf
+                .jsonrpc_max_subscriptions_per_connection,
+            tcp_max_request_bytes: self.raw_conf.jsonrpc_tcp_max_request_bytes,
+        }
+    }
+
     pub fn local_http_config(&self) -> HttpConfiguration {
         HttpConfiguration::new(
             Some((127, 0, 0, 1)),
@@ -1471,6 +1491,7 @@ impl Configuration {
             self.raw_conf.jsonrpc_http_keep_alive,
             self.raw_conf.jsonrpc_http_threads,
         )
+        .with_limits(self.rpc_limits())
     }
 
     pub fn http_config(&self) -> HttpConfiguration {
@@ -1481,6 +1502,7 @@ impl Configuration {
             self.raw_conf.jsonrpc_http_keep_alive,
             self.raw_conf.jsonrpc_http_threads,
         )
+        .with_limits(self.rpc_limits())
     }
 
     pub fn eth_http_config(&self) -> HttpConfiguration {
@@ -1491,6 +1513,7 @@ impl Configuration {
             self.raw_conf.jsonrpc_http_keep_alive,
             self.raw_conf.jsonrpc_http_threads,
         )
+        .with_limits(self.rpc_limits())
     }
 
     pub fn eth_ws_config(&self) -> WsConfiguration {
@@ -1499,6 +1522,7 @@ impl Configuration {
             self.raw_conf.jsonrpc_ws_eth_port,
             self.raw_conf.jsonrpc_ws_max_payload_bytes,
         )
+        .with_limits(self.rpc_limits())
     }
 
     pub fn local_tcp_config(&self) -> TcpConfiguration {
@@ -1506,10 +1530,12 @@ impl Configuration {
             Some((127, 0, 0, 1)),
             self.raw_conf.jsonrpc_local_tcp_port,
         )
+        .with_limits(self.rpc_limits())
     }
 
     pub fn tcp_config(&self) -> TcpConfiguration {
         TcpConfiguration::new(None, self.raw_conf.jsonrpc_tcp_port)
+            .with_limits(self.rpc_limits())
     }
 
     pub fn local_ws_config(&self) -> WsConfiguration {
@@ -1518,6 +1544,7 @@ impl Configuration {
             self.raw_conf.jsonrpc_local_ws_port,
             self.raw_conf.jsonrpc_ws_max_payload_bytes,
         )
+        .with_limits(self.rpc_limits())
     }
 
     pub fn ws_config(&self) -> WsConfiguration {
@@ -1526,6 +1553,7 @@ impl Configuration {
             self.raw_conf.jsonrpc_ws_port,
             self.raw_conf.jsonrpc_ws_max_payload_bytes,
         )
+        .with_limits(self.rpc_limits())
     }
 
     pub fn execution_config(&self) -> ConsensusExecutionConfiguration {

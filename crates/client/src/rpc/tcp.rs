@@ -22,7 +22,7 @@ use jsonrpsee::{
     core::traits::IdProvider,
     prepare_error,
     types::{
-        error::reject_too_many_subscriptions, ErrorCode, ErrorObject, Id,
+        error::{reject_too_big_batch_request, reject_too_many_subscriptions}, ErrorCode, ErrorObject, Id,
         Notification, Params, Request,
     },
     BoundedSubscriptions, ConnectionId, MethodCallback, MethodResponse,
@@ -45,39 +45,43 @@ use tokio::{
 };
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
-/// Limits of the TCP endpoint. The previous `jsonrpc-tcp-server` had no
-/// explicit limits; the defaults below are at least as permissive as its
-/// effective behaviour.
+/// Limits of the TCP endpoint.
 #[derive(Debug, Clone)]
 pub struct TcpLimits {
-    /// Longest accepted request line, in bytes. The old codec buffered lines
-    /// without any bound; `u32::MAX` (4 GiB) is the same upper bound the
-    /// HTTP and WebSocket servers can express.
+    /// Longest accepted request line, in bytes.
     pub max_request_bytes: usize,
+    /// Longest response, in bytes.
+    pub max_response_bytes: usize,
+    /// Requests in one batch.
+    pub max_batch_size: usize,
     /// Connections served concurrently. The old server drove at most 1024
     /// connections at once (`buffer_unordered(1024)`); further connections
     /// were accepted and waited, which is also what happens here.
     pub max_connections: usize,
-    /// Subscriptions per connection. Unbounded before; `u32::MAX` here.
+    /// Subscriptions per connection.
     pub max_subscriptions_per_connection: u32,
     /// Outgoing messages (responses and notifications) buffered per
     /// connection before a sender waits; the old push channel held 65536.
     pub message_buffer_capacity: usize,
 }
 
-impl Default for TcpLimits {
-    fn default() -> Self {
+impl From<&super::RpcLimits> for TcpLimits {
+    fn from(limits: &super::RpcLimits) -> Self {
         TcpLimits {
-            max_request_bytes: u32::MAX as usize,
+            max_request_bytes: limits.tcp_max_request_bytes as usize,
+            max_response_bytes: limits.max_response_bytes as usize,
+            max_batch_size: limits.max_batch_size as usize,
             max_connections: 1024,
-            max_subscriptions_per_connection: u32::MAX,
+            max_subscriptions_per_connection: limits
+                .max_subscriptions_per_connection,
             message_buffer_capacity: 65536,
         }
     }
 }
 
-/// Responses are not size limited on this endpoint (as before).
-const MAX_RESPONSE_SIZE: usize = usize::MAX;
+impl Default for TcpLimits {
+    fn default() -> Self { Self::from(&super::RpcLimits::default()) }
+}
 
 /// Connection ids of TCP connections; they only need to be unique among
 /// the connections of one `Methods` instance.
@@ -155,6 +159,8 @@ struct Connection {
     sink: MethodSink,
     subscriptions: BoundedSubscriptions,
     max_subscriptions: u32,
+    max_response_bytes: usize,
+    max_batch_size: usize,
     id_provider: Arc<dyn IdProvider>,
 }
 
@@ -208,6 +214,8 @@ async fn serve_connection(
             limits.max_subscriptions_per_connection,
         ),
         max_subscriptions: limits.max_subscriptions_per_connection,
+        max_response_bytes: limits.max_response_bytes,
+        max_batch_size: limits.max_batch_size,
         id_provider,
     };
 
@@ -285,6 +293,15 @@ async fn handle_request(conn: &Connection, text: &str) -> Outcome {
                 ))
             }
         };
+        if batch.len() > conn.max_batch_size {
+            return Outcome::Response(String::from(Box::<str>::from(
+                MethodResponse::error(
+                    Id::Null,
+                    reject_too_big_batch_request(conn.max_batch_size),
+                )
+                .into_json(),
+            )));
+        }
         let mut responses = Vec::with_capacity(batch.len());
         let mut subscribed = false;
         for entry in batch {
@@ -345,14 +362,14 @@ async fn call(conn: &Connection, req: Request<'_>) -> MethodResponse {
             MethodResponse::error(id, ErrorObject::from(ErrorCode::MethodNotFound))
         }
         Some((_, MethodCallback::Sync(callback))) => {
-            (callback)(id, params, MAX_RESPONSE_SIZE, extensions)
+            (callback)(id, params, conn.max_response_bytes, extensions)
         }
         Some((_, MethodCallback::Async(callback))) => {
             (callback)(
                 id.into_owned(),
                 params.into_owned(),
                 conn.conn_id,
-                MAX_RESPONSE_SIZE,
+                conn.max_response_bytes,
                 extensions,
             )
             .await
@@ -375,7 +392,7 @@ async fn call(conn: &Connection, req: Request<'_>) -> MethodResponse {
             }
         }
         Some((_, MethodCallback::Unsubscription(callback))) => {
-            (callback)(id, params, conn.conn_id, MAX_RESPONSE_SIZE, extensions)
+            (callback)(id, params, conn.conn_id, conn.max_response_bytes, extensions)
         }
     }
 }

@@ -146,9 +146,6 @@ pub fn compute_block_transactions_root(
 
 const SHIELDED_ROOT_DOMAIN: &[u8] = b"mazze/transactions-root/shielded/v1";
 
-/// Shielded transactions allowed in a block. The shielded lane is not active
-/// yet.
-pub const MAX_SHIELDED_TRANSACTIONS_PER_BLOCK: usize = 0;
 
 /// Compute a proof for the `tx_index_in_block`-th transaction in a block.
 pub fn compute_transaction_proof(
@@ -565,20 +562,15 @@ impl VerificationConfig {
     /// the body is incorrect, this means the block is invalid, and we
     /// should discard this block and all its descendants.
     #[inline]
+    ///
+    /// `verify_witness` is false only for a block re-read from this node's
+    /// own database: it was verified when it was accepted, and its witness
+    /// is not stored. Every block from the network is verified in full.
     pub fn verify_sync_graph_block_basic(
-        &self, block: &Block, chain_id: AllChainID,
+        &self, block: &Block, chain_id: AllChainID, verify_witness: bool,
     ) -> Result<(), Error> {
         self.verify_block_integrity(block)?;
-
-        if block.shielded.len() > MAX_SHIELDED_TRANSACTIONS_PER_BLOCK {
-            return Err(From::from(BlockError::TooManyShieldedTransactions(
-                OutOfBounds {
-                    min: None,
-                    max: Some(MAX_SHIELDED_TRANSACTIONS_PER_BLOCK),
-                    found: block.shielded.len(),
-                },
-            )));
-        }
+        self.verify_shielded_section(block, chain_id, verify_witness)?;
 
         let block_height = block.block_header.height();
 
@@ -604,6 +596,72 @@ impl VerificationConfig {
                     found: block_size as u64,
                 },
             )));
+        }
+        Ok(())
+    }
+
+    /// Stage A for the shielded section (spec §8.2): the slot and count
+    /// rules, the constant fee, distinct nullifiers, and every proof. A
+    /// proof that does not match its body's `proof_hash` came from the peer,
+    /// not the miner, so the block is requested again; anything else makes
+    /// the block invalid.
+    fn verify_shielded_section(
+        &self, block: &Block, chain_id: AllChainID, verify_witness: bool,
+    ) -> Result<(), Error> {
+        if block.shielded.is_empty() {
+            return Ok(());
+        }
+        let params = &self.machine.params().shielded;
+        let height = block.block_header.height();
+        if !params.is_slot(height) {
+            bail!(BlockError::ShieldedSectionOutsideSlot(height));
+        }
+        if block.shielded.len() > params.max_txs_per_block {
+            bail!(BlockError::TooManyShieldedTransactions(OutOfBounds {
+                min: None,
+                max: Some(params.max_txs_per_block),
+                found: block.shielded.len(),
+            }));
+        }
+        let mut nullifiers = HashSet::new();
+        for body in &block.shielded {
+            if body.fee != params.tx_fee {
+                bail!(BlockError::InvalidShieldedTransaction(format!(
+                    "fee {} instead of {}",
+                    body.fee, params.tx_fee
+                )));
+            }
+            for nf in &body.nf {
+                if !nullifiers.insert(*nf) {
+                    bail!(BlockError::InvalidShieldedTransaction(
+                        "nullifier spent twice in one section".into()
+                    ));
+                }
+            }
+        }
+        if !verify_witness {
+            return Ok(());
+        }
+        if !block.has_complete_witness() {
+            bail!(BlockError::ShieldedWitnessMismatch(
+                "missing proofs".into()
+            ));
+        }
+        let shielded_chain_id = chain_id.in_shielded_space();
+        for (body, proof) in block.shielded.iter().zip(&block.witness) {
+            use mazze_shielded_pq::verify::{verify_body, Rejection};
+            match verify_body(body, proof, shielded_chain_id) {
+                Ok(()) => {}
+                Err(Rejection::ProofHashMismatch) => {
+                    bail!(BlockError::ShieldedWitnessMismatch(format!(
+                        "proof does not match body {:?}",
+                        body.hash()
+                    )))
+                }
+                Err(e) => bail!(BlockError::InvalidShieldedTransaction(
+                    format!("{:?}: {:?}", body.hash(), e)
+                )),
+            }
         }
         Ok(())
     }
@@ -1050,10 +1108,7 @@ mod shielded_root_tests {
         assert_ne!(other_root, one);
     }
 
-    #[test]
-    fn shielded_section_is_rejected_while_the_lane_is_inactive() {
-        use super::VerificationConfig;
-        use crate::error::{BlockError, ErrorKind};
+    fn config(params: mazze_executor::spec::ShieldedParams) -> super::VerificationConfig {
         use mazze_executor::{
             machine::{new_machine_with_builtin, VmFactory},
             spec::CommonParams,
@@ -1063,47 +1118,108 @@ mod shielded_root_tests {
             consensus::TRANSACTION_DEFAULT_EPOCH_BOUND,
             tx_pool::TXPOOL_DEFAULT_NONCE_BITS,
         };
-        use mazze_types::AllChainID;
-        use primitives::{Block, BlockHeaderBuilder};
-
-        let machine = Arc::new(new_machine_with_builtin(
-            CommonParams::default(),
-            VmFactory::default(),
-        ));
-        let config = VerificationConfig::new(
+        let mut common = CommonParams::default();
+        common.shielded = params;
+        super::VerificationConfig::new(
             true,
             REFEREE_DEFAULT_BOUND,
             MAX_BLOCK_SIZE_IN_BYTES,
             TRANSACTION_DEFAULT_EPOCH_BOUND,
             TXPOOL_DEFAULT_NONCE_BITS,
-            machine,
-        );
-        let block_with = |shielded: Vec<Arc<ShieldedTxBody>>| {
-            let header = BlockHeaderBuilder::new()
-                .with_transactions_root(compute_block_transactions_root(
-                    &vec![],
-                    &shielded,
-                ))
-                .build();
-            Block::new(header, vec![]).with_shielded(shielded)
+            Arc::new(new_machine_with_builtin(common, VmFactory::default())),
+        )
+    }
+
+    fn block_at(
+        height: u64, shielded: Vec<Arc<ShieldedTxBody>>,
+        witness: Vec<Arc<Vec<u8>>>,
+    ) -> primitives::Block {
+        let header = primitives::BlockHeaderBuilder::new()
+            .with_height(height)
+            .with_transactions_root(compute_block_transactions_root(
+                &vec![],
+                &shielded,
+            ))
+            .build();
+        primitives::Block::new(header, vec![])
+            .with_shielded(shielded)
+            .with_witness(witness)
+    }
+
+    fn kind(r: Result<(), crate::error::Error>) -> String {
+        match r {
+            Ok(()) => "ok".into(),
+            Err(e) => match e.kind() {
+                crate::error::ErrorKind::Block(b) => format!("{b:?}")
+                    .split('(')
+                    .next()
+                    .unwrap()
+                    .to_string(),
+                other => format!("{other:?}"),
+            },
+        }
+    }
+
+    /// Stage A at block acceptance, with one real transaction.
+    #[test]
+    fn stage_a_accepts_valid_sections_and_classifies_failures() {
+        use mazze_executor::spec::ShieldedParams;
+        use mazze_types::AllChainID;
+
+        let chain = AllChainID::new(1, 1, 1);
+        let active = ShieldedParams {
+            activation_height: 0,
+            slot_epochs: 1,
+            ..ShieldedParams::default()
         };
-        let chain_id = AllChainID::new(1, 1, 1);
+        let fee = active.tx_fee;
+        let (body, proof) =
+            mazze_shielded_pq::testkit::payment(1, 100 * fee, fee, 1);
+        let body = Arc::new(body);
+        let proof = Arc::new(proof);
+        let cfg = config(active.clone());
+        let check = |cfg: &super::VerificationConfig,
+                     b: &primitives::Block,
+                     witness: bool| {
+            kind(cfg.verify_sync_graph_block_basic(b, chain, witness))
+        };
 
-        assert!(config
-            .verify_sync_graph_block_basic(&block_with(vec![]), chain_id)
-            .is_ok());
+        let good = block_at(5, vec![body.clone()], vec![proof.clone()]);
+        assert_eq!(check(&cfg, &good, true), "ok");
+        // Re-read from the node's own database: no witness, not re-proved.
+        let from_db = block_at(5, vec![body.clone()], vec![]);
+        assert_eq!(check(&cfg, &from_db, false), "ok");
 
-        // The root matches, so this is an invalid block, not a bad body.
-        let err = config
-            .verify_sync_graph_block_basic(&block_with(bodies(&[1])), chain_id)
-            .unwrap_err();
-        assert!(
-            matches!(
-                err.kind(),
-                ErrorKind::Block(BlockError::TooManyShieldedTransactions(_))
-            ),
-            "{err:?}"
+        // The peer's fault: the block is requested again, not condemned.
+        assert_eq!(check(&cfg, &from_db, true), "ShieldedWitnessMismatch");
+        let wrong = block_at(5, vec![body.clone()], vec![Arc::new(vec![7u8; 1000])]);
+        assert_eq!(check(&cfg, &wrong, true), "ShieldedWitnessMismatch");
+
+        // The miner's fault: the block is invalid.
+        let twice = block_at(
+            5,
+            vec![body.clone(), body.clone()],
+            vec![proof.clone(), proof.clone()],
         );
+        assert_eq!(check(&cfg, &twice, true), "InvalidShieldedTransaction");
+        let other_fee = config(ShieldedParams { tx_fee: fee + 1, ..active.clone() });
+        assert_eq!(check(&other_fee, &good, true), "InvalidShieldedTransaction");
+        let other_chain = AllChainID::new(1, 1, 2);
+        assert_eq!(
+            kind(cfg.verify_sync_graph_block_basic(&good, other_chain, true)),
+            "InvalidShieldedTransaction"
+        );
+
+        // Slots and activation.
+        let every_second = config(ShieldedParams { slot_epochs: 2, ..active.clone() });
+        assert_eq!(check(&every_second, &good, true), "ShieldedSectionOutsideSlot");
+        let inactive = config(ShieldedParams::default());
+        assert_eq!(check(&inactive, &good, true), "ShieldedSectionOutsideSlot");
+        let one_per_block = config(ShieldedParams { max_txs_per_block: 0, ..active });
+        assert_eq!(check(&one_per_block, &good, true), "TooManyShieldedTransactions");
+
+        // A block without a section is unaffected by any of this.
+        assert_eq!(check(&inactive, &block_at(5, vec![], vec![]), true), "ok");
     }
 }
 

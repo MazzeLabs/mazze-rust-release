@@ -2452,8 +2452,19 @@ impl SynchronizationGraph {
             let r = self.verification_config.verify_sync_graph_block_basic(
                 &block,
                 self.consensus.best_chain_id(),
+                !recover_from_db,
             );
             match r {
+                Err(Error(
+                    ErrorKind::Block(BlockError::ShieldedWitnessMismatch(e)),
+                    _,
+                )) => {
+                    // The peer sent proofs that do not match the block's
+                    // commitments; the block itself may be valid.
+                    warn!("Shielded witness mismatch, requesting again: hash={:?} err={}", hash, e);
+                    inner.arena[me].block_ready = false;
+                    return BlockInsertionResult::RequestAgain;
+                }
                 Err(Error(
                     ErrorKind::Block(BlockError::InvalidTransactionsRoot(e)),
                     _,

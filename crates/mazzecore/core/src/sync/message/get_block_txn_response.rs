@@ -74,7 +74,8 @@ impl Handleable for GetBlockTxnResponse {
                         }
                     }
                     let block = Block::new(header, trans)
-                        .with_shielded(cmpct.shielded);
+                        .with_shielded(cmpct.shielded)
+                        .with_witness(cmpct.witness);
                     let expected_root = *block.block_header.transactions_root();
                     let actual_root = compute_block_transactions_root(
                         &block.transactions,

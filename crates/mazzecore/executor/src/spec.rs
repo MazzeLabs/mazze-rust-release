@@ -57,6 +57,54 @@ pub struct CommonParams {
     pub transition_numbers: TransitionsBlockNumber,
     /// The upgrades activated at given block height (a.k.a. epoch number).
     pub transition_heights: TransitionsEpochHeight,
+    /// The shielded space (docs/internal/privacy-pq-stark.md §8).
+    pub shielded: ShieldedParams,
+}
+
+/// Parameters of the shielded lane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShieldedParams {
+    /// First block height whose blocks may carry a shielded section.
+    /// `u64::MAX`: the lane is inactive.
+    pub activation_height: u64,
+    /// A block may carry a section only at `height % slot_epochs == 0`
+    /// (the shielded slot chain, spec §8.6).
+    pub slot_epochs: u64,
+    /// Shielded transactions in one block's section.
+    pub max_txs_per_block: usize,
+    /// The constant fee of every shielded transaction, fully burned (§8.3).
+    pub tx_fee: u64,
+    /// An anchor is accepted for this many epochs after it was recorded.
+    pub anchor_window_epochs: u64,
+}
+
+/// Weight of one shielded transaction: its body plus the largest proof
+/// (§8.3). Every transaction has the same shape, so the same weight.
+pub const SHIELDED_TX_WEIGHT: u64 = 441 + 192 * 1024;
+
+/// Base price of the shielded lane: 100x the native minimum, per unit of
+/// weight (§8.3).
+pub const SHIELDED_BASE_PRICE: u64 = 100 * 1_000_000_000;
+
+impl Default for ShieldedParams {
+    fn default() -> Self {
+        ShieldedParams {
+            activation_height: u64::MAX,
+            slot_epochs: 20,
+            max_txs_per_block: 8,
+            tx_fee: SHIELDED_BASE_PRICE * SHIELDED_TX_WEIGHT,
+            anchor_window_epochs: 100_000,
+        }
+    }
+}
+
+impl ShieldedParams {
+    /// Whether a block at `height` may carry a shielded section.
+    pub fn is_slot(&self, height: u64) -> bool {
+        height >= self.activation_height
+            && self.slot_epochs > 0
+            && height % self.slot_epochs == 0
+    }
 }
 
 #[derive(Default, Debug, Clone)]
@@ -89,6 +137,7 @@ impl Default for CommonParams {
             transition_numbers: Default::default(),
             transition_heights: Default::default(),
             min_base_price: SpaceMap::default(),
+            shielded: ShieldedParams::default(),
         }
     }
 }

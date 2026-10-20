@@ -36,3 +36,7 @@ pub const RESERVED11: Address =
 
 // Reserved for the shielded pool precompile/contract.
 pub const SHIELDED_POOL_CONTRACT_ADDRESS: Address = RESERVED8;
+
+// The post-quantum shielded space: its native-space account holds the backing
+// balance, its shielded-space account the pool's state.
+pub const SHIELDED_BRIDGE_ADDRESS: Address = RESERVED9;

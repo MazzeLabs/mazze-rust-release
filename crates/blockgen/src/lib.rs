@@ -15,7 +15,8 @@ use mazze_parameters::{
 use mazze_types::{Address, SpaceMap, H256, U256};
 use mazzecore::{
     block_parameters::*, consensus::consensus_inner::StateBlameInfo, pow::*,
-    verification::compute_transaction_root, ConsensusGraph,
+    verification::{compute_block_transactions_root, compute_transaction_root},
+    ConsensusGraph,
     ConsensusGraphTrait, SharedSynchronizationGraph,
     SharedSynchronizationService, SharedTransactionPool, Stopable,
 };
@@ -276,8 +277,15 @@ impl BlockGenerator {
             .params()
             .custom_prefix(parent_height + 1)
             .unwrap_or(vec![]);
+        // A shielded slot carries the pool's shielded transactions and their
+        // proofs (spec §8.6); any other height carries none.
+        let (shielded, witness) =
+            self.txpool.pack_shielded(parent_height + 1);
         let block_header = BlockHeaderBuilder::new()
-            .with_transactions_root(compute_transaction_root(&transactions))
+            .with_transactions_root(compute_block_transactions_root(
+                &transactions,
+                &shielded,
+            ))
             .with_parent_hash(parent_hash)
             .with_height(parent_height + 1)
             .with_timestamp(my_timestamp)
@@ -296,6 +304,8 @@ impl BlockGenerator {
             .build();
 
         Block::new(block_header, transactions)
+            .with_shielded(shielded)
+            .with_witness(witness)
     }
 
     /// Assemble a new block with specified parent and referee, this is for test

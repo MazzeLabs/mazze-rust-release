@@ -101,7 +101,12 @@ impl GetBlocks {
         let mut packet_size_left = MAX_PACKET_SIZE;
 
         for hash in self.hashes.iter() {
-            if let Some(block) = ctx.manager.graph.block_by_hash(hash) {
+            if let Some(block) = ctx
+                .manager
+                .graph
+                .block_by_hash(hash)
+                .filter(|block| block.is_servable())
+            {
                 let block_size = if with_public {
                     block.approximated_rlp_size_with_public()
                 } else {

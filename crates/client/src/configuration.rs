@@ -203,6 +203,11 @@ build_config! {
         // hostile WS client. Operators serving large batched
         // subscriptions can raise this in hydra.toml.
         (jsonrpc_ws_max_payload_bytes, (usize), 10 * 1024 * 1024)
+        // The shielded lane (see `ShieldedParams`). Inactive unless an
+        // activation height is set.
+        (shielded_activation_height, (Option<u64>), None)
+        (shielded_slot_epochs, (Option<u64>), None)
+        (shielded_max_txs_per_block, (Option<usize>), None)
         // RPC server limits (see `RpcLimits`).
         (jsonrpc_max_batch_size, (u32), 1000)
         (jsonrpc_max_response_bytes, (u32), 25 * 1024 * 1024)
@@ -1677,6 +1682,16 @@ impl Configuration {
             self.raw_conf.evm_transaction_gas_ratio;
 
         self.set_mips(&mut params);
+
+        if let Some(height) = self.raw_conf.shielded_activation_height {
+            params.shielded.activation_height = height;
+        }
+        if let Some(slot) = self.raw_conf.shielded_slot_epochs {
+            params.shielded.slot_epochs = slot;
+        }
+        if let Some(max) = self.raw_conf.shielded_max_txs_per_block {
+            params.shielded.max_txs_per_block = max;
+        }
 
         params
     }

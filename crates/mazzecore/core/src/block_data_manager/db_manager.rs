@@ -23,7 +23,7 @@ use primitives::{
     Block, BlockHeader, SignedTransaction, TransactionIndex,
 };
 use metrics::{Counter, CounterUsize};
-use rlp::Rlp;
+use rlp::{Rlp, RlpStream};
 use parking_lot::Mutex;
 use std::{
     cell::Cell,
@@ -106,6 +106,7 @@ pub enum DBTable {
     BlamedHeaderVerifiedRoots,
     BlockTraces,
     HashByBlockNumber,
+    ShieldedWitness,
 }
 
 impl DBTable {
@@ -124,6 +125,7 @@ impl DBTable {
             }
             DBTable::BlockTraces => "BlockTraces",
             DBTable::HashByBlockNumber => "HashByBlockNumber",
+            DBTable::ShieldedWitness => "ShieldedWitness",
         }
     }
 
@@ -142,6 +144,7 @@ impl DBTable {
             }
             "BlockTraces" => DBTable::BlockTraces,
             "HashByBlockNumber" => DBTable::HashByBlockNumber,
+            "ShieldedWitness" => DBTable::ShieldedWitness,
             _ => return None,
         })
     }
@@ -468,6 +471,10 @@ impl DBManager {
             DBTable::Misc,
             make_simple_entry(MdbxColumn::Misc),
         );
+        backends.insert(
+            DBTable::ShieldedWitness,
+            make_simple_entry(MdbxColumn::ShieldedWitness),
+        );
 
         // Compound: Blocks (7 sub-columns keyed by suffix byte,
         // with the bare 32B key routing to `BlockHeaders`).
@@ -597,11 +604,20 @@ impl DBManager {
     }
 
     /// TODO Use new_with_rlp_size
+    /// The stored block, with its witness while the witness is retained.
     pub fn block_from_db(&self, block_hash: &H256) -> Option<Block> {
         let (transactions, shielded) = self.block_body_from_db(block_hash)?;
+        let header = self.block_header_from_db(block_hash)?;
+        let witness = if shielded.is_empty() {
+            Vec::new()
+        } else {
+            self.block_witness_from_db(header.height(), block_hash)
+                .unwrap_or_default()
+        };
         Some(
-            Block::new(self.block_header_from_db(block_hash)?, transactions)
-                .with_shielded(shielded),
+            Block::new(header, transactions)
+                .with_shielded(shielded)
+                .with_witness(witness),
         )
     }
 
@@ -739,6 +755,78 @@ impl DBManager {
             Block::decode_stored_body(&encoded)
                 .expect("Wrong block rlp format!"),
         )
+    }
+
+    /// Stores the proofs of a block's shielded section (transient: see
+    /// `prune_witnesses_below`).
+    pub fn insert_block_witness_to_db(
+        &self, height: u64, hash: &H256, witness: &[Arc<Vec<u8>>],
+    ) {
+        let mut stream = RlpStream::new_list(witness.len());
+        for proof in witness {
+            stream.append(&proof.as_slice());
+        }
+        self.insert_to_db(
+            DBTable::ShieldedWitness,
+            &witness_key(height, hash),
+            stream.out().to_vec(),
+        )
+    }
+
+    pub fn block_witness_from_db(
+        &self, height: u64, hash: &H256,
+    ) -> Option<Vec<Arc<Vec<u8>>>> {
+        let encoded = self
+            .load_from_db(DBTable::ShieldedWitness, &witness_key(height, hash))?;
+        let rlp = Rlp::new(&encoded);
+        let mut witness = Vec::new();
+        for proof in rlp.iter() {
+            witness.push(Arc::new(proof.data().ok()?.to_vec()));
+        }
+        Some(witness)
+    }
+
+    pub fn insert_shielded_outcomes_to_db(
+        &self, block_hash: &H256,
+        outcomes: &[mazze_executor::shielded_engine::ShieldedOutcome],
+    ) {
+        let mut stream = RlpStream::new_list(outcomes.len());
+        for outcome in outcomes {
+            stream.append(outcome);
+        }
+        self.insert_to_db(
+            DBTable::Misc,
+            &shielded_outcomes_key(block_hash),
+            stream.out().to_vec(),
+        )
+    }
+
+    pub fn shielded_outcomes_from_db(
+        &self, block_hash: &H256,
+    ) -> Option<Vec<mazze_executor::shielded_engine::ShieldedOutcome>> {
+        let encoded = self
+            .load_from_db(DBTable::Misc, &shielded_outcomes_key(block_hash))?;
+        Rlp::new(&encoded).as_list().ok()
+    }
+
+    /// Deletes the witnesses of every block below `height`, by key range.
+    pub fn prune_witnesses_below(&self, height: u64) -> usize {
+        let backend = match self.table_backends.get(&DBTable::ShieldedWitness)
+        {
+            Some(TableBackend::Simple(b)) => b,
+            _ => return 0,
+        };
+        match backend.kvdb.delete_range_chunked(
+            &[],
+            Some(&height.to_be_bytes()),
+            4096,
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                warn!("pruning shielded witnesses failed: {:?}", e);
+                0
+            }
+        }
     }
 
     pub fn remove_block_body_from_db(&self, hash: &H256) {
@@ -1327,6 +1415,18 @@ fn blamed_header_verified_roots_key(block_height: u64) -> [u8; 8] {
     let mut height_key = [0; 8];
     LittleEndian::write_u64(&mut height_key[0..8], block_height);
     height_key
+}
+
+fn shielded_outcomes_key(block_hash: &H256) -> Vec<u8> {
+    [b"shielded_outcomes".as_ref(), block_hash.as_bytes()].concat()
+}
+
+/// `height (8B BE) ‖ hash`: heights sort first, so pruning is a range delete.
+fn witness_key(height: u64, block_hash: &H256) -> Vec<u8> {
+    let mut key = Vec::with_capacity(8 + 32);
+    key.extend_from_slice(&height.to_be_bytes());
+    key.extend_from_slice(block_hash.as_bytes());
+    key
 }
 
 fn block_body_key(block_hash: &H256) -> Vec<u8> {

@@ -562,9 +562,33 @@ impl BlockDataManager {
     ) {
         if persistent {
             self.db_manager.insert_block_body_to_db(block.as_ref());
+            // The witness is kept apart from the body, only until the block
+            // falls behind the checkpoint (`new_checkpoint`).
+            if !block.shielded.is_empty() && block.has_complete_witness() {
+                self.db_manager.insert_block_witness_to_db(
+                    block.block_header.height(),
+                    &hash,
+                    &block.witness,
+                );
+            }
         }
         self.cache_man.lock().note_used(CacheId::Block(hash));
         self.blocks.write().insert(hash, block);
+    }
+
+    /// The outcomes of a pivot block's shielded section, from its last
+    /// execution.
+    pub fn insert_shielded_outcomes(
+        &self, block_hash: &H256,
+        outcomes: &[mazze_executor::shielded_engine::ShieldedOutcome],
+    ) {
+        self.db_manager.insert_shielded_outcomes_to_db(block_hash, outcomes)
+    }
+
+    pub fn shielded_outcomes(
+        &self, block_hash: &H256,
+    ) -> Option<Vec<mazze_executor::shielded_engine::ShieldedOutcome>> {
+        self.db_manager.shielded_outcomes_from_db(block_hash)
     }
 
     /// remove block body in memory cache and db
@@ -1837,6 +1861,17 @@ impl BlockDataManager {
     pub fn new_checkpoint(
         &self, new_checkpoint_height: u64, best_epoch_number: u64,
     ) {
+        // Witnesses are relay data for peers that have not verified a block
+        // yet; an era behind the stable checkpoint nobody needs them (spec
+        // §6.2). Every node prunes, archive nodes included.
+        let pruned = self.db_manager.prune_witnesses_below(
+            new_checkpoint_height.saturating_sub(
+                mazze_parameters::consensus::ERA_DEFAULT_EPOCH_COUNT,
+            ),
+        );
+        if pruned > 0 {
+            debug!("pruned {} shielded witnesses", pruned);
+        }
         let mut gc_progress = self.gc_progress.lock();
         gc_progress.gc_end = new_checkpoint_height;
         gc_progress.last_consensus_best_epoch = best_epoch_number;

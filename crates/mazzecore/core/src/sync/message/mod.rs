@@ -28,6 +28,7 @@ mod snapshot_manifest_request;
 mod snapshot_manifest_response;
 mod state_sync_candidate_request;
 mod state_sync_candidate_response;
+mod shielded_transactions;
 mod status;
 mod throttling;
 mod transactions;
@@ -53,6 +54,7 @@ pub use self::{
     keys::{Key, KeyContainer},
     message::{handle_rlp_message, msgid},
     new_block::NewBlock,
+    shielded_transactions::ShieldedTransactions,
     new_block_hashes::NewBlockHashes,
     snapshot_chunk_request::SnapshotChunkRequest,
     snapshot_chunk_response::SnapshotChunkResponse,

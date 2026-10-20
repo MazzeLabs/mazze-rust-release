@@ -77,13 +77,22 @@ impl Handleable for GetCompactBlocks {
         let mut blocks = Vec::new();
 
         for hash in self.hashes.iter() {
-            if let Some(compact_block) =
-                ctx.manager.graph.data_man.compact_block_by_hash(hash)
+            if let Some(compact_block) = ctx
+                .manager
+                .graph
+                .data_man
+                .compact_block_by_hash(hash)
+                .filter(|cb| cb.shielded.is_empty() || cb.witness.len() == cb.shielded.len())
             {
                 if (compact_blocks.len() as u64) < MAX_HEADERS_TO_SEND {
                     compact_blocks.push(compact_block);
                 }
-            } else if let Some(block) = ctx.manager.graph.block_by_hash(hash) {
+            } else if let Some(block) = ctx
+                .manager
+                .graph
+                .block_by_hash(hash)
+                .filter(|block| block.is_servable())
+            {
                 debug!("Have complete block but no compact block, return complete block instead");
                 if (blocks.len() as u64) < MAX_BLOCKS_TO_SEND {
                     blocks.push(block.as_ref().clone());

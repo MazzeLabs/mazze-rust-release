@@ -11,6 +11,8 @@ pub mod field;
 pub mod keys;
 pub mod note;
 pub mod ps1;
+#[cfg(feature = "prover")]
+pub mod testkit;
 pub mod tree;
 pub mod verify;
 pub mod wire;

@@ -627,6 +627,16 @@ pub enum Column {
     /// [storage-delta-mpt-migration.md](../../../../../docs/internal/storage-delta-mpt-migration.md)
     /// for the migration path and cutover story.
     DeltaMpt = 49,
+
+    /// **`ShieldedWitness`** — `block_height (8B BE) ‖ block_hash (32B) →
+    /// Vec<proof> (RLP)`.
+    ///
+    /// The proofs of a block's shielded section (spec §6.2), kept only so
+    /// peers that have not verified the block yet can be served. Transient
+    /// relay data, never part of history: pruned by height range once the
+    /// block is an era behind the stable checkpoint, on every node
+    /// including archive ones.
+    ShieldedWitness = 50,
 }
 
 /// Total number of MDBX columns. Update on adding a variant.
@@ -634,7 +644,7 @@ pub enum Column {
 /// The `KvdbMdbx` env is created with `set_max_tables(64)` (see
 /// [`DEFAULT_MAX_TABLES`](super::kvdb_mdbx)); ~14 slots remain
 /// after Phase 4c (`DeltaMpt`).
-pub const NUM_COLUMNS: u32 = 50;
+pub const NUM_COLUMNS: u32 = 51;
 
 impl Column {
     /// The stable `u32` id assigned to this column. `#[repr(u32)]` on
@@ -698,6 +708,7 @@ impl Column {
         Column::EpochSkippedBlockSet,
         Column::Misc,
         Column::DeltaMpt,
+        Column::ShieldedWitness,
     ];
 
     /// Human-readable name — same as the variant identifier, hoisted
@@ -754,6 +765,7 @@ impl Column {
             Column::EpochSkippedBlockSet => "EpochSkippedBlockSet",
             Column::Misc => "Misc",
             Column::DeltaMpt => "DeltaMpt",
+            Column::ShieldedWitness => "ShieldedWitness",
         }
     }
 }

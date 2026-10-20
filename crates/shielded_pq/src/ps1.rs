@@ -41,6 +41,9 @@ pub const PROVEN_SECURITY_BITS: usize = 128;
 /// 184.7–188.7 KB; a prover whose proof exceeds the cap re-proves.
 pub const PROOF_LEN_MAX: usize = 192 * 1024;
 
+// Blocks bound proofs by the same cap before any proof system is consulted.
+const _: () = assert!(PROOF_LEN_MAX == primitives::shielded::MAX_PROOF_BYTES);
+
 pub type Challenge = BinomialExtensionField<F, 8>;
 type ByteHash = Keccak256Hash;
 type U64Hash = PaddingFreeSponge<KeccakF, 25, 17, 4>;

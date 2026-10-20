@@ -63,5 +63,8 @@ pub mod state;
 /// Shielded primitives used by the pool, tooling, and circuits.
 pub mod shielded;
 
+/// Stage B of the post-quantum shielded space: applying shielded sections.
+pub mod shielded_engine;
+
 pub use internal_contract::{InternalContractMap, InternalContractTrait};
 pub use observer as executive_observer;

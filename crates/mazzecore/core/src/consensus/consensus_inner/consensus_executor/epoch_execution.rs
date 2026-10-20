@@ -95,6 +95,24 @@ impl ConsensusExecutionHandler {
                 &mut epoch_recorder,
             )?;
         }
+        // The shielded section of the pivot block of a slot epoch (spec
+        // §8.6), after the epoch's account transactions. Its proofs were
+        // verified when the block was accepted.
+        let shielded = &self.machine.params().shielded;
+        let height = main_block.block_header.height();
+        if !main_block.shielded.is_empty() && shielded.is_slot(height) {
+            let outcomes = mazze_executor::shielded_engine::execute_section(
+                state,
+                &main_block.shielded,
+                height,
+                shielded,
+            )?;
+            if !dry_run {
+                self.data_man
+                    .insert_shielded_outcomes(&main_block.hash(), &outcomes);
+            }
+        }
+
         // Split the "evm" phase into prefetch (synchronous account-cache warm)
         // vs the actual tx loop, so we can tell whether the ~40ms/block cost on
         // a near-empty testnet is prefetch overhead or execution. Rate-limited.

@@ -464,6 +464,10 @@ pub struct SynchronizationProtocolHandler {
 
     // provider for serving light protocol queries
     light_provider: Arc<LightProvider>,
+
+    /// Dandelion++ routing of shielded transactions.
+    #[ignore_malloc_size_of = "routing state only"]
+    pub dandelion: crate::sync::dandelion::Dandelion,
 }
 
 #[derive(Clone, Default, DeriveMallocSizeOf)]
@@ -564,6 +568,59 @@ impl SynchronizationProtocolHandler {
             state_sync,
             synced_epoch_id: Default::default(),
             light_provider,
+            dandelion: Default::default(),
+        }
+    }
+
+    /// Ids of the connected peers.
+    pub fn peer_ids(&self) -> Vec<NodeId> {
+        self.syn.peers.read().keys().copied().collect()
+    }
+
+    /// Sends a pooled shielded transaction along `route`. Nothing is sent
+    /// while the lane is inactive, so nodes that predate the message never
+    /// receive it.
+    pub fn relay_shielded(
+        &self, io: &dyn NetworkContext, hash: H256,
+        route: crate::sync::dandelion::Route, from: Option<&NodeId>,
+    ) {
+        use crate::sync::{dandelion::Route, message::ShieldedTransactions};
+        let pool = self.graph.consensus.get_tx_pool();
+        let tx = match pool.shielded.get(&hash) {
+            Some(tx) => tx,
+            None => return,
+        };
+        let msg = |stem: bool| ShieldedTransactions {
+            stem,
+            txs: vec![((*tx.body).clone(), (*tx.proof).clone())],
+        };
+        let result = match route {
+            Route::Stem(peer) => msg(true).send(io, &peer),
+            Route::Fluff => {
+                let skip = from.copied().unwrap_or_default();
+                self.broadcast_message(io, &skip, &msg(false))
+            }
+            Route::Drop => Ok(()),
+        };
+        if let Err(e) = result {
+            debug!("relaying shielded transaction {:?} failed: {:?}", hash, e);
+        }
+    }
+
+    /// Starts stems for locally submitted shielded transactions and fluffs
+    /// those whose embargo expired.
+    fn propagate_shielded_transactions(&self, io: &dyn NetworkContext) {
+        let pool = self.graph.consensus.get_tx_pool();
+        if pool.machine().params().shielded.activation_height == u64::MAX {
+            return;
+        }
+        let peers = self.peer_ids();
+        for hash in pool.shielded.take_originated() {
+            let route = self.dandelion.route_originated(hash, &peers);
+            self.relay_shielded(io, hash, route, None);
+        }
+        for hash in self.dandelion.expired_embargoes() {
+            self.relay_shielded(io, hash, crate::sync::dandelion::Route::Fluff, None);
         }
     }
 
@@ -2615,6 +2672,7 @@ impl NetworkProtocolHandler for SynchronizationProtocolHandler {
         match timer {
             TX_TIMER => {
                 self.propagate_new_transactions(io);
+                self.propagate_shielded_transactions(io);
             }
             CHECK_FUTURE_BLOCK_TIMER => {
                 self.check_future_blocks(io);

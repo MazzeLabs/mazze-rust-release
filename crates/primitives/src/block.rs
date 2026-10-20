@@ -3,7 +3,7 @@
 // See http://www.gnu.org/licenses/
 
 use crate::{
-    shielded::ShieldedTxBody, BlockHeader, SignedTransaction,
+    shielded::{ShieldedTxBody, MAX_PROOF_BYTES}, BlockHeader, SignedTransaction,
     TransactionWithSignature,
 };
 use byteorder::{ByteOrder, LittleEndian};
@@ -56,6 +56,10 @@ pub struct Block {
     /// The shielded transaction bodies, a section apart from the account
     /// transactions. Their proofs travel as a witness sidecar.
     pub shielded: Vec<Arc<ShieldedTxBody>>,
+    /// The witness sidecar: one proof per shielded body, in order. It is part
+    /// of the network encoding only. The block database never stores it,
+    /// and the block hash commits to it through each body's `proof_hash`.
+    pub witness: Vec<Arc<Vec<u8>>>,
     /// Approximated rlp size of the block.
     pub approximated_rlp_size: usize,
     /// Approximated rlp size of block with transaction public key.
@@ -99,6 +103,7 @@ impl Block {
             block_header,
             transactions,
             shielded: Vec::new(),
+            witness: Vec::new(),
             approximated_rlp_size,
             approximated_rlp_size_with_public,
         }
@@ -115,11 +120,32 @@ impl Block {
         self
     }
 
-    /// `[header, transactions]`, plus the shielded section as a third item
-    /// when it is not empty. Blocks without shielded transactions keep their
-    /// encoding.
+    /// Sets the witness sidecar: one proof per shielded body. The
+    /// approximated sizes grow by the proofs, so packets stay within bounds.
+    pub fn with_witness(mut self, witness: Vec<Arc<Vec<u8>>>) -> Self {
+        let added: usize = witness.iter().map(|proof| proof.len() + 4).sum();
+        self.approximated_rlp_size += added;
+        self.approximated_rlp_size_with_public += added;
+        self.witness = witness;
+        self
+    }
+
+    /// Whether this block can be sent to a peer: a shielded section needs
+    /// its witness, and a block whose witness was pruned is not served.
+    pub fn is_servable(&self) -> bool {
+        self.shielded.is_empty() || self.has_complete_witness()
+    }
+
+    /// Whether the block carries one proof per shielded body.
+    pub fn has_complete_witness(&self) -> bool {
+        self.witness.len() == self.shielded.len()
+    }
+
+    /// `[header, transactions]`, plus the shielded section and its witness
+    /// as a third and fourth item when the section is not empty. Blocks
+    /// without shielded transactions keep their encoding.
     fn begin_block_list(&self, stream: &mut RlpStream) {
-        stream.begin_list(2 + !self.shielded.is_empty() as usize);
+        stream.begin_list(2 + 2 * !self.shielded.is_empty() as usize);
     }
 
     fn append_shielded(&self, stream: &mut RlpStream) {
@@ -128,15 +154,20 @@ impl Block {
             for body in &self.shielded {
                 stream.append(&**body);
             }
+            stream.begin_list(self.witness.len());
+            for proof in &self.witness {
+                stream.append(&proof.as_slice());
+            }
         }
     }
 
     fn decode_shielded(
         rlp: &Rlp,
-    ) -> Result<Vec<Arc<ShieldedTxBody>>, DecoderError> {
+    ) -> Result<(Vec<Arc<ShieldedTxBody>>, Vec<Arc<Vec<u8>>>), DecoderError>
+    {
         match rlp.item_count()? {
-            2 => Ok(Vec::new()),
-            3 => {
+            2 => Ok((Vec::new(), Vec::new())),
+            4 => {
                 let bodies = rlp.list_at::<ShieldedTxBody>(2)?;
                 // An empty section has only one form: absent.
                 if bodies.is_empty() {
@@ -144,7 +175,21 @@ impl Block {
                         "Empty shielded section must be omitted",
                     ));
                 }
-                Ok(bodies.into_iter().map(Arc::new).collect())
+                let proofs = rlp.at(3)?;
+                if proofs.item_count()? != bodies.len() {
+                    return Err(DecoderError::Custom(
+                        "One proof per shielded body",
+                    ));
+                }
+                let mut witness = Vec::with_capacity(bodies.len());
+                for proof in proofs.iter() {
+                    let bytes = proof.data()?;
+                    if bytes.len() > MAX_PROOF_BYTES {
+                        return Err(DecoderError::Custom("Proof too long"));
+                    }
+                    witness.push(Arc::new(bytes.to_vec()));
+                }
+                Ok((bodies.into_iter().map(Arc::new).collect(), witness))
             }
             _ => Err(DecoderError::RlpIncorrectListLen),
         }
@@ -215,6 +260,7 @@ impl Block {
             // reconstructed_txns constructed here will not be used
             reconstructed_txns: Vec::new(),
             shielded: self.shielded.clone(),
+            witness: self.witness.clone(),
         }
     }
 
@@ -309,7 +355,7 @@ impl Block {
         if rlp.as_raw().len() != rlp.payload_info()?.total() {
             return Err(DecoderError::RlpIsTooBig);
         }
-        let shielded = Self::decode_shielded(rlp)?;
+        let (shielded, witness) = Self::decode_shielded(rlp)?;
 
         let mut block = Block::new_with_rlp_size(
             rlp.val_at(0)?,
@@ -318,6 +364,7 @@ impl Block {
             Some(rlp.as_raw().len()),
         );
         block.shielded = shielded;
+        block.witness = witness;
         Ok(block)
     }
 }
@@ -343,7 +390,7 @@ impl Decodable for Block {
         if rlp.as_raw().len() != rlp.payload_info()?.total() {
             return Err(DecoderError::RlpIsTooBig);
         }
-        let shielded = Self::decode_shielded(rlp)?;
+        let (shielded, witness) = Self::decode_shielded(rlp)?;
 
         let transactions = rlp.list_at::<TransactionWithSignature>(1)?;
 
@@ -360,6 +407,7 @@ impl Decodable for Block {
             None,
         );
         block.shielded = shielded;
+        block.witness = witness;
         Ok(block)
     }
 }
@@ -379,6 +427,8 @@ pub struct CompactBlock {
     /// The shielded section, carried whole: bodies are small and there is
     /// no mempool from which to rebuild them.
     pub shielded: Vec<Arc<ShieldedTxBody>>,
+    /// The section's witness, so the rebuilt block can be verified.
+    pub witness: Vec<Arc<Vec<u8>>>,
 }
 
 impl Debug for CompactBlock {
@@ -483,7 +533,7 @@ impl CompactBlock {
 impl Encodable for CompactBlock {
     fn rlp_append(&self, steam: &mut RlpStream) {
         steam
-            .begin_list(3 + !self.shielded.is_empty() as usize)
+            .begin_list(3 + 2 * !self.shielded.is_empty() as usize)
             .append(&self.block_header)
             .append(&self.nonce)
             .append(&self.tx_short_ids);
@@ -491,6 +541,10 @@ impl Encodable for CompactBlock {
             steam.begin_list(self.shielded.len());
             for body in &self.shielded {
                 steam.append(&**body);
+            }
+            steam.begin_list(self.witness.len());
+            for proof in &self.witness {
+                steam.append(&proof.as_slice());
             }
         }
     }
@@ -502,16 +556,30 @@ impl Decodable for CompactBlock {
         if short_ids.len() % CompactBlock::SHORT_ID_SIZE_IN_BYTES != 0 {
             return Err(DecoderError::Custom("Compact Block length Error!"));
         }
-        let shielded = match rlp.item_count()? {
-            3 => Vec::new(),
-            4 => {
+        let (shielded, witness) = match rlp.item_count()? {
+            3 => (Vec::new(), Vec::new()),
+            5 => {
                 let bodies = rlp.list_at::<ShieldedTxBody>(3)?;
                 if bodies.is_empty() {
                     return Err(DecoderError::Custom(
                         "Empty shielded section must be omitted",
                     ));
                 }
-                bodies.into_iter().map(Arc::new).collect()
+                let proofs = rlp.at(4)?;
+                if proofs.item_count()? != bodies.len() {
+                    return Err(DecoderError::Custom(
+                        "One proof per shielded body",
+                    ));
+                }
+                let mut witness = Vec::with_capacity(bodies.len());
+                for proof in proofs.iter() {
+                    let bytes = proof.data()?;
+                    if bytes.len() > MAX_PROOF_BYTES {
+                        return Err(DecoderError::Custom("Proof too long"));
+                    }
+                    witness.push(Arc::new(bytes.to_vec()));
+                }
+                (bodies.into_iter().map(Arc::new).collect(), witness)
             }
             _ => return Err(DecoderError::RlpIncorrectListLen),
         };
@@ -521,6 +589,7 @@ impl Decodable for CompactBlock {
             tx_short_ids: short_ids,
             reconstructed_txns: Vec::new(),
             shielded,
+            witness,
         })
     }
 }
@@ -534,11 +603,15 @@ mod tests {
 
     fn block(shielded: usize) -> Block {
         let header = BlockHeaderBuilder::new().with_height(7).build();
-        Block::new(header, vec![]).with_shielded(
-            (0..shielded as u32)
-                .map(|i| Arc::new(ShieldedTxBody::sample_for_tests(i)))
-                .collect(),
-        )
+        Block::new(header, vec![])
+            .with_shielded(
+                (0..shielded as u32)
+                    .map(|i| Arc::new(ShieldedTxBody::sample_for_tests(i)))
+                    .collect(),
+            )
+            .with_witness(
+                (0..shielded).map(|i| Arc::new(vec![i as u8; 100])).collect(),
+            )
     }
 
     #[test]
@@ -553,22 +626,50 @@ mod tests {
     fn shielded_section_round_trips() {
         let b = block(3);
         let encoded = rlp::encode(&b);
-        assert_eq!(Rlp::new(&encoded).item_count().unwrap(), 3);
+        assert_eq!(Rlp::new(&encoded).item_count().unwrap(), 4);
         let decoded: Block = rlp::decode(&encoded).unwrap();
         assert_eq!(decoded.shielded, b.shielded);
+        assert_eq!(decoded.witness, b.witness);
         assert_eq!(decoded.hash(), b.hash());
 
         let with_public = b.encode_with_tx_public();
         let decoded =
             Block::decode_with_tx_public(&Rlp::new(&with_public)).unwrap();
         assert_eq!(decoded.shielded, b.shielded);
+        assert_eq!(decoded.witness, b.witness);
+
+        // The stored body never carries the witness.
+        let (_, shielded) = Block::decode_stored_body(&b.encode_stored_body()).unwrap();
+        assert_eq!(shielded, b.shielded);
+    }
+
+    #[test]
+    fn the_witness_must_match_the_section() {
+        // Three items (section without witness) and a witness of the wrong
+        // length are both refused, as is an oversized proof.
+        let b = block(2);
+        let mut s = RlpStream::new_list(3);
+        s.append(&b.block_header);
+        s.begin_list(0);
+        s.append_list(&b.shielded.iter().map(|x| (**x).clone()).collect::<Vec<_>>());
+        assert!(rlp::decode::<Block>(&s.out()).is_err());
+
+        let short = block(2).with_witness(vec![Arc::new(vec![1u8; 10])]);
+        assert!(rlp::decode::<Block>(&rlp::encode(&short)).is_err());
+
+        let huge = block(1).with_witness(vec![Arc::new(vec![
+            0u8;
+            crate::shielded::MAX_PROOF_BYTES + 1
+        ])]);
+        assert!(rlp::decode::<Block>(&rlp::encode(&huge)).is_err());
     }
 
     #[test]
     fn empty_shielded_section_is_rejected() {
         let b = block(0);
-        let mut s = RlpStream::new_list(3);
+        let mut s = RlpStream::new_list(4);
         s.append(&b.block_header);
+        s.begin_list(0);
         s.begin_list(0);
         s.begin_list(0);
         let encoded = s.out();
@@ -613,16 +714,18 @@ mod tests {
         let decoded: super::CompactBlock =
             rlp::decode(&rlp::encode(&compact)).unwrap();
         assert_eq!(decoded.shielded, b.shielded);
+        assert_eq!(decoded.witness, b.witness);
         assert_eq!(decoded.hash(), b.hash());
     }
 
     #[test]
-    fn four_items_are_rejected() {
+    fn five_items_are_rejected() {
         let b = block(1);
-        let mut s = RlpStream::new_list(4);
+        let mut s = RlpStream::new_list(5);
         s.append(&b.block_header);
         s.begin_list(0);
         s.append_list(&[ShieldedTxBody::sample_for_tests(1)]);
+        s.begin_list(1).append(&vec![1u8; 4]);
         s.begin_list(0);
         assert!(rlp::decode::<Block>(&s.out()).is_err());
     }

@@ -517,8 +517,13 @@ fn shielded_section_survives_the_block_database() {
             .with_parent_hash(genesis.hash())
             .with_height(1)
             .build();
-        let block =
-            Arc::new(Block::new(header, vec![]).with_shielded(shielded.clone()));
+        let witness: Vec<Arc<Vec<u8>>> =
+            (0..3).map(|i| Arc::new(vec![i as u8; 1000])).collect();
+        let block = Arc::new(
+            Block::new(header, vec![])
+                .with_shielded(shielded.clone())
+                .with_witness(witness.clone()),
+        );
         data_man.insert_block(block.clone(), true);
 
         let reloaded = data_man
@@ -526,7 +531,17 @@ fn shielded_section_survives_the_block_database() {
             .block_from_db(&block.hash())
             .expect("block in the database");
         assert_eq!(reloaded.shielded, shielded);
+        assert_eq!(reloaded.witness, witness, "the witness is retained");
+        assert!(reloaded.is_servable());
         assert_eq!(reloaded.hash(), block.hash());
+
+        // Pruning below the block's height keeps it; above deletes it.
+        assert_eq!(data_man.db_manager.prune_witnesses_below(1), 0);
+        assert_eq!(data_man.db_manager.prune_witnesses_below(2), 1);
+        let reloaded = data_man.db_manager.block_from_db(&block.hash()).unwrap();
+        assert_eq!(reloaded.shielded, shielded, "the body stays");
+        assert!(reloaded.witness.is_empty());
+        assert!(!reloaded.is_servable(), "a block without its proofs is not served");
     }
     let _ = fs::remove_dir_all(dir);
 }

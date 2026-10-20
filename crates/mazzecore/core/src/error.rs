@@ -39,6 +39,14 @@ pub enum BlockError {
     InvalidBlockSize(OutOfBounds<u64>),
     /// Too many shielded transactions in the block's shielded section.
     TooManyShieldedTransactions(OutOfBounds<usize>),
+    /// A shielded section at a height that is not a shielded slot.
+    ShieldedSectionOutsideSlot(u64),
+    /// A shielded transaction breaks a consensus rule: the block is invalid.
+    InvalidShieldedTransaction(String),
+    /// The witness the peer sent does not match the block (wrong proof
+    /// bytes for a body's `proof_hash`): the block may still be valid, so it
+    /// is requested again.
+    ShieldedWitnessMismatch(String),
     InvalidBasePrice(Mismatch<SpaceMap<U256>>),
     /// Timestamp header field is invalid.
     InvalidTimestamp(OutOfBounds<SystemTime>),
@@ -99,6 +107,15 @@ impl fmt::Display for BlockError {
             InvalidBlockSize(ref oob) => format!("Invalid block size: {}", oob),
             TooManyShieldedTransactions(ref oob) => {
                 format!("Too many shielded transactions: {}", oob)
+            }
+            ShieldedSectionOutsideSlot(height) => {
+                format!("Shielded section at non-slot height {}", height)
+            }
+            InvalidShieldedTransaction(ref e) => {
+                format!("Invalid shielded transaction: {}", e)
+            }
+            ShieldedWitnessMismatch(ref e) => {
+                format!("Shielded witness does not match the block: {}", e)
             }
             InvalidTimestamp(ref oob) => {
                 let oob =

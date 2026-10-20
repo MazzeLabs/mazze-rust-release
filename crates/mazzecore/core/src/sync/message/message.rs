@@ -52,6 +52,7 @@ build_msgid! {
     STATE_SYNC_CANDIDATE_RESPONSE = 0x21
     STATUS_V3 = 0x23
     HEARTBEAT = 0x24
+    SHIELDED_TRANSACTIONS = 0x25
 
     // This is only used in inflight_keys.
     NET_INFLIGHT_BLOCKS = 0xf0
@@ -66,6 +67,7 @@ build_msgid! {
 // high priority message types
 build_msg_impl! { StatusV3, msgid::STATUS_V3, "StatusV3", SYNC_PROTO_V1, SYNC_PROTO_V1 }
 build_msg_impl! { Heartbeat, msgid::HEARTBEAT, "Heartbeat", SYNC_PROTO_V1, SYNC_PROTO_V1 }
+build_msg_impl! { ShieldedTransactions, msgid::SHIELDED_TRANSACTIONS, "ShieldedTransactions", SYNC_PROTO_V1, SYNC_PROTO_V1 }
 build_msg_impl! { NewBlockHashes, msgid::NEW_BLOCK_HASHES, "NewBlockHashes", SYNC_PROTO_V1, SYNC_PROTO_V1 }
 build_msg_with_request_id_impl! { GetBlockHeaders, msgid::GET_BLOCK_HEADERS, "GetBlockHeaders", SYNC_PROTO_V1, SYNC_PROTO_V1 }
 build_msg_impl! { GetBlockHeadersResponse, msgid::GET_BLOCK_HEADERS_RESPONSE, "GetBlockHeadersResponse", SYNC_PROTO_V1, SYNC_PROTO_V1 }
@@ -284,6 +286,9 @@ pub fn handle_rlp_message(
     match id {
         msgid::STATUS_V3 => handle_message::<StatusV3>(ctx, rlp)?,
         msgid::HEARTBEAT => handle_message::<Heartbeat>(ctx, rlp)?,
+        msgid::SHIELDED_TRANSACTIONS => {
+            handle_message::<ShieldedTransactions>(ctx, rlp)?
+        }
         msgid::NEW_BLOCK => handle_message::<NewBlock>(ctx, rlp)?,
         msgid::NEW_BLOCK_HASHES => {
             handle_message::<NewBlockHashes>(ctx, rlp)?;

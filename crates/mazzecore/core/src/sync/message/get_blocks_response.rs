@@ -220,11 +220,13 @@ mod tests {
 
     fn block(shielded: u32) -> Block {
         let header = BlockHeaderBuilder::new().with_height(3).build();
-        Block::new(header, vec![]).with_shielded(
-            (0..shielded)
-                .map(|i| Arc::new(ShieldedTxBody::sample_for_tests(i)))
-                .collect(),
-        )
+        Block::new(header, vec![])
+            .with_shielded(
+                (0..shielded)
+                    .map(|i| Arc::new(ShieldedTxBody::sample_for_tests(i)))
+                    .collect(),
+            )
+            .with_witness((0..shielded).map(|i| Arc::new(vec![i as u8; 64])).collect())
     }
 
     #[test]
@@ -238,6 +240,7 @@ mod tests {
         assert_eq!(decoded.request_id, 9);
         assert!(decoded.blocks[0].shielded.is_empty());
         assert_eq!(decoded.blocks[1].shielded, msg.blocks[1].shielded);
+        assert_eq!(decoded.blocks[1].witness, msg.blocks[1].witness);
     }
 
     #[test]

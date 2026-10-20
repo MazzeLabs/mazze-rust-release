@@ -3,6 +3,7 @@
 // See http://www.gnu.org/licenses/
 
 mod account_cache;
+pub mod shielded;
 mod garbage_collector;
 mod nonce_pool;
 mod transaction_pool_inner;
@@ -151,6 +152,9 @@ pub struct TransactionPool {
     /// If it's `false`, operations on the tx pool will be ignored to save
     /// memory/CPU cost.
     ready_for_mining: AtomicBool,
+
+    /// The shielded lane.
+    pub shielded: shielded::ShieldedTxPool,
 }
 
 impl MallocSizeOf for TransactionPool {
@@ -209,7 +213,82 @@ impl TransactionPool {
             recycle_tx_requests: Mutex::new(Default::default()),
             machine,
             ready_for_mining: AtomicBool::new(false),
+            shielded: shielded::ShieldedTxPool::new(
+                shielded::ShieldedTxPool::DEFAULT_CAPACITY,
+            ),
         }
+    }
+
+    /// Admits a shielded transaction (spec §8.2): the lane must be active,
+    /// the fee exact, the proof valid (the full stage A verification, so
+    /// invalid proofs never reach a block), and its nullifiers and anchor
+    /// valid against the latest executed state.
+    pub fn insert_shielded(
+        &self, body: primitives::shielded::ShieldedTxBody, proof: Vec<u8>,
+    ) -> Result<H256, shielded::ShieldedPoolError> {
+        use mazze_executor::shielded_engine::{anchor_valid, nullifier_spent};
+        use shielded::{PooledShieldedTx, ShieldedPoolError};
+
+        let params = &self.machine.params().shielded;
+        if params.activation_height == u64::MAX {
+            return Err(ShieldedPoolError::Inactive);
+        }
+        if body.fee != params.tx_fee {
+            return Err(ShieldedPoolError::WrongFee {
+                expected: params.tx_fee,
+                found: body.fee,
+            });
+        }
+        let best = self.consensus_best_info.lock().clone();
+        mazze_shielded_pq::verify::verify_body(
+            &body,
+            &proof,
+            best.chain_id.in_shielded_space(),
+        )
+        .map_err(|e| ShieldedPoolError::InvalidProof(format!("{:?}", e)))?;
+        {
+            let state = self.best_executed_state.lock().clone();
+            for nf in &body.nf {
+                if nullifier_spent(&state, nf).unwrap_or(true) {
+                    return Err(ShieldedPoolError::Spent);
+                }
+            }
+            if !anchor_valid(&state, &body.anchor, best.best_epoch_number, params)
+                .unwrap_or(false)
+            {
+                return Err(ShieldedPoolError::UnknownAnchor);
+            }
+        }
+        let tx = PooledShieldedTx::new(body, proof);
+        let hash = tx.hash;
+        self.shielded.insert(tx)?;
+        Ok(hash)
+    }
+
+    /// The shielded section and witness for a block at `height`: empty
+    /// unless `height` is a shielded slot. Transactions spent or anchored
+    /// too long ago by now are dropped from the pool.
+    pub fn pack_shielded(
+        &self, height: u64,
+    ) -> (
+        Vec<Arc<primitives::shielded::ShieldedTxBody>>,
+        Vec<Arc<Vec<u8>>>,
+    ) {
+        use mazze_executor::shielded_engine::{anchor_valid, nullifier_spent};
+
+        let params = &self.machine.params().shielded;
+        if !params.is_slot(height) || self.shielded.len() == 0 {
+            return (Vec::new(), Vec::new());
+        }
+        let state = self.best_executed_state.lock().clone();
+        let picked = self.shielded.pick(params.max_txs_per_block, |body| {
+            body.nf
+                .iter()
+                .all(|nf| !nullifier_spent(&state, nf).unwrap_or(true))
+                && anchor_valid(&state, &body.anchor, height, params)
+                    .unwrap_or(false)
+        });
+        picked.into_iter().map(|tx| (tx.body, tx.proof)).unzip()
     }
 
     pub fn machine(&self) -> Arc<Machine> {

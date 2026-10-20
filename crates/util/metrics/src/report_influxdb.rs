@@ -81,7 +81,7 @@ impl Reporter for InfluxdbReporter {
             point = metric.add_field(point, None);
 
             for (k, v) in &self.tags {
-                point = point.add_tag(k.clone(), Value::String(v.clone()));
+                point = point.add_tag(k.clone(), Value::String(v.clone().into()));
             }
 
             points = points.push(point);
@@ -96,7 +96,7 @@ impl Reporter for InfluxdbReporter {
             }
 
             for (k, v) in &self.tags {
-                point = point.add_tag(k.clone(), Value::String(v.clone()));
+                point = point.add_tag(k.clone(), Value::String(v.clone().into()));
             }
 
             points = points.push(point);
@@ -116,7 +116,7 @@ impl Reporter for InfluxdbReporter {
 }
 
 pub trait InfluxdbReportable {
-    fn add_field(&self, point: Point, prefix: Option<&String>) -> Point;
+    fn add_field<'p>(&self, point: Point<'p>, prefix: Option<&String>) -> Point<'p>;
 }
 
 fn field(name: &str, prefix: Option<&String>) -> String {
@@ -132,7 +132,7 @@ fn field(name: &str, prefix: Option<&String>) -> String {
 }
 
 impl InfluxdbReportable for CounterUsize {
-    fn add_field(&self, point: Point, prefix: Option<&String>) -> Point {
+    fn add_field<'p>(&self, point: Point<'p>, prefix: Option<&String>) -> Point<'p> {
         point.add_field(
             field("count", prefix),
             Value::Integer(self.count() as i64),
@@ -141,7 +141,7 @@ impl InfluxdbReportable for CounterUsize {
 }
 
 impl InfluxdbReportable for GaugeUsize {
-    fn add_field(&self, point: Point, prefix: Option<&String>) -> Point {
+    fn add_field<'p>(&self, point: Point<'p>, prefix: Option<&String>) -> Point<'p> {
         point.add_field(
             field("value", prefix),
             Value::Integer(self.value() as i64),
@@ -150,7 +150,7 @@ impl InfluxdbReportable for GaugeUsize {
 }
 
 impl InfluxdbReportable for StandardMeter {
-    fn add_field(&self, point: Point, prefix: Option<&String>) -> Point {
+    fn add_field<'p>(&self, point: Point<'p>, prefix: Option<&String>) -> Point<'p> {
         let snapshot = self.snapshot();
         point
             .add_field(
@@ -168,7 +168,7 @@ impl InfluxdbReportable for StandardMeter {
 }
 
 impl<T: Histogram> InfluxdbReportable for T {
-    fn add_field(&self, point: Point, prefix: Option<&String>) -> Point {
+    fn add_field<'p>(&self, point: Point<'p>, prefix: Option<&String>) -> Point<'p> {
         let snapshot = self.snapshot();
         point
             .add_field(

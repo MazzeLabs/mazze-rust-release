@@ -5,10 +5,11 @@
 #[cfg(test)]
 mod test;
 
+mod cli;
 mod command;
 
 use crate::command::rpc::RpcCommand;
-use clap::{crate_version, load_yaml, App, ArgMatches};
+use clap::{crate_version, ArgMatches};
 use client::{
     archive::ArchiveClient,
     common::{client_methods, ClientTrait},
@@ -83,9 +84,8 @@ fn main() -> Result<(), String> {
         });
     } // only for #[cfg]
 
-    let yaml = load_yaml!("cli.yaml");
     let version = parity_version::version(crate_version!());
-    let matches = App::from_yaml(yaml).version(version.as_str()).get_matches();
+    let matches = cli::cli_app().version(version.as_str()).get_matches();
 
     if let Some(output) = handle_sub_command(&matches)? {
         println!("{}", output);

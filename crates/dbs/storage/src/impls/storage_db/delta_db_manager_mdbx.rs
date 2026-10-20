@@ -417,17 +417,17 @@ mod tests {
     use crate::storage_db::key_value_db::{
         KeyValueDbTrait, KeyValueDbTraitRead,
     };
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     fn open_env() -> (TempDir, Arc<MdbxEnv>) {
-        let dir = TempDir::new("delta_db_manager_mdbx").unwrap();
+        let dir = tempfile::Builder::new().prefix("delta_db_manager_mdbx").tempdir().unwrap();
         let env = MdbxEnv::open(dir.path()).unwrap();
         (dir, env)
     }
 
     fn make_manager() -> (TempDir, TempDir, DeltaDbManagerMdbx) {
         let (env_dir, env) = open_env();
-        let path_dir = TempDir::new("delta_mpts_path").unwrap();
+        let path_dir = tempfile::Builder::new().prefix("delta_mpts_path").tempdir().unwrap();
         let m = DeltaDbManagerMdbx::new(
             env,
             path_dir.path().to_path_buf(),

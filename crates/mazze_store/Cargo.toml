@@ -35,7 +35,7 @@ subtle = "2.5"
 dir = { git = "https://github.com/MazzeLabs/mazze-parity-deps", rev = "223e9acc6f7ba9f1b296639f08b326a72d7b92fa"  }
 smallvec = "1.4"
 parity-wordlist = "1.0"
-tempdir = "0.3"
 
 [dev-dependencies]
+tempfile = "3"
 matches = "0.1"

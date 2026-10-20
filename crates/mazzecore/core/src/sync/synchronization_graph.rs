@@ -17,7 +17,7 @@ use std::{
 use futures::executor::block_on;
 use parking_lot::{Mutex, RwLock};
 use slab::Slab;
-use tokio02::sync::mpsc::error::TryRecvError;
+use tokio::sync::mpsc::error::TryRecvError;
 use unexpected::{Mismatch, OutOfBounds};
 
 use dag::{Graph, RichDAG, RichDETS, DAG, DETS};
@@ -1357,7 +1357,7 @@ impl SynchronizationGraph {
                                 consensus_unprocessed_count.fetch_sub(1, Ordering::SeqCst);
                             },
                             Err(TryRecvError::Empty) => break 'inner,
-                            Err(TryRecvError::Closed) => break 'outer,
+                            Err(TryRecvError::Disconnected) => break 'outer,
                         }
                     }
                     if let Some((_, hash)) = priority_queue.pop() {

@@ -241,7 +241,7 @@ mod tests {
         io::{Read, Write},
         time,
     };
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     fn generate_hash(val: &str, time: u64) -> H256 {
         keccak(format!("{}:{}", val, time))
@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn should_read_old_format_from_file() {
         // given
-        let tempdir = TempDir::new("").unwrap();
+        let tempdir = TempDir::new().unwrap();
         let file_path = tempdir.path().join("file");
         let code = "23521352asdfasdfadf";
         {
@@ -333,7 +333,7 @@ mod tests {
     #[test]
     fn should_remove_old_unused_tokens() {
         // given
-        let tempdir = TempDir::new("").unwrap();
+        let tempdir = TempDir::new().unwrap();
         let file_path = tempdir.path().join("file");
         let code1 = "11111111asdfasdf111";
         let code2 = "22222222asdfasdf222";

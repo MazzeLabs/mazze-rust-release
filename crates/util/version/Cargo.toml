@@ -13,4 +13,5 @@ target_info = "0.1"
 
 [build-dependencies]
 anyhow = "1.0"
-vergen = "7.0.0"
+# git via the git CLI (gitcl), not libgit2 (RUSTSEC-2024-0013 in libgit2-sys).
+vergen = { version = "8.3", default-features = false, features = ["git", "gitcl", "rustc"] }

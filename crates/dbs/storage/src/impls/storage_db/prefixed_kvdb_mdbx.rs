@@ -484,10 +484,10 @@ mod tests {
     use crate::impls::storage_db::{
         kvdb_mdbx::MdbxEnv, mdbx_columns::Column,
     };
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     fn open_env() -> (TempDir, Arc<MdbxEnv>) {
-        let dir = TempDir::new("prefixed_kvdb_mdbx").unwrap();
+        let dir = tempfile::Builder::new().prefix("prefixed_kvdb_mdbx").tempdir().unwrap();
         let env = MdbxEnv::open(dir.path()).unwrap();
         (dir, env)
     }

@@ -2,12 +2,15 @@ extern crate anyhow;
 extern crate vergen;
 
 use anyhow::Result;
-use vergen::{vergen, Config, ShaKind, TimestampKind};
+use vergen::EmitBuilder;
 
 fn main() -> Result<()> {
-    let mut config = Config::default();
-    *config.git_mut().commit_timestamp_kind_mut() = TimestampKind::DateOnly;
-    *config.git_mut().sha_kind_mut() = ShaKind::Short;
     println!("cargo:rerun-if-env-changed=MAZZE_BUILD_COMMIT");
-    vergen(config)
+    // Emits VERGEN_GIT_SHA (short form), VERGEN_GIT_COMMIT_DATE
+    // (YYYY-MM-DD) and VERGEN_RUSTC_SEMVER.
+    EmitBuilder::builder()
+        .git_sha(true)
+        .git_commit_date()
+        .rustc_semver()
+        .emit()
 }

@@ -85,11 +85,9 @@ sha3-macro = {path= "../../util/sha3-macro" }
 # ../../../docs/storage-architecture.md
 static_assertions = "1.1.0"
 strfmt = "0.1"
-tempdir = "0.3"
 threadpool = "1.0"
 throttling = { path = "../../util/throttling" }
 toml = "0.5.8"
-tokio02 = { version = "0.2", package="tokio", features = ["full"] }
 tokio = { version = "1.6", features = ["full"] }
 tokio-timer = "0.2.13"
 tokio-stream = "0.1.4"
@@ -121,6 +119,7 @@ rust-randomx = "0.7.5"
 crossbeam-deque = "0.7.3"
 
 [dev-dependencies]
+tempfile = "3"
 criterion = "0.3"
 mazze-storage = { path = "../../dbs/storage", features = ["testonly_code"] }
 mazze-vm-types = { path = "../vm-types", features = ["testonly_code"] }

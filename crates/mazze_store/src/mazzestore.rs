@@ -899,9 +899,8 @@ impl SimpleSecretStore for MazzeMultiStore {
 
 #[cfg(test)]
 mod tests {
-    extern crate tempdir;
 
-    use self::tempdir::TempDir;
+    use tempfile::TempDir;
     use super::{MazzeMultiStore, MazzeStore};
     use crate::accounts_dir::{
         KeyDirectory, MemoryDirectory, RootDiskDirectory,
@@ -934,7 +933,7 @@ mod tests {
 
     impl RootDiskDirectoryGuard {
         pub fn new() -> Self {
-            let temp_path = TempDir::new("").unwrap();
+            let temp_path = TempDir::new().unwrap();
             let disk_dir =
                 Box::new(RootDiskDirectory::create(temp_path.path()).unwrap());
 

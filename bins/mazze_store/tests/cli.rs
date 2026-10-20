@@ -14,9 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity Ethereum.  If not, see <http://www.gnu.org/licenses/>.
 
-extern crate tempdir;
 use std::{fs::File, io::Write, process::Command};
-use tempdir::TempDir;
 
 fn run(args: &[&str]) -> String {
     let output = Command::new("cargo")
@@ -32,7 +30,7 @@ fn run(args: &[&str]) -> String {
 fn cli_cmd() {
     Command::new("cargo").arg("build").output().unwrap();
 
-    let dir = TempDir::new("test-vault").unwrap();
+    let dir = tempfile::Builder::new().prefix("test-vault").tempdir().unwrap();
 
     let mut passwd = File::create(dir.path().join("test-password")).unwrap();
     writeln!(passwd, "password").unwrap();

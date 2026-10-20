@@ -439,9 +439,8 @@ fn account_filename(account: &SafeAccount) -> String {
 
 #[cfg(test)]
 mod test {
-    extern crate tempdir;
 
-    use self::tempdir::TempDir;
+    use tempfile::TempDir;
     use super::{KeyDirectory, RootDiskDirectory, VaultKey};
     use crate::account::SafeAccount;
     use mazzekey::{Generator, Random};
@@ -574,7 +573,7 @@ mod test {
     #[test]
     fn should_list_vaults() {
         // given
-        let temp_path = TempDir::new("").unwrap();
+        let temp_path = TempDir::new().unwrap();
         let directory = RootDiskDirectory::create(&temp_path).unwrap();
         let vault_provider = directory.as_vault_provider().unwrap();
         vault_provider
@@ -593,7 +592,7 @@ mod test {
 
     #[test]
     fn hash_of_files() {
-        let temp_path = TempDir::new("").unwrap();
+        let temp_path = TempDir::new().unwrap();
         let directory = RootDiskDirectory::create(&temp_path).unwrap();
 
         let hash = directory

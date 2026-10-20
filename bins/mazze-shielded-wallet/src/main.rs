@@ -9,16 +9,20 @@
 //! public data. The wallet rebuilds the commitment tree itself from the
 //! node's sections (there is no `getTreePath`), finds its notes by their
 //! commitments, and proves locally. Payments are delivered out of band: the
-//! sender writes the recipient's note opening to a file.
+//! sender gives the recipient the note opening, plain (`mzn1`) over a
+//! private channel, or sealed (`mzx1`, spec §9.2) to the recipient's bundle
+//! over any channel.
 //!
 //! ```text
 //! mazze-shielded-wallet init       --wallet W
-//! mazze-shielded-wallet address    --wallet W
+//! mazze-shielded-wallet address    --wallet W --rpc URL
+//! mazze-shielded-wallet export-bundle --wallet W --rpc URL --out FILE
 //! mazze-shielded-wallet sync       --wallet W --rpc URL
 //! mazze-shielded-wallet balance    --wallet W
 //! mazze-shielded-wallet shield-in  --wallet W --rpc URL --amount A --funder-key HEX
-//! mazze-shielded-wallet send       --wallet W --rpc URL --to mzs1.. --amount A --opening-out FILE
-//! mazze-shielded-wallet receive    --wallet W --opening FILE
+//! mazze-shielded-wallet send       --wallet W --rpc URL --to mzs1.. --amount A
+//!                                  (--bundle FILE --sealed-out FILE | --opening-out FILE)
+//! mazze-shielded-wallet receive    --wallet W --rpc URL --opening FILE   (mzn1 or mzx1)
 //! mazze-shielded-wallet unshield   --wallet W --rpc URL --to 0xADDR [--espace] --amount A
 //! mazze-shielded-wallet claim      --wallet W --rpc URL
 //! mazze-shielded-wallet restore    --wallet W --rpc URL --seed HEX
@@ -30,6 +34,7 @@
 //! the seed alone. Notes received from others are recoverable only once
 //! claimed into a self-note, so `claim` should run after every receipt.
 
+mod delivery;
 mod rpc;
 mod store;
 
@@ -114,9 +119,18 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         "address" => {
             let w = Wallet::load(path)?;
-            let node = Node::connect(a.get("rpc")?)?;
-            let chain = chain_id(&node)?;
-            println!("{}", address(&w, chain));
+            let sponge = Sponge::new(chain_id(&Node::connect(a.get("rpc")?)?)?);
+            let keys = WalletKeys::from_seed(&sponge, w.seed);
+            println!("{}", delivery::address(&keys, &sponge, 0).0.encode());
+            Ok(())
+        }
+        "export-bundle" => {
+            let w = Wallet::load(path)?;
+            let sponge = Sponge::new(chain_id(&Node::connect(a.get("rpc")?)?)?);
+            let keys = WalletKeys::from_seed(&sponge, w.seed);
+            let (_, bundle) = delivery::address(&keys, &sponge, 0);
+            std::fs::write(a.get("out")?, &bundle.0).map_err(|e| e.to_string())?;
+            println!("bundle ({} bytes) written to {}", bundle.0.len(), a.get("out")?);
             Ok(())
         }
         "balance" => {
@@ -128,13 +142,26 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         "receive" => {
             let mut w = Wallet::load(path)?;
-            let opening: StoredNote = serde_json::from_str(
-                &std::fs::read_to_string(a.get("opening")?).map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| e.to_string())?;
-            w.notes.push(opening);
+            let sponge = Sponge::new(chain_id(&Node::connect(a.get("rpc")?)?)?);
+            let keys = WalletKeys::from_seed(&sponge, w.seed);
+            let text = std::fs::read_to_string(a.get("opening")?).map_err(|e| e.to_string())?;
+            let opening = if text.trim_start().starts_with("mzx1") {
+                let (addr, _) = delivery::address(&keys, &sponge, 0);
+                delivery::open(&w.seed, 0, &addr.bundle_hash, &text)
+                    .ok_or("the sealed opening is not for this wallet (or was tampered with)")?
+            } else {
+                delivery::Opening::from_plain(&text).ok_or("not an mzn1 or mzx1 opening")?
+            };
+            let note = Note {
+                d: opening.d,
+                owner: keys.spend.owner(&sponge, &opening.d),
+                value: opening.value,
+                psi: opening.psi,
+                y: opening.y,
+            };
+            w.notes.push(StoredNote::from_note(&note, &sponge));
             w.save(path)?;
-            println!("imported; run sync to find it on chain");
+            println!("received {}; run sync, then claim it", opening.value);
             Ok(())
         }
         "sync" => {
@@ -170,32 +197,7 @@ fn chain_id(node: &Node) -> Result<u32, String> {
     Ok(as_u64(&node.call("shielded_getStatus", vec![])?["chainId"])? as u32)
 }
 
-/// `mzs1` + hex(d ‖ owner), the elements as 4-byte little-endian words.
-fn address(w: &Wallet, chain: u32) -> String {
-    let sponge = Sponge::new(chain);
-    let keys = WalletKeys::from_seed(&sponge, w.seed);
-    let d = keys.diversifier(0);
-    let owner = keys.spend.owner(&sponge, &d);
-    let mut bytes = Vec::new();
-    for x in d.iter().chain(owner.iter()) {
-        bytes.extend_from_slice(&x.as_canonical_u32().to_le_bytes());
-    }
-    format!("mzs1{}", hex::encode(bytes))
-}
 
-fn parse_address(s: &str) -> Result<([F; 3], Digest), String> {
-    let bytes = hex::decode(s.strip_prefix("mzs1").ok_or("not an mzs1 address")?)
-        .map_err(|e| e.to_string())?;
-    if bytes.len() != 4 * (3 + DIGEST) {
-        return Err("bad address length".into());
-    }
-    let elems: Vec<F> = bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-        .map(|v| if v < F::ORDER_U32 { Ok(F::new(v)) } else { Err("non-canonical address") })
-        .collect::<Result<_, _>>()?;
-    Ok((std::array::from_fn(|i| elems[i]), std::array::from_fn(|i| elems[3 + i])))
-}
 
 /// A note with fresh commitment and nullifier randomness.
 fn new_note(d: [F; 3], owner: Digest, value: u64) -> Note {
@@ -391,11 +393,15 @@ fn shield_in(path: &str, a: &Args) -> Result<(), String> {
     .ok_or("--funder-key must be a 32-byte secret")?;
     let mut data = keccak_hash::keccak(b"shieldIn(bytes32)").0[..4].to_vec();
     data.extend_from_slice(body.hash().as_bytes());
-    let receipt = send_native(&ctx.node, &secret, Address::from(SHIELDED_BRIDGE_ADDRESS), amount, data)?;
-    if receipt["outcomeStatus"] != json!("0x0") {
-        return Err(format!("the deposit failed: {receipt}"));
+    send_native(&ctx.node, &secret, Address::from(SHIELDED_BRIDGE_ADDRESS), amount, data)?;
+    // The bridge's credit is the authority, not the receipt: in a DAG the
+    // same transaction can be packed twice, and the receipt returned may be
+    // the skipped duplicate's.
+    let credit = deposit_credit(&ctx.node, body.hash().as_bytes())?;
+    if credit != amount {
+        return Err(format!("the bridge holds a credit of {credit} for this body, expected {amount}"));
     }
-    println!("deposit executed");
+    println!("deposit credited: {credit}");
     submit(&ctx, &body, &proof)?;
     w.notes.push(stored);
     w.next_self += 1;
@@ -406,7 +412,8 @@ fn send(path: &str, a: &Args) -> Result<(), String> {
     let mut w = Wallet::load(path)?;
     let ctx = context(&mut w, a)?;
     let amount = a.amount()?;
-    let (d, owner) = parse_address(a.get("to")?)?;
+    let to = delivery::Address::decode(a.get("to")?).ok_or("--to is not an mzs1 address")?;
+    let (d, owner) = (to.d, to.owner);
     let inputs = select_inputs(&w, amount + ctx.fee)?;
     let total: u64 = inputs.iter().map(|&i| w.notes[i].value).sum();
     let t = tree(&w);
@@ -425,10 +432,16 @@ fn send(path: &str, a: &Args) -> Result<(), String> {
     };
     let (body, proof) = prove_and_submit(&ctx, witness, None, recovery)?;
     submit(&ctx, &body, &proof)?;
-    let opening = StoredNote::from_note(&theirs, &ctx.sponge);
-    std::fs::write(a.get("opening-out")?, serde_json::to_string_pretty(&opening).unwrap())
-        .map_err(|e| e.to_string())?;
-    println!("recipient's note opening written to {}", a.get("opening-out")?);
+    let opening = delivery::Opening { d: theirs.d, value: theirs.value, psi: theirs.psi, y: theirs.y };
+    if let Ok(bundle_file) = a.get("bundle") {
+        let bundle = delivery::Bundle(std::fs::read(bundle_file).map_err(|e| e.to_string())?);
+        let sealed = delivery::seal(&to, &bundle, &opening)?;
+        std::fs::write(a.get("sealed-out")?, &sealed).map_err(|e| e.to_string())?;
+        println!("sealed opening written to {}", a.get("sealed-out")?);
+    } else {
+        std::fs::write(a.get("opening-out")?, opening.to_plain()).map_err(|e| e.to_string())?;
+        println!("plain opening written to {} (use only over a private channel)", a.get("opening-out")?);
+    }
     w.notes.push(stored);
     w.next_self += 1;
     w.save(path)
@@ -570,16 +583,38 @@ fn restore(path: &str, a: &Args) -> Result<(), String> {
 
 // ---- the native deposit ------------------------------------------------------
 
+fn native_network(node: &Node) -> Result<mazze_addr::Network, String> {
+    Ok(match as_u64(&node.call("mazze_getStatus", vec![])?["networkId"])? {
+        1 => mazze_addr::Network::Test,
+        1990 => mazze_addr::Network::Main,
+        n => mazze_addr::Network::Id(n),
+    })
+}
+
+/// The shield-in credit the bridge holds for `body_hash` (`deposit(bytes32)`).
+fn deposit_credit(node: &Node, body_hash: &[u8]) -> Result<u64, String> {
+    let bridge = mazze_addr::mazze_addr_encode(
+        &SHIELDED_BRIDGE_ADDRESS,
+        native_network(node)?,
+        mazze_addr::EncodingOptions::Simple,
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    let mut data = keccak_hash::keccak(b"deposit(bytes32)").0[..4].to_vec();
+    data.extend_from_slice(body_hash);
+    let out = node.call("mazze_call", vec![json!({"to": bridge, "data": hex0x(&data)}), json!("latest_state")])?;
+    let bytes = unhex(&out)?;
+    if bytes.len() != 32 || bytes[..24].iter().any(|b| *b != 0) {
+        return Err(format!("unexpected deposit() result {out}"));
+    }
+    Ok(u64::from_be_bytes(bytes[24..].try_into().unwrap()))
+}
+
 fn send_native(
     node: &Node, secret: &mazzekey::Secret, to: Address, value: u64, data: Vec<u8>,
 ) -> Result<Value, String> {
     let status = node.call("mazze_getStatus", vec![])?;
     let chain_id = as_u64(&status["chainId"])? as u32;
-    let network = match as_u64(&status["networkId"])? {
-        1 => mazze_addr::Network::Test,
-        1990 => mazze_addr::Network::Main,
-        n => mazze_addr::Network::Id(n),
-    };
+    let network = native_network(node)?;
     let epoch = as_u64(&node.call("mazze_epochNumber", vec![json!("latest_state")])?)?;
     let gas_price = U256::from(as_u64(&node.call("mazze_gasPrice", vec![])?)?);
     let build = |nonce: U256| -> primitives::SignedTransaction {

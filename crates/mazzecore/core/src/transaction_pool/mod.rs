@@ -265,6 +265,11 @@ impl TransactionPool {
         Ok(hash)
     }
 
+    /// The latest executed state the pool checks against.
+    pub fn best_executed_state_view(&self) -> Arc<State> {
+        self.best_executed_state.lock().clone()
+    }
+
     /// The shielded section and witness for a block at `height`: empty
     /// unless `height` is a shielded slot. Transactions spent or anchored
     /// too long ago by now are dropped from the pool.

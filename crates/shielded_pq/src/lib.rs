@@ -15,4 +15,6 @@ pub mod ps1;
 pub mod testkit;
 pub mod tree;
 pub mod verify;
+#[cfg(feature = "prover")]
+pub mod wallet;
 pub mod wire;

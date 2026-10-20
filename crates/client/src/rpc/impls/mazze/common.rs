@@ -172,6 +172,12 @@ impl RpcImpl {
         }
     }
 
+    pub fn shared_consensus(&self) -> SharedConsensusGraph {
+        self.consensus.clone()
+    }
+
+    pub fn shared_tx_pool(&self) -> SharedTransactionPool { self.tx_pool.clone() }
+
     fn consensus_graph(&self) -> &ConsensusGraph {
         self.consensus
             .as_any()

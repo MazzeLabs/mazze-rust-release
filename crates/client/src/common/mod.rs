@@ -12,7 +12,6 @@ use std::{
 
 use crate::rpc::{HttpServer, TcpServer, WsServer as WSServer};
 use parking_lot::{Condvar, Mutex};
-use rlp::Rlp;
 use threadpool::ThreadPool;
 
 use blockgen::BlockGenerator;

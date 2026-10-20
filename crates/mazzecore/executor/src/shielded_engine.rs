@@ -252,6 +252,11 @@ pub fn tree_state(state: &State) -> DbResult<(Digest, u64)> {
     Ok((frontier.root(), frontier.leaves))
 }
 
+/// The credit currently recorded for a shield-in body.
+pub fn deposit_credit(state: &State, body_hash: &[u8]) -> DbResult<U256> {
+    get(state, &credit_key(body_hash))
+}
+
 /// The bridge's half of a shield-in: the depositor's `amount` has already
 /// moved into the backing account; this records the credit the shielded
 /// body `body_hash` consumes when its slot executes. A second deposit for

@@ -277,8 +277,10 @@ impl Account {
         }
     }
 
+    /// The three-field format of eSpace accounts, also used by
+    /// shielded-space accounts: neither has collateral, admin or sponsors.
     pub fn to_evm_account(&self) -> EthereumAccount {
-        assert_eq!(self.address_local_info.space, Space::Ethereum);
+        assert_ne!(self.address_local_info.space, Space::Native);
         assert!(self.collateral_for_storage.is_zero());
         assert!(self.admin.is_zero());
         assert_eq!(self.sponsor_info, Default::default());
@@ -286,6 +288,26 @@ impl Account {
             balance: self.balance,
             nonce: self.nonce,
             code_hash: self.code_hash,
+        }
+    }
+
+    /// Decodes an account whose space is known from its key. A
+    /// shielded-space account uses the three-field format.
+    pub fn new_from_rlp_with_space(
+        address: AddressWithSpace, rlp: &Rlp,
+    ) -> Result<Self, AccountError> {
+        match address.space {
+            Space::Shielded => {
+                let a = EthereumAccount::decode(rlp)?;
+                Ok(Self {
+                    address_local_info: address,
+                    balance: a.balance,
+                    nonce: a.nonce,
+                    code_hash: a.code_hash,
+                    ..Self::new_empty(&address)
+                })
+            }
+            _ => Self::new_from_rlp(address.address, rlp),
         }
     }
 
@@ -315,7 +337,7 @@ impl Account {
 
 impl Encodable for Account {
     fn rlp_append(&self, stream: &mut RlpStream) {
-        if self.address_local_info.space == Space::Ethereum {
+        if self.address_local_info.space != Space::Native {
             stream.append_internal(&self.to_evm_account());
             return;
         }
@@ -426,6 +448,16 @@ fn test_random_account(
         )
         .unwrap()
     );
+}
+
+#[test]
+fn test_shielded_space_account_round_trips() {
+    use mazze_types::AddressSpaceUtil;
+    let address = Address::repeat_byte(0x09).with_shielded_space();
+    let account = Account::new_empty_with_balance(&address, &5.into(), &0.into());
+    let decoded = Account::new_from_rlp_with_space(address, &Rlp::new(&account.rlp_bytes())).unwrap();
+    assert_eq!(decoded, account);
+    assert_eq!(decoded.address_local_info.space, Space::Shielded);
 }
 
 #[test]

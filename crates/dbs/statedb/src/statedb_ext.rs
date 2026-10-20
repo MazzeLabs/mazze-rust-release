@@ -87,8 +87,8 @@ impl StateDbExt for StateDbGeneric {
                 .with_space(address.space),
         ) {
             Ok(None) => Ok(None),
-            Ok(Some(raw)) => Ok(Some(Account::new_from_rlp(
-                address.address,
+            Ok(Some(raw)) => Ok(Some(Account::new_from_rlp_with_space(
+                *address,
                 &Rlp::new(&raw),
             )?)),
             Err(e) => bail!(e),

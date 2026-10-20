@@ -393,6 +393,21 @@ fn setup_rpc_apis(
                     throttling_section,
                 );
             }
+            Api::Shielded => {
+                use crate::rpc::traits::shielded::ShieldedServer;
+                let shielded = crate::rpc::impls::shielded::ShieldedHandler::new(
+                    common.shared_consensus(),
+                    common.shared_tx_pool(),
+                )
+                .into_rpc();
+                extend_with_interceptor(
+                    &mut handler,
+                    &rpc.config,
+                    shielded,
+                    throttling_conf,
+                    throttling_section,
+                );
+            }
             Api::TxPool => {
                 let txpool =
                     TransactionPoolHandler::new(common.clone()).into_rpc();
@@ -541,6 +556,9 @@ fn setup_rpc_apis_light(
             }
             Api::TxPool => {
                 warn!("Light nodes do not support txpool RPC");
+            }
+            Api::Shielded => {
+                warn!("Light nodes do not support shielded RPC");
             }
         }
     }

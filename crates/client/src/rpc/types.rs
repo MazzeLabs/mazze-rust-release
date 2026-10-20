@@ -17,6 +17,7 @@ mod log;
 pub mod mazze;
 mod provenance;
 pub mod pubsub;
+pub mod shielded;
 mod receipt;
 mod reward_info;
 mod sponsor_info;

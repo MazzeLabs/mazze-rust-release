@@ -5,9 +5,9 @@
 
 use std::cell::Cell;
 
-use p3_field::{PrimeCharacteristicRing, PrimeField32};
+use p3_field::PrimeCharacteristicRing;
 use primitives::shielded::{
-    proof_hash, RecoverySlot, ShieldedDest, ShieldedDigest, ShieldedTxBody,
+    RecoverySlot, ShieldedDest, ShieldedTxBody,
 };
 use rand::{rngs::StdRng, SeedableRng};
 
@@ -16,9 +16,8 @@ use crate::{
     field::{Digest, Sponge, Xof, DIGEST, F},
     keys::SpendKeys,
     note::Note,
-    ps1::{self, ProverRandomness},
+    ps1::ProverRandomness,
     tree::{Tree, DEPTH},
-    wire,
 };
 
 thread_local! {
@@ -82,46 +81,19 @@ pub fn witness(chain_id: u32, in_values: [Option<u64>; 2], outs: [u64; 2], v_in:
 }
 
 
-fn to_digest(xs: &[F]) -> ShieldedDigest {
-    ShieldedDigest::from_elements(std::array::from_fn(|i| xs[i].as_canonical_u32()))
-        .expect("field elements are canonical")
-}
-
-/// What a wallet does: fix the body, bind it through the sighash, prove,
-/// then commit the body to the proof. Returns the body and the proof bytes.
+/// What a wallet does, with deterministic randomness for tests.
 pub fn prove_transaction(
     chain_id: u32, w: &mut Tx2Witness, dest: Option<ShieldedDest>, seed: u64,
 ) -> (ShieldedTxBody, Vec<u8>) {
-    let (_, pv) = build_trace(w, chain_id, HEIGHT, None);
-    let at = |o: usize| to_digest(&pv[o..o + DIGEST]);
-    let mut body = ShieldedTxBody {
-        pool_version: 1,
-        proof_system_id: ps1::PROOF_SYSTEM_ID,
-        anchor: at(pvi::ANCHOR),
-        nf: [at(pvi::NF[0]), at(pvi::NF[1])],
-        cm_out: [at(pvi::CM[0]), at(pvi::CM[1])],
-        recovery: RecoverySlot { tag: [1; 32], slot: [2; 64], mac: [3; 16] },
-        v_public_in: w.v_in,
-        v_public_out: w.v_out,
-        dest,
-        fee: w.fee,
-        proof_hash: Default::default(),
-    };
-    body.check_structure().expect("a well-formed test transaction");
-    w.sighash = body.sighash(chain_id);
-    let (trace, pv) = build_trace(w, chain_id, HEIGHT, None);
-    let air = Tx2Air::new(chain_id);
-    let proof = ps1::prove(
-        &air,
+    let mut rng = StdRng::seed_from_u64(seed);
+    crate::wallet::build_transaction(
         chain_id,
-        trace,
-        &pv,
-        ProverRandomness::from_csprng(&mut StdRng::seed_from_u64(seed)),
+        w,
+        dest,
+        RecoverySlot { tag: [1; 32], slot: [2; 64], mac: [3; 16] },
+        || ProverRandomness::from_csprng(&mut rng),
     )
-    .expect("an honest witness proves");
-    let bytes = wire::encode(&proof);
-    body.proof_hash = proof_hash(&bytes);
-    (body, bytes)
+    .expect("an honest witness proves")
 }
 
 /// A balanced private payment: one real input of `value`, change and fee.

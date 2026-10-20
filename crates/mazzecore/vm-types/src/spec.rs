@@ -135,6 +135,9 @@ pub struct Spec {
     /// CIP-142: Transient Storage Opcodes
     /// CIP-143: MCOPY (0x5e) Opcode for Efficient Memory Copy
     pub cancun_opcodes: bool,
+    /// The shielded lane is active at this height: the shield-in bridge
+    /// accepts deposits.
+    pub shielded_active: bool,
 }
 
 /// Wasm cost table
@@ -262,6 +265,7 @@ impl Spec {
             wasm: None,
             evm_gas_ratio: 2,
             cancun_opcodes: true,
+            shielded_active: false,
         }
     }
 

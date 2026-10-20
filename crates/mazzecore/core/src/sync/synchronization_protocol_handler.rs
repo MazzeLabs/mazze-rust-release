@@ -1859,7 +1859,9 @@ impl SynchronizationProtocolHandler {
         //     itself be the one wedged half of the split we are about to
         //     cause; with two or more peers we are meaningfully connected
         //     to the pack.
-        {
+        //     Dev mode is a single node by design: there is no network to
+        //     fork from, so the guard does not apply.
+        if !self.protocol_config.dev_mode {
             let peer_count = self.syn.peers.read().len();
             if peer_count < 2 {
                 warn!(

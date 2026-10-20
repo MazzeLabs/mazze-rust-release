@@ -143,8 +143,10 @@ impl Default for CommonParams {
 }
 
 impl CommonParams {
-    pub fn spec(&self, number: BlockNumber, _height: BlockHeight) -> Spec {
+    pub fn spec(&self, number: BlockNumber, height: BlockHeight) -> Spec {
         let mut spec = Spec::genesis_spec();
+
+        spec.shielded_active = height >= self.shielded.activation_height;
 
         spec.cancun_opcodes = number >= self.transition_numbers.cancun_opcodes;
         if spec.cancun_opcodes {

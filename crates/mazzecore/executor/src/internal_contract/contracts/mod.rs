@@ -6,6 +6,7 @@ mod admin;
 mod context;
 pub(super) mod cross_space;
 mod future;
+mod shielded_bridge;
 mod shielded_pool;
 mod sponsor;
 pub(super) mod system_storage;
@@ -54,7 +55,7 @@ pub fn all_internal_contracts() -> Vec<Box<dyn super::InternalContractTrait>> {
         Box::new(future::Reserved2::instance()),
         Box::new(future::Reserved3::instance()),
         Box::new(shielded_pool::ShieldedPool::instance()),
-        Box::new(future::Reserved9::instance()),
+        Box::new(shielded_bridge::ShieldedBridge::instance()),
         Box::new(future::Reserved11::instance()),
     ]
 }

@@ -19,6 +19,7 @@ members = [
     "crates/secret_store",
     "crates/transactiongen",
     "bins/mazze_store",
+    "bins/mazze-shielded-wallet",
     "bins/mazze_key",
     "bins/mazze",
     "crates/mazzecore/core",

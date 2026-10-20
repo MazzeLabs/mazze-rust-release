@@ -1640,6 +1640,7 @@ dependencies = [
  "mazze-internal-common",
  "mazze-parameters",
  "mazze-rpc-error",
+ "mazze-shielded-pq",
  "mazze-statedb",
  "mazze-storage",
  "mazze-types",
@@ -4651,6 +4652,27 @@ dependencies = [
  "rlp 0.4.6",
  "serde",
  "tiny-keccak 2.0.2",
+]
+
+[[package]]
+name = "mazze-shielded-wallet"
+version = "0.1.0"
+dependencies = [
+ "hex 0.4.3",
+ "jsonrpsee",
+ "keccak-hash",
+ "mazze-addr",
+ "mazze-shielded-pq",
+ "mazze-types",
+ "mazzekey",
+ "p3-field",
+ "primitives",
+ "rand 0.10.3",
+ "rand 0.8.5",
+ "rlp 0.4.6",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

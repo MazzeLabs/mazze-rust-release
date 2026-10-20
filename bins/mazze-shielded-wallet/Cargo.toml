@@ -1,0 +1,27 @@
+[package]
+name = "mazze-shielded-wallet"
+version = "0.1.0"
+license = "GPL-3.0"
+description = "Wallet for the post-quantum shielded space: keys, scanning, proving, submission"
+edition = "2021"
+
+[[bin]]
+name = "mazze-shielded-wallet"
+path = "src/main.rs"
+
+[dependencies]
+mazze-shielded-pq = { path = "../../crates/shielded_pq", features = ["prover"] }
+primitives = { path = "../../crates/primitives" }
+mazze-types = { path = "../../crates/mazze_types" }
+mazze-addr = { path = "../../crates/mazze_addr" }
+mazzekey = { path = "../../crates/mazze_key" }
+keccak-hash = "0.5"
+rlp = "0.4.0"
+jsonrpsee = { version = "0.26.1", features = ["http-client"] }
+tokio = { version = "1.6", features = ["rt", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+rand = "0.8"
+rand10 = { package = "rand", version = "0.10.1", default-features = false, features = ["std_rng"] }
+p3-field = "=0.8.0"

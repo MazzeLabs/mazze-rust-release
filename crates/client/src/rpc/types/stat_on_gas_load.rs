@@ -1,7 +1,7 @@
 use mazze_types::{SpaceMap, U256, U64};
 use serde_derive::Serialize;
 
-#[derive(Default, Serialize)]
+#[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatOnGasLoad {
     pub time_elapsed: U64,

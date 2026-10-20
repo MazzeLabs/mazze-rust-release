@@ -3,7 +3,7 @@
 // See http://www.gnu.org/licenses/
 
 use super::RpcAddress;
-use jsonrpc_core::Error as RpcError;
+use mazze_rpc_error::Error as RpcError;
 use mazze_addr::Network;
 use mazze_types::{Space, H160, H256, U256, U64};
 use mazzecore::{
@@ -27,7 +27,7 @@ use crate::rpc::types::{
     transaction::PackedOrExecuted, Bytes, Receipt, Transaction,
 };
 
-#[derive(PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum BlockTransactions {
     /// Only hashes
     Hashes(Vec<H256>),
@@ -83,7 +83,7 @@ impl<'a> Deserialize<'a> for BlockTransactions {
     }
 }
 
-#[derive(PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Block {
     /// Hash of the block

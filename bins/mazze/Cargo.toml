@@ -26,10 +26,9 @@ rpassword = "4.0.1"
 io = { path = "../../crates/util/io" }
 runtime = { path = "../../crates/util/runtime" }
 ctrlc = { git = "https://github.com/paritytech/rust-ctrlc.git", rev="b523017108bb2d571a7a69bd97bc406e63bc7a9d" }
-jsonrpc-core = "15.1.0"
-jsonrpc-tcp-server = "15.1.0"
-jsonrpc-http-server = "15.1.0"
-jsonrpc-core-client = { version = "15.1.0", features = ["http"] }
+jsonrpsee = { version = "0.26.1", features = ["http-client"] }
+mazze-rpc-error = { path = "../../crates/util/rpc-error" }
+tokio = { version = "1.6", features = ["rt"] }
 error-chain = { version = "0.12.4" }
 log = "0.4"
 slab = "0.4"
@@ -47,7 +46,6 @@ rand = "0.8.3"
 client = { path = "../../crates/client" }
 mazze-types = { path = "../../crates/mazze_types" }
 threadpool = "1.7"
-futures = "0.1.29"
 docopt = "1.0"
 mazzekey = { path = "../../crates/mazze_key" }
 parity-wordlist = "1.3.0"

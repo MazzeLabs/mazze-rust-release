@@ -5,7 +5,7 @@
 use mazze_types::{H256, U256, U64};
 use mazzecore::state_exposer::SyncGraphStates as PrimitiveSyncGraphStates;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncGraphBlockState {
     pub block_hash: H256,
@@ -16,7 +16,7 @@ pub struct SyncGraphBlockState {
     pub adaptive: bool,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 /// This struct maintains some inner state of synchronization graph.
 pub struct SyncGraphStates {

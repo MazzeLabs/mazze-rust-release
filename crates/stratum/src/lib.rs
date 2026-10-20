@@ -19,9 +19,23 @@
 // along with Parity Ethereum.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Stratum protocol implementation for Mazze clients
+//!
+//! The wire protocol is the one of the previous `jsonrpc-tcp-server` based
+//! implementation, served by a small tokio TCP server:
+//!
+//! * newline-delimited JSON-RPC requests, JSON-RPC 1.0 (no `"jsonrpc"`
+//!   member, as sent by `mazze-miner`) or 2.0, single or batched;
+//! * every request line is answered by one line (an empty line for
+//!   notifications); responses mirror the request version;
+//! * `mining.subscribe [worker_id, secret]` registers the connection as a
+//!   worker (`true`), or answers `false` when a secret is configured and
+//!   `keccak(secret)` does not match it;
+//! * `mining.submit [worker, job_id, nonce, pow_hash, ..]` hands the string
+//!   parameters to the job dispatcher and answers `[true]`,
+//!   `[false, "reason"]` or `[false]`;
+//! * jobs are pushed to every registered worker as
+//!   `{ "id": N, "method": "mining.notify", "params": <payload> }` lines.
 
-extern crate jsonrpc_core;
-extern crate jsonrpc_tcp_server;
 extern crate keccak_hash as hash;
 extern crate mazze_types;
 extern crate parking_lot;
@@ -29,40 +43,47 @@ extern crate parking_lot;
 #[macro_use]
 extern crate log;
 
-#[cfg(test)]
-extern crate env_logger;
-#[cfg(test)]
-extern crate tokio;
-#[cfg(test)]
-extern crate tokio_io;
-
+mod jsonrpc;
 mod traits;
 
-pub use traits::{Error, JobDispatcher, PushWorkHandler, ServiceConfiguration};
+pub use traits::{
+    Error, JobDispatcher, PushMessageError, PushWorkHandler,
+    ServiceConfiguration,
+};
 
-use jsonrpc_core::{
-    to_value, Compatibility, IoDelegate, MetaIoHandler, Metadata, Params, Value,
-};
-use jsonrpc_tcp_server::{
-    Dispatcher, MetaExtractor, PushMessageError, RequestContext,
-    Server as JsonRpcServer, ServerBuilder as JsonRpcServerBuilder,
-};
+use futures::StreamExt;
+use jsonrpc::{Handler, Params};
 use lazy_static::lazy_static;
+use mazze_rpc_error::{to_value, Error as RpcError, Value};
 use metrics::{Counter, CounterUsize};
 use std::sync::Arc;
 
 use crate::traits::Error::InvalidSolution;
 use hash::keccak;
 use mazze_types::H256;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::{
     collections::{HashMap, HashSet},
+    io,
     net::SocketAddr,
 };
+use tokio::{
+    io::AsyncWriteExt,
+    net::{TcpListener, TcpStream},
+    sync::{mpsc, watch},
+};
+use tokio_util::codec::{FramedRead, LinesCodec};
 
-type RpcResult = Result<jsonrpc_core::Value, jsonrpc_core::Error>;
+type RpcResult = Result<Value, RpcError>;
 
 const NOTIFY_COUNTER_INITIAL: u32 = 16;
+
+/// Longest accepted request line. The previous server buffered lines
+/// without a bound; `u32::MAX` keeps it at least as permissive.
+const MAX_REQUEST_BYTES: usize = u32::MAX as usize;
+
+/// Pushed messages buffered per worker (same as the previous push channel).
+const PUSH_BUFFER_CAPACITY: usize = 65536;
 
 lazy_static! {
     /// G-MN-1 — Per-outcome counters for `mining.submit` from stratum
@@ -87,13 +108,8 @@ lazy_static! {
         CounterUsize::register_with_group("stratum", "shares_malformed");
 }
 
-/// Container which owns rpc server and stratum implementation
+/// Container which owns the tcp server and stratum implementation
 pub struct Stratum {
-    /// RPC server
-    ///
-    /// It is an `Option` so it can be easily closed and released during `drop`
-    /// phase
-    rpc_server: Option<JsonRpcServer>,
     /// stratum protocol implementation
     ///
     /// It is owned by a container and rpc server
@@ -102,6 +118,13 @@ pub struct Stratum {
     ///
     /// Used to push messages to peers
     tcp_dispatcher: Dispatcher,
+    /// Address the server listens on.
+    local_addr: SocketAddr,
+    /// Stops the accept loop and the connections.
+    stop: watch::Sender<bool>,
+    /// Runtime of the server tasks. It is an `Option` so it can be shut
+    /// down during `drop`.
+    runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl Stratum {
@@ -116,32 +139,40 @@ impl Stratum {
             notify_counter: RwLock::new(NOTIFY_COUNTER_INITIAL),
         });
 
-        let mut delegate = IoDelegate::<StratumImpl, SocketMetadata>::new(
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("stratum")
+            .enable_all()
+            .build()?;
+
+        let listener = std::net::TcpListener::bind(addr)?;
+        listener.set_nonblocking(true)?;
+        let local_addr = listener.local_addr()?;
+        let listener = {
+            let _guard = runtime.enter();
+            TcpListener::from_std(listener)?
+        };
+
+        let tcp_dispatcher = Dispatcher::default();
+        let (stop, stop_rx) = watch::channel(false);
+        runtime.spawn(accept_loop(
+            listener,
             implementation.clone(),
-        );
-        delegate
-            .add_method_with_meta("mining.subscribe", StratumImpl::subscribe);
-        delegate.add_method_with_meta("mining.submit", StratumImpl::submit);
-        let mut handler = MetaIoHandler::<SocketMetadata>::with_compatibility(
-            Compatibility::Both,
-        );
-        handler.extend_with(delegate);
+            tcp_dispatcher.clone(),
+            stop_rx,
+        ));
 
-        let server_builder = JsonRpcServerBuilder::new(handler);
-        let tcp_dispatcher = server_builder.dispatcher();
-        let server_builder = server_builder.session_meta_extractor(
-            PeerMetaExtractor::new(tcp_dispatcher.clone()),
-        );
-        let server = server_builder.start(addr)?;
-
-        let stratum = Arc::new(Stratum {
-            rpc_server: Some(server),
+        Ok(Arc::new(Stratum {
             implementation,
             tcp_dispatcher,
-        });
-
-        Ok(stratum)
+            local_addr,
+            stop,
+            runtime: Some(runtime),
+        }))
     }
+
+    /// The address the stratum server listens on.
+    pub fn local_addr(&self) -> SocketAddr { self.local_addr }
 }
 
 impl PushWorkHandler for Stratum {
@@ -155,9 +186,163 @@ impl PushWorkHandler for Stratum {
 
 impl Drop for Stratum {
     fn drop(&mut self) {
-        // shut down rpc server
-        if let Some(server) = self.rpc_server.take() {
-            server.close()
+        // shut down the tcp server
+        let _ = self.stop.send(true);
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
+/// Peer-messages dispatcher: the push channel of every connected peer.
+#[derive(Clone, Default)]
+pub struct Dispatcher {
+    channels: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>,
+}
+
+impl Dispatcher {
+    /// Pushes a message to the given peer.
+    pub fn push_message(
+        &self, peer_addr: &SocketAddr, msg: String,
+    ) -> Result<(), PushMessageError> {
+        let channels = self.channels.lock();
+        match channels.get(peer_addr) {
+            Some(channel) => channel.try_send(msg).map_err(|e| match e {
+                mpsc::error::TrySendError::Closed(_) => {
+                    PushMessageError::NoSuchPeer
+                }
+                mpsc::error::TrySendError::Full(_) => PushMessageError::Send(
+                    "the peer's message queue is full".into(),
+                ),
+            }),
+            None => Err(PushMessageError::NoSuchPeer),
+        }
+    }
+
+    /// Returns `true` if the peer is still connected.
+    pub fn is_connected(&self, socket_addr: &SocketAddr) -> bool {
+        self.channels.lock().contains_key(socket_addr)
+    }
+
+    /// Returns current peer count.
+    pub fn peer_count(&self) -> usize { self.channels.lock().len() }
+}
+
+async fn accept_loop(
+    listener: TcpListener, implementation: Arc<StratumImpl>,
+    dispatcher: Dispatcher, mut stop: watch::Receiver<bool>,
+) {
+    loop {
+        let (socket, peer_addr) = tokio::select! {
+            _ = stop.changed() => return,
+            accepted = listener.accept() => match accepted {
+                Ok(accepted) => accepted,
+                Err(e) => {
+                    warn!(target: "tcp", "Error accepting connection: {}", e);
+                    continue;
+                }
+            },
+        };
+        trace!(target: "tcp", "Accepted incoming connection from {}", &peer_addr);
+        tokio::spawn(serve_connection(
+            socket,
+            peer_addr,
+            implementation.clone(),
+            dispatcher.clone(),
+            stop.clone(),
+        ));
+    }
+}
+
+async fn write_line(
+    write: &mut tokio::net::tcp::OwnedWriteHalf, line: &str,
+) -> io::Result<()> {
+    let mut buf = Vec::with_capacity(line.len() + 1);
+    buf.extend_from_slice(line.as_bytes());
+    buf.push(b'\n');
+    write.write_all(&buf).await
+}
+
+async fn serve_connection(
+    socket: TcpStream, peer_addr: SocketAddr, implementation: Arc<StratumImpl>,
+    dispatcher: Dispatcher, mut stop: watch::Receiver<bool>,
+) {
+    let (push_tx, mut push_rx) = mpsc::channel(PUSH_BUFFER_CAPACITY);
+    dispatcher.channels.lock().insert(peer_addr, push_tx);
+
+    let (read, mut write) = socket.into_split();
+    let mut lines = FramedRead::new(
+        read,
+        LinesCodec::new_with_max_length(MAX_REQUEST_BYTES),
+    );
+    let session = Session {
+        implementation: &implementation,
+        addr: peer_addr,
+    };
+
+    let mut write_ok = true;
+    loop {
+        tokio::select! {
+            // Responses first, then pushed messages (as before).
+            biased;
+            line = lines.next() => match line {
+                Some(Ok(line)) => {
+                    let response = jsonrpc::handle_request(&session, &line);
+                    match &response {
+                        Some(r) => trace!(target: "tcp", "Sent response: {}", r),
+                        None => trace!(target: "tcp", "JSON RPC request produced no response"),
+                    }
+                    if write_line(&mut write, &response.unwrap_or_default())
+                        .await
+                        .is_err()
+                    {
+                        write_ok = false;
+                        break;
+                    }
+                }
+                Some(Err(e)) => {
+                    warn!(target: "tcp", "Error while processing request: {:?}", e);
+                    break;
+                }
+                None => break,
+            },
+            Some(msg) = push_rx.recv() => {
+                if write_line(&mut write, &msg).await.is_err() {
+                    write_ok = false;
+                    break;
+                }
+            }
+            _ = stop.changed() => break,
+        }
+    }
+
+    // The peer stopped sending: deliver the messages already queued.
+    if write_ok {
+        while let Ok(msg) = push_rx.try_recv() {
+            if write_line(&mut write, &msg).await.is_err() {
+                break;
+            }
+        }
+        let _ = write.shutdown().await;
+    }
+    dispatcher.channels.lock().remove(&peer_addr);
+    trace!(target: "tcp", "Peer {}: service finished", peer_addr);
+}
+
+/// The stratum methods as seen from one connection.
+struct Session<'a> {
+    implementation: &'a StratumImpl,
+    addr: SocketAddr,
+}
+
+impl Handler for Session<'_> {
+    fn call(&self, method: &str, params: Params) -> Option<RpcResult> {
+        match method {
+            "mining.subscribe" => {
+                Some(self.implementation.subscribe(params, &self.addr))
+            }
+            "mining.submit" => Some(self.implementation.submit(params)),
+            _ => None,
         }
     }
 }
@@ -175,7 +360,7 @@ struct StratumImpl {
 
 impl StratumImpl {
     /// rpc method `mining.subscribe`
-    fn subscribe(&self, params: Params, meta: SocketMetadata) -> RpcResult {
+    fn subscribe(&self, params: Params, addr: &SocketAddr) -> RpcResult {
         params.parse::<(String, String)>().map(|(worker_id, secret)|{
             if let Some(valid_secret) = self.secret {
                 let hash = keccak(secret);
@@ -184,13 +369,13 @@ impl StratumImpl {
                 }
             }
             debug!(target: "stratum", "New worker #{} registered", worker_id);
-            self.workers.write().insert(meta.addr().clone(), worker_id);
+            self.workers.write().insert(addr.clone(), worker_id);
             to_value(true)
         }).map(|v| v.expect("Only true/false is returned and it's always serializable; qed"))
     }
 
     /// rpc method `mining.submit`
-    fn submit(&self, params: Params, _meta: SocketMetadata) -> RpcResult {
+    fn submit(&self, params: Params) -> RpcResult {
         Ok(Value::Array(match params {
             Params::Array(vals) => {
                 // first two elements are service messages (worker_id & job_id)
@@ -276,67 +461,14 @@ impl StratumImpl {
     }
 }
 
-#[derive(Clone)]
-pub struct SocketMetadata {
-    addr: SocketAddr,
-    // with the new version of jsonrpc-core, SocketMetadata
-    // won't have to implement default, so this field will not
-    // have to be an Option
-    #[allow(dead_code)]
-    tcp_dispatcher: Option<Dispatcher>,
-}
-
-impl Default for SocketMetadata {
-    fn default() -> Self {
-        SocketMetadata {
-            addr: "0.0.0.0:0".parse().unwrap(),
-            tcp_dispatcher: None,
-        }
-    }
-}
-
-impl SocketMetadata {
-    pub fn addr(&self) -> &SocketAddr {
-        &self.addr
-    }
-}
-
-impl Metadata for SocketMetadata {}
-
-pub struct PeerMetaExtractor {
-    tcp_dispatcher: Dispatcher,
-}
-
-impl PeerMetaExtractor {
-    fn new(tcp_dispatcher: Dispatcher) -> Self {
-        PeerMetaExtractor { tcp_dispatcher }
-    }
-}
-
-impl MetaExtractor<SocketMetadata> for PeerMetaExtractor {
-    fn extract(&self, context: &RequestContext) -> SocketMetadata {
-        SocketMetadata {
-            addr: context.peer_addr,
-            tcp_dispatcher: Some(self.tcp_dispatcher.clone()),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::{
-        net::{Shutdown, SocketAddr},
+        io::{BufRead, BufReader, Read, Write},
+        net::{Shutdown, SocketAddr, TcpStream},
         sync::Arc,
         thread, time,
-    };
-
-    use jsonrpc_core::futures::{future, Future};
-    use tokio::{
-        io,
-        net::TcpStream,
-        runtime::Runtime,
-        timer::timeout::{self, Timeout},
     };
 
     pub struct VoidManager;
@@ -348,24 +480,15 @@ mod tests {
     }
 
     fn dummy_request(addr: &SocketAddr, data: &str) -> Vec<u8> {
-        let mut runtime = Runtime::new()
-            .expect("Tokio Runtime should be created with no errors");
-
+        let mut stream =
+            TcpStream::connect(addr).expect("connect should succeed");
         let mut data_vec = data.as_bytes().to_vec();
         data_vec.extend(b"\n");
-
-        let stream = TcpStream::connect(addr)
-            .and_then(move |stream| io::write_all(stream, data_vec))
-            .and_then(|(stream, _)| {
-                stream.shutdown(Shutdown::Write).unwrap();
-                io::read_to_end(stream, Vec::with_capacity(2048))
-            })
-            .and_then(|(_stream, read_buf)| future::ok(read_buf));
-        let result = runtime
-            .block_on(stream)
-            .expect("Runtime should run with no errors");
-
-        result
+        stream.write_all(&data_vec).unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+        let mut read_buf = Vec::with_capacity(2048);
+        stream.read_to_end(&mut read_buf).unwrap();
+        read_buf
     }
 
     #[test]
@@ -455,50 +578,144 @@ mod tests {
 
         let auth_response = "{\"jsonrpc\":\"2.0\",\"result\":true,\"id\":1}\n";
 
-        let mut runtime = Runtime::new()
-            .expect("Tokio Runtime should be created with no errors");
-        let read_buf0 = vec![0u8; auth_response.len()];
-        let read_buf1 = Vec::with_capacity(2048);
-        let stream = TcpStream::connect(&addr)
-            .and_then(move |stream| {
-                io::write_all(stream, auth_request)
-            })
-            .and_then(|(stream, _)| {
-                io::read_exact(stream, read_buf0)
-            })
-            .map_err(|err| panic!("{:?}", err))
-            .and_then(move |(stream, read_buf0)| {
-                assert_eq!(String::from_utf8(read_buf0).unwrap(), auth_response);
-                trace!(target: "stratum", "Received authorization confirmation");
-                Timeout::new(future::ok(stream), ::std::time::Duration::from_millis(100))
-            })
-            .map_err(|err: timeout::Error<()>| panic!("Timeout: {:?}", err))
-            .and_then(move |stream| {
-                trace!(target: "stratum", "Pusing work to peers");
-                stratum.push_work_all(r#"{ "00040008", "100500" }"#.to_owned())
-                    .expect("Pushing work should produce no errors");
-                Timeout::new(future::ok(stream), ::std::time::Duration::from_millis(100))
-            })
-            .map_err(|err: timeout::Error<()>| panic!("Timeout: {:?}", err))
-            .and_then(|stream| {
-                trace!(target: "stratum", "Ready to read work from server");
-                thread::sleep(time::Duration::from_millis(100));
-                stream.shutdown(Shutdown::Write).unwrap();
-                io::read_to_end(stream, read_buf1)
-            })
-            .and_then(|(_, read_buf1)| {
-                trace!(target: "stratum", "Received work from server");
-                future::ok(read_buf1)
-            });
-        let response = String::from_utf8(
-            runtime
-                .block_on(stream)
-                .expect("Runtime should run with no errors"),
-        )
-        .expect("Response should be utf-8");
+        let mut stream = TcpStream::connect(&addr).unwrap();
+        stream.write_all(&auth_request).unwrap();
+        let mut read_buf0 = vec![0u8; auth_response.len()];
+        stream.read_exact(&mut read_buf0).unwrap();
+        assert_eq!(String::from_utf8(read_buf0).unwrap(), auth_response);
+        trace!(target: "stratum", "Received authorization confirmation");
+        thread::sleep(time::Duration::from_millis(100));
+
+        trace!(target: "stratum", "Pusing work to peers");
+        stratum
+            .push_work_all(r#"{ "00040008", "100500" }"#.to_owned())
+            .expect("Pushing work should produce no errors");
+        thread::sleep(time::Duration::from_millis(100));
+
+        trace!(target: "stratum", "Ready to read work from server");
+        thread::sleep(time::Duration::from_millis(100));
+        stream.shutdown(Shutdown::Write).unwrap();
+        let mut read_buf1 = Vec::with_capacity(2048);
+        stream.read_to_end(&mut read_buf1).unwrap();
+        trace!(target: "stratum", "Received work from server");
+        let response =
+            String::from_utf8(read_buf1).expect("Response should be utf-8");
 
         assert_eq!(
             "{ \"id\": 17, \"method\": \"mining.notify\", \"params\": { \"00040008\", \"100500\" } }\n",
             response);
+    }
+
+    /// Records submitted shares; rejects the nonce "0xbad".
+    #[derive(Default)]
+    struct RecordingManager {
+        submitted: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl JobDispatcher for RecordingManager {
+        fn submit(&self, payload: Vec<String>) -> Result<(), Error> {
+            let reject = payload.get(2).map(String::as_str) == Some("0xbad");
+            self.submitted.lock().push(payload);
+            if reject {
+                Err(Error::InvalidSolution("bad nonce".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn read_line(reader: &mut BufReader<TcpStream>) -> String {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        line
+    }
+
+    /// A client speaking the protocol exactly as `mazze-miner` and the
+    /// previous `jsonrpc-tcp-server` based server did: JSON-RPC 1.0
+    /// requests without a `"jsonrpc"` member, newline-delimited, with jobs
+    /// pushed on the same connection.
+    #[test]
+    fn old_protocol_client_works() {
+        let secret = "s3cret";
+        let manager = Arc::new(RecordingManager::default());
+        let stratum = Stratum::start(
+            &"127.0.0.1:0".parse().unwrap(),
+            manager.clone(),
+            Some(keccak(secret)),
+        )
+        .unwrap();
+        let addr = stratum.local_addr();
+
+        // A wrong secret is answered with `false` and does not register.
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .write_all(b"{\"id\":\"w1\",\"method\":\"mining.subscribe\",\"params\":[\"999\",\"wrong\"]}\n")
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        assert_eq!(read_line(&mut reader), "{\"result\":false,\"id\":\"w1\"}\n");
+        assert_eq!(stratum.implementation.workers.read().len(), 0);
+
+        // The right secret registers the worker.
+        stream
+            .write_all(format!("{{\"id\":\"w1\",\"method\":\"mining.subscribe\",\"params\":[\"999\",\"{}\"]}}\n", secret).as_bytes())
+            .unwrap();
+        assert_eq!(read_line(&mut reader), "{\"result\":true,\"id\":\"w1\"}\n");
+        assert_eq!(stratum.implementation.workers.read().len(), 1);
+
+        // Jobs are pushed to the worker.
+        stratum
+            .push_work_all(r#"["0x01", "0x02", "0x03"]"#.to_owned())
+            .unwrap();
+        assert_eq!(
+            read_line(&mut reader),
+            "{ \"id\": 17, \"method\": \"mining.notify\", \"params\": [\"0x01\", \"0x02\", \"0x03\"] }\n"
+        );
+
+        // Shares are submitted as strings; non-string params are dropped.
+        stream
+            .write_all(b"{\"id\":\"7-10\",\"method\":\"mining.submit\",\"params\":[\"worker\",\"10\",\"0x7\",\"0xabc\",5]}\n")
+            .unwrap();
+        assert_eq!(read_line(&mut reader), "{\"result\":[true],\"id\":\"7-10\"}\n");
+        stream
+            .write_all(b"{\"id\":8,\"method\":\"mining.submit\",\"params\":[\"worker\",\"10\",\"0xbad\",\"0xabc\"]}\n")
+            .unwrap();
+        assert_eq!(read_line(&mut reader), "{\"result\":[false,\"bad nonce\"],\"id\":8}\n");
+        stream
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"mining.submit\",\"params\":{\"a\":1}}\n")
+            .unwrap();
+        assert_eq!(read_line(&mut reader), "{\"jsonrpc\":\"2.0\",\"result\":[false],\"id\":9}\n");
+        assert_eq!(
+            *manager.submitted.lock(),
+            vec![
+                vec!["worker".to_string(), "10".into(), "0x7".into(), "0xabc".into()],
+                vec!["worker".to_string(), "10".into(), "0xbad".into(), "0xabc".into()],
+            ]
+        );
+
+        // Errors and notifications keep the old framing.
+        stream.write_all(b"{\"id\":1,\"method\":\"mining.unknown\",\"params\":[]}\n").unwrap();
+        assert_eq!(
+            read_line(&mut reader),
+            "{\"error\":{\"code\":-32601,\"message\":\"Method not found\"},\"id\":1}\n"
+        );
+        stream.write_all(b"{\"id\":2,\"method\":\"mining.subscribe\",\"params\":[]}\n").unwrap();
+        assert_eq!(
+            read_line(&mut reader),
+            "{\"error\":{\"code\":-32602,\"message\":\"Invalid params: invalid length 0, expected a tuple of size 2.\"},\"id\":2}\n"
+        );
+        stream.write_all(b"not json\n").unwrap();
+        assert_eq!(
+            read_line(&mut reader),
+            "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32700,\"message\":\"Parse error\"},\"id\":null}\n"
+        );
+        stream.write_all(b"{\"method\":\"mining.submit\",\"params\":[]}\n").unwrap();
+        assert_eq!(read_line(&mut reader), "\n");
+
+        // A disconnected worker is dropped on the next push.
+        stream.shutdown(Shutdown::Both).unwrap();
+        drop(reader);
+        thread::sleep(time::Duration::from_millis(200));
+        stratum.push_work_all("[]".to_owned()).unwrap();
+        assert_eq!(stratum.implementation.workers.read().len(), 0);
     }
 }

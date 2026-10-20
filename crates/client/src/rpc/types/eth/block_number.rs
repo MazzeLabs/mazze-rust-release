@@ -211,9 +211,9 @@ impl<'a> Visitor<'a> for BlockNumberVisitor {
 }
 
 impl TryFrom<BlockNumber> for EpochNumber {
-    type Error = jsonrpc_core::Error;
+    type Error = mazze_rpc_error::Error;
 
-    fn try_from(x: BlockNumber) -> jsonrpc_core::Result<EpochNumber> {
+    fn try_from(x: BlockNumber) -> mazze_rpc_error::Result<EpochNumber> {
         match x {
             BlockNumber::Num(num) => Ok(EpochNumber::Number(num)),
             BlockNumber::Latest => Ok(EpochNumber::LatestState),

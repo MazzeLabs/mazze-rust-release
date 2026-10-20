@@ -28,7 +28,6 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
 };
-use time;
 
 const IGNORED_FILES: &[&str] = &[
     "thumbs.db",
@@ -431,8 +430,8 @@ impl KeyFileManager for DiskKeyFileManager {
 fn account_filename(account: &SafeAccount) -> String {
     // build file path
     account.filename.clone().unwrap_or_else(|| {
-        let timestamp = time::strftime("%Y-%m-%dT%H-%M-%S", &time::now_utc())
-            .expect("Time-format string is valid.");
+        let timestamp =
+            chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S").to_string();
         format!("UTC--{}Z--{}", timestamp, Uuid::from(account.id))
     })
 }

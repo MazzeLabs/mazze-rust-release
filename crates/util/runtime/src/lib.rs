@@ -14,283 +14,122 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity Ethereum.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Tokio Runtime wrapper.
+//! Tokio runtime wrapper.
+//!
+//! Owns the multi-threaded tokio runtime that drives the RPC servers, the
+//! pub-sub notification loops and the polling filters. Dropping the
+//! [`Runtime`] shuts it down.
 
-pub extern crate futures;
 pub extern crate tokio;
 
-use futures::{future, Future, IntoFuture};
-use std::{
-    fmt,
-    sync::mpsc,
-    thread,
-    time::{Duration, Instant},
-};
-pub use tokio::{
-    runtime::{
-        Builder as TokioRuntimeBuilder, Runtime as TokioRuntime, TaskExecutor,
-    },
-    timer::Delay,
-};
+use std::{fmt, future::Future};
+pub use tokio::runtime::Handle;
 
-/// Runtime for futures.
-///
-/// Runs in a separate thread.
+/// An owned tokio runtime.
 pub struct Runtime {
+    runtime: Option<tokio::runtime::Runtime>,
     executor: Executor,
-    handle: RuntimeHandle,
 }
 
 impl Runtime {
-    fn new(runtime_bldr: &mut TokioRuntimeBuilder) -> Self {
-        let mut runtime = runtime_bldr.build().expect(
-            "Building a Tokio runtime will only fail when mio components \
-             cannot be initialized (catastrophic)",
-        );
-        let (stop, stopped) = futures::oneshot();
-        let (tx, rx) = mpsc::channel();
-        let handle = thread::spawn(move || {
-            tx.send(runtime.executor())
-                .expect("Rx is blocking upper thread.");
-            runtime
-                .block_on(
-                    futures::empty()
-                        .select(stopped)
-                        .map(|_| ())
-                        .map_err(|_| ()),
-                )
-                .expect("Tokio runtime should not have unhandled errors.");
-        });
-        let executor = rx
-            .recv()
-            .expect("tx is transfered to a newly spawned thread.");
-
+    fn new(builder: &mut tokio::runtime::Builder) -> Self {
+        let runtime = builder
+            .enable_all()
+            .thread_name("rpc-runtime")
+            .build()
+            .expect(
+                "Building a Tokio runtime will only fail when mio components \
+                 cannot be initialized (catastrophic)",
+            );
+        let executor = Executor {
+            handle: runtime.handle().clone(),
+        };
         Runtime {
-            executor: Executor {
-                inner: Mode::Tokio(executor),
-            },
-            handle: RuntimeHandle {
-                close: Some(stop),
-                handle: Some(handle),
-            },
+            runtime: Some(runtime),
+            executor,
         }
     }
 
-    /// Spawns a new tokio runtime with a default thread count on a background
-    /// thread and returns a `Runtime` which can be used to spawn tasks via
-    /// its executor.
-    pub fn with_default_thread_count() -> Self {
-        let mut runtime_bldr = TokioRuntimeBuilder::new();
-        Self::new(&mut runtime_bldr)
-    }
-
-    /// Spawns a new tokio runtime with a the specified thread count on a
-    /// background thread and returns a `Runtime` which can be used to spawn
+    /// Spawns a new tokio runtime with a default thread count (one worker
+    /// per CPU core) and returns a `Runtime` which can be used to spawn
     /// tasks via its executor.
+    pub fn with_default_thread_count() -> Self {
+        Self::new(&mut tokio::runtime::Builder::new_multi_thread())
+    }
+
+    /// Spawns a new tokio runtime with the specified worker thread count.
     pub fn with_thread_count(thread_count: usize) -> Self {
-        let mut runtime_bldr = TokioRuntimeBuilder::new();
-        runtime_bldr.core_threads(thread_count);
-
-        Self::new(&mut runtime_bldr)
+        Self::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(thread_count.max(1)),
+        )
     }
 
-    /// Returns this runtime raw executor.
-    ///
-    /// Deprecated: Exists only to connect with current JSONRPC implementation.
-    pub fn raw_executor(&self) -> TaskExecutor {
-        if let Mode::Tokio(ref executor) = self.executor.inner {
-            executor.clone()
-        } else {
-            panic!("Runtime is not initialized in Tokio mode.")
-        }
-    }
+    /// Returns the runtime executor.
+    pub fn executor(&self) -> Executor { self.executor.clone() }
 
-    /// Returns runtime executor.
-    pub fn executor(&self) -> Executor {
-        self.executor.clone()
+    /// Returns a handle to the underlying tokio runtime.
+    pub fn handle(&self) -> &Handle { &self.executor.handle }
+}
+
+impl fmt::Debug for Runtime {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Runtime").finish()
     }
 }
 
-#[derive(Clone)]
-enum Mode {
-    Tokio(TaskExecutor),
-    Sync,
-    ThreadPerFuture,
-}
-
-impl fmt::Debug for Mode {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        use self::Mode::*;
-
-        match *self {
-            Tokio(_) => write!(fmt, "tokio"),
-            Sync => write!(fmt, "synchronous"),
-            ThreadPerFuture => write!(fmt, "thread per future"),
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        // `shutdown_background` does not block, so the runtime can also be
+        // dropped from within an asynchronous context.
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
         }
     }
 }
 
-/// Returns a future which runs `f` until `duration` has elapsed, at which
-/// time `on_timeout` is run and the future resolves.
-fn timeout<F, R, T>(
-    f: F, duration: Duration, on_timeout: T,
-) -> impl Future<Item = (), Error = ()> + Send + 'static
-where
-    T: FnOnce() -> () + Send + 'static,
-    F: FnOnce() -> R + Send + 'static,
-    R: IntoFuture<Item = (), Error = ()> + Send + 'static,
-    R::Future: Send + 'static,
-{
-    let future = future::lazy(f);
-    let timeout = Delay::new(Instant::now() + duration).then(move |_| {
-        on_timeout();
-        Ok(())
-    });
-    future.select(timeout).then(|_| Ok(()))
-}
-
+/// A cloneable handle used to spawn tasks on a [`Runtime`].
 #[derive(Debug, Clone)]
 pub struct Executor {
-    inner: Mode,
+    handle: Handle,
 }
 
 impl Executor {
-    /// Executor for existing runtime.
+    /// Executor for an existing tokio runtime.
+    pub fn new(handle: Handle) -> Self { Executor { handle } }
+
+    /// Executor for the tokio runtime the caller currently runs in.
     ///
-    /// Deprecated: Exists only to connect with current JSONRPC implementation.
-    pub fn new(executor: TaskExecutor) -> Self {
+    /// Panics when called outside of a tokio runtime.
+    pub fn current() -> Self {
         Executor {
-            inner: Mode::Tokio(executor),
+            handle: Handle::current(),
         }
     }
 
-    /// Synchronous executor, used mostly for tests.
-    pub fn new_sync() -> Self {
-        Executor { inner: Mode::Sync }
+    /// Spawn a future to this runtime.
+    pub fn spawn<F>(&self, future: F)
+    where F: Future<Output = ()> + Send + 'static {
+        self.handle.spawn(future);
     }
 
-    /// Spawns a new thread for each future (use only for tests).
-    pub fn new_thread_per_future() -> Self {
-        Executor {
-            inner: Mode::ThreadPerFuture,
-        }
-    }
-
-    /// Spawn a future to this runtime
-    pub fn spawn<R>(&self, r: R)
-    where
-        R: IntoFuture<Item = (), Error = ()> + Send + 'static,
-        R::Future: Send + 'static,
-    {
-        match self.inner {
-            Mode::Tokio(ref executor) => executor.spawn(r.into_future()),
-            Mode::Sync => {
-                let _ = r.into_future().wait();
-            }
-            Mode::ThreadPerFuture => {
-                thread::spawn(move || {
-                    let _ = r.into_future().wait();
-                });
-            }
-        }
-    }
-
-    /// Spawn a new future returned by given closure.
-    pub fn spawn_fn<F, R>(&self, f: F)
-    where
-        F: FnOnce() -> R + Send + 'static,
-        R: IntoFuture<Item = (), Error = ()> + Send + 'static,
-        R::Future: Send + 'static,
-    {
-        match self.inner {
-            Mode::Tokio(ref executor) => executor.spawn(future::lazy(f)),
-            Mode::Sync => {
-                let _ = future::lazy(f).wait();
-            }
-            Mode::ThreadPerFuture => {
-                thread::spawn(move || {
-                    let _ = f().into_future().wait();
-                });
-            }
-        }
-    }
-
-    /// Spawn a new future and wait for it or for a timeout to occur.
-    pub fn spawn_with_timeout<F, R, T>(
-        &self, f: F, duration: Duration, on_timeout: T,
-    ) where
-        T: FnOnce() -> () + Send + 'static,
-        F: FnOnce() -> R + Send + 'static,
-        R: IntoFuture<Item = (), Error = ()> + Send + 'static,
-        R::Future: Send + 'static,
-    {
-        match self.inner {
-            Mode::Tokio(ref executor) => {
-                executor.spawn(timeout(f, duration, on_timeout))
-            }
-            Mode::Sync => {
-                let _ = timeout(f, duration, on_timeout).wait();
-            }
-            Mode::ThreadPerFuture => {
-                thread::spawn(move || {
-                    let _ = timeout(f, duration, on_timeout).wait();
-                });
-            }
-        }
-    }
+    /// Returns a handle to the underlying tokio runtime.
+    pub fn handle(&self) -> &Handle { &self.handle }
 }
 
-impl<F: Future<Item = (), Error = ()> + Send + 'static> future::Executor<F>
-    for Executor
-{
-    fn execute(&self, future: F) -> Result<(), future::ExecuteError<F>> {
-        match self.inner {
-            Mode::Tokio(ref executor) => executor.execute(future),
-            Mode::Sync => {
-                let _ = future.wait();
-                Ok(())
-            }
-            Mode::ThreadPerFuture => {
-                thread::spawn(move || {
-                    let _ = future.wait();
-                });
-                Ok(())
-            }
-        }
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::Runtime;
+    use std::sync::mpsc;
 
-/// A handle to a runtime. Dropping the handle will cause runtime to shutdown.
-pub struct RuntimeHandle {
-    close: Option<futures::Complete<()>>,
-    handle: Option<thread::JoinHandle<()>>,
-}
-
-impl From<Runtime> for RuntimeHandle {
-    fn from(el: Runtime) -> Self {
-        el.handle
-    }
-}
-
-impl Drop for RuntimeHandle {
-    fn drop(&mut self) {
-        self.close.take().map(|v| v.send(()));
-    }
-}
-
-impl RuntimeHandle {
-    /// Blocks current thread and waits until the runtime is finished.
-    pub fn wait(mut self) -> thread::Result<()> {
-        self.handle
-            .take()
-            .expect("Handle is taken only in `wait`, `wait` is consuming; qed")
-            .join()
-    }
-
-    /// Finishes this runtime.
-    pub fn close(mut self) {
-        let _ = self.close.take()
-			.expect("Close is taken only in `close` and `drop`. `close` is consuming; qed")
-			.send(());
+    #[test]
+    fn spawned_tasks_run() {
+        let runtime = Runtime::with_thread_count(2);
+        let (tx, rx) = mpsc::channel();
+        runtime.executor().spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            tx.send(42).unwrap();
+        });
+        assert_eq!(rx.recv().unwrap(), 42);
     }
 }

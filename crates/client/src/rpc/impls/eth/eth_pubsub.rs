@@ -4,23 +4,14 @@
 
 use crate::rpc::{
     error_codes,
-    helpers::{EpochQueue, SubscriberId, Subscribers},
-    metadata::Metadata,
-    traits::eth_space::eth_pubsub::EthPubSub as PubSub,
+    helpers::{notify, EpochQueue, SubscriberId, Subscribers},
+    traits::eth_space::eth_pubsub::EthPubSubServer as PubSubServer,
     types::eth::{
         eth_pubsub as pubsub, Header as RpcHeader, Log as RpcLog, Log,
     },
 };
-use futures::{
-    compat::Future01CompatExt,
-    future::{FutureExt, TryFutureExt},
-};
 use itertools::zip;
-use jsonrpc_core::{futures::Future, Result as RpcResult};
-use jsonrpc_pubsub::{
-    typed::{Sink, Subscriber},
-    SubscriptionId,
-};
+use jsonrpsee::{PendingSubscriptionSink, SubscriptionSink};
 use mazze_parameters::{
     consensus::DEFERRED_STATE_EPOCH_COUNT,
     consensus_internal::REWARD_EPOCH_COUNT,
@@ -40,9 +31,9 @@ use std::{
     sync::{Arc, Weak},
     time::Duration,
 };
-use tokio_timer::sleep;
+use tokio::time::sleep;
 
-type Client = Sink<pubsub::Result>;
+type Client = SubscriptionSink;
 
 /// Mazze PubSub implementation.
 #[derive(Clone)]
@@ -129,8 +120,6 @@ impl PubSubClient {
             }
         };
 
-        // run futures@0.3 future on tokio@0.1 executor
-        let fut = fut.unit_error().boxed().compat();
         self.handler.executor.spawn(fut);
     }
 
@@ -221,8 +210,6 @@ impl PubSubClient {
             }
         };
 
-        // run futures@0.3 future on tokio@0.1 executor
-        let fut = fut.unit_error().boxed().compat();
         self.handler.executor.spawn(fut);
     }
 }
@@ -238,21 +225,13 @@ pub struct ChainNotificationHandler {
 impl ChainNotificationHandler {
     // notify `subscriber` about `result` in a separate task
     fn notify(exec: &Executor, subscriber: &Client, result: pubsub::Result) {
-        let fut = subscriber.notify(Ok(result)).map(|_| ()).map_err(
-            |e| warn!(target: "rpc", "Unable to send notification: {}", e),
-        );
-
-        exec.spawn(fut)
+        let subscriber = subscriber.clone();
+        exec.spawn(async move { notify(&subscriber, &result).await })
     }
 
     // notify `subscriber` about `result` asynchronously
     async fn notify_async(subscriber: &Client, result: pubsub::Result) {
-        let fut = subscriber.notify(Ok(result)).map(|_| ()).map_err(
-            |e| warn!(target: "rpc", "Unable to send notification: {}", e),
-        );
-
-        // convert futures01::Future into std::Future so that we can await
-        let _ = fut.compat().await;
+        notify(subscriber, &result).await
     }
 
     // notify each subscriber about header `hash` concurrently
@@ -391,7 +370,7 @@ impl ChainNotificationHandler {
                 Ok(Some(b)) => return Some(b),
                 Ok(None) => {
                     error!("Block not executed yet {:?}", main);
-                    let _ = sleep(POLL_INTERVAL_MS).compat().await;
+                    sleep(POLL_INTERVAL_MS).await;
                 }
                 Err(e) => {
                     error!("get_phantom_block_by_number failed {}", e);
@@ -450,7 +429,7 @@ impl ChainNotificationHandler {
                 Some(res) => return Some(res.block_receipts.clone()),
                 None => {
                     trace!("Cannot find receipts with {:?}/{:?}", block, main);
-                    let _ = sleep(POLL_INTERVAL_MS).compat().await;
+                    sleep(POLL_INTERVAL_MS).await;
                 }
             }
 
@@ -533,68 +512,77 @@ impl ChainNotificationHandler {
     }
 }
 
-impl PubSub for PubSubClient {
-    type Metadata = Metadata;
+/// What a validated `eth_subscribe` call subscribes to.
+enum Subscription {
+    Heads,
+    Logs(LogFilter),
+}
 
+impl PubSubServer for PubSubClient {
     fn subscribe(
-        &self, _meta: Metadata, subscriber: Subscriber<pubsub::Result>,
-        kind: pubsub::Kind, params: Option<pubsub::Params>,
+        &self, pending: PendingSubscriptionSink, kind: pubsub::Kind,
+        params: Option<pubsub::Params>,
     ) {
-        let error = match (kind, params) {
+        let subscription = match (kind, params) {
             // --------- newHeads ---------
             (pubsub::Kind::NewHeads, None) => {
                 info!("eth pubsub newheads");
-                self.heads_subscribers.write().push(subscriber);
-                self.start_heads_loop();
-                return;
+                Ok(Subscription::Heads)
             }
-            (pubsub::Kind::NewHeads, _) => error_codes::invalid_params(
+            (pubsub::Kind::NewHeads, _) => Err(error_codes::invalid_params(
                 "newHeads",
                 "Expected no parameters.",
-            ),
+            )),
             // --------- logs ---------
             (pubsub::Kind::Logs, None) => {
                 info!("eth pubsub logs");
                 let mut log_filter = LogFilter::default();
                 log_filter.space = Space::Ethereum;
-
-                let id =
-                    self.logs_subscribers.write().push(subscriber, log_filter);
-
-                self.start_logs_loop(id);
-                return;
+                Ok(Subscription::Logs(log_filter))
             }
             (pubsub::Kind::Logs, Some(pubsub::Params::Logs(filter))) => {
                 info!("eth pubsub logs with filter");
-                match filter.into_primitive(self.consensus.clone()) {
-                    Err(e) => e,
-                    Ok(filter) => {
-                        let id = self
-                            .logs_subscribers
-                            .write()
-                            .push(subscriber, filter);
-
-                        self.start_logs_loop(id);
-                        return;
-                    }
-                }
+                filter
+                    .into_primitive(self.consensus.clone())
+                    .map(Subscription::Logs)
             }
-            (pubsub::Kind::Logs, _) => error_codes::invalid_params(
+            (pubsub::Kind::Logs, _) => Err(error_codes::invalid_params(
                 "logs",
                 "Expected filter parameter.",
-            ),
-            _ => error_codes::unimplemented(None),
+            )),
+            _ => Err(error_codes::unimplemented(None)),
         };
 
-        let _ = subscriber.reject(error);
-    }
-
-    fn unsubscribe(
-        &self, _: Option<Self::Metadata>, id: SubscriptionId,
-    ) -> RpcResult<bool> {
-        let res0 = self.heads_subscribers.write().remove(&id).is_some();
-        let res1 = self.logs_subscribers.write().remove(&id).is_some();
-
-        Ok(res0 || res1)
+        let this = self.clone();
+        self.handler.executor.spawn(async move {
+            let subscription = match subscription {
+                Ok(subscription) => subscription,
+                Err(e) => return pending.reject(e).await,
+            };
+            let sink = match pending.accept().await {
+                Ok(sink) => sink,
+                // The client went away before the subscription started.
+                Err(_) => return,
+            };
+            let id = SubscriberId::of(&sink);
+            match subscription {
+                Subscription::Heads => {
+                    this.heads_subscribers
+                        .write()
+                        .insert(id.clone(), sink.clone());
+                    this.start_heads_loop();
+                }
+                Subscription::Logs(filter) => {
+                    this.logs_subscribers
+                        .write()
+                        .insert(id.clone(), (sink.clone(), filter));
+                    this.start_logs_loop(id.clone());
+                }
+            }
+            // `eth_unsubscribe` or a closed connection ends the subscription.
+            sink.closed().await;
+            this.heads_subscribers.write().remove(&id);
+            this.logs_subscribers.write().remove(&id);
+        });
     }
 }

@@ -7,7 +7,7 @@ use crate::rpc::{
     helpers::{maybe_vec_into, VariadicValue},
     types::Log,
 };
-use jsonrpc_core::Error as RpcError;
+use mazze_rpc_error::Error as RpcError;
 use mazze_types::{Space, H256, U256, U64};
 use primitives::filter::{LogFilter as PrimitiveFilter, LogFilterParams};
 use serde::{Deserialize, Serialize, Serializer};
@@ -201,7 +201,7 @@ impl Serialize for MazzeFilterLog {
 }
 
 /// Results of the filter_changes RPC.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum MazzeFilterChanges {
     /// New logs.
     Logs(Vec<MazzeFilterLog>),

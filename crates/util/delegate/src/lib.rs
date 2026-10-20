@@ -312,6 +312,52 @@ pub fn delegate(tokens: TokenStream) -> TokenStream {
 
             let body = quote::quote! { #delegator_attribute.#name(#(#args),*) };
             let span = input.span();
+
+            // `async fn` delegation (Mazze extension): the target trait is an
+            // `#[async_trait]` trait, so emit the desugared signature that
+            // `async_trait` produces for the trait declaration and convert
+            // the delegate's return value with `delegate_convert::IntoAsync`.
+            // The impl block itself does not need `#[async_trait]` for these.
+            if signature.asyncness.is_some() {
+                let ret_type = match &signature.output {
+                    syn::ReturnType::Default => quote::quote! { () },
+                    syn::ReturnType::Type(_, ret_type) => quote::quote! { #ret_type },
+                };
+                let mut sig = signature.clone();
+                sig.asyncness = None;
+                sig.generics.params.insert(0, syn::parse_quote!('async_trait));
+                sig.generics.params.insert(0, syn::parse_quote!('life0));
+                for arg in sig.inputs.iter_mut() {
+                    if let syn::FnArg::Receiver(receiver) = arg {
+                        match &mut receiver.reference {
+                            Some((_, lifetime)) => {
+                                *lifetime = Some(syn::parse_quote!('life0))
+                            }
+                            None => panic!(
+                                "async delegated methods must take &self ({})",
+                                signature.ident
+                            ),
+                        }
+                    }
+                }
+                sig.output = syn::parse_quote! {
+                    -> ::core::pin::Pin<Box<
+                        dyn ::core::future::Future<Output = #ret_type>
+                            + ::core::marker::Send
+                            + 'async_trait
+                    >>
+                };
+                let where_clause = sig.generics.make_where_clause();
+                where_clause.predicates.push(syn::parse_quote!('life0: 'async_trait));
+                where_clause.predicates.push(syn::parse_quote!(Self: 'async_trait));
+                return quote::quote_spanned! {span=>
+                    #(#attrs)*
+                    #inline
+                    #visibility #sig {
+                        Box::pin(delegate_convert::IntoAsync::<#ret_type>::into_async(#body))
+                    }
+                };
+            }
             let body = match &signature.output {
                 syn::ReturnType::Default => quote::quote! { #body; },
                 syn::ReturnType::Type(_, ret_type) => {

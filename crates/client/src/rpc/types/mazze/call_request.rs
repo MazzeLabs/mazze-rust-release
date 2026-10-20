@@ -79,7 +79,7 @@ pub struct SendTxRequest {
     pub transaction_type: Option<U64>,
 }
 
-#[derive(Debug, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EstimateGasAndCollateralResponse {
     /// The recommended gas_limit.
@@ -90,7 +90,7 @@ pub struct EstimateGasAndCollateralResponse {
     pub storage_collateralized: U64,
 }
 
-#[derive(Debug, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckBalanceAgainstTransactionResponse {
     /// Whether the account should pay transaction fee by self.

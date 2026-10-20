@@ -193,7 +193,7 @@ impl InternalTransferAction {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalizedBlockTrace {
     pub transaction_traces: Vec<LocalizedTransactionTrace>,
@@ -205,7 +205,7 @@ pub struct LocalizedBlockTrace {
     pub block_hash: H256,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalizedTransactionTrace {
     pub traces: Vec<LocalizedTrace>,
@@ -215,7 +215,7 @@ pub struct LocalizedTransactionTrace {
     pub transaction_hash: H256,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct LocalizedTrace {
     pub action: Action,
     pub valid: bool,
@@ -372,7 +372,7 @@ impl LocalizedBlockTrace {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EpochTrace {
     mazze_traces: Vec<LocalizedTrace>,

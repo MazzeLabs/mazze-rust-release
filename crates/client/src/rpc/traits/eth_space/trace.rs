@@ -3,27 +3,27 @@
 // See http://www.gnu.org/licenses/
 
 use crate::rpc::types::eth::{BlockNumber, LocalizedTrace, TraceFilter};
-use jsonrpc_core::Result as JsonRpcResult;
-use jsonrpc_derive::rpc;
+use mazze_rpc_error::Result as JsonRpcResult;
+use jsonrpsee::proc_macros::rpc;
 use mazze_types::H256;
 
 /// Trace specific rpc interface.
 #[rpc(server)]
 pub trait Trace {
     /// Returns all traces produced at the given block.
-    #[rpc(name = "trace_block")]
+    #[method(name = "trace_block", blocking)]
     fn block_traces(
         &self, block_number: BlockNumber,
     ) -> JsonRpcResult<Option<Vec<LocalizedTrace>>>;
 
     /// Returns all traces matching the provided filter.
-    #[rpc(name = "trace_filter")]
+    #[method(name = "trace_filter", blocking)]
     fn filter_traces(
         &self, filter: TraceFilter,
     ) -> JsonRpcResult<Option<Vec<LocalizedTrace>>>;
 
     /// Returns all traces produced at the given transaction.
-    #[rpc(name = "trace_transaction")]
+    #[method(name = "trace_transaction", blocking)]
     fn transaction_traces(
         &self, tx_hash: H256,
     ) -> JsonRpcResult<Option<Vec<LocalizedTrace>>>;

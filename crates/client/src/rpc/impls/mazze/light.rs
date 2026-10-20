@@ -3,8 +3,8 @@
 // See http://www.gnu.org/licenses/
 
 use delegate::delegate;
-use futures::future::{self, FutureExt, TryFutureExt};
-use jsonrpc_core::{BoxFuture, Error as RpcError, Result as JsonRpcResult};
+use futures::future::{self, FutureExt};
+use mazze_rpc_error::{Error as RpcError, Result as JsonRpcResult};
 use mazze_types::{
     AddressSpaceUtil, BigEndianHash, Space, H160, H256, H520, U128, U256, U64,
 };
@@ -33,7 +33,7 @@ use crate::{
     rpc::{
         error_codes,
         impls::common::{self, RpcImpl as CommonImpl},
-        traits::{debug::LocalRpc, mazze::Mazze, test::TestRpc},
+        traits::{debug::LocalRpcServer, mazze::MazzeServer, test::TestRpcServer},
         types::{
             errors::check_rpc_address_network, Account as RpcAccount,
             AccountPendingInfo, AccountPendingTransactions, BlameInfo,
@@ -59,13 +59,13 @@ use mazzecore::{
 // macro for reducing boilerplate for unsupported methods
 macro_rules! not_supported {
     () => {};
-    ( fn $fn:ident ( &self $(, $name:ident : $type:ty)* ) $( -> BoxFuture<$ret:ty> )? ; $($tail:tt)* ) => {
+    // `async fn` of an `#[async_trait]` RPC trait, in desugared form.
+    ( fn $fn:ident ( &self $(, $name:ident : $type:ty)* ) -> BoxFuture<$ret:ty> ; $($tail:tt)* ) => {
         #[allow(unused_variables)]
-        fn $fn ( &self $(, $name : $type)* ) $( -> BoxFuture<$ret> )? {
-            use jsonrpc_core::futures::future::{Future, IntoFuture};
-            Err(error_codes::unimplemented(Some("Tracking issue: https://github.com/s94130586/mazze-rust/issues/1461".to_string())))
-                .into_future()
-                .boxed()
+        fn $fn<'life0, 'async_trait>( &'life0 self $(, $name : $type)* )
+            -> ::core::pin::Pin<Box<dyn ::core::future::Future<Output = mazze_rpc_error::Result<$ret>> + Send + 'async_trait>>
+        where 'life0: 'async_trait, Self: 'async_trait {
+            Box::pin(futures::future::ready(Err(error_codes::unimplemented(Some("Tracking issue: https://github.com/s94130586/mazze-rust/issues/1461".to_string())))))
         }
 
         not_supported!($($tail)*);
@@ -176,7 +176,7 @@ impl RpcImpl {
             Ok(RpcAccount::try_from(account, network)?)
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     fn balance(
@@ -213,7 +213,7 @@ impl RpcImpl {
                 .unwrap_or_default())
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     fn admin(
@@ -246,7 +246,7 @@ impl RpcImpl {
             }
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     fn sponsor_info(
@@ -279,7 +279,7 @@ impl RpcImpl {
             }
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     pub fn account_pending_info(
@@ -291,7 +291,7 @@ impl RpcImpl {
             // TODO impl light node rpc
             Ok(None)
         };
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     fn collateral_for_storage(
@@ -320,7 +320,7 @@ impl RpcImpl {
                 .unwrap_or_default())
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     fn code(
@@ -360,7 +360,7 @@ impl RpcImpl {
             ))
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     fn get_logs(&self, filter: MazzeRpcLogFilter) -> RpcBoxFuture<Vec<RpcLog>> {
@@ -399,7 +399,7 @@ impl RpcImpl {
                 .collect::<Result<_, _>>()?)
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     fn send_tx_helper(
@@ -476,7 +476,7 @@ impl RpcImpl {
             Self::send_tx_helper(light, Bytes::new(tx.rlp_bytes()))
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     fn storage_root(
@@ -505,7 +505,7 @@ impl RpcImpl {
             Ok(Some(root))
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     fn storage_at(
@@ -544,7 +544,7 @@ impl RpcImpl {
             Ok(maybe_entry.map(Into::into))
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     fn transaction_by_hash(
@@ -571,7 +571,7 @@ impl RpcImpl {
             )?))
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     fn transaction_receipt(
@@ -636,7 +636,7 @@ impl RpcImpl {
             Ok(Some(receipt))
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     pub fn epoch_number(&self, epoch: Option<EpochNumber>) -> RpcResult<U256> {
@@ -680,7 +680,7 @@ impl RpcImpl {
                 .unwrap_or_default())
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     pub fn block_by_hash(
@@ -722,7 +722,7 @@ impl RpcImpl {
             )?))
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     pub fn block_by_hash_with_main_assumption(
@@ -778,7 +778,7 @@ impl RpcImpl {
             )?)
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     pub fn block_by_epoch_number(
@@ -834,7 +834,7 @@ impl RpcImpl {
             )?))
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     pub fn blocks_by_epoch(&self, epoch: EpochNumber) -> RpcResult<Vec<H256>> {
@@ -877,7 +877,7 @@ impl RpcImpl {
                 .unwrap_or(GAS_PRICE_DEFAULT_VALUE.into()))
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     fn check_balance_against_transaction(
@@ -926,7 +926,7 @@ impl RpcImpl {
             ))
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 
     fn fee_history(
@@ -939,11 +939,8 @@ impl RpcImpl {
         );
 
         if block_count.as_u64() == 0 {
-            return Box::new(
-                async { Ok(FeeHistory::new().to_mazze_fee_history()) }
-                    .boxed()
-                    .compat(),
-            );
+            return async { Ok(FeeHistory::new().to_mazze_fee_history()) }
+                .boxed();
         }
 
         // clone to avoid lifetime issues due to capturing `self`
@@ -1012,7 +1009,7 @@ impl RpcImpl {
             Ok(fee_history.to_mazze_fee_history())
         };
 
-        Box::new(fut.boxed().compat())
+        fut.boxed()
     }
 }
 
@@ -1048,7 +1045,7 @@ impl MazzeHandler {
     }
 }
 
-impl Mazze for MazzeHandler {
+impl MazzeServer for MazzeHandler {
     delegate! {
         to self.common {
             fn best_block_hash(&self) -> JsonRpcResult<H256>;
@@ -1058,42 +1055,42 @@ impl Mazze for MazzeHandler {
             fn get_consensus_debug(&self) -> JsonRpcResult<serde_json::Value>;
             fn get_status(&self) -> JsonRpcResult<RpcStatus>;
             fn skipped_blocks_by_epoch(&self, num: EpochNumber) -> JsonRpcResult<Vec<H256>>;
-            fn account_pending_info(&self, addr: RpcAddress) -> BoxFuture<Option<AccountPendingInfo>>;
+            async fn account_pending_info(&self, addr: RpcAddress) -> mazze_rpc_error::Result<Option<AccountPendingInfo>>;
             fn is_timer_block(&self, block_hash: H256) -> JsonRpcResult<bool>;
             fn get_timer_chain(&self) -> JsonRpcResult<Vec<H256>>;
             fn get_timer_chain_difficulty(&self) -> JsonRpcResult<U256>;
             fn get_block_weight(&self, block_hash: H256) -> JsonRpcResult<U256>;
             fn is_adaptive_block(&self, block_hash: H256) -> JsonRpcResult<bool>;
             fn is_partial_invalid(&self, block_hash: H256) -> JsonRpcResult<bool>;
-            fn get_block_blame_info(&self, block_hash: H256) -> JsonRpcResult<jsonrpc_core::Value>;
+            fn get_block_blame_info(&self, block_hash: H256) -> JsonRpcResult<mazze_rpc_error::Value>;
             fn get_dag_tips(&self) -> JsonRpcResult<Vec<H256>>;
             fn get_skipped_block_hashes_by_epoch(&self, epoch_number: EpochNumber) -> JsonRpcResult<Vec<H256>>;
-            fn get_randomx_epoch_info(&self, epoch_number: Option<EpochNumber>) -> JsonRpcResult<jsonrpc_core::Value>;
-            fn get_era_details(&self, selector: Option<String>) -> JsonRpcResult<jsonrpc_core::Value>;
+            fn get_randomx_epoch_info(&self, epoch_number: Option<EpochNumber>) -> JsonRpcResult<mazze_rpc_error::Value>;
+            fn get_era_details(&self, selector: Option<String>) -> JsonRpcResult<mazze_rpc_error::Value>;
         }
 
         to self.rpc_impl {
-            fn account(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<RpcAccount>;
-            fn admin(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<Option<RpcAddress>>;
-            fn balance(&self, address: RpcAddress, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> BoxFuture<U256>;
-            fn block_by_epoch_number(&self, epoch_num: EpochNumber, include_txs: bool) -> BoxFuture<Option<RpcBlock>>;
-            fn block_by_hash_with_main_assumption(&self, block_hash: H256, main_hash: H256, epoch_number: U64) -> BoxFuture<RpcBlock>;
-            fn block_by_hash(&self, hash: H256, include_txs: bool) -> BoxFuture<Option<RpcBlock>>;
+            async fn account(&self, address: RpcAddress, num: Option<EpochNumber>) -> mazze_rpc_error::Result<RpcAccount>;
+            async fn admin(&self, address: RpcAddress, num: Option<EpochNumber>) -> mazze_rpc_error::Result<Option<RpcAddress>>;
+            async fn balance(&self, address: RpcAddress, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> mazze_rpc_error::Result<U256>;
+            async fn block_by_epoch_number(&self, epoch_num: EpochNumber, include_txs: bool) -> mazze_rpc_error::Result<Option<RpcBlock>>;
+            async fn block_by_hash_with_main_assumption(&self, block_hash: H256, main_hash: H256, epoch_number: U64) -> mazze_rpc_error::Result<RpcBlock>;
+            async fn block_by_hash(&self, hash: H256, include_txs: bool) -> mazze_rpc_error::Result<Option<RpcBlock>>;
             fn blocks_by_epoch(&self, num: EpochNumber) -> JsonRpcResult<Vec<H256>>;
-            fn check_balance_against_transaction(&self, account_addr: RpcAddress, contract_addr: RpcAddress, gas_limit: U256, gas_price: U256, storage_limit: U256, epoch: Option<EpochNumber>) -> BoxFuture<CheckBalanceAgainstTransactionResponse>;
-            fn code(&self, address: RpcAddress, block_hash_or_epoch_num: Option<BlockHashOrEpochNumber>) -> BoxFuture<Bytes>;
-            fn collateral_for_storage(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<U256>;
+            async fn check_balance_against_transaction(&self, account_addr: RpcAddress, contract_addr: RpcAddress, gas_limit: U256, gas_price: U256, storage_limit: U256, epoch: Option<EpochNumber>) -> mazze_rpc_error::Result<CheckBalanceAgainstTransactionResponse>;
+            async fn code(&self, address: RpcAddress, block_hash_or_epoch_num: Option<BlockHashOrEpochNumber>) -> mazze_rpc_error::Result<Bytes>;
+            async fn collateral_for_storage(&self, address: RpcAddress, num: Option<EpochNumber>) -> mazze_rpc_error::Result<U256>;
             fn epoch_number(&self, epoch_num: Option<EpochNumber>) -> JsonRpcResult<U256>;
-            fn gas_price(&self) -> BoxFuture<U256>;
-            fn get_logs(&self, filter: MazzeRpcLogFilter) -> BoxFuture<Vec<RpcLog>>;
-            fn next_nonce(&self, address: RpcAddress, num: Option<BlockHashOrEpochNumber>) -> BoxFuture<U256>;
+            async fn gas_price(&self) -> mazze_rpc_error::Result<U256>;
+            async fn get_logs(&self, filter: MazzeRpcLogFilter) -> mazze_rpc_error::Result<Vec<RpcLog>>;
+            async fn next_nonce(&self, address: RpcAddress, num: Option<BlockHashOrEpochNumber>) -> mazze_rpc_error::Result<U256>;
             fn send_raw_transaction(&self, raw: Bytes) -> JsonRpcResult<H256>;
-            fn sponsor_info(&self, address: RpcAddress, num: Option<EpochNumber>) -> BoxFuture<SponsorInfo>;
-            fn storage_at(&self, addr: RpcAddress, pos: U256, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> BoxFuture<Option<H256>>;
-            fn storage_root(&self, address: RpcAddress, epoch_num: Option<EpochNumber>) -> BoxFuture<Option<StorageRoot>>;
-            fn transaction_by_hash(&self, hash: H256) -> BoxFuture<Option<RpcTransaction>>;
-            fn transaction_receipt(&self, tx_hash: H256) -> BoxFuture<Option<RpcReceipt>>;
-            fn fee_history(&self, block_count: HexU64, newest_block: EpochNumber, reward_percentiles: Vec<f64>) -> BoxFuture<MazzeFeeHistory>;
+            async fn sponsor_info(&self, address: RpcAddress, num: Option<EpochNumber>) -> mazze_rpc_error::Result<SponsorInfo>;
+            async fn storage_at(&self, addr: RpcAddress, pos: U256, block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>) -> mazze_rpc_error::Result<Option<H256>>;
+            async fn storage_root(&self, address: RpcAddress, epoch_num: Option<EpochNumber>) -> mazze_rpc_error::Result<Option<StorageRoot>>;
+            async fn transaction_by_hash(&self, hash: H256) -> mazze_rpc_error::Result<Option<RpcTransaction>>;
+            async fn transaction_receipt(&self, tx_hash: H256) -> mazze_rpc_error::Result<Option<RpcReceipt>>;
+            async fn fee_history(&self, block_count: HexU64, newest_block: EpochNumber, reward_percentiles: Vec<f64>) -> mazze_rpc_error::Result<MazzeFeeHistory>;
         }
     }
 
@@ -1124,7 +1121,7 @@ impl TestRpcImpl {
     }
 }
 
-impl TestRpc for TestRpcImpl {
+impl TestRpcServer for TestRpcImpl {
     delegate! {
         to self.common {
             fn add_latency(&self, id: NodeId, latency_ms: f64) -> JsonRpcResult<()>;
@@ -1170,7 +1167,7 @@ impl DebugRpcImpl {
     }
 }
 
-impl LocalRpc for DebugRpcImpl {
+impl LocalRpcServer for DebugRpcImpl {
     delegate! {
         to self.common {
             fn txpool_content(&self, address: Option<RpcAddress>) -> JsonRpcResult<
@@ -1191,7 +1188,7 @@ impl LocalRpc for DebugRpcImpl {
         }
 
         to self.rpc_impl {
-            fn send_transaction(&self, tx: SendTxRequest, password: Option<String>) -> BoxFuture<H256>;
+            async fn send_transaction(&self, tx: SendTxRequest, password: Option<String>) -> mazze_rpc_error::Result<H256>;
         }
     }
 

@@ -30,7 +30,7 @@ const SHA3_HASH_OF_EMPTY_UNCLE: &str =
     "1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347";
 
 /// Block Transactions
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum BlockTransactions {
     /// Only hashes
     Hashes(Vec<H256>),
@@ -53,7 +53,7 @@ impl Serialize for BlockTransactions {
 }
 
 /// Block representation
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Block {
     /// Hash of the block

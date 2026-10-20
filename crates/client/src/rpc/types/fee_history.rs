@@ -5,7 +5,7 @@ use primitives::{transaction::SignedTransaction, BlockHeader};
 
 use super::MazzeFeeHistory;
 
-#[derive(Serialize, Debug, Default)]
+#[derive(Clone, Serialize, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FeeHistory {
     /// Oldest Block

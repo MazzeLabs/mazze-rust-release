@@ -504,7 +504,7 @@ impl DeferredPool {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TransactionStatus {
     Packed,
@@ -512,7 +512,7 @@ pub enum TransactionStatus {
     Pending(PendingReason),
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PendingReason {
     FutureNonce,

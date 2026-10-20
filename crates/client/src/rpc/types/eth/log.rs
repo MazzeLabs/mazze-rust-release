@@ -22,7 +22,7 @@ use crate::rpc::{
     error_codes::{internal_error, invalid_params},
     types::Bytes,
 };
-use jsonrpc_core::Error as RpcError;
+use mazze_rpc_error::Error as RpcError;
 use mazze_types::{H160, H256, U256};
 use mazzecore::SharedConsensusGraph;
 use primitives::{

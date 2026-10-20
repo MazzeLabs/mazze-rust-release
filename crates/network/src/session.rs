@@ -668,7 +668,7 @@ impl fmt::Debug for Session {
 }
 
 /// User friendly session information that used for Debug RPC.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionDetails {
     pub originated: bool,

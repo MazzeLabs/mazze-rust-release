@@ -8,7 +8,7 @@ use crate::rpc::{
         invalid_params, request_rejected_in_catch_up_mode, unknown_block,
     },
     impls::RpcImplConfiguration,
-    traits::eth_space::eth::Eth,
+    traits::eth_space::eth::EthServer,
     types::{
         eth::{
             AccountPendingTransactions, Block as RpcBlock, BlockNumber,
@@ -19,7 +19,7 @@ use crate::rpc::{
     },
 };
 use clap::crate_version;
-use jsonrpc_core::{Error as RpcError, Result as RpcResult};
+use mazze_rpc_error::{Error as RpcError, Result as RpcResult};
 use mazze_execute_helper::estimation::{
     decode_error, EstimateExt, EstimateRequest,
 };
@@ -268,7 +268,7 @@ impl EthHandler {
 
     fn construct_rpc_receipt(
         &self, b: &PhantomBlock, idx: usize, prior_log_index: &mut usize,
-    ) -> jsonrpc_core::Result<Receipt> {
+    ) -> mazze_rpc_error::Result<Receipt> {
         if b.transactions.len() != b.receipts.len() {
             return Err(internal_error(
                 "Inconsistent state: transactions and receipts length mismatch",
@@ -399,24 +399,24 @@ impl EthHandler {
     }
 }
 
-impl Eth for EthHandler {
-    fn client_version(&self) -> jsonrpc_core::Result<String> {
+impl EthServer for EthHandler {
+    fn client_version(&self) -> mazze_rpc_error::Result<String> {
         info!("RPC Request: web3_clientVersion");
         Ok(parity_version::version(crate_version!()))
     }
 
-    fn net_version(&self) -> jsonrpc_core::Result<String> {
+    fn net_version(&self) -> mazze_rpc_error::Result<String> {
         info!("RPC Request: net_version");
         Ok(format!("{}", self.consensus.best_chain_id().in_evm_space()))
     }
 
-    fn protocol_version(&self) -> jsonrpc_core::Result<String> {
+    fn protocol_version(&self) -> mazze_rpc_error::Result<String> {
         info!("RPC Request: eth_protocolVersion");
         // 65 is a common ETH version now
         Ok(format!("{}", 65))
     }
 
-    fn syncing(&self) -> jsonrpc_core::Result<SyncStatus> {
+    fn syncing(&self) -> mazze_rpc_error::Result<SyncStatus> {
         info!("RPC Request: eth_syncing");
         if self.sync.catch_up_mode() {
             Ok(
@@ -437,30 +437,30 @@ impl Eth for EthHandler {
         }
     }
 
-    fn hashrate(&self) -> jsonrpc_core::Result<U256> {
+    fn hashrate(&self) -> mazze_rpc_error::Result<U256> {
         info!("RPC Request: eth_hashrate");
         // We do not mine
         Ok(U256::zero())
     }
 
-    fn author(&self) -> jsonrpc_core::Result<H160> {
+    fn author(&self) -> mazze_rpc_error::Result<H160> {
         info!("RPC Request: eth_coinbase");
         // We do not care this, just return zero address
         Ok(H160::zero())
     }
 
-    fn is_mining(&self) -> jsonrpc_core::Result<bool> {
+    fn is_mining(&self) -> mazze_rpc_error::Result<bool> {
         info!("RPC Request: eth_mining");
         // We do not mine from ETH perspective
         Ok(false)
     }
 
-    fn chain_id(&self) -> jsonrpc_core::Result<Option<U64>> {
+    fn chain_id(&self) -> mazze_rpc_error::Result<Option<U64>> {
         info!("RPC Request: eth_chainId");
         return Ok(Some(self.consensus.best_chain_id().in_evm_space().into()));
     }
 
-    fn gas_price(&self) -> jsonrpc_core::Result<U256> {
+    fn gas_price(&self) -> mazze_rpc_error::Result<U256> {
         info!("RPC Request: eth_gasPrice");
         let (_, maybe_base_price) =
             self.tx_pool.get_best_info_with_parent_base_price();
@@ -478,7 +478,7 @@ impl Eth for EthHandler {
         ))
     }
 
-    fn max_priority_fee_per_gas(&self) -> jsonrpc_core::Result<U256> {
+    fn max_priority_fee_per_gas(&self) -> mazze_rpc_error::Result<U256> {
         info!("RPC Request: eth_maxPriorityFeePerGas");
         let evm_ratio =
             self.tx_pool.machine().params().evm_transaction_block_ratio
@@ -499,25 +499,25 @@ impl Eth for EthHandler {
         Ok(total_reward * evm_ratio / 300)
     }
 
-    fn accounts(&self) -> jsonrpc_core::Result<Vec<H160>> {
+    fn accounts(&self) -> mazze_rpc_error::Result<Vec<H160>> {
         info!("RPC Request: eth_accounts");
         // Mazze eSpace does not manage accounts
         Ok(vec![])
     }
 
-    fn block_number(&self) -> jsonrpc_core::Result<U256> {
+    fn block_number(&self) -> mazze_rpc_error::Result<U256> {
         let consensus_graph = self.consensus_graph();
         let epoch_num = EpochNumber::LatestState;
         info!("RPC Request: eth_blockNumber()");
         match consensus_graph.get_height_from_epoch_number(epoch_num.into()) {
             Ok(height) => Ok(height.into()),
-            Err(e) => Err(jsonrpc_core::Error::invalid_params(e)),
+            Err(e) => Err(mazze_rpc_error::Error::invalid_params(e)),
         }
     }
 
     fn balance(
         &self, address: H160, num: Option<BlockNumber>,
-    ) -> jsonrpc_core::Result<U256> {
+    ) -> mazze_rpc_error::Result<U256> {
         let epoch_num = num.unwrap_or_default().try_into()?;
 
         info!(
@@ -537,7 +537,7 @@ impl Eth for EthHandler {
 
     fn storage_at(
         &self, address: H160, position: U256, block_num: Option<BlockNumber>,
-    ) -> jsonrpc_core::Result<H256> {
+    ) -> mazze_rpc_error::Result<H256> {
         let epoch_num = block_num.unwrap_or_default().try_into()?;
 
         info!(
@@ -567,7 +567,7 @@ impl Eth for EthHandler {
 
     fn block_by_hash(
         &self, hash: H256, include_txs: bool,
-    ) -> jsonrpc_core::Result<Option<RpcBlock>> {
+    ) -> mazze_rpc_error::Result<Option<RpcBlock>> {
         info!(
             "RPC Request: eth_getBlockByHash hash={:?} include_txs={:?}",
             hash, include_txs
@@ -592,7 +592,7 @@ impl Eth for EthHandler {
 
     fn block_by_number(
         &self, block_num: BlockNumber, include_txs: bool,
-    ) -> jsonrpc_core::Result<Option<RpcBlock>> {
+    ) -> mazze_rpc_error::Result<Option<RpcBlock>> {
         info!("RPC Request: eth_getBlockByNumber block_number={:?} include_txs={:?}", block_num, include_txs);
 
         let phantom_block = {
@@ -616,7 +616,7 @@ impl Eth for EthHandler {
 
     fn transaction_count(
         &self, address: H160, num: Option<BlockNumber>,
-    ) -> jsonrpc_core::Result<U256> {
+    ) -> mazze_rpc_error::Result<U256> {
         info!(
             "RPC Request: eth_getTransactionCount address={:?} block_number={:?}",
             address, num
@@ -642,7 +642,7 @@ impl Eth for EthHandler {
 
     fn block_transaction_count_by_hash(
         &self, hash: H256,
-    ) -> jsonrpc_core::Result<Option<U256>> {
+    ) -> mazze_rpc_error::Result<Option<U256>> {
         info!(
             "RPC Request: eth_getBlockTransactionCountByHash hash={:?}",
             hash,
@@ -667,7 +667,7 @@ impl Eth for EthHandler {
 
     fn block_transaction_count_by_number(
         &self, block_num: BlockNumber,
-    ) -> jsonrpc_core::Result<Option<U256>> {
+    ) -> mazze_rpc_error::Result<Option<U256>> {
         info!(
             "RPC Request: eth_getBlockTransactionCountByNumber block_number={:?}",
             block_num
@@ -694,7 +694,7 @@ impl Eth for EthHandler {
 
     fn block_uncles_count_by_hash(
         &self, hash: H256,
-    ) -> jsonrpc_core::Result<Option<U256>> {
+    ) -> mazze_rpc_error::Result<Option<U256>> {
         info!("RPC Request: eth_getUncleCountByBlockHash hash={:?}", hash);
 
         let epoch_num = match self.consensus.get_block_epoch_number(&hash) {
@@ -716,7 +716,7 @@ impl Eth for EthHandler {
 
     fn block_uncles_count_by_number(
         &self, block_num: BlockNumber,
-    ) -> jsonrpc_core::Result<Option<U256>> {
+    ) -> mazze_rpc_error::Result<Option<U256>> {
         info!(
             "RPC Request: eth_getUncleCountByBlockNumber block_number={:?}",
             block_num
@@ -732,7 +732,7 @@ impl Eth for EthHandler {
 
     fn code_at(
         &self, address: H160, epoch_num: Option<BlockNumber>,
-    ) -> jsonrpc_core::Result<Bytes> {
+    ) -> mazze_rpc_error::Result<Bytes> {
         let epoch_num = epoch_num.unwrap_or_default().try_into()?;
 
         info!(
@@ -763,7 +763,7 @@ impl Eth for EthHandler {
         Ok(Bytes::new(code))
     }
 
-    fn send_raw_transaction(&self, raw: Bytes) -> jsonrpc_core::Result<H256> {
+    fn send_raw_transaction(&self, raw: Bytes) -> mazze_rpc_error::Result<H256> {
         info!(
             "RPC Request: eth_sendRawTransaction / eth_submitTransaction raw={:?}",
             raw,
@@ -817,13 +817,13 @@ impl Eth for EthHandler {
         Ok(r)
     }
 
-    fn submit_transaction(&self, raw: Bytes) -> jsonrpc_core::Result<H256> {
+    fn submit_transaction(&self, raw: Bytes) -> mazze_rpc_error::Result<H256> {
         self.send_raw_transaction(raw)
     }
 
     fn call(
         &self, request: CallRequest, block_number_or_hash: Option<BlockNumber>,
-    ) -> jsonrpc_core::Result<Bytes> {
+    ) -> mazze_rpc_error::Result<Bytes> {
         info!(
             "RPC Request: eth_call request={:?}, block_num={:?}",
             request, block_number_or_hash
@@ -880,7 +880,7 @@ impl Eth for EthHandler {
 
     fn estimate_gas(
         &self, request: CallRequest, block_number_or_hash: Option<BlockNumber>,
-    ) -> jsonrpc_core::Result<U256> {
+    ) -> mazze_rpc_error::Result<U256> {
         info!(
             "RPC Request: eth_estimateGas request={:?}, block_num={:?}",
             request, block_number_or_hash
@@ -946,7 +946,7 @@ impl Eth for EthHandler {
     fn fee_history(
         &self, block_count: HexU64, newest_block: BlockNumber,
         reward_percentiles: Vec<f64>,
-    ) -> jsonrpc_core::Result<FeeHistory> {
+    ) -> mazze_rpc_error::Result<FeeHistory> {
         info!(
             "RPC Request: eth_feeHistory: block_count={}, newest_block={:?}, reward_percentiles={:?}",
             block_count, newest_block, reward_percentiles
@@ -1026,7 +1026,7 @@ impl Eth for EthHandler {
 
     fn transaction_by_hash(
         &self, hash: H256,
-    ) -> jsonrpc_core::Result<Option<Transaction>> {
+    ) -> mazze_rpc_error::Result<Option<Transaction>> {
         info!("RPC Request: eth_getTransactionByHash({:?})", hash);
 
         let tx_index = match self
@@ -1083,7 +1083,7 @@ impl Eth for EthHandler {
 
     fn transaction_by_block_hash_and_index(
         &self, hash: H256, idx: Index,
-    ) -> jsonrpc_core::Result<Option<Transaction>> {
+    ) -> mazze_rpc_error::Result<Option<Transaction>> {
         info!("RPC Request: eth_getTransactionByBlockHashAndIndex hash={:?}, idx={:?}", hash, idx);
 
         let phantom_block = {
@@ -1102,7 +1102,7 @@ impl Eth for EthHandler {
 
     fn transaction_by_block_number_and_index(
         &self, block_num: BlockNumber, idx: Index,
-    ) -> jsonrpc_core::Result<Option<Transaction>> {
+    ) -> mazze_rpc_error::Result<Option<Transaction>> {
         info!("RPC Request: eth_getTransactionByBlockNumberAndIndex block_num={:?}, idx={:?}", block_num, idx);
 
         let phantom_block = {
@@ -1123,7 +1123,7 @@ impl Eth for EthHandler {
 
     fn transaction_receipt(
         &self, tx_hash: H256,
-    ) -> jsonrpc_core::Result<Option<Receipt>> {
+    ) -> mazze_rpc_error::Result<Option<Receipt>> {
         info!(
             "RPC Request: eth_getTransactionReceipt tx_hash={:?}",
             tx_hash
@@ -1194,7 +1194,7 @@ impl Eth for EthHandler {
 
     fn uncle_by_block_hash_and_index(
         &self, hash: H256, idx: Index,
-    ) -> jsonrpc_core::Result<Option<RpcBlock>> {
+    ) -> mazze_rpc_error::Result<Option<RpcBlock>> {
         info!(
             "RPC Request: eth_getUncleByBlockHashAndIndex hash={:?}, idx={:?}",
             hash, idx
@@ -1205,13 +1205,13 @@ impl Eth for EthHandler {
 
     fn uncle_by_block_number_and_index(
         &self, block_num: BlockNumber, idx: Index,
-    ) -> jsonrpc_core::Result<Option<RpcBlock>> {
+    ) -> mazze_rpc_error::Result<Option<RpcBlock>> {
         info!("RPC Request: eth_getUncleByBlockNumberAndIndex block_num={:?}, idx={:?}", block_num, idx);
         // We do not have uncle block
         Ok(None)
     }
 
-    fn logs(&self, filter: EthRpcLogFilter) -> jsonrpc_core::Result<Vec<Log>> {
+    fn logs(&self, filter: EthRpcLogFilter) -> mazze_rpc_error::Result<Vec<Log>> {
         info!("RPC Request: eth_getLogs({:?})", filter);
 
         let filter: LogFilter =
@@ -1236,7 +1236,7 @@ impl Eth for EthHandler {
             .collect::<Result<_, _>>()?)
     }
 
-    fn submit_hashrate(&self, _: U256, _: H256) -> jsonrpc_core::Result<bool> {
+    fn submit_hashrate(&self, _: U256, _: H256) -> mazze_rpc_error::Result<bool> {
         info!("RPC Request: eth_submitHashrate");
         // We do not care mining
         Ok(false)
@@ -1244,7 +1244,7 @@ impl Eth for EthHandler {
 
     fn block_receipts(
         &self, block_num: Option<BlockNumber>,
-    ) -> jsonrpc_core::Result<Vec<Receipt>> {
+    ) -> mazze_rpc_error::Result<Vec<Receipt>> {
         info!(
             "RPC Request: parity_getBlockReceipts block_number={:?}",
             block_num
@@ -1296,7 +1296,7 @@ impl Eth for EthHandler {
     fn account_pending_transactions(
         &self, address: H160, maybe_start_nonce: Option<U256>,
         maybe_limit: Option<U64>,
-    ) -> jsonrpc_core::Result<AccountPendingTransactions> {
+    ) -> mazze_rpc_error::Result<AccountPendingTransactions> {
         info!("RPC Request: eth_getAccountPendingTransactions(addr={:?}, start_nonce={:?}, limit={:?})",
               address, maybe_start_nonce, maybe_limit);
 

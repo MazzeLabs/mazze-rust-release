@@ -10,9 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use jsonrpc_http_server::Server as HttpServer;
-use jsonrpc_tcp_server::Server as TcpServer;
-use jsonrpc_ws_server::Server as WSServer;
+use crate::rpc::{HttpServer, TcpServer, WsServer as WSServer};
 use parking_lot::{Condvar, Mutex};
 use rlp::Rlp;
 use threadpool::ThreadPool;
@@ -49,7 +47,6 @@ use crate::{
     accounts::{account_provider, keys_path},
     configuration::parse_config_address_string,
     rpc::{
-        extractor::RpcExtractor,
         impls::{
             common::RpcImpl as CommonRpcImpl,
             eth_pubsub::PubSubClient as EthPubSubClient, mazze::RpcImpl,
@@ -430,7 +427,15 @@ pub fn initialize_common_modules(
         accounts.clone(),
     ));
 
-    let runtime = Runtime::with_default_thread_count();
+    // All RPC servers share one runtime. `jsonrpc_http_threads` used to
+    // size the event loop of each HTTP server; it is now a lower bound on
+    // the workers of the shared runtime (one per CPU core by default).
+    let runtime = match conf.raw_conf.jsonrpc_http_threads {
+        Some(threads) => Runtime::with_thread_count(threads.max(
+            std::thread::available_parallelism().map_or(1, |n| n.get()),
+        )),
+        None => Runtime::with_default_thread_count(),
+    };
     let pubsub = PubSubClient::new(
         runtime.executor(),
         consensus.clone(),
@@ -642,6 +647,7 @@ pub fn initialize_not_light_node_modules(
             eth_pubsub.clone(),
             &conf,
         ),
+        &runtime,
     )?;
 
     let debug_rpc_tcp_server = super::rpc::start_tcp(
@@ -653,7 +659,7 @@ pub fn initialize_not_light_node_modules(
             eth_pubsub.clone(),
             &conf,
         ),
-        RpcExtractor,
+        &runtime,
     )?;
 
     let rpc_tcp_server = super::rpc::start_tcp(
@@ -665,7 +671,7 @@ pub fn initialize_not_light_node_modules(
             eth_pubsub.clone(),
             &conf,
         ),
-        RpcExtractor,
+        &runtime,
     )?;
 
     let debug_rpc_ws_server = super::rpc::start_ws(
@@ -677,7 +683,7 @@ pub fn initialize_not_light_node_modules(
             eth_pubsub.clone(),
             &conf,
         ),
-        RpcExtractor,
+        &runtime,
     )?;
 
     let rpc_ws_server = super::rpc::start_ws(
@@ -689,7 +695,7 @@ pub fn initialize_not_light_node_modules(
             eth_pubsub.clone(),
             &conf,
         ),
-        RpcExtractor,
+        &runtime,
     )?;
 
     let eth_rpc_http_server = super::rpc::start_http(
@@ -701,6 +707,7 @@ pub fn initialize_not_light_node_modules(
             eth_pubsub.clone(),
             &conf,
         ),
+        &runtime,
     )?;
 
     let eth_rpc_ws_server = super::rpc::start_ws(
@@ -712,7 +719,7 @@ pub fn initialize_not_light_node_modules(
             eth_pubsub.clone(),
             &conf,
         ),
-        RpcExtractor,
+        &runtime,
     )?;
 
     let rpc_http_server = super::rpc::start_http(
@@ -724,6 +731,7 @@ pub fn initialize_not_light_node_modules(
             eth_pubsub.clone(),
             &conf,
         ),
+        &runtime,
     )?;
 
     network.start();
@@ -804,12 +812,11 @@ pub fn initialize_txgens(
 }
 
 pub mod delegate_convert {
-    use std::convert::Into as StdInto;
-
-    use jsonrpc_core::{
-        futures::{future::IntoFuture, Future},
+    use futures::{future, FutureExt, TryFutureExt};
+    use mazze_rpc_error::{
         BoxFuture, Error as JsonRpcError, Result as JsonRpcResult,
     };
+    use std::{future::Future, pin::Pin};
 
     use crate::rpc::{RpcBoxFuture, RpcError, RpcResult};
 
@@ -818,27 +825,21 @@ pub mod delegate_convert {
     }
 
     impl<T> Into<JsonRpcResult<T>> for JsonRpcResult<T> {
-        fn into(x: Self) -> JsonRpcResult<T> {
-            x
-        }
+        fn into(x: Self) -> JsonRpcResult<T> { x }
     }
 
     impl<T: Send + Sync + 'static> Into<BoxFuture<T>> for BoxFuture<T> {
-        fn into(x: Self) -> BoxFuture<T> {
-            x
-        }
+        fn into(x: Self) -> BoxFuture<T> { x }
     }
 
     impl<T: Send + Sync + 'static> Into<BoxFuture<T>> for RpcBoxFuture<T> {
         fn into(x: Self) -> BoxFuture<T> {
-            Box::new(x.map_err(|rpc_error| Into::into(rpc_error)))
+            x.map_err(|rpc_error| Into::into(rpc_error)).boxed()
         }
     }
 
     impl Into<JsonRpcError> for RpcError {
-        fn into(e: Self) -> JsonRpcError {
-            e.into()
-        }
+        fn into(e: Self) -> JsonRpcError { e.into() }
     }
 
     pub fn into_jsonrpc_result<T>(r: RpcResult<T>) -> JsonRpcResult<T> {
@@ -849,9 +850,7 @@ pub mod delegate_convert {
     }
 
     impl<T> Into<JsonRpcResult<T>> for RpcResult<T> {
-        fn into(x: Self) -> JsonRpcResult<T> {
-            into_jsonrpc_result(x)
-        }
+        fn into(x: Self) -> JsonRpcResult<T> { into_jsonrpc_result(x) }
     }
 
     /// Sometimes an rpc method is implemented asynchronously, then the rpc
@@ -863,32 +862,46 @@ pub mod delegate_convert {
     /// conversion.
     impl<T: Send + Sync + 'static> Into<BoxFuture<T>> for RpcResult<T> {
         fn into(x: Self) -> BoxFuture<T> {
-            into_jsonrpc_result(x).into_future().boxed()
+            future::ready(into_jsonrpc_result(x)).boxed()
         }
     }
 
-    /*
-    /// It's a bad idea to convert a BoxFuture return type to a JsonRpcResult
-    /// return type for rpc call. Simply imagine how the code below runs.
-    impl<T: Send + Sync + 'static> Into<JsonRpcResult<T>> for BoxFuture<T> {
-        fn into(x: Self) -> JsonRpcResult<T> {
-            thread::Builder::new()
-                .name("rpc async waiter".into())
-                .spawn(move || x.wait())
-                .map_err(|e| {
-                    let mut rpc_err = JsonRpcError::internal_error();
-                    rpc_err.message = format!("thread creation error: {}", e);
+    /// Conversion used by `delegate!` for `async fn` RPC methods: whatever
+    /// the delegate returns (a result or a future of a result, with either
+    /// error type) becomes a future of the JSON-RPC result.
+    pub trait IntoAsync<R> {
+        fn into_async(x: Self) -> Pin<Box<dyn Future<Output = R> + Send>>;
+    }
 
-                    rpc_err
-                })?
-                .join()
-                .map_err(|_| {
-                    let mut rpc_err = JsonRpcError::internal_error();
-                    rpc_err.message = format!("thread join error.");
-
-                    rpc_err
-                })?
+    impl<T: Send + 'static> IntoAsync<JsonRpcResult<T>> for JsonRpcResult<T> {
+        fn into_async(
+            x: Self,
+        ) -> Pin<Box<dyn Future<Output = JsonRpcResult<T>> + Send>> {
+            future::ready(x).boxed()
         }
     }
-    */
+
+    impl<T: Send + 'static> IntoAsync<JsonRpcResult<T>> for RpcResult<T> {
+        fn into_async(
+            x: Self,
+        ) -> Pin<Box<dyn Future<Output = JsonRpcResult<T>> + Send>> {
+            future::ready(into_jsonrpc_result(x)).boxed()
+        }
+    }
+
+    impl<T: Send + 'static> IntoAsync<JsonRpcResult<T>> for BoxFuture<T> {
+        fn into_async(
+            x: Self,
+        ) -> Pin<Box<dyn Future<Output = JsonRpcResult<T>> + Send>> {
+            x
+        }
+    }
+
+    impl<T: Send + 'static> IntoAsync<JsonRpcResult<T>> for RpcBoxFuture<T> {
+        fn into_async(
+            x: Self,
+        ) -> Pin<Box<dyn Future<Output = JsonRpcResult<T>> + Send>> {
+            x.map_err(|rpc_error| Into::into(rpc_error)).boxed()
+        }
+    }
 }

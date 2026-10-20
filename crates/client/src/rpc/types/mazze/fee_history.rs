@@ -1,7 +1,7 @@
 use mazze_types::U256;
 use std::collections::VecDeque;
 
-#[derive(Serialize, Debug, Default)]
+#[derive(Clone, Serialize, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct MazzeFeeHistory {
     /// Oldest epoch

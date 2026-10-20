@@ -382,7 +382,7 @@ impl Ord for ProtocolInfo {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
     pub id: PeerId,
     pub addr: SocketAddr,

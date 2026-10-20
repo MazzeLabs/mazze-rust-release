@@ -45,6 +45,7 @@ members = [
     "crates/util/metrics",
     "crates/util/priority-send-queue",
     "crates/util/random_crash",
+    "crates/util/rpc-error",
     "crates/util/runtime",
     "crates/util/sha3-macro",
     "crates/util/solidity-abi",

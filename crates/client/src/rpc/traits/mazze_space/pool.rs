@@ -7,44 +7,44 @@ use crate::rpc::types::{
     Transaction as RpcTransaction, TxPoolPendingNonceRange, TxPoolStatus,
     TxWithPoolInfo,
 };
-use jsonrpc_core::{BoxFuture, Result as JsonRpcResult};
-use jsonrpc_derive::rpc;
+use mazze_rpc_error::{Result as JsonRpcResult};
+use jsonrpsee::proc_macros::rpc;
 use mazze_types::{H256, U256, U64};
 
 /// Transaction pool RPCs
 #[rpc(server)]
 pub trait TransactionPool {
-    #[rpc(name = "txpool_status")]
+    #[method(name = "txpool_status", blocking)]
     fn txpool_status(&self) -> JsonRpcResult<TxPoolStatus>;
 
-    #[rpc(name = "txpool_nextNonce")]
+    #[method(name = "txpool_nextNonce", blocking)]
     fn txpool_next_nonce(&self, address: RpcAddress) -> JsonRpcResult<U256>;
 
-    #[rpc(name = "txpool_transactionByAddressAndNonce")]
+    #[method(name = "txpool_transactionByAddressAndNonce", blocking)]
     fn txpool_transaction_by_address_and_nonce(
         &self, address: RpcAddress, nonce: U256,
     ) -> JsonRpcResult<Option<RpcTransaction>>;
 
-    #[rpc(name = "txpool_pendingNonceRange")]
+    #[method(name = "txpool_pendingNonceRange", blocking)]
     fn txpool_pending_nonce_range(
         &self, address: RpcAddress,
     ) -> JsonRpcResult<TxPoolPendingNonceRange>;
 
-    #[rpc(name = "txpool_txWithPoolInfo")]
+    #[method(name = "txpool_txWithPoolInfo", blocking)]
     fn txpool_tx_with_pool_info(
         &self, hash: H256,
     ) -> JsonRpcResult<TxWithPoolInfo>;
 
     /// Get transaction pending info by account address
-    #[rpc(name = "txpool_accountPendingInfo")]
-    fn account_pending_info(
+    #[method(name = "txpool_accountPendingInfo")]
+    async fn account_pending_info(
         &self, address: RpcAddress,
-    ) -> BoxFuture<Option<AccountPendingInfo>>;
+    ) -> mazze_rpc_error::Result<Option<AccountPendingInfo>>;
 
     /// Get transaction pending info by account address
-    #[rpc(name = "txpool_accountPendingTransactions")]
-    fn account_pending_transactions(
+    #[method(name = "txpool_accountPendingTransactions")]
+    async fn account_pending_transactions(
         &self, address: RpcAddress, maybe_start_nonce: Option<U256>,
         maybe_limit: Option<U64>,
-    ) -> BoxFuture<AccountPendingTransactions>;
+    ) -> mazze_rpc_error::Result<AccountPendingTransactions>;
 }

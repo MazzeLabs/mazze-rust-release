@@ -7,15 +7,13 @@ use std::sync::Arc;
 use parking_lot::{Condvar, Mutex};
 use secret_store::SecretStore;
 
-use jsonrpc_http_server::Server as HttpServer;
-use jsonrpc_tcp_server::Server as TcpServer;
-use jsonrpc_ws_server::Server as WsServer;
+use crate::rpc::{HttpServer, TcpServer, WsServer};
 
 use crate::{
     common::{initialize_common_modules, ClientComponents},
     configuration::Configuration,
     rpc::{
-        extractor::RpcExtractor, impls::light::RpcImpl,
+        impls::light::RpcImpl,
         setup_debug_rpc_apis_light, setup_public_rpc_apis_light,
     },
 };
@@ -108,6 +106,7 @@ impl LightClient {
                 eth_pubsub.clone(),
                 &conf,
             ),
+            &runtime,
         )?;
 
         let debug_rpc_tcp_server = super::rpc::start_tcp(
@@ -119,7 +118,7 @@ impl LightClient {
                 eth_pubsub.clone(),
                 &conf,
             ),
-            RpcExtractor,
+            &runtime,
         )?;
 
         let rpc_tcp_server = super::rpc::start_tcp(
@@ -131,7 +130,7 @@ impl LightClient {
                 eth_pubsub.clone(),
                 &conf,
             ),
-            RpcExtractor,
+            &runtime,
         )?;
 
         let debug_rpc_ws_server = super::rpc::start_ws(
@@ -143,7 +142,7 @@ impl LightClient {
                 eth_pubsub.clone(),
                 &conf,
             ),
-            RpcExtractor,
+            &runtime,
         )?;
 
         let rpc_ws_server = super::rpc::start_ws(
@@ -155,7 +154,7 @@ impl LightClient {
                 eth_pubsub.clone(),
                 &conf,
             ),
-            RpcExtractor,
+            &runtime,
         )?;
 
         let rpc_http_server = super::rpc::start_http(
@@ -167,6 +166,7 @@ impl LightClient {
                 eth_pubsub.clone(),
                 &conf,
             ),
+            &runtime,
         )?;
 
         network.start();

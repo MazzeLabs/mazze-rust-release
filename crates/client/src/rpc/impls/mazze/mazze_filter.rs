@@ -13,14 +13,13 @@ use crate::rpc::{
         limit_logs, PollFilter, PollManager, SyncPollFilter,
         MAX_BLOCK_HISTORY_SIZE,
     },
-    traits::mazze::MazzeFilter,
+    traits::mazze::MazzeFilterServer,
     types::{
         Log, MazzeFilterChanges, MazzeFilterLog, MazzeRpcLogFilter, RevertTo,
     },
 };
-use futures::{FutureExt, TryFutureExt};
 use itertools::zip;
-use jsonrpc_core::{Error as RpcError, ErrorCode, Result as JsonRpcResult};
+use mazze_rpc_error::{Error as RpcError, ErrorCode, Result as JsonRpcResult};
 use mazze_addr::Network;
 use mazze_types::{Space, H128, H256};
 use mazzecore::{
@@ -167,7 +166,6 @@ impl MazzeFilterClient {
             }
         };
 
-        let fut = fut.unit_error().boxed().compat();
         executor.spawn(fut);
     }
 }
@@ -384,7 +382,7 @@ impl Filterable for MazzeFilterClient {
     }
 }
 
-impl<T: Filterable + Send + Sync + 'static> MazzeFilter for T {
+impl<T: Filterable + Send + Sync + 'static> MazzeFilterServer for T {
     /// Returns id of new filter.
     fn new_filter(&self, filter: MazzeRpcLogFilter) -> JsonRpcResult<H128> {
         debug!("create filter: {:?}", filter);

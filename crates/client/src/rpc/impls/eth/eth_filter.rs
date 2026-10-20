@@ -7,7 +7,6 @@ use std::{
     sync::Arc,
 };
 
-use futures::{FutureExt, TryFutureExt};
 use itertools::zip;
 use mazze_types::{Space, H128, H256};
 use mazzecore::{
@@ -26,10 +25,10 @@ use crate::rpc::{
         limit_logs, PollFilter, PollManager, SyncPollFilter,
         MAX_BLOCK_HISTORY_SIZE,
     },
-    traits::eth_space::eth::EthFilter,
+    traits::eth_space::eth::EthFilterServer,
     types::eth::{BlockNumber, EthRpcLogFilter, FilterChanges, Log},
 };
-use jsonrpc_core::{Error as RpcError, ErrorCode, Result as RpcResult};
+use mazze_rpc_error::{Error as RpcError, ErrorCode, Result as RpcResult};
 use mazzecore::rpc_errors::Error as MazzeRpcError;
 
 /// Something which provides data that can be filtered over.
@@ -161,7 +160,6 @@ impl EthFilterClient {
             }
         };
 
-        let fut = fut.unit_error().boxed().compat();
         executor.spawn(fut);
     }
 }
@@ -375,7 +373,7 @@ impl Filterable for EthFilterClient {
     }
 }
 
-impl<T: Filterable + Send + Sync + 'static> EthFilter for T {
+impl<T: Filterable + Send + Sync + 'static> EthFilterServer for T {
     /// Returns id of new filter.
     fn new_filter(&self, filter: EthRpcLogFilter) -> RpcResult<H128> {
         debug!("create filter: {:?}", filter);

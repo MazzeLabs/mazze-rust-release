@@ -30,7 +30,6 @@ extern crate fnv;
 extern crate num_cpus;
 extern crate parking_lot;
 extern crate slab;
-extern crate time;
 extern crate timer;
 
 mod service_mio;

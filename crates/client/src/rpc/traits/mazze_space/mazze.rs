@@ -11,8 +11,8 @@ use crate::rpc::types::{
     RewardInfo as RpcRewardInfo, RpcAddress, SponsorInfo, Status as RpcStatus,
     StorageCollateralInfo, TokenSupplyInfo, Transaction, U64 as HexU64,
 };
-use jsonrpc_core::{BoxFuture, Result as JsonRpcResult, Value as JsonValue};
-use jsonrpc_derive::rpc;
+use mazze_rpc_error::{Result as JsonRpcResult, Value as JsonValue};
+use jsonrpsee::proc_macros::rpc;
 use mazze_types::{H128, H256, U256, U64};
 use primitives::StorageRoot;
 
@@ -36,97 +36,97 @@ pub trait Mazze {
     //        fn is_mining(&self) -> JsonRpcResult<bool>;
 
     /// Returns current gas price.
-    #[rpc(name = "mazze_gasPrice")]
-    fn gas_price(&self) -> BoxFuture<U256>;
+    #[method(name = "mazze_gasPrice")]
+    async fn gas_price(&self) -> mazze_rpc_error::Result<U256>;
 
     /// Returns current max_priority_fee
-    #[rpc(name = "mazze_maxPriorityFeePerGas")]
-    fn max_priority_fee_per_gas(&self) -> BoxFuture<U256>;
+    #[method(name = "mazze_maxPriorityFeePerGas")]
+    async fn max_priority_fee_per_gas(&self) -> mazze_rpc_error::Result<U256>;
 
     /// Returns highest epoch number.
-    #[rpc(name = "mazze_epochNumber")]
+    #[method(name = "mazze_epochNumber", blocking)]
     fn epoch_number(
         &self, epoch_number: Option<EpochNumber>,
     ) -> JsonRpcResult<U256>;
 
     /// Returns balance of the given account.
-    #[rpc(name = "mazze_getBalance")]
-    fn balance(
+    #[method(name = "mazze_getBalance")]
+    async fn balance(
         &self, addr: RpcAddress,
         block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>,
-    ) -> BoxFuture<U256>;
+    ) -> mazze_rpc_error::Result<U256>;
 
     /// Returns admin of the given contract
-    #[rpc(name = "mazze_getAdmin")]
-    fn admin(
+    #[method(name = "mazze_getAdmin")]
+    async fn admin(
         &self, addr: RpcAddress, epoch_number: Option<EpochNumber>,
-    ) -> BoxFuture<Option<RpcAddress>>;
+    ) -> mazze_rpc_error::Result<Option<RpcAddress>>;
 
     /// Returns sponsor information of the given contract
-    #[rpc(name = "mazze_getSponsorInfo")]
-    fn sponsor_info(
+    #[method(name = "mazze_getSponsorInfo")]
+    async fn sponsor_info(
         &self, addr: RpcAddress, epoch_number: Option<EpochNumber>,
-    ) -> BoxFuture<SponsorInfo>;
+    ) -> mazze_rpc_error::Result<SponsorInfo>;
 
     /// Returns balance of the given account.
-    #[rpc(name = "mazze_getCollateralForStorage")]
-    fn collateral_for_storage(
+    #[method(name = "mazze_getCollateralForStorage")]
+    async fn collateral_for_storage(
         &self, addr: RpcAddress, epoch_number: Option<EpochNumber>,
-    ) -> BoxFuture<U256>;
+    ) -> mazze_rpc_error::Result<U256>;
 
     /// Returns the code at given address at given time (epoch number).
-    #[rpc(name = "mazze_getCode")]
-    fn code(
+    #[method(name = "mazze_getCode")]
+    async fn code(
         &self, addr: RpcAddress,
         block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>,
-    ) -> BoxFuture<Bytes>;
+    ) -> mazze_rpc_error::Result<Bytes>;
 
     /// Returns storage entries from a given contract.
-    #[rpc(name = "mazze_getStorageAt")]
-    fn storage_at(
+    #[method(name = "mazze_getStorageAt")]
+    async fn storage_at(
         &self, addr: RpcAddress, pos: U256,
         block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>,
-    ) -> BoxFuture<Option<H256>>;
+    ) -> mazze_rpc_error::Result<Option<H256>>;
 
-    #[rpc(name = "mazze_getStorageRoot")]
-    fn storage_root(
+    #[method(name = "mazze_getStorageRoot")]
+    async fn storage_root(
         &self, address: RpcAddress, epoch_num: Option<EpochNumber>,
-    ) -> BoxFuture<Option<StorageRoot>>;
+    ) -> mazze_rpc_error::Result<Option<StorageRoot>>;
 
     /// Returns block with given hash.
-    #[rpc(name = "mazze_getBlockByHash")]
-    fn block_by_hash(
+    #[method(name = "mazze_getBlockByHash")]
+    async fn block_by_hash(
         &self, block_hash: H256, include_txs: bool,
-    ) -> BoxFuture<Option<Block>>;
+    ) -> mazze_rpc_error::Result<Option<Block>>;
 
     /// Returns block with given hash and main chain assumption.
-    #[rpc(name = "mazze_getBlockByHashWithMainAssumption")]
-    fn block_by_hash_with_main_assumption(
+    #[method(name = "mazze_getBlockByHashWithMainAssumption")]
+    async fn block_by_hash_with_main_assumption(
         &self, block_hash: H256, main_hash: H256, epoch_number: U64,
-    ) -> BoxFuture<Block>;
+    ) -> mazze_rpc_error::Result<Block>;
 
     /// Returns block with given epoch number.
-    #[rpc(name = "mazze_getBlockByEpochNumber")]
-    fn block_by_epoch_number(
+    #[method(name = "mazze_getBlockByEpochNumber")]
+    async fn block_by_epoch_number(
         &self, epoch_number: EpochNumber, include_txs: bool,
-    ) -> BoxFuture<Option<Block>>;
+    ) -> mazze_rpc_error::Result<Option<Block>>;
 
     /// Returns block with given block number.
-    #[rpc(name = "mazze_getBlockByBlockNumber")]
-    fn block_by_block_number(
+    #[method(name = "mazze_getBlockByBlockNumber")]
+    async fn block_by_block_number(
         &self, block_number: U64, include_txs: bool,
-    ) -> BoxFuture<Option<Block>>;
+    ) -> mazze_rpc_error::Result<Option<Block>>;
 
     /// Returns best block hash.
-    #[rpc(name = "mazze_getBestBlockHash")]
+    #[method(name = "mazze_getBestBlockHash", blocking)]
     fn best_block_hash(&self) -> JsonRpcResult<H256>;
 
     /// Returns the nonce should be filled in next sending transaction from
     /// given address at given time (epoch number).
-    #[rpc(name = "mazze_getNextNonce")]
-    fn next_nonce(
+    #[method(name = "mazze_getNextNonce")]
+    async fn next_nonce(
         &self, addr: RpcAddress, epoch_number: Option<BlockHashOrEpochNumber>,
-    ) -> BoxFuture<U256>;
+    ) -> mazze_rpc_error::Result<U256>;
 
     //        /// Returns the number of transactions in a block with given hash.
     //        #[rpc(name = "mazze_getBlockTransactionCountByHash")]
@@ -139,7 +139,7 @@ pub trait Mazze {
     // BoxFuture<Option<U256>>;
 
     /// Sends signed transaction, returning its hash.
-    #[rpc(name = "mazze_sendRawTransaction")]
+    #[method(name = "mazze_sendRawTransaction", blocking)]
     fn send_raw_transaction(&self, raw_tx: Bytes) -> JsonRpcResult<H256>;
 
     //        /// @alias of `mazze_sendRawTransaction`.
@@ -147,118 +147,118 @@ pub trait Mazze {
     //        fn submit_transaction(&self, Bytes) -> JsonRpcResult<H256>;
 
     /// Call contract, returning the output data.
-    #[rpc(name = "mazze_call")]
+    #[method(name = "mazze_call", blocking)]
     fn call(
         &self, tx: CallRequest,
         block_hash_or_epoch_number: Option<BlockHashOrEpochNumber>,
     ) -> JsonRpcResult<Bytes>;
 
     /// Returns logs matching the filter provided.
-    #[rpc(name = "mazze_getLogs")]
-    fn get_logs(&self, filter: MazzeRpcLogFilter) -> BoxFuture<Vec<RpcLog>>;
+    #[method(name = "mazze_getLogs")]
+    async fn get_logs(&self, filter: MazzeRpcLogFilter) -> mazze_rpc_error::Result<Vec<RpcLog>>;
 
     /// Get transaction by its hash.
-    #[rpc(name = "mazze_getTransactionByHash")]
-    fn transaction_by_hash(
+    #[method(name = "mazze_getTransactionByHash")]
+    async fn transaction_by_hash(
         &self, tx_hash: H256,
-    ) -> BoxFuture<Option<Transaction>>;
+    ) -> mazze_rpc_error::Result<Option<Transaction>>;
 
     /// Get transaction pending info by account address
-    #[rpc(name = "mazze_getAccountPendingInfo")]
-    fn account_pending_info(
+    #[method(name = "mazze_getAccountPendingInfo")]
+    async fn account_pending_info(
         &self, address: RpcAddress,
-    ) -> BoxFuture<Option<AccountPendingInfo>>;
+    ) -> mazze_rpc_error::Result<Option<AccountPendingInfo>>;
 
     /// Get transaction pending info by account address
-    #[rpc(name = "mazze_getAccountPendingTransactions")]
-    fn account_pending_transactions(
+    #[method(name = "mazze_getAccountPendingTransactions")]
+    async fn account_pending_transactions(
         &self, address: RpcAddress, maybe_start_nonce: Option<U256>,
         maybe_limit: Option<U64>,
-    ) -> BoxFuture<AccountPendingTransactions>;
+    ) -> mazze_rpc_error::Result<AccountPendingTransactions>;
 
     /// Return estimated gas and collateral usage.
-    #[rpc(name = "mazze_estimateGasAndCollateral")]
+    #[method(name = "mazze_estimateGasAndCollateral", blocking)]
     fn estimate_gas_and_collateral(
         &self, request: CallRequest, epoch_number: Option<EpochNumber>,
     ) -> JsonRpcResult<EstimateGasAndCollateralResponse>;
 
-    #[rpc(name = "mazze_feeHistory")]
-    fn fee_history(
+    #[method(name = "mazze_feeHistory")]
+    async fn fee_history(
         &self, block_count: HexU64, newest_block: EpochNumber,
         reward_percentiles: Vec<f64>,
-    ) -> BoxFuture<MazzeFeeHistory>;
+    ) -> mazze_rpc_error::Result<MazzeFeeHistory>;
 
     /// Check if user balance is enough for the transaction.
-    #[rpc(name = "mazze_checkBalanceAgainstTransaction")]
-    fn check_balance_against_transaction(
+    #[method(name = "mazze_checkBalanceAgainstTransaction")]
+    async fn check_balance_against_transaction(
         &self, account_addr: RpcAddress, contract_addr: RpcAddress,
         gas_limit: U256, gas_price: U256, storage_limit: U256,
         epoch: Option<EpochNumber>,
-    ) -> BoxFuture<CheckBalanceAgainstTransactionResponse>;
+    ) -> mazze_rpc_error::Result<CheckBalanceAgainstTransactionResponse>;
 
-    #[rpc(name = "mazze_getBlocksByEpoch")]
+    #[method(name = "mazze_getBlocksByEpoch", blocking)]
     fn blocks_by_epoch(
         &self, epoch_number: EpochNumber,
     ) -> JsonRpcResult<Vec<H256>>;
 
-    #[rpc(name = "mazze_getSkippedBlocksByEpoch")]
+    #[method(name = "mazze_getSkippedBlocksByEpoch", blocking)]
     fn skipped_blocks_by_epoch(
         &self, epoch_number: EpochNumber,
     ) -> JsonRpcResult<Vec<H256>>;
 
-    #[rpc(name = "mazze_getTransactionReceipt")]
-    fn transaction_receipt(
+    #[method(name = "mazze_getTransactionReceipt")]
+    async fn transaction_receipt(
         &self, tx_hash: H256,
-    ) -> BoxFuture<Option<RpcReceipt>>;
+    ) -> mazze_rpc_error::Result<Option<RpcReceipt>>;
 
     /// Return account related states of the given account
-    #[rpc(name = "mazze_getAccount")]
-    fn account(
+    #[method(name = "mazze_getAccount")]
+    async fn account(
         &self, address: RpcAddress, epoch_num: Option<EpochNumber>,
-    ) -> BoxFuture<RpcAccount>;
+    ) -> mazze_rpc_error::Result<RpcAccount>;
 
-    #[rpc(name = "mazze_getConfirmationRiskByHash")]
+    #[method(name = "mazze_getConfirmationRiskByHash", blocking)]
     fn confirmation_risk_by_hash(
         &self, block_hash: H256,
     ) -> JsonRpcResult<Option<U256>>;
 
-    #[rpc(name = "mazze_getStatus")]
+    #[method(name = "mazze_getStatus", blocking)]
     fn get_status(&self) -> JsonRpcResult<RpcStatus>;
 
     /// Returns block reward information in an epoch
-    #[rpc(name = "mazze_getBlockRewardInfo")]
+    #[method(name = "mazze_getBlockRewardInfo", blocking)]
     fn get_block_reward_info(
         &self, num: EpochNumber,
     ) -> JsonRpcResult<Vec<RpcRewardInfo>>;
 
     /// Return the client version as a string
-    #[rpc(name = "mazze_clientVersion")]
+    #[method(name = "mazze_clientVersion", blocking)]
     fn get_client_version(&self) -> JsonRpcResult<String>;
 
     /// Return the node's version as structured data: node software version,
     /// build commit and consensus version (peers with a different non-zero
     /// consensus version are rejected at handshake).
-    #[rpc(name = "mazze_nodeVersion")]
+    #[method(name = "mazze_nodeVersion", blocking)]
     fn get_node_version(&self) -> JsonRpcResult<JsonValue>;
 
     /// Diagnostic: checkpoint machinery state (era / stable heights, timer
     /// chain and force-confirm point), to see why checkpoints do or do not
     /// form on a node.
-    #[rpc(name = "mazze_consensusDebug")]
+    #[method(name = "mazze_consensusDebug", blocking)]
     fn get_consensus_debug(&self) -> JsonRpcResult<JsonValue>;
 
     /// Return information about total token supply.
-    #[rpc(name = "mazze_getSupplyInfo")]
+    #[method(name = "mazze_getSupplyInfo", blocking)]
     fn get_supply_info(
         &self, epoch_number: Option<EpochNumber>,
     ) -> JsonRpcResult<TokenSupplyInfo>;
 
-    #[rpc(name = "mazze_getCollateralInfo")]
+    #[method(name = "mazze_getCollateralInfo", blocking)]
     fn get_collateral_info(
         &self, epoch_number: Option<EpochNumber>,
     ) -> JsonRpcResult<StorageCollateralInfo>;
 
-    #[rpc(name = "mazze_getFeeBurnt")]
+    #[method(name = "mazze_getFeeBurnt", blocking)]
     fn get_fee_burnt(
         &self, epoch_number: Option<EpochNumber>,
     ) -> JsonRpcResult<U256>;
@@ -284,55 +284,55 @@ pub trait Mazze {
     // BoxFuture<Option<Block>>;
 
     /// Check if a block is a timer block
-    #[rpc(name = "mazze_isTimerBlock")]
+    #[method(name = "mazze_isTimerBlock", blocking)]
     fn is_timer_block(&self, block_hash: H256) -> JsonRpcResult<bool>;
 
     /// Get the timer chain hash list
-    #[rpc(name = "mazze_getTimerChain")]
+    #[method(name = "mazze_getTimerChain", blocking)]
     fn get_timer_chain(&self) -> JsonRpcResult<Vec<H256>>;
 
     /// Get the timer chain difficulty
-    #[rpc(name = "mazze_getTimerChainDifficulty")]
+    #[method(name = "mazze_getTimerChainDifficulty", blocking)]
     fn get_timer_chain_difficulty(&self) -> JsonRpcResult<U256>;
 
     /// Get block blame info by block hash
-    #[rpc(name = "mazze_getBlockBlameInfo")]
+    #[method(name = "mazze_getBlockBlameInfo", blocking)]
     fn get_block_blame_info(
         &self, block_hash: H256,
     ) -> JsonRpcResult<JsonValue>;
 
     /// Get current DAG tips (terminal block hashes)
-    #[rpc(name = "mazze_getDagTips")]
+    #[method(name = "mazze_getDagTips", blocking)]
     fn get_dag_tips(&self) -> JsonRpcResult<Vec<H256>>;
 
     /// Alias for skipped blocks by epoch
-    #[rpc(name = "mazze_getSkippedBlockHashesByEpoch")]
+    #[method(name = "mazze_getSkippedBlockHashesByEpoch", blocking)]
     fn get_skipped_block_hashes_by_epoch(
         &self, epoch_number: EpochNumber,
     ) -> JsonRpcResult<Vec<H256>>;
 
     /// Get RandomX epoch info
-    #[rpc(name = "mazze_getRandomXEpochInfo")]
+    #[method(name = "mazze_getRandomXEpochInfo", blocking)]
     fn get_randomx_epoch_info(
         &self, epoch_number: Option<EpochNumber>,
     ) -> JsonRpcResult<JsonValue>;
 
     /// Get era details (latest_era supported)
-    #[rpc(name = "mazze_getEraDetails")]
+    #[method(name = "mazze_getEraDetails", blocking)]
     fn get_era_details(
         &self, selector: Option<String>,
     ) -> JsonRpcResult<JsonValue>;
 
     /// Get block weight by hash (WLSR weight)
-    #[rpc(name = "mazze_getBlockWeight")]
+    #[method(name = "mazze_getBlockWeight", blocking)]
     fn get_block_weight(&self, block_hash: H256) -> JsonRpcResult<U256>;
 
     /// Check if a block is adaptive
-    #[rpc(name = "mazze_isAdaptiveBlock")]
+    #[method(name = "mazze_isAdaptiveBlock", blocking)]
     fn is_adaptive_block(&self, block_hash: H256) -> JsonRpcResult<bool>;
 
     /// Check if a block is partial invalid
-    #[rpc(name = "mazze_isPartialInvalid")]
+    #[method(name = "mazze_isPartialInvalid", blocking)]
     fn is_partial_invalid(&self, block_hash: H256) -> JsonRpcResult<bool>;
 }
 
@@ -340,26 +340,26 @@ pub trait Mazze {
 #[rpc(server)]
 pub trait MazzeFilter {
     /// Returns id of new filter.
-    #[rpc(name = "mazze_newFilter")]
-    fn new_filter(&self, _: MazzeRpcLogFilter) -> JsonRpcResult<H128>;
+    #[method(name = "mazze_newFilter", blocking)]
+    fn new_filter(&self, arg0: MazzeRpcLogFilter) -> JsonRpcResult<H128>;
 
     /// Returns id of new block filter.
-    #[rpc(name = "mazze_newBlockFilter")]
+    #[method(name = "mazze_newBlockFilter", blocking)]
     fn new_block_filter(&self) -> JsonRpcResult<H128>;
 
     /// Returns id of new block filter.
-    #[rpc(name = "mazze_newPendingTransactionFilter")]
+    #[method(name = "mazze_newPendingTransactionFilter", blocking)]
     fn new_pending_transaction_filter(&self) -> JsonRpcResult<H128>;
 
     /// Returns filter changes since last poll.
-    #[rpc(name = "mazze_getFilterChanges")]
-    fn filter_changes(&self, _: H128) -> JsonRpcResult<MazzeFilterChanges>;
+    #[method(name = "mazze_getFilterChanges", blocking)]
+    fn filter_changes(&self, arg0: H128) -> JsonRpcResult<MazzeFilterChanges>;
 
     /// Returns all logs matching given filter (in a range 'from' - 'to').
-    #[rpc(name = "mazze_getFilterLogs")]
-    fn filter_logs(&self, _: H128) -> JsonRpcResult<Vec<RpcLog>>;
+    #[method(name = "mazze_getFilterLogs", blocking)]
+    fn filter_logs(&self, arg0: H128) -> JsonRpcResult<Vec<RpcLog>>;
 
     /// Uninstalls filter.
-    #[rpc(name = "mazze_uninstallFilter")]
-    fn uninstall_filter(&self, _: H128) -> JsonRpcResult<bool>;
+    #[method(name = "mazze_uninstallFilter", blocking)]
+    fn uninstall_filter(&self, arg0: H128) -> JsonRpcResult<bool>;
 }

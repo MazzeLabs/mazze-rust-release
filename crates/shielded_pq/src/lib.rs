@@ -12,4 +12,5 @@ pub mod keys;
 pub mod note;
 pub mod ps1;
 pub mod tree;
+pub mod verify;
 pub mod wire;

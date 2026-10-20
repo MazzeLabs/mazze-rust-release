@@ -1,0 +1,90 @@
+//! Stage A of the verification pipeline (spec §8.2): everything about a
+//! shielded transaction that needs no chain state, ending with the STARK.
+//! A block is accepted only if this passes for every body in its section.
+
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock},
+};
+
+use primitives::shielded::{proof_hash, ShieldedDigest, ShieldedTxBody};
+
+use crate::{
+    air::spend2x2::{pvi, Tx2Air},
+    field::{from_bytes, limbs, Digest, DIGEST, F},
+    ps1::{self, PROOF_LEN_MAX, PROOF_SYSTEM_ID},
+    wire,
+};
+
+/// The only pool version this crate proves for.
+pub const POOL_VERSION: u8 = 1;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Rejection {
+    UnknownPoolVersion(u8),
+    UnknownProofSystem(u8),
+    ProofTooLong(usize),
+    ProofHashMismatch,
+    MalformedProof(String),
+    InvalidProof(String),
+}
+
+fn digest(d: &ShieldedDigest) -> Digest {
+    from_bytes::<DIGEST>(d.as_bytes())
+        .expect("a decoded body holds canonical digests")
+}
+
+/// The AIR's public values for `body` (spec §7): anchor, both nullifiers,
+/// both output commitments, the public amounts and fee as 16-bit limbs, and
+/// the sighash as 16 little-endian 16-bit limbs.
+pub fn public_values(body: &ShieldedTxBody, chain_id: u32) -> Vec<F> {
+    let mut pv = Vec::with_capacity(pvi::COUNT);
+    pv.extend_from_slice(&digest(&body.anchor));
+    for nf in &body.nf {
+        pv.extend_from_slice(&digest(nf));
+    }
+    for cm in &body.cm_out {
+        pv.extend_from_slice(&digest(cm));
+    }
+    pv.extend_from_slice(&limbs(body.v_public_in));
+    pv.extend_from_slice(&limbs(body.v_public_out));
+    pv.extend_from_slice(&limbs(body.fee));
+    for pair in body.sighash(chain_id).chunks_exact(2) {
+        pv.push(F::new(u16::from_le_bytes([pair[0], pair[1]]) as u32));
+    }
+    debug_assert_eq!(pv.len(), pvi::COUNT);
+    pv
+}
+
+/// The statement for one chain, built once: its periodic columns are large.
+fn air(chain_id: u32) -> Arc<Tx2Air> {
+    static AIRS: OnceLock<Mutex<HashMap<u32, Arc<Tx2Air>>>> = OnceLock::new();
+    let mut airs = AIRS.get_or_init(Default::default).lock().unwrap();
+    airs.entry(chain_id)
+        .or_insert_with(|| Arc::new(Tx2Air::new(chain_id)))
+        .clone()
+}
+
+/// Verifies one shielded transaction against its proof. Checks run cheapest
+/// first; nothing is skipped and nothing is remembered (no "verified" flag).
+pub fn verify_body(
+    body: &ShieldedTxBody, proof: &[u8], chain_id: u32,
+) -> Result<(), Rejection> {
+    if body.pool_version != POOL_VERSION {
+        return Err(Rejection::UnknownPoolVersion(body.pool_version));
+    }
+    if body.proof_system_id != PROOF_SYSTEM_ID {
+        return Err(Rejection::UnknownProofSystem(body.proof_system_id));
+    }
+    if proof.len() > PROOF_LEN_MAX {
+        return Err(Rejection::ProofTooLong(proof.len()));
+    }
+    if proof_hash(proof) != body.proof_hash {
+        return Err(Rejection::ProofHashMismatch);
+    }
+    let decoded = wire::decode(proof, PROOF_LEN_MAX)
+        .map_err(|e| Rejection::MalformedProof(e.to_string()))?;
+    let air = air(chain_id);
+    ps1::verify(&*air, chain_id, &decoded, &public_values(body, chain_id))
+        .map_err(Rejection::InvalidProof)
+}

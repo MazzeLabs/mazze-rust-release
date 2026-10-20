@@ -4681,6 +4681,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "mazze-shielded-pq",
+ "mazze-types",
  "p3-air",
  "p3-challenger",
  "p3-commit",
@@ -4695,7 +4696,9 @@ dependencies = [
  "p3-security",
  "p3-symmetric",
  "p3-uni-stark",
+ "primitives",
  "rand 0.10.3",
+ "rlp 0.4.6",
  "serde",
  "tiny-keccak 2.0.2",
 ]

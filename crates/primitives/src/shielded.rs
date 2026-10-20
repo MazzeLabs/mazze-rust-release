@@ -234,9 +234,29 @@ impl ShieldedTxBody {
     }
 }
 
-impl Encodable for ShieldedTxBody {
-    fn rlp_append(&self, s: &mut RlpStream) {
-        s.begin_list(14);
+/// Domain of the sighash.
+pub const SIGHASH_DOMAIN: &[u8] = b"mazze/shielded/sighash/v1";
+
+impl ShieldedTxBody {
+    /// The digest the proof binds as a public input (spec §6.3): SHAKE256
+    /// over the domain, the chain id and every body field except
+    /// `proof_hash`, which cannot be covered because the proof depends on
+    /// the sighash. The body itself commits to the proof through
+    /// `proof_hash`.
+    pub fn sighash(&self, chain_id: u32) -> [u8; 32] {
+        let mut fields = RlpStream::new_list(13);
+        self.append_signed_fields(&mut fields);
+        let mut shake = Shake::v256();
+        shake.update(SIGHASH_DOMAIN);
+        shake.update(&chain_id.to_le_bytes());
+        shake.update(&fields.out());
+        let mut out = [0u8; 32];
+        shake.finalize(&mut out);
+        out
+    }
+
+    /// The first 13 items of the encoding: everything but `proof_hash`.
+    fn append_signed_fields(&self, s: &mut RlpStream) {
         s.append(&SHIELDED_TX_VERSION);
         s.append(&self.pool_version);
         s.append(&self.proof_system_id);
@@ -259,6 +279,13 @@ impl Encodable for ShieldedTxBody {
             }
         }
         s.append(&self.fee);
+    }
+}
+
+impl Encodable for ShieldedTxBody {
+    fn rlp_append(&self, s: &mut RlpStream) {
+        s.begin_list(14);
+        self.append_signed_fields(s);
         s.append(&self.proof_hash);
     }
 }
@@ -400,6 +427,42 @@ mod tests {
         shake.update(b"proof");
         shake.finalize(&mut plain);
         assert_ne!(h.as_bytes(), &plain);
+    }
+
+    #[test]
+    fn sighash_covers_every_field_but_the_proof_hash() {
+        let base = body().sighash(1);
+        assert_ne!(base, body().sighash(2), "chain id");
+        let mut other = body();
+        other.proof_hash = H512::repeat_byte(0x01);
+        assert_eq!(other.sighash(1), base, "the proof hash is not covered");
+        let mut changes: Vec<Box<dyn Fn(&mut ShieldedTxBody)>> = vec![
+            Box::new(|b| b.pool_version += 1),
+            Box::new(|b| b.proof_system_id += 1),
+            Box::new(|b| b.anchor = digest(9)),
+            Box::new(|b| b.nf[1] = digest(9)),
+            Box::new(|b| b.cm_out[0] = digest(9)),
+            Box::new(|b| b.recovery.tag[3] ^= 1),
+            Box::new(|b| b.recovery.slot[0] ^= 1),
+            Box::new(|b| b.recovery.mac[15] ^= 1),
+            Box::new(|b| b.v_public_in += 1),
+            Box::new(|b| b.fee += 1),
+            Box::new(|b| {
+                b.v_public_out = 1;
+                b.dest = Some(ShieldedDest {
+                    space: Space::Native,
+                    address: Address::repeat_byte(2),
+                })
+            }),
+        ];
+        for (i, change) in changes.iter_mut().enumerate() {
+            let mut b = body();
+            change(&mut b);
+            assert_ne!(b.sighash(1), base, "field change {i} not covered");
+        }
+        let mut native = shield_out();
+        native.dest.as_mut().unwrap().space = Space::Native;
+        assert_ne!(native.sighash(1), shield_out().sighash(1), "dest space");
     }
 
     #[test]

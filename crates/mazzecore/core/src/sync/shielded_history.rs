@@ -59,13 +59,15 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// outcomes.
 pub type HistoryRow = (u64, H256, ShieldedHistoryEntry);
 
-/// The first slot epoch of the lane, if it is configured.
+/// The first slot epoch that can hold a section, if the lane is
+/// configured. Never the genesis epoch: the genesis block has no section and
+/// is not executed like the others, so history starts after it.
 pub fn first_slot(params: &ShieldedParams) -> Option<u64> {
     if params.activation_height == u64::MAX || params.slot_epochs == 0 {
         return None;
     }
     let slot = params.slot_epochs;
-    Some(params.activation_height.div_ceil(slot) * slot)
+    Some(params.activation_height.max(1).div_ceil(slot) * slot)
 }
 
 /// Appends the applied outputs of `entry`, the section of slot `epoch`, to
@@ -192,6 +194,9 @@ impl ShieldedBackfill {
                     return;
                 }
             }
+            info!(
+                "shielded history below epoch {start} is missing: fetching it from peers, from epoch {cursor}"
+            );
             inner.replayed = Some((cursor, frontier));
         }
         let (cursor, frontier) = inner.replayed.clone().expect("set above");
@@ -257,6 +262,7 @@ impl ShieldedBackfill {
             }
             inner.outstanding = None;
             if !msg.complete {
+                debug!("{:?} has no complete shielded history", peer);
                 inner.excluded.insert(*peer);
                 return;
             }
@@ -388,7 +394,8 @@ mod tests {
             slot_epochs,
             ..Default::default()
         };
-        assert_eq!(first_slot(&p(0, 10)), Some(0));
+        assert_eq!(first_slot(&p(0, 10)), Some(10), "never the genesis epoch");
+        assert_eq!(first_slot(&p(1, 10)), Some(10));
         assert_eq!(first_slot(&p(15, 10)), Some(20));
         assert_eq!(first_slot(&p(20, 10)), Some(20));
         assert_eq!(first_slot(&p(u64::MAX, 10)), None);

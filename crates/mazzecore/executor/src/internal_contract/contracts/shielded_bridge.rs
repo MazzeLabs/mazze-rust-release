@@ -19,6 +19,7 @@ use mazze_types::{AddressSpaceUtil, Space, H256, U256};
 
 use super::preludes::*;
 use crate::{
+    spec::SHIELDED_UNIT,
     executive_observer::AddressPocket, internal_bail, shielded_engine,
     substate::cleanup_mode,
 };
@@ -60,8 +61,14 @@ impl SimpleExecutionTrait for ShieldIn {
         if value.is_zero() {
             internal_bail!("shield-in requires a non-zero value");
         }
-        if value > U256::from(u64::MAX) {
-            internal_bail!("shield-in value above 2^64");
+        // Shielded amounts are whole GMazzy (`SHIELDED_UNIT`), below 2^64
+        // units: anything else is refused, never rounded.
+        let unit = U256::from(SHIELDED_UNIT);
+        if !(value % unit).is_zero() {
+            internal_bail!("shield-in value must be a whole number of GMazzy");
+        }
+        if value / unit > U256::from(u64::MAX) {
+            internal_bail!("shield-in value above 2^64 GMazzy");
         }
         // From eSpace the value landed on the bridge's eSpace account; the
         // backing is the native one, so it moves there.

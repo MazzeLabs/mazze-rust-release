@@ -46,6 +46,15 @@ pub fn unhex(v: &Value) -> Result<Vec<u8>, String> {
     hex::decode(s.trim_start_matches("0x")).map_err(|e| e.to_string())
 }
 
+pub fn as_u256(v: &Value) -> Result<mazze_types::U256, String> {
+    let s = v.as_str().ok_or_else(|| format!("expected a quantity, got {v}"))?;
+    let hex = s.trim_start_matches("0x");
+    if hex.is_empty() || hex.len() > 64 {
+        return Err(format!("bad quantity {s}"));
+    }
+    hex.parse().map_err(|e| format!("bad quantity {s}: {e:?}"))
+}
+
 pub fn as_u64(v: &Value) -> Result<u64, String> {
     match v {
         Value::String(s) => u64::from_str_radix(s.trim_start_matches("0x"), 16)

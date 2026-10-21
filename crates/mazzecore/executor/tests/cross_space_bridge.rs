@@ -554,7 +554,8 @@ fn shield_in_from_espace_moves_the_value_to_the_native_backing() {
         "no other internal contract is"
     );
 
-    let amount = U256::from(5_000u64);
+    // Five GMazzy: shielded amounts are whole units.
+    let amount = U256::from(5_000_000_000u64);
     harness
         .state
         .add_balance(&espace_bridge, &amount, CleanupMode::NoEmpty)
@@ -586,6 +587,13 @@ fn shield_in_from_espace_moves_the_value_to_the_native_backing() {
         static_flag: false,
         depth: 0,
     };
+    // A fraction of a GMazzy is refused, never rounded.
+    let mut fractional = params.clone();
+    fractional.value = ActionValue::Transfer(amount + 1);
+    assert!(matches!(
+        contract.execute(&fractional, &mut ref_ctx),
+        InternalTrapResult::Return(Err(_))
+    ));
     let result = contract.execute(&params, &mut ref_ctx);
     assert!(matches!(result, InternalTrapResult::Return(Ok(_))));
 
@@ -595,4 +603,30 @@ fn shield_in_from_espace_moves_the_value_to_the_native_backing() {
         deposit_credit(&harness.state, body_hash.as_bytes()).unwrap(),
         amount
     );
+}
+
+/// After the pause height the bridge takes no deposit.
+#[test]
+fn a_paused_lane_takes_no_deposit() {
+    use mazze_parameters::internal_contract_addresses::SHIELDED_BRIDGE_ADDRESS;
+    use mazze_types::H256;
+
+    let mut common = mazze_executor::spec::CommonParams::default();
+    common.shielded.activation_height = 0;
+    common.shielded.pause_height = 0;
+    let mut harness = Harness::with_params(common);
+    let spec = harness.spec();
+    assert!(!spec.shielded_active);
+    let data = encode_call("shieldIn(bytes32)", &H256::repeat_byte(1));
+    let params = make_call_params(
+        Address::random(),
+        SHIELDED_BRIDGE_ADDRESS,
+        100_000,
+        U256::from(1_000_000_000u64),
+        data,
+    );
+    let result = dispatch(&mut harness, &spec, &SHIELDED_BRIDGE_ADDRESS, params, |c, p, ctx| {
+        c.execute(p, ctx)
+    });
+    assert!(matches!(result, InternalTrapResult::Return(Err(_))));
 }

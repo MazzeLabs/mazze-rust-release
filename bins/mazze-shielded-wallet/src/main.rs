@@ -64,8 +64,15 @@ use rand::RngCore;
 use rand10::SeedableRng;
 use serde_json::{json, Value};
 
-use rpc::{as_u64, hex0x, unhex, Node};
+use rpc::{as_u256, as_u64, hex0x, unhex, Node};
 use store::{PendingTx, StoredNote, Wallet};
+
+/// Mazzy per shielded unit (consensus `SHIELDED_UNIT`, checked against the
+/// node): every shielded amount is a whole number of GMazzy.
+const UNIT: u64 = 1_000_000_000;
+
+/// A shielded amount in mazzy, for display and for deposits.
+fn mazzy(units: u64) -> U256 { U256::from(units) * U256::from(UNIT) }
 
 /// The cross-space bridge, `0x0888…06`.
 const CROSS_SPACE_ADDRESS: [u8; 20] = [
@@ -106,8 +113,18 @@ impl Args {
         self.0.get(key).map(|s| s.as_str()).ok_or(format!("missing --{key}"))
     }
 
-    fn amount(&self) -> Result<u64, String> {
-        self.get("amount")?.parse().map_err(|e| format!("--amount: {e}"))
+    /// `--amount` in mazzy.
+    fn amount(&self) -> Result<U256, String> {
+        U256::from_dec_str(self.get("amount")?).map_err(|e| format!("--amount: {e:?}"))
+    }
+
+    /// `--amount` as a shielded amount: a whole number of `UNIT`s.
+    fn shielded_amount(&self) -> Result<u64, String> {
+        let mazzy = self.amount()?;
+        if !(mazzy % U256::from(UNIT)).is_zero() || mazzy / U256::from(UNIT) > U256::from(u64::MAX) {
+            return Err(format!("--amount must be a whole number of GMazzy ({UNIT} mazzy)"));
+        }
+        Ok((mazzy / U256::from(UNIT)).as_u64())
     }
 }
 
@@ -143,7 +160,12 @@ fn run(args: &[String]) -> Result<(), String> {
             let w = Wallet::load(path)?;
             let spendable: u64 = w.notes.iter().filter(|n| n.position.is_some() && !n.spent).map(|n| n.value).sum();
             let pending: u64 = w.notes.iter().filter(|n| n.position.is_none()).map(|n| n.value).sum();
-            println!("{{\"spendable\": {spendable}, \"pending\": {pending}, \"notes\": {}}}", w.notes.len());
+            println!(
+                "{{\"spendable\": {}, \"pending\": {}, \"notes\": {}}}",
+                mazzy(spendable),
+                mazzy(pending),
+                w.notes.len()
+            );
             Ok(())
         }
         "receive" => {
@@ -167,7 +189,7 @@ fn run(args: &[String]) -> Result<(), String> {
             };
             w.notes.push(StoredNote::from_note(&note, &sponge));
             w.save(path)?;
-            println!("received {}; run sync, then claim it", opening.value);
+            println!("received {}; run sync, then claim it", mazzy(opening.value));
             Ok(())
         }
         "sync" => {
@@ -296,8 +318,9 @@ fn sync(w: &mut Wallet, node: &Node) -> Result<(), String> {
     let spendable: u64 =
         w.notes.iter().filter(|n| n.position.is_some() && !n.spent).map(|n| n.value).sum();
     println!(
-        "synced to epoch {executed}: {} leaves, spendable {spendable}",
-        w.leaves.len()
+        "synced to epoch {executed}: {} leaves, spendable {}",
+        w.leaves.len(),
+        mazzy(spendable)
     );
     Ok(())
 }
@@ -326,7 +349,10 @@ fn context(w: &mut Wallet, a: &Args) -> Result<Context, String> {
     let chain = as_u64(&status["chainId"])? as u32;
     let sponge = Sponge::new(chain);
     let keys = WalletKeys::from_seed(&sponge, w.seed);
-    let fee = as_u64(&status["txFee"])?;
+    if as_u256(&status["amountUnit"]).ok() != Some(U256::from(UNIT)) {
+        return Err(format!("the node's shielded unit is not {UNIT} mazzy"));
+    }
+    let fee = (as_u256(&status["txFee"])? / U256::from(UNIT)).as_u64();
     Ok(Context { node, chain, sponge, keys, fee })
 }
 
@@ -339,7 +365,7 @@ fn select_inputs(w: &Wallet, need: u64) -> Result<Vec<usize>, String> {
     idx.truncate(2);
     let total: u64 = idx.iter().map(|&i| w.notes[i].value).sum();
     if total < need {
-        return Err(format!("spendable {total} in two notes is below {need}"));
+        return Err(format!("spendable {} in two notes is below {}", mazzy(total), mazzy(need)));
     }
     Ok(idx)
 }
@@ -433,9 +459,9 @@ fn shuffle_outputs(a: Note, b: Note) -> [Note; 2] {
 fn shield_in(path: &str, a: &Args) -> Result<(), String> {
     let mut w = Wallet::load(path)?;
     let ctx = context(&mut w, a)?;
-    let amount = a.amount()?;
+    let amount = a.shielded_amount()?;
     if amount <= ctx.fee {
-        return Err(format!("the amount must exceed the fee {}", ctx.fee));
+        return Err(format!("the amount must exceed the fee {}", mazzy(ctx.fee)));
     }
     let (mine, recovery, stored) = self_note(&ctx, &mut w, path, amount - ctx.fee)?;
     let witness = Tx2Witness {
@@ -461,14 +487,14 @@ fn shield_in(path: &str, a: &Args) -> Result<(), String> {
     data.extend_from_slice(body.hash().as_bytes());
     let bridge = Address::from(SHIELDED_BRIDGE_ADDRESS);
     match a.get("espace-rpc") {
-        Ok(url) => send_espace(&Node::connect(url)?, &secret, bridge, amount, data)?,
-        Err(_) => send_native(&ctx.node, &secret, bridge, amount, data)?,
+        Ok(url) => send_espace(&Node::connect(url)?, &secret, bridge, mazzy(amount), data)?,
+        Err(_) => send_native(&ctx.node, &secret, bridge, mazzy(amount), data)?,
     };
     // The bridge's credit is the authority, not the receipt: in a DAG the
     // same transaction can be packed twice, and the receipt returned may be
     // the skipped duplicate's.
     let credit = deposit_credit(&ctx.node, body.hash().as_bytes())?;
-    if credit < amount {
+    if credit < mazzy(amount) {
         return Err(format!("the bridge holds a credit of {credit} for this body, expected {amount}"));
     }
     println!("deposit credited: {credit}");
@@ -479,7 +505,7 @@ fn shield_in(path: &str, a: &Args) -> Result<(), String> {
 fn send(path: &str, a: &Args) -> Result<(), String> {
     let mut w = Wallet::load(path)?;
     let ctx = context(&mut w, a)?;
-    let amount = a.amount()?;
+    let amount = a.shielded_amount()?;
     let to = delivery::Address::decode(a.get("to")?).ok_or("--to is not an mzs1 address")?;
     let (d, owner) = (to.d, to.owner);
     let inputs = select_inputs(&w, amount + ctx.fee)?;
@@ -517,7 +543,7 @@ fn send(path: &str, a: &Args) -> Result<(), String> {
 fn unshield(path: &str, a: &Args) -> Result<(), String> {
     let mut w = Wallet::load(path)?;
     let ctx = context(&mut w, a)?;
-    let amount = a.amount()?;
+    let amount = a.shielded_amount()?;
     let to: H160 = a.get("to")?.trim_start_matches("0x").parse().map_err(|e| format!("--to: {e:?}"))?;
     let space = if a.0.contains_key("espace") { mazze_types::Space::Ethereum } else { mazze_types::Space::Native };
     let inputs = select_inputs(&w, amount + ctx.fee)?;
@@ -558,7 +584,7 @@ fn claim(path: &str, a: &Args) -> Result<(), String> {
         .max_by_key(|&i| w.notes[i].value);
     let total = w.notes[received].value + main.map(|i| w.notes[i].value).unwrap_or(0);
     if total <= ctx.fee {
-        return Err(format!("the notes ({total}) do not cover the fee {}", ctx.fee));
+        return Err(format!("the notes ({}) do not cover the fee {}", mazzy(total), mazzy(ctx.fee)));
     }
     let t = tree(&w);
     let second = main.map(|i| spend_input(&ctx, &w, &t, i)).unwrap_or_else(|| dummy_input(&ctx.sponge));
@@ -657,7 +683,7 @@ fn native_network(node: &Node) -> Result<mazze_addr::Network, String> {
 }
 
 /// The shield-in credit the bridge holds for `body_hash` (`deposit(bytes32)`).
-fn deposit_credit(node: &Node, body_hash: &[u8]) -> Result<u64, String> {
+fn deposit_credit(node: &Node, body_hash: &[u8]) -> Result<U256, String> {
     let bridge = mazze_addr::mazze_addr_encode(
         &SHIELDED_BRIDGE_ADDRESS,
         native_network(node)?,
@@ -668,15 +694,15 @@ fn deposit_credit(node: &Node, body_hash: &[u8]) -> Result<u64, String> {
     data.extend_from_slice(body_hash);
     let out = node.call("mazze_call", vec![json!({"to": bridge, "data": hex0x(&data)}), json!("latest_state")])?;
     let bytes = unhex(&out)?;
-    if bytes.len() != 32 || bytes[..24].iter().any(|b| *b != 0) {
+    if bytes.len() != 32 {
         return Err(format!("unexpected deposit() result {out}"));
     }
-    Ok(u64::from_be_bytes(bytes[24..].try_into().unwrap()))
+    Ok(U256::from_big_endian(&bytes))
 }
 
 /// Sends a signed eSpace (EIP-155) transaction and waits for its receipt.
 fn send_espace(
-    node: &Node, secret: &mazzekey::Secret, to: Address, value: u64, data: Vec<u8>,
+    node: &Node, secret: &mazzekey::Secret, to: Address, value: U256, data: Vec<u8>,
 ) -> Result<Value, String> {
     let chain_id = as_u64(&node.call("eth_chainId", vec![])?)? as u32;
     let gas_price = U256::from(as_u64(&node.call("eth_gasPrice", vec![])?)?);
@@ -686,7 +712,7 @@ fn send_espace(
             gas_price,
             gas: 300_000.into(),
             action: Action::Call(to),
-            value: value.into(),
+            value,
             chain_id: Some(chain_id),
             data: data.clone(),
         }
@@ -711,7 +737,7 @@ fn send_espace(
 }
 
 fn send_native(
-    node: &Node, secret: &mazzekey::Secret, to: Address, value: u64, data: Vec<u8>,
+    node: &Node, secret: &mazzekey::Secret, to: Address, value: U256, data: Vec<u8>,
 ) -> Result<Value, String> {
     let status = node.call("mazze_getStatus", vec![])?;
     let chain_id = as_u64(&status["chainId"])? as u32;
@@ -724,7 +750,7 @@ fn send_native(
             gas_price,
             gas: 300_000.into(),
             action: Action::Call(to),
-            value: value.into(),
+            value,
             storage_limit: 0,
             epoch_height: epoch,
             chain_id,

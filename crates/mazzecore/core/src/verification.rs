@@ -1216,6 +1216,11 @@ mod shielded_root_tests {
         assert_eq!(check(&every_second, &good, true), "ShieldedSectionOutsideSlot");
         let inactive = config(ShieldedParams::default());
         assert_eq!(check(&inactive, &good, true), "ShieldedSectionOutsideSlot");
+        // Paused at or before the block's height: no section is valid.
+        let paused = config(ShieldedParams { pause_height: 5, ..active.clone() });
+        assert_eq!(check(&paused, &good, true), "ShieldedSectionOutsideSlot");
+        let paused_later = config(ShieldedParams { pause_height: 6, ..active.clone() });
+        assert_eq!(check(&paused_later, &good, true), "ok");
         let one_per_block = config(ShieldedParams { max_txs_per_block: 0, ..active });
         assert_eq!(check(&one_per_block, &good, true), "TooManyShieldedTransactions");
 

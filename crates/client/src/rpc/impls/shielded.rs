@@ -10,6 +10,7 @@ use crate::rpc::{
         Bytes,
     },
 };
+use mazze_executor::spec::{shielded_to_mazzy, SHIELDED_UNIT};
 use mazze_executor::shielded_engine::{
     backing_account, tree_state, ShieldedOutcome,
 };
@@ -65,7 +66,8 @@ impl ShieldedServer for ShieldedHandler {
             activation_height: params.activation_height.into(),
             slot_epochs: params.slot_epochs.into(),
             max_txs_per_block: (params.max_txs_per_block as u64).into(),
-            tx_fee: params.tx_fee.into(),
+            tx_fee: shielded_to_mazzy(params.tx_fee),
+            amount_unit: SHIELDED_UNIT.into(),
             anchor_window_epochs: params.anchor_window_epochs.into(),
             chain_id: (self.consensus.best_chain_id().in_shielded_space() as u64)
                 .into(),
@@ -129,9 +131,9 @@ impl ShieldedServer for ShieldedHandler {
                         recovery_tag: Bytes(body.recovery.tag.to_vec()),
                         recovery_slot: Bytes(body.recovery.slot.to_vec()),
                         recovery_mac: Bytes(body.recovery.mac.to_vec()),
-                        v_public_in: U256::from(body.v_public_in),
-                        v_public_out: U256::from(body.v_public_out),
-                        fee: U256::from(body.fee),
+                        v_public_in: shielded_to_mazzy(body.v_public_in),
+                        v_public_out: shielded_to_mazzy(body.v_public_out),
+                        fee: shielded_to_mazzy(body.fee),
                         applied,
                         positions,
                         skip_reason,

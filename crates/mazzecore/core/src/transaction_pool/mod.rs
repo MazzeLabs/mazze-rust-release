@@ -235,7 +235,9 @@ impl TransactionPool {
         use shielded::{PooledShieldedTx, ShieldedPoolError};
 
         let params = &self.machine.params().shielded;
-        if params.activation_height == u64::MAX {
+        let best = self.consensus_best_info.lock().clone();
+        // Inactive or paused (spec §8.4).
+        if !params.is_active(best.best_epoch_number) {
             return Err(ShieldedPoolError::Inactive);
         }
         if body.fee != params.tx_fee {
@@ -248,7 +250,6 @@ impl TransactionPool {
             return Err(ShieldedPoolError::InvalidProof("too long".into()));
         }
         self.shielded.precheck(&body)?;
-        let best = self.consensus_best_info.lock().clone();
         {
             let state = self.best_executed_state.lock().clone();
             for nf in &body.nf {
@@ -288,7 +289,7 @@ impl TransactionPool {
         height: u64, params: &mazze_executor::spec::ShieldedParams,
     ) -> shielded::Verdict {
         use mazze_executor::shielded_engine::{
-            anchor_valid, deposit_covers, nullifier_spent,
+            anchor_valid, breaker_allowance, deposit_covers, nullifier_spent,
         };
         use shielded::Verdict;
         let spent =
@@ -299,6 +300,14 @@ impl TransactionPool {
             return if spent { Verdict::Hold } else { Verdict::Drop };
         }
         if spent || !deposit_covers(state, body).unwrap_or(false) {
+            return Verdict::Hold;
+        }
+        // Over the circuit breaker's allowance: it would be skipped, so it
+        // waits for a later window instead of taking a slot.
+        if body.v_public_out > 0
+            && breaker_allowance(state, height, params).unwrap_or_default()
+                < mazze_executor::spec::shielded_to_mazzy(body.v_public_out)
+        {
             return Verdict::Hold;
         }
         Verdict::Pack

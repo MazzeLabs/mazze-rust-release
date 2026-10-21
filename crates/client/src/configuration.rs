@@ -10,7 +10,10 @@ use parking_lot::RwLock;
 use rand::Rng;
 
 use mazze_addr::{mazze_addr_decode, Network};
-use mazze_executor::{machine::Machine, spec::CommonParams};
+use mazze_executor::{
+    machine::Machine,
+    spec::{CommonParams, ShieldedParams},
+};
 use mazze_internal_common::{
     ChainIdParams, ChainIdParamsInner, ChainIdParamsOneChainInner,
 };
@@ -203,8 +206,8 @@ build_config! {
         // hostile WS client. Operators serving large batched
         // subscriptions can raise this in hydra.toml.
         (jsonrpc_ws_max_payload_bytes, (usize), 10 * 1024 * 1024)
-        // The shielded lane (see `ShieldedParams`). Inactive unless an
-        // activation height is set.
+        // The shielded lane: fixed per network (`ShieldedParams::for_network`);
+        // these overrides are honoured only in dev and test modes.
         (shielded_activation_height, (Option<u64>), None)
         (shielded_slot_epochs, (Option<u64>), None)
         (shielded_max_txs_per_block, (Option<usize>), None)
@@ -943,18 +946,30 @@ impl Configuration {
                         .unwrap_or_else(|| rand::thread_rng().gen());
                     let evm_chain_id =
                         self.raw_conf.evm_chain_id.unwrap_or(chain_id);
+                    // The shielded lane's parameters are consensus rules,
+                    // fixed per network (`ShieldedParams::for_network`):
+                    // outside dev and test modes no node may set them.
+                    let shielded_keys_set = self.raw_conf.shielded_chain_id.is_some()
+                        || self.raw_conf.shielded_activation_height.is_some()
+                        || self.raw_conf.shielded_slot_epochs.is_some()
+                        || self.raw_conf.shielded_max_txs_per_block.is_some();
+                    assert!(
+                        self.is_test_or_dev_mode() || !shielded_keys_set,
+                        "the shielded_* settings are fixed by the network and \
+                         may only be set in dev or test mode"
+                    );
                     let shielded_chain_id =
                         self.raw_conf.shielded_chain_id.unwrap_or(chain_id);
                     // The shielded chain id is a KoalaBear element inside
                     // the circuit; at or above p it would alias another id.
-                    if self.raw_conf.shielded_activation_height.is_some() {
-                        assert!(
-                            shielded_chain_id < 0x7f00_0001,
-                            "shielded_chain_id {} must be below the KoalaBear \
-                             prime 2^31 - 2^24 + 1",
-                            shielded_chain_id
-                        );
-                    }
+                    let lane_configured = self.raw_conf.shielded_activation_height.is_some()
+                        || ShieldedParams::for_network(chain_id).activation_height != u64::MAX;
+                    assert!(
+                        !lane_configured || shielded_chain_id < 0x7f00_0001,
+                        "shielded_chain_id {} must be below the KoalaBear \
+                         prime 2^31 - 2^24 + 1",
+                        shielded_chain_id
+                    );
                     *to_init = Some(ChainIdParamsInner::new_simple(
                         AllChainID::new(
                             chain_id,
@@ -1693,14 +1708,19 @@ impl Configuration {
 
         self.set_mips(&mut params);
 
-        if let Some(height) = self.raw_conf.shielded_activation_height {
-            params.shielded.activation_height = height;
-        }
-        if let Some(slot) = self.raw_conf.shielded_slot_epochs {
-            params.shielded.slot_epochs = slot;
-        }
-        if let Some(max) = self.raw_conf.shielded_max_txs_per_block {
-            params.shielded.max_txs_per_block = max;
+        params.shielded = ShieldedParams::for_network(
+            params.chain_id.read().get_chain_id(0).in_native_space(),
+        );
+        if self.is_test_or_dev_mode() {
+            if let Some(height) = self.raw_conf.shielded_activation_height {
+                params.shielded.activation_height = height;
+            }
+            if let Some(slot) = self.raw_conf.shielded_slot_epochs {
+                params.shielded.slot_epochs = slot;
+            }
+            if let Some(max) = self.raw_conf.shielded_max_txs_per_block {
+                params.shielded.max_txs_per_block = max;
+            }
         }
 
         params

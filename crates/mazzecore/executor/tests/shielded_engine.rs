@@ -15,7 +15,7 @@ use mazze_executor::{
         backing_account, credit_key, execute_section, pool_account, record_deposit,
         ShieldedOutcome, SkipReason,
     },
-    spec::ShieldedParams,
+    spec::{shielded_to_mazzy, ShieldedParams},
     state::{CleanupMode, State},
 };
 use mazze_shielded_pq::{
@@ -30,6 +30,9 @@ use mazze_types::{Address, AddressSpaceUtil, Space, U256};
 use primitives::shielded::{ShieldedDest, ShieldedDigest, ShieldedTxBody};
 
 const FEE: u64 = 1_000;
+
+/// A shielded amount (in units) in mazzy, as balances hold it.
+fn m(units: u64) -> U256 { shielded_to_mazzy(units) }
 
 fn digest(label: &str, i: u64) -> ShieldedDigest {
     let elements: [_; 12] = Xof::new(label, &[&i.to_le_bytes()]).fields();
@@ -69,9 +72,9 @@ fn params() -> ShieldedParams {
 /// for the body.
 fn deposit(state: &mut State, b: &ShieldedTxBody, height: u64) {
     state
-        .add_balance(&backing_account(), &U256::from(b.v_public_in), CleanupMode::ForceCreate)
+        .add_balance(&backing_account(), &m(b.v_public_in), CleanupMode::ForceCreate)
         .unwrap();
-    record_deposit(state, b.hash().as_bytes(), U256::from(b.v_public_in), height).unwrap();
+    record_deposit(state, b.hash().as_bytes(), m(b.v_public_in), height).unwrap();
 }
 
 fn snapshot(state: &State) -> (U256, U256, U256) {
@@ -110,7 +113,7 @@ fn shield_in_pay_shield_out_and_every_refusal() {
         execute_section(&mut state, &[Arc::new(shield_in.clone())], 3, &p).unwrap(),
         vec![ShieldedOutcome::Applied { positions: [0, 1] }]
     );
-    assert_eq!(state.balance(&backing_account()).unwrap(), U256::from(10_000 - FEE), "fee burned");
+    assert_eq!(state.balance(&backing_account()).unwrap(), m(10_000 - FEE), "fee burned");
     assert!(
         state.storage_at(&pool_account(), &credit_key(shield_in.hash().as_bytes())).unwrap().is_zero(),
         "the credit is consumed"
@@ -129,8 +132,8 @@ fn shield_in_pay_shield_out_and_every_refusal() {
         "a section applies in order: the second spends at the first's root"
     );
     let (backing, dest, leaves) = snapshot(&state);
-    assert_eq!(backing, U256::from(10_000 - 3 * FEE - 3_000));
-    assert_eq!(dest, U256::from(3_000));
+    assert_eq!(backing, m(10_000 - 3 * FEE - 3_000));
+    assert_eq!(dest, m(3_000));
     assert_eq!(leaves, U256::from(6));
 
     // 3. Refusals leave the state exactly as it was.
@@ -176,7 +179,7 @@ fn shield_in_pay_shield_out_and_every_refusal() {
     ));
     assert_eq!(
         state.balance(&Address::repeat_byte(0x66).with_evm_space()).unwrap(),
-        U256::from(100)
+        m(100)
     );
 }
 
@@ -241,12 +244,69 @@ fn top_ups_do_not_block_and_the_turnstile_holds() {
         "the excess stays credited to the body"
     );
     let (total_in, total_out, total_burnt) = turnstile(&state).unwrap();
-    assert_eq!(total_in, U256::from(10_000));
+    assert_eq!(total_in, m(10_000));
     assert_eq!(total_out, U256::zero());
-    assert_eq!(total_burnt, U256::from(FEE));
+    assert_eq!(total_burnt, m(FEE));
     // backing = in - out - burnt + unconsumed credits (the 1)
     assert_eq!(
         state.balance(&backing_account()).unwrap(),
-        U256::from(10_000 - FEE + 1)
+        m(10_000 - FEE) + U256::one()
     );
+}
+
+/// The circuit breaker: shield-outs may take 10% of the backing per window;
+/// beyond it they are skipped (notes unspent) until the next window. The
+/// floor keeps a small pool usable.
+#[test]
+fn the_circuit_breaker_bounds_shield_outs_per_window() {
+    let (_sm, mut state) = fresh_state();
+    let p = ShieldedParams {
+        breaker_window_epochs: 100,
+        breaker_fraction_bps: 1_000,
+        breaker_floor: 0,
+        anchor_window_epochs: 10_000,
+        ..params()
+    };
+    let shield_in = body(1, empty_root(), 100_000, 0);
+    deposit(&mut state, &shield_in, 1);
+    execute_section(&mut state, &[Arc::new(shield_in.clone())], 2, &p).unwrap();
+    let root = root_after(&shield_in.cm_out);
+    // Backing 99,000 units: 9,900 may leave in this window.
+    let out = |seed: u32, v: u64| Arc::new(body(seed, root, 0, v));
+    let skipped = |o: &[ShieldedOutcome]| o == [ShieldedOutcome::Skipped(SkipReason::CircuitBreaker)];
+    assert!(skipped(&execute_section(&mut state, &[out(2, 9_901)], 3, &p).unwrap()), "over 10%");
+    assert!(matches!(
+        execute_section(&mut state, &[out(3, 6_000)], 4, &p).unwrap()[0],
+        ShieldedOutcome::Applied { .. }
+    ));
+    assert!(
+        skipped(&execute_section(&mut state, &[out(4, 4_000)], 5, &p).unwrap()),
+        "the window's total counts"
+    );
+    // The next window measures again.
+    assert!(matches!(
+        execute_section(&mut state, &[out(5, 4_000)], 100, &p).unwrap()[0],
+        ShieldedOutcome::Applied { .. }
+    ));
+    // With a floor, a small amount always passes.
+    let floored = ShieldedParams { breaker_floor: 50_000, ..p.clone() };
+    assert!(matches!(
+        execute_section(&mut state, &[out(6, 20_000)], 101, &floored).unwrap()[0],
+        ShieldedOutcome::Applied { .. }
+    ));
+}
+
+/// The lane's parameters come from the network, not from a node's config.
+#[test]
+fn the_network_fixes_the_shielded_parameters() {
+    use mazze_executor::spec::TESTNET_CHAIN_ID;
+    let testnet = ShieldedParams::for_network(TESTNET_CHAIN_ID);
+    assert!(testnet.is_active(0) && testnet.is_slot(10));
+    assert_eq!(testnet.slot_epochs, 10);
+    assert_eq!(testnet.pause_height, u64::MAX);
+    assert_eq!((testnet.breaker_window_epochs, testnet.breaker_fraction_bps), (125_000, 1_000));
+    let other = ShieldedParams::for_network(TESTNET_CHAIN_ID + 1);
+    assert!(!other.is_active(0) && !other.is_slot(10), "inactive elsewhere");
+    let paused = ShieldedParams { pause_height: 20, ..testnet };
+    assert!(paused.is_slot(10) && !paused.is_slot(20) && !paused.is_active(25));
 }

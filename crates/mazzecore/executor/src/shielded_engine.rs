@@ -34,7 +34,7 @@ use primitives::{
 };
 
 use crate::{
-    spec::ShieldedParams,
+    spec::{shielded_to_mazzy, ShieldedParams},
     state::{CleanupMode, State},
     substate::Substate,
 };
@@ -71,6 +71,10 @@ pub enum SkipReason {
     Backing,
     /// The commitment tree is full.
     TreeFull,
+    /// The shield-out exceeds what the circuit breaker allows in this
+    /// window (spec §8.4). The notes stay unspent; it can be sent again in
+    /// a later window.
+    CircuitBreaker,
 }
 
 impl SkipReason {
@@ -81,6 +85,7 @@ impl SkipReason {
             SkipReason::Spent => 3,
             SkipReason::Backing => 4,
             SkipReason::TreeFull => 5,
+            SkipReason::CircuitBreaker => 6,
         }
     }
 
@@ -91,6 +96,7 @@ impl SkipReason {
             3 => SkipReason::Spent,
             4 => SkipReason::Backing,
             5 => SkipReason::TreeFull,
+            6 => SkipReason::CircuitBreaker,
             _ => return None,
         })
     }
@@ -261,7 +267,7 @@ pub fn anchor_valid(
 pub fn deposit_covers(state: &State, body: &ShieldedTxBody) -> DbResult<bool> {
     Ok(body.v_public_in == 0
         || get(state, &credit_key(body.hash().as_bytes()))?
-            >= U256::from(body.v_public_in))
+            >= shielded_to_mazzy(body.v_public_in))
 }
 
 /// Turnstile counters: value that entered and left the shielded space and
@@ -269,6 +275,46 @@ pub fn deposit_covers(state: &State, body: &ShieldedTxBody) -> DbResult<bool> {
 const TOTAL_IN_KEY: &[u8] = b"total_in";
 const TOTAL_OUT_KEY: &[u8] = b"total_out";
 const TOTAL_BURNT_KEY: &[u8] = b"total_burnt";
+
+/// The circuit breaker's window: its index + 1, the backing it is measured
+/// against, and what shield-outs took from it so far (mazzy).
+const CB_WINDOW_KEY: &[u8] = b"cb_window";
+const CB_BASE_KEY: &[u8] = b"cb_base";
+const CB_OUT_KEY: &[u8] = b"cb_out";
+
+/// What the circuit breaker still lets shield-outs take at `height`, in
+/// mazzy (spec §8.4): `breaker_fraction_bps` of the larger of the backing
+/// when the window opened and the backing now, at least `breaker_floor`,
+/// minus what this window already paid out.
+pub fn breaker_allowance(
+    state: &State, height: u64, params: &ShieldedParams,
+) -> DbResult<U256> {
+    let window = U256::from(height / params.breaker_window_epochs.max(1) + 1);
+    let backing = state.balance(&backing_account())?;
+    let (base, out) = if get(state, CB_WINDOW_KEY)? == window {
+        (get(state, CB_BASE_KEY)?, get(state, CB_OUT_KEY)?)
+    } else {
+        (backing, U256::zero())
+    };
+    let limit = (base.max(backing) * U256::from(params.breaker_fraction_bps)
+        / U256::from(10_000))
+    .max(shielded_to_mazzy(params.breaker_floor));
+    Ok(limit.saturating_sub(out))
+}
+
+fn breaker_record(
+    state: &mut State, height: u64, params: &ShieldedParams, amount: U256,
+) -> DbResult<()> {
+    let window = U256::from(height / params.breaker_window_epochs.max(1) + 1);
+    if get(state, CB_WINDOW_KEY)? != window {
+        let backing = state.balance(&backing_account())?;
+        set(state, CB_WINDOW_KEY.to_vec(), window)?;
+        set(state, CB_BASE_KEY.to_vec(), backing)?;
+        set(state, CB_OUT_KEY.to_vec(), U256::zero())?;
+    }
+    let out = get(state, CB_OUT_KEY)? + amount;
+    set(state, CB_OUT_KEY.to_vec(), out)
+}
 
 /// Deposits credited by the bridge and not yet consumed by a shield-in.
 const PENDING_CREDITS_KEY: &[u8] = b"pending_credits";
@@ -356,7 +402,7 @@ fn apply(
     //    stays credited to the body.
     let credit = credit_key(body.hash().as_bytes());
     let credited = get(state, &credit)?;
-    if body.v_public_in > 0 && credited < U256::from(body.v_public_in) {
+    if body.v_public_in > 0 && credited < shielded_to_mazzy(body.v_public_in) {
         return Ok(Skipped(SkipReason::NoDeposit));
     }
 
@@ -374,9 +420,15 @@ fn apply(
 
     // 4. The backing pays the shield-out and the burned fee. The deposit
     //    of a shield-in is already in it.
-    let outflow = U256::from(body.v_public_out) + U256::from(body.fee);
+    let outflow = shielded_to_mazzy(body.v_public_out) + shielded_to_mazzy(body.fee);
     if state.balance(&backing_account())? < outflow {
         return Ok(Skipped(SkipReason::Backing));
+    }
+
+    // 5. The circuit breaker bounds what can leave per window.
+    let v_out = shielded_to_mazzy(body.v_public_out);
+    if body.v_public_out > 0 && v_out > breaker_allowance(state, height, params)? {
+        return Ok(Skipped(SkipReason::CircuitBreaker));
     }
 
     let mut frontier = load_frontier(state)?;
@@ -395,21 +447,23 @@ fn apply(
     store_frontier(state, &frontier)?;
     record_root(state, &frontier.root(), height)?;
     if body.v_public_in > 0 {
-        set(state, credit, credited - U256::from(body.v_public_in))?;
-        let pending = pending_credits(state)?.saturating_sub(U256::from(body.v_public_in));
+        set(state, credit, credited - shielded_to_mazzy(body.v_public_in))?;
+        let pending =
+            pending_credits(state)?.saturating_sub(shielded_to_mazzy(body.v_public_in));
         set(state, PENDING_CREDITS_KEY.to_vec(), pending)?;
     }
     let (total_in, total_out, total_burnt) = turnstile(state)?;
-    set(state, TOTAL_IN_KEY.to_vec(), total_in + U256::from(body.v_public_in))?;
-    set(state, TOTAL_OUT_KEY.to_vec(), total_out + U256::from(body.v_public_out))?;
-    set(state, TOTAL_BURNT_KEY.to_vec(), total_burnt + U256::from(body.fee))?;
+    set(state, TOTAL_IN_KEY.to_vec(), total_in + shielded_to_mazzy(body.v_public_in))?;
+    set(state, TOTAL_OUT_KEY.to_vec(), total_out + shielded_to_mazzy(body.v_public_out))?;
+    set(state, TOTAL_BURNT_KEY.to_vec(), total_burnt + shielded_to_mazzy(body.fee))?;
 
     if body.v_public_out > 0 {
+        breaker_record(state, height, params, v_out)?;
         let dest = body.dest.expect("stage A: a shield-out has a destination");
-        pay_out(state, &dest, U256::from(body.v_public_out))?;
+        pay_out(state, &dest, shielded_to_mazzy(body.v_public_out))?;
     }
     if body.fee > 0 {
-        let fee = U256::from(body.fee);
+        let fee = shielded_to_mazzy(body.fee);
         state.sub_balance(&backing_account(), &fee, &mut CleanupMode::NoEmpty)?;
         state.burn_by_mip1559(fee);
     }

@@ -13,7 +13,11 @@ pub struct ShieldedStatus {
     pub activation_height: U64,
     pub slot_epochs: U64,
     pub max_txs_per_block: U64,
+    /// The fee in mazzy.
     pub tx_fee: U256,
+    /// Mazzy per shielded unit: every shielded amount is a whole number of
+    /// these, and so must every deposit be.
+    pub amount_unit: U256,
     pub anchor_window_epochs: U64,
     pub chain_id: U64,
     /// The tree root after the latest executed epoch (48 bytes).

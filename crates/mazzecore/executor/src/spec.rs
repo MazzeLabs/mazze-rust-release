@@ -72,19 +72,41 @@ pub struct ShieldedParams {
     pub slot_epochs: u64,
     /// Shielded transactions in one block's section.
     pub max_txs_per_block: usize,
-    /// The constant fee of every shielded transaction, fully burned (§8.3).
+    /// The constant fee of every shielded transaction, fully burned (§8.3),
+    /// in shielded units (`SHIELDED_UNIT`).
     pub tx_fee: u64,
     /// An anchor is accepted for this many epochs after it was recorded.
     pub anchor_window_epochs: u64,
+    /// From this height on the lane is frozen (spec §8.4): no section is
+    /// valid or executed and the bridge takes no deposit. The emergency stop
+    /// for a soundness bug, set by a coordinated release. `u64::MAX`: never.
+    pub pause_height: u64,
+    /// Shield-out circuit breaker (spec §8.4): in each window of this many
+    /// epochs, shield-outs may take at most `breaker_fraction_bps` of the
+    /// backing (or `breaker_floor`, whichever is larger). A counterfeit can
+    /// then drain at most that much per window, which leaves time to react.
+    pub breaker_window_epochs: u64,
+    /// In basis points of the backing at the window's start or now,
+    /// whichever is larger.
+    pub breaker_fraction_bps: u64,
+    /// Allowance per window whatever the backing, in shielded units, so a
+    /// young pool is not frozen by its own small size.
+    pub breaker_floor: u64,
 }
 
 /// Weight of one shielded transaction: its body plus the largest proof
 /// (§8.3). Every transaction has the same shape, so the same weight.
 pub const SHIELDED_TX_WEIGHT: u64 = 441 + 192 * 1024;
 
-/// Base price of the shielded lane: 100x the native minimum, per unit of
-/// weight (§8.3).
-pub const SHIELDED_BASE_PRICE: u64 = 100 * 1_000_000_000;
+/// The unit of every shielded amount (notes, public amounts, the fee): one
+/// GMazzy, 10^-9 MAZZE. The circuit proves 64-bit amounts; counted in
+/// mazzy they would cap a note at ~18.4 MAZZE, counted in GMazzy at ~18.4
+/// billion, above the whole supply. The bridge accepts only whole units.
+pub const SHIELDED_UNIT: u64 = 1_000_000_000;
+
+/// Base price of the shielded lane: 100x the native minimum (100 GMazzy),
+/// per unit of weight (§8.3), in shielded units.
+pub const SHIELDED_BASE_PRICE: u64 = 100;
 
 impl Default for ShieldedParams {
     fn default() -> Self {
@@ -98,14 +120,44 @@ impl Default for ShieldedParams {
             max_txs_per_block: 8,
             tx_fee: SHIELDED_BASE_PRICE * SHIELDED_TX_WEIGHT,
             anchor_window_epochs: 100_000,
+            pause_height: u64::MAX,
+            // About a day at the fleet's ~1.44 epochs/s.
+            breaker_window_epochs: 125_000,
+            breaker_fraction_bps: 1_000,
+            // 1,000 MAZZE.
+            breaker_floor: 1_000 * 1_000_000_000,
         }
     }
 }
 
+/// Chain id of the Mazze test network (the fleet).
+pub const TESTNET_CHAIN_ID: u32 = 1990;
+
+/// A shielded amount in mazzy.
+pub fn shielded_to_mazzy(units: u64) -> mazze_types::U256 {
+    mazze_types::U256::from(units) * mazze_types::U256::from(SHIELDED_UNIT)
+}
+
 impl ShieldedParams {
+    /// The parameters a network runs with. They are consensus rules, so they
+    /// are fixed here per chain and never read from a node's configuration:
+    /// a node configured differently would fork itself off (spec §9.9, L4).
+    /// Only dev and test modes may override them.
+    pub fn for_network(chain_id: u32) -> Self {
+        match chain_id {
+            TESTNET_CHAIN_ID => ShieldedParams { activation_height: 0, ..Default::default() },
+            _ => ShieldedParams::default(),
+        }
+    }
+
+    /// Whether the lane is open at `height`: activated and not paused.
+    pub fn is_active(&self, height: u64) -> bool {
+        height >= self.activation_height && height < self.pause_height
+    }
+
     /// Whether a block at `height` may carry a shielded section.
     pub fn is_slot(&self, height: u64) -> bool {
-        height >= self.activation_height
+        self.is_active(height)
             && self.slot_epochs > 0
             && height % self.slot_epochs == 0
     }
@@ -150,7 +202,7 @@ impl CommonParams {
     pub fn spec(&self, number: BlockNumber, height: BlockHeight) -> Spec {
         let mut spec = Spec::genesis_spec();
 
-        spec.shielded_active = height >= self.shielded.activation_height;
+        spec.shielded_active = self.shielded.is_active(height);
 
         spec.cancun_opcodes = number >= self.transition_numbers.cancun_opcodes;
         if spec.cancun_opcodes {

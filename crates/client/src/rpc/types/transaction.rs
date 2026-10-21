@@ -18,9 +18,9 @@ use primitives::{
         eth_transaction::Eip155Transaction,
         native_transaction::{
             Mip1559Transaction, Mip2930Transaction, NativeTransaction,
-            ShieldedTransaction, TypedNativeTransaction,
+            TypedNativeTransaction,
         },
-        Action, LEGACY_TX_TYPE, MIP1559_TYPE, MIP2930_TYPE, MIP_SHIELDED_TYPE,
+        Action, LEGACY_TX_TYPE, MIP1559_TYPE, MIP2930_TYPE,
     },
     SignedTransaction, Transaction as PrimitiveTransaction, TransactionIndex,
     TransactionWithSignature, TransactionWithSignatureSerializePart,
@@ -280,44 +280,6 @@ impl Transaction {
                                 },
                             ),
                         ),
-                        MIP_SHIELDED_TYPE => {
-                            if matches!(action, Action::Create) {
-                                return Err(Error::Custom(
-                                    "Shielded transaction requires a recipient"
-                                        .into(),
-                                ));
-                            }
-                            if self.data.0.is_empty() {
-                                return Err(Error::Custom(
-                                    "Shielded payload must not be empty".into(),
-                                ));
-                            }
-                            if !self.value.is_zero() {
-                                return Err(Error::Custom(
-                                    "Shielded transaction must not transfer value"
-                                        .into(),
-                                ));
-                            }
-                            PrimitiveTransaction::Native(
-                                TypedNativeTransaction::Shielded(
-                                    ShieldedTransaction {
-                                        nonce: self.nonce.into(),
-                                        gas_price,
-                                        gas: self.gas.into(),
-                                        action,
-                                        value: self.value.into(),
-                                        storage_limit: self
-                                            .storage_limit
-                                            .as_u64(),
-                                        epoch_height: self
-                                            .epoch_height
-                                            .as_u64(),
-                                        chain_id,
-                                        data: self.data.into(),
-                                    },
-                                ),
-                            )
-                        }
                         x => {
                             return Err(Error::Custom(format!(
                                 "Unrecognized transaction type {}",
@@ -333,10 +295,6 @@ impl Transaction {
             hash: self.hash.into(),
             rlp_size: None,
         };
-        if tx_with_sig.is_shielded() && tx_with_sig.is_unsigned() {
-            return Ok(SignedTransaction::new_shielded(tx_with_sig));
-        }
-
         let public = tx_with_sig.recover_public()?;
         Ok(SignedTransaction::new(public, tx_with_sig))
     }

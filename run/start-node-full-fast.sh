@@ -40,8 +40,6 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
   exit 1
 fi
 
-export MAZZE_SHIELDED_VK_HEX="${MAZZE_SHIELDED_VK_HEX:-$SCRIPT_DIR/shielded_vk.hex}"
-
 cp "$CONFIG_FILE" "$TEMP_CONF"
 
 set_kv() {

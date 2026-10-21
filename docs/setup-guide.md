@@ -108,30 +108,25 @@ cargo build --release
 
 ## 3. Dev Mode (Local)
 
-Use dev mode for local testing (fast blocks, local RPC, shielded testing).
+Use dev mode for local testing (fast blocks, local RPC).
 
-1. (Optional) Re-genesis with shielded keys (wipes dev chain data):
-```bash
-./run/regenesis-shielded.sh --dev
-```
-
-2. Build the dev node binary:
+1. Build the dev node binary:
 ```bash
 cargo build -p mazze
 ```
 
-3. Start the dev node:
+2. Start the dev node:
 ```bash
 ./run/start-node-dev.sh
 ```
 
-4. If blocks are not advancing, build and start the miner:
+3. If blocks are not advancing, build and start the miner:
 ```bash
 cargo build --release -p mazze-miner
 ./run/start-miner.sh
 ```
 
-5. Open the CLI:
+4. Open the CLI:
 ```bash
 ./run/mazze-cli.sh
 ```

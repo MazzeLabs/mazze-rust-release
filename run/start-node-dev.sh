@@ -27,13 +27,6 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
   exit 1
 fi
 
-export MAZZE_SHIELDED_VK_HEX="${MAZZE_SHIELDED_VK_HEX:-$SCRIPT_DIR/shielded_vk.hex}"
-
-if [[ ! -f "$SCRIPT_DIR/shielded_vk.hex" || ! -f "$SCRIPT_DIR/shielded_pk.hex" ]]; then
-  echo "Warning: shielded key files not found; shielded proofs will fail until you generate them." >&2
-  echo "Hint: cargo run -p mazze-executor --bin shielded_keygen -- --out run/shielded_vk.hex --out-pk run/shielded_pk.hex" >&2
-fi
-
 cp "$CONFIG_FILE" "$TEMP_CONF"
 
 set_kv() {

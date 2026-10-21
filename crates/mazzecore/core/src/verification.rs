@@ -8,7 +8,6 @@ use crate::{
     sync::{Error as SyncError, ErrorKind as SyncErrorKind},
 };
 use mazze_executor::{machine::Machine, spec::TransitionsEpochHeight};
-use mazze_parameters::internal_contract_addresses::SHIELDED_POOL_CONTRACT_ADDRESS;
 use mazze_parameters::{
     block::*, consensus_internal::ELASTICITY_MULTIPLIER, sync::MAX_PACKET_SIZE,
 };
@@ -888,23 +887,14 @@ impl VerificationConfig {
         height: BlockHeight, _transitions: &TransitionsEpochHeight,
         mode: VerifyTxMode,
     ) -> Result<(), TransactionError> {
-        let is_shielded = tx.is_shielded();
-        if is_shielded && !tx.is_unsigned() {
-            bail!(TransactionError::InvalidShielded(
-                "shielded transaction must be unsigned".into()
+        tx.check_low_s()?;
+        tx.check_y_parity()?;
+
+        // Disallow unsigned transactions
+        if tx.is_unsigned() {
+            bail!(TransactionError::InvalidSignature(
+                "Transaction is unsigned".into()
             ));
-        }
-
-        if !is_shielded {
-            tx.check_low_s()?;
-            tx.check_y_parity()?;
-
-            // Disallow unsigned transactions
-            if tx.is_unsigned() {
-                bail!(TransactionError::InvalidSignature(
-                    "Transaction is unsigned".into()
-                ));
-            }
         }
 
         if let Some(tx_chain_id) = tx.chain_id() {
@@ -917,8 +907,8 @@ impl VerificationConfig {
             }
         }
 
-        // Forbid zero-gas-price tx (shielded uses fee-in-proof).
-        if tx.gas_price().is_zero() && !is_shielded {
+        // Forbid zero-gas-price tx
+        if tx.gas_price().is_zero() {
             bail!(TransactionError::ZeroGasPrice);
         }
 
@@ -931,8 +921,6 @@ impl VerificationConfig {
                 }
             }
         }
-
-        Self::check_shielded_transaction(tx)?;
 
         if let (VerifyTxMode::Local(..), Some(max_nonce)) =
             (mode, self.max_nonce)
@@ -978,47 +966,6 @@ impl VerificationConfig {
         _tx: &TransactionWithSignature, _mode: &VerifyTxMode,
     ) -> bool {
         return true;
-    }
-
-    fn check_shielded_transaction(
-        tx: &TransactionWithSignature,
-    ) -> Result<(), TransactionError> {
-        if let Transaction::Native(TypedNativeTransaction::Shielded(
-            ref shielded,
-        )) = tx.unsigned
-        {
-            let target = match shielded.action {
-                Action::Call(ref address) => address,
-                Action::Create => {
-                    bail!(TransactionError::InvalidShielded(
-                        "shielded transaction must call the shielded pool"
-                            .into()
-                    ))
-                }
-            };
-            if *target != SHIELDED_POOL_CONTRACT_ADDRESS {
-                bail!(TransactionError::InvalidShielded(
-                    "shielded transaction must target the shielded pool".into()
-                ))
-            }
-            if !shielded.value.is_zero() {
-                bail!(TransactionError::InvalidShielded(
-                    "shielded transaction must not transfer value".into()
-                ))
-            }
-            if !shielded.gas_price.is_zero() {
-                bail!(TransactionError::InvalidShielded(
-                    "shielded transaction must set gas_price to 0".into()
-                ))
-            }
-            if shielded.data.is_empty() {
-                bail!(TransactionError::InvalidShielded(
-                    "shielded payload must not be empty".into()
-                ))
-            }
-        }
-
-        Ok(())
     }
 
     fn check_gas_limit_with_calldata(

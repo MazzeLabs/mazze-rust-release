@@ -781,9 +781,7 @@ impl TransactionPool {
             Space::Shielded => self.config.min_native_tx_price,
         };
         // check transaction gas price
-        if !transaction.is_shielded()
-            && *transaction.gas_price() < min_tx_price.into()
-        {
+        if *transaction.gas_price() < min_tx_price.into() {
             TX_REJECT_GAS_PRICE.inc(1);
             trace!("Transaction {} discarded due to below minimal gas price: price {}", transaction.hash(), transaction.gas_price());
             return Err(format!(

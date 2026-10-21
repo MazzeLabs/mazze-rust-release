@@ -16,5 +16,9 @@ make_solidity_contract! {
 }
 
 make_solidity_contract! {
+    pub(super) struct Reserved8(RESERVED8, "placeholder");
+}
+
+make_solidity_contract! {
     pub(super) struct Reserved11(RESERVED11, "placeholder");
 }

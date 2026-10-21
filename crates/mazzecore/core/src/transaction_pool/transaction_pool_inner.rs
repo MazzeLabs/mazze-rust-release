@@ -585,8 +585,6 @@ pub struct TransactionPoolInner {
     /// Keeps all transactions in the transaction pool.
     /// It should contain the same transaction set as `deferred_pool`.
     txs: TransactionSet,
-    /// Shielded transactions keyed by hash (no nonce ordering).
-    shielded_pool: TransactionSet,
 }
 
 impl TransactionPoolInner {
@@ -607,7 +605,6 @@ impl TransactionPoolInner {
             ready_nonces_and_balances: HashMap::new(),
             garbage_collector: SpaceMap::default(),
             txs: TransactionSet::default(),
-            shielded_pool: TransactionSet::default(),
         }
     }
 
@@ -621,7 +618,6 @@ impl TransactionPoolInner {
         self.ready_nonces_and_balances.clear();
         self.garbage_collector.apply_all(|x| x.clear());
         self.txs.clear();
-        self.shielded_pool.clear();
         self.total_received_count = 0;
         self.unpacked_transaction_count = 0;
     }
@@ -1101,55 +1097,11 @@ impl TransactionPoolInner {
 
     pub fn check_tx_packed_in_deferred_pool(&self, tx_hash: &H256) -> bool {
         match self.txs.get(tx_hash) {
-            Some(tx) if tx.is_shielded() => false,
             Some(tx) => {
                 self.deferred_pool.check_tx_packed(tx.sender(), *tx.nonce())
             }
             None => false,
         }
-    }
-
-    fn pack_shielded_transactions<F>(
-        &self, num_txs: usize, mut gas_limit: U256, mut size_limit: usize,
-        validity: F,
-    ) -> Vec<Arc<SignedTransaction>>
-    where
-        F: Fn(&SignedTransaction) -> PackingCheckResult,
-    {
-        if num_txs == 0 || gas_limit.is_zero() || size_limit == 0 {
-            return Vec::new();
-        }
-
-        let mut candidates: Vec<Arc<SignedTransaction>> =
-            self.shielded_pool.values().cloned().collect();
-        candidates.sort_by(|a, b| {
-            b.gas_price()
-                .cmp(a.gas_price())
-                .then_with(|| a.hash().cmp(&b.hash()))
-        });
-
-        let mut packed = Vec::new();
-        for tx in candidates {
-            if packed.len() >= num_txs {
-                break;
-            }
-            match validity(&tx) {
-                PackingCheckResult::Pack => {}
-                PackingCheckResult::Pending | PackingCheckResult::Drop => {
-                    continue;
-                }
-            }
-            let tx_gas = *tx.gas();
-            let tx_size = tx.rlp_size();
-            if tx_gas > gas_limit || tx_size > size_limit {
-                continue;
-            }
-            gas_limit -= tx_gas;
-            size_limit -= tx_size;
-            packed.push(tx);
-        }
-
-        packed
     }
 
     /// pack at most num_txs transactions randomly
@@ -1187,31 +1139,15 @@ impl TransactionPoolInner {
             );
         packed_transactions.extend_from_slice(&sampled_tx);
 
-        let (sampled_tx, native_used_gas, native_used_size) =
-            self.deferred_pool.packing_sampler(
-                Space::Native,
-                block_gas_limit - used_gas,
-                block_size_limit - used_size,
-                num_txs - sampled_tx.len(),
-                U256::zero(),
-                validity,
-            );
-        packed_transactions.extend_from_slice(&sampled_tx);
-
-        let remaining_gas = block_gas_limit
-            .saturating_sub(used_gas)
-            .saturating_sub(native_used_gas);
-        let remaining_size = block_size_limit
-            .saturating_sub(used_size)
-            .saturating_sub(native_used_size);
-        let remaining_txs = num_txs.saturating_sub(packed_transactions.len());
-        let shielded_txs = self.pack_shielded_transactions(
-            remaining_txs,
-            remaining_gas,
-            remaining_size,
+        let (sampled_tx, _, _) = self.deferred_pool.packing_sampler(
+            Space::Native,
+            block_gas_limit - used_gas,
+            block_size_limit - used_size,
+            num_txs - sampled_tx.len(),
+            U256::zero(),
             validity,
         );
-        packed_transactions.extend_from_slice(&shielded_txs);
+        packed_transactions.extend_from_slice(&sampled_tx);
 
         if log::max_level() >= log::Level::Debug {
             let mut rlp_s = RlpStream::new();
@@ -1371,21 +1307,6 @@ impl TransactionPoolInner {
             }
         }
 
-        let mut remaining_gas = block_gas_limit;
-        let mut remaining_size = block_size_limit;
-        for tx in &packed_transactions {
-            remaining_gas = remaining_gas.saturating_sub(*tx.gas());
-            remaining_size = remaining_size.saturating_sub(tx.rlp_size());
-        }
-        let remaining_txs = num_txs.saturating_sub(packed_transactions.len());
-        let shielded_txs = self.pack_shielded_transactions(
-            remaining_txs,
-            remaining_gas,
-            remaining_size,
-            validity,
-        );
-        packed_transactions.extend_from_slice(&shielded_txs);
-
         if log::max_level() >= log::Level::Debug {
             let mut rlp_s = RlpStream::new();
             for tx in &packed_transactions {
@@ -1447,9 +1368,6 @@ impl TransactionPoolInner {
         transaction: Arc<SignedTransaction>, packed: bool, force: bool,
     ) -> Result<(), String> {
         let _timer = MeterTimer::time_func(TX_POOL_INNER_INSERT_TIMER.as_ref());
-        if transaction.is_shielded() {
-            return self.insert_shielded_transaction(transaction, packed);
-        }
         let (sponsored_gas, sponsored_storage) =
             self.get_sponsored_gas_and_storage(account_cache, &transaction)?;
 
@@ -1548,35 +1466,6 @@ impl TransactionPoolInner {
         Ok(())
     }
 
-    fn insert_shielded_transaction(
-        &mut self, transaction: Arc<SignedTransaction>, packed: bool,
-    ) -> Result<(), String> {
-        let tx_hash = transaction.hash();
-        if packed {
-            self.shielded_pool.remove(&tx_hash);
-            if self.txs.remove(&tx_hash).is_some() {
-                if self.unpacked_transaction_count > 0 {
-                    self.unpacked_transaction_count -= 1;
-                }
-            }
-            return Ok(());
-        }
-
-        if self.is_full(Space::Native) {
-            return Err("Transaction pool is full".into());
-        }
-
-        if self.txs.get(&tx_hash).is_some() {
-            return Ok(());
-        }
-
-        self.shielded_pool.insert(tx_hash, transaction.clone());
-        self.txs.insert(tx_hash, transaction);
-        self.unpacked_transaction_count += 1;
-
-        Ok(())
-    }
-
     fn estimated_gas_fee(gas: U256, gas_price: U256) -> U256 {
         let estimated_gas_u512 = gas.full_mul(gas_price);
         // Normally, it is less than 2^128
@@ -1662,8 +1551,7 @@ mod tests {
     use primitives::{
         block_header::compute_next_price_tuple,
         transaction::{
-            native_transaction::{NativeTransaction, ShieldedTransaction},
-            Eip155Transaction,
+            native_transaction::NativeTransaction, Eip155Transaction,
         },
         Action, SignedTransaction, Transaction,
     };
@@ -2053,248 +1941,5 @@ mod tests {
             pack_transactions_1559_checked(&mut pool, &machine);
             pool.clear();
         }
-    }
-
-    // ============================================================
-    // Shielded-transaction pool tests (C.3 lock-in)
-    // ============================================================
-    //
-    // These tests lock in the invariants documented in
-    // `docs/privacy-layer.md` §10 and the N-series finding rows in
-    // `docs/security-audit.md` §2.5. Specifically:
-    //
-    // * Shielded txs go to a SEPARATE pool keyed by hash only — there's
-    //   no `(sender, nonce)` index, because the sender is hidden inside
-    //   the ZK proof.
-    // * Packing order is native-first, shielded-appended-after.
-    // * Shielded txs sort by gas-price descending (tie-break by hash).
-    // * The `packed = true` flag removes the tx from BOTH the shielded
-    //   pool and the global `txs` set.
-
-    use mazze_parameters::internal_contract_addresses::SHIELDED_POOL_CONTRACT_ADDRESS;
-    use primitives::transaction::{
-        native_transaction::TypedNativeTransaction, TransactionWithSignature,
-    };
-
-    /// Build an unsigned shielded transaction. Shielded txs have no
-    /// signer (the prover's identity is hidden) — they are hash-keyed
-    /// via `SignedTransaction::new_shielded`, which derives the sender
-    /// from `keccak256(tx_hash)`.
-    fn new_test_shielded_tx(
-        gas_price: usize, nonce: usize, payload_size: usize,
-    ) -> Arc<SignedTransaction> {
-        // Distinct payloads so the hash-derived sender differs across
-        // calls — keeps the tests deterministic without depending on
-        // a random nonce.
-        let mut data = vec![0u8; payload_size];
-        for (i, b) in data.iter_mut().enumerate() {
-            *b = ((nonce.wrapping_add(i)) & 0xff) as u8;
-        }
-
-        let shielded = ShieldedTransaction {
-            nonce: U256::from(nonce),
-            gas_price: U256::from(gas_price),
-            gas: U256::from(100_000u64),
-            action: Action::Call(SHIELDED_POOL_CONTRACT_ADDRESS),
-            value: U256::zero(),
-            storage_limit: 0,
-            epoch_height: 0,
-            chain_id: 1,
-            data,
-        };
-        let unsigned =
-            Transaction::Native(TypedNativeTransaction::Shielded(shielded));
-        let tws = TransactionWithSignature::new_unsigned(unsigned);
-        // Recompute the hash — `new_unsigned` leaves it default.
-        let tws = {
-            let raw = rlp::encode(&tws);
-            let hash = keccak_hash::keccak(&raw);
-            let mut tws = tws;
-            tws.hash = hash;
-            tws.rlp_size = Some(raw.len());
-            tws
-        };
-        Arc::new(SignedTransaction::new_shielded(tws))
-    }
-
-    #[test]
-    fn shielded_tx_inserts_into_separate_pool() {
-        let mut pool = TransactionPoolInner::new_for_test();
-        let tx = new_test_shielded_tx(10, 0, 4);
-        let hash = tx.hash();
-
-        pool.insert_shielded_transaction(tx.clone(), false)
-            .expect("insertion failed");
-
-        // Goes into shielded_pool …
-        assert!(
-            pool.shielded_pool.get(&hash).is_some(),
-            "shielded tx missing from shielded_pool",
-        );
-        // … and into the global txs set …
-        assert!(
-            pool.txs.get(&hash).is_some(),
-            "shielded tx missing from global txs set",
-        );
-        // … but NOT into the deferred (nonce-ordered) pool — shielded
-        // txs have no sender bucket to populate.
-        assert!(
-            pool.deferred_pool.buckets.is_empty(),
-            "shielded tx wrongly populated the nonce-ordered deferred pool",
-        );
-        assert_eq!(pool.unpacked_transaction_count, 1);
-    }
-
-    #[test]
-    fn shielded_txs_no_sender_nonce_conflict() {
-        // Two shielded txs with the SAME nonce but different payloads
-        // (hence different hashes) MUST both be acceptable — shielded
-        // txs are hash-keyed, there's no nonce-replacement semantics.
-        let mut pool = TransactionPoolInner::new_for_test();
-
-        let tx_a = new_test_shielded_tx(10, 0, 4);
-        let tx_b = new_test_shielded_tx(10, 0, 5); // different payload
-        assert_ne!(tx_a.hash(), tx_b.hash(), "test setup: hashes must differ");
-
-        pool.insert_shielded_transaction(tx_a.clone(), false).unwrap();
-        pool.insert_shielded_transaction(tx_b.clone(), false).unwrap();
-
-        assert!(pool.shielded_pool.get(&tx_a.hash()).is_some());
-        assert!(pool.shielded_pool.get(&tx_b.hash()).is_some());
-        assert_eq!(pool.unpacked_transaction_count, 2);
-    }
-
-    #[test]
-    fn shielded_tx_packed_flag_removes_from_pool() {
-        let mut pool = TransactionPoolInner::new_for_test();
-        let tx = new_test_shielded_tx(10, 0, 4);
-        let hash = tx.hash();
-        pool.insert_shielded_transaction(tx.clone(), false).unwrap();
-        assert_eq!(pool.unpacked_transaction_count, 1);
-
-        // Re-inserting with packed = true removes from both shielded_pool
-        // and the global txs set.
-        pool.insert_shielded_transaction(tx, true).unwrap();
-
-        assert!(
-            pool.shielded_pool.get(&hash).is_none(),
-            "packed shielded tx should be removed from shielded_pool",
-        );
-        assert!(
-            pool.txs.get(&hash).is_none(),
-            "packed shielded tx should be removed from global txs",
-        );
-        assert_eq!(pool.unpacked_transaction_count, 0);
-    }
-
-    #[test]
-    fn shielded_pack_sorts_by_gas_price_descending() {
-        let mut pool = TransactionPoolInner::new_for_test();
-        // Insert in shuffled order to assert sort takes effect.
-        let lo = new_test_shielded_tx(10, 0, 4);
-        let hi = new_test_shielded_tx(30, 1, 4);
-        let mid = new_test_shielded_tx(20, 2, 4);
-        pool.insert_shielded_transaction(lo.clone(), false).unwrap();
-        pool.insert_shielded_transaction(hi.clone(), false).unwrap();
-        pool.insert_shielded_transaction(mid.clone(), false).unwrap();
-
-        let packed = pool.pack_shielded_transactions(
-            10,
-            U256::from(10_000_000u64),
-            10_000_000,
-            |_tx| PackingCheckResult::Pack,
-        );
-
-        let prices: Vec<U256> =
-            packed.iter().map(|t| *t.gas_price()).collect();
-        assert_eq!(
-            prices,
-            vec![U256::from(30), U256::from(20), U256::from(10)],
-            "shielded txs must pack descending by gas_price",
-        );
-    }
-
-    #[test]
-    fn shielded_pack_respects_num_tx_cap() {
-        let mut pool = TransactionPoolInner::new_for_test();
-        for i in 0..5 {
-            let tx = new_test_shielded_tx(10 + i, i as usize, 4);
-            pool.insert_shielded_transaction(tx, false).unwrap();
-        }
-
-        let packed = pool.pack_shielded_transactions(
-            2, // cap at 2
-            U256::from(10_000_000u64),
-            10_000_000,
-            |_tx| PackingCheckResult::Pack,
-        );
-
-        assert_eq!(packed.len(), 2);
-        // The cap selects the top-2-by-gas-price.
-        assert_eq!(*packed[0].gas_price(), U256::from(14));
-        assert_eq!(*packed[1].gas_price(), U256::from(13));
-    }
-
-    #[test]
-    fn shielded_pack_respects_gas_limit() {
-        let mut pool = TransactionPoolInner::new_for_test();
-        // Each tx has gas = 100_000.
-        for i in 0..5 {
-            let tx = new_test_shielded_tx(10 + i, i as usize, 4);
-            pool.insert_shielded_transaction(tx, false).unwrap();
-        }
-
-        // Gas limit allows exactly 3 txs.
-        let packed = pool.pack_shielded_transactions(
-            10,
-            U256::from(300_000u64),
-            10_000_000,
-            |_tx| PackingCheckResult::Pack,
-        );
-        assert_eq!(packed.len(), 3);
-    }
-
-    #[test]
-    fn shielded_pack_skips_drop_and_pending() {
-        let mut pool = TransactionPoolInner::new_for_test();
-        let tx_drop = new_test_shielded_tx(30, 0, 4);
-        let tx_pending = new_test_shielded_tx(20, 1, 4);
-        let tx_ok = new_test_shielded_tx(10, 2, 4);
-        let drop_hash = tx_drop.hash();
-        let pending_hash = tx_pending.hash();
-        pool.insert_shielded_transaction(tx_drop, false).unwrap();
-        pool.insert_shielded_transaction(tx_pending, false).unwrap();
-        pool.insert_shielded_transaction(tx_ok.clone(), false).unwrap();
-
-        let packed = pool.pack_shielded_transactions(
-            10,
-            U256::from(10_000_000u64),
-            10_000_000,
-            move |tx| {
-                if tx.hash() == drop_hash {
-                    PackingCheckResult::Drop
-                } else if tx.hash() == pending_hash {
-                    PackingCheckResult::Pending
-                } else {
-                    PackingCheckResult::Pack
-                }
-            },
-        );
-
-        assert_eq!(packed.len(), 1);
-        assert_eq!(packed[0].hash(), tx_ok.hash());
-    }
-
-    #[test]
-    fn clear_drops_shielded_pool() {
-        let mut pool = TransactionPoolInner::new_for_test();
-        let tx = new_test_shielded_tx(10, 0, 4);
-        pool.insert_shielded_transaction(tx, false).unwrap();
-        assert_eq!(pool.shielded_pool.inner.len(), 1);
-
-        pool.clear();
-
-        assert_eq!(pool.shielded_pool.inner.len(), 0);
-        assert_eq!(pool.txs.inner.len(), 0);
     }
 }

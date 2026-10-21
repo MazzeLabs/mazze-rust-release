@@ -18,22 +18,13 @@ ADDRCONV_BIN="$TOOLS_DIR/addrconv"
 DASHBOARD_ENABLED="${MAZZE_CLI_DASH:-1}"
 DASHBOARD_REFRESH_SEC="${MAZZE_CLI_DASH_REFRESH:-2}"
 DASHBOARD_LAST_TS=0
-SHIELDED_FROM_EPOCH="${MAZZE_SHIELDED_FROM_EPOCH:-0x0}"
-SHIELDED_LOG_CHUNK="${MAZZE_SHIELDED_LOG_CHUNK:-500}"
 CLI_COLOR="${MAZZE_CLI_COLOR:-1}"
 FAUCET_AMOUNT_MAZZE="${MAZZE_FAUCET_AMOUNT:-1000}"
 if [[ -n "${NO_COLOR:-}" || ! -t 1 ]]; then
   CLI_COLOR="0"
 fi
 
-SHIELDED_POOL_BASE32="MAZZE:TYPE.BUILTIN:AAEJUAAAAAAAAAAAAAAAAAAAAAAAAAAABAJ1SJV3W2"
-
 MAZZEKEY_BIN="$REPO_ROOT/target/debug/mazzekey"
-SHIELDED_NOTE_BIN="$REPO_ROOT/target/debug/shielded_note"
-
-SELECTOR_ROOT="0xebf0c717"
-SELECTOR_VK_HASH="0x69b5d6d1"
-SELECTOR_NULLIFIER="0xd5a4e325"
 
 color() {
   local code="$1"
@@ -328,12 +319,6 @@ ensure_mazzekey() {
   fi
 }
 
-ensure_shielded_note() {
-  if [[ ! -x "$SHIELDED_NOTE_BIN" ]]; then
-    cargo build -p mazze-executor --bin shielded_note
-  fi
-}
-
 wallet_dir() {
   printf '%s' "$WALLET_DIR/$1"
 }
@@ -362,23 +347,6 @@ wallet_get_address_hex() {
   local dir
   dir="$(wallet_dir "$1")"
   cat "$dir/address_hex" 2>/dev/null || true
-}
-
-wallet_get_shielded_address() {
-  local name="$1"
-  local dir
-  dir="$(wallet_dir "$name")"
-  if [[ -f "$dir/shielded_address" ]]; then
-    cat "$dir/shielded_address"
-    return 0
-  fi
-  local secret
-  secret="$(wallet_get_secret "$name")" || return 1
-  ensure_shielded_note
-  local addr
-  addr="$("$SHIELDED_NOTE_BIN" address --secret "$secret" --network-id "$NETWORK_ID")" || return 1
-  printf '%s' "$addr" > "$dir/shielded_address"
-  echo "$addr"
 }
 
 wallet_is_encrypted() {
@@ -473,20 +441,6 @@ resolve_wallet_address_hex() {
   printf '%s' "$input"
 }
 
-resolve_wallet_shielded_address() {
-  local input="$1"
-  if wallet_exists "$input"; then
-    wallet_get_shielded_address "$input"
-    return
-  fi
-  if [[ "$input" == 0x* || "$input" == 0X* ]]; then
-    ensure_shielded_note
-    "$SHIELDED_NOTE_BIN" address --public "$input" --network-id "$NETWORK_ID"
-    return
-  fi
-  printf '%s' "$input"
-}
-
 resolve_wallet_secret() {
   local input="$1"
   if wallet_exists "$input"; then
@@ -542,16 +496,6 @@ if wei != wei.to_integral_value():
 print(int(wei))' "$amount" "$MAZZE_DECIMALS"
 }
 
-pad32_hex() {
-  local value="$1"
-  value="${value#0x}"
-  value="${value#0X}"
-  if [[ ${#value} -gt 64 ]]; then
-    return 1
-  fi
-  printf '%064s' "$value" | tr ' ' '0'
-}
-
 print_balance() {
   local value_hex="$1"
   py -c 'import sys,decimal
@@ -594,228 +538,6 @@ def fmt(val):
 print(fmt(q))' "$value_hex" "$MAZZE_DECIMALS"
 }
 
-shielded_logs_pairs() {
-  local from_epoch="${1:-$SHIELDED_FROM_EPOCH}"
-  local from_dec to_dec
-  from_dec="$(resolve_epoch_to_dec "$from_epoch")" || return 1
-  to_dec="$(resolve_epoch_to_dec "latest_state")" || return 1
-  local chunk="$SHIELDED_LOG_CHUNK"
-  if ! [[ "$chunk" =~ ^[0-9]+$ ]] || (( chunk <= 0 )); then
-    chunk=500
-  fi
-  local start="$from_dec"
-  while (( start <= to_dec )); do
-    local end=$((start + chunk - 1))
-    if (( end > to_dec )); then
-      end="$to_dec"
-    fi
-    local from_hex to_hex filter logs_json
-    from_hex="$(dec_to_hex "$start")"
-    to_hex="$(dec_to_hex "$end")"
-    filter="$(printf '{"fromEpoch":"%s","toEpoch":"%s","address":"%s"}' "$from_hex" "$to_hex" "$SHIELDED_POOL_BASE32")"
-    logs_json="$(rpc_call_result_raw mazze_getLogs "[$filter]")" || return 1
-    if [[ -n "$logs_json" && "$logs_json" != "null" ]]; then
-      printf '%s' "$logs_json" | py -c 'import json,sys
-logs=json.loads(sys.stdin.read() or "[]")
-for log in logs:
-    topics = log.get("topics") or []
-    if len(topics) < 2:
-        continue
-    commitment = topics[1]
-    data_hex = (log.get("data") or "0x").lower()
-    if not data_hex.startswith("0x"):
-        continue
-    data = bytes.fromhex(data_hex[2:])
-    if not data:
-        continue
-    cipher = None
-    if len(data) >= 32:
-        head = int.from_bytes(data[0:32], "big")
-        # ABI dynamic (offset+len) or compact (len+data)
-        if head + 32 == len(data):
-            cipher = data[32:]
-        else:
-            offset = head
-            if offset + 32 <= len(data):
-                length = int.from_bytes(data[offset:offset+32], "big")
-                start = offset + 32
-                end = start + length
-                if end <= len(data):
-                    cipher = data[start:end]
-    if cipher is None:
-        cipher = data
-    if not cipher:
-        continue
-    print(f"{commitment} 0x{cipher.hex()}")'
-    fi
-    start=$((end + 1))
-  done
-}
-
-nullifier_is_spent() {
-  local nullifier="$1"
-  local padded
-  padded="$(pad32_hex "$nullifier")" || return 1
-  local data="${SELECTOR_NULLIFIER}${padded}"
-  local result
-  result="$(rpc_call_result mazze_call "[{\"to\":\"${SHIELDED_POOL_BASE32}\",\"data\":\"${data}\"},\"latest_state\"]" 2>/dev/null)" || return 1
-  local value
-  value="$(py -c 'import sys
-v=sys.argv[1].strip()
-try:
-    if v.startswith(("0x","0X")):
-        print(int(v,16))
-    else:
-        print(int(v))
-except Exception:
-    sys.exit(1)' "$result")" || return 1
-  if [[ "$value" == "0" ]]; then
-    return 1
-  fi
-  return 0
-}
-
-shielded_notes_for_secret() {
-  local secret="$1"
-  local from_epoch="${2:-$SHIELDED_FROM_EPOCH}"
-  ensure_shielded_note
-  local pairs
-  if ! pairs="$(shielded_logs_pairs "$from_epoch")"; then
-    return 1
-  fi
-  if [[ -z "$pairs" ]]; then
-    return 0
-  fi
-  while read -r commitment ciphertext; do
-    if [[ -z "$commitment" || -z "$ciphertext" ]]; then
-      continue
-    fi
-    local note_json
-    note_json="$("$SHIELDED_NOTE_BIN" decrypt --secret "$secret" --commitment "$commitment" --ciphertext "$ciphertext" 2>/dev/null)" || continue
-    local value nullifier
-    value="$(printf '%s' "$note_json" | py -c 'import json,sys; print(json.load(sys.stdin)["value"])')" || continue
-    nullifier="$(printf '%s' "$note_json" | py -c 'import json,sys; print(json.load(sys.stdin)["nullifier"])')" || continue
-    if nullifier_is_spent "$nullifier"; then
-      continue
-    fi
-    printf '%s %s\n' "$value" "$nullifier"
-  done <<< "$pairs"
-}
-
-shielded_notes_full() {
-  local secret="$1"
-  local from_epoch="${2:-$SHIELDED_FROM_EPOCH}"
-  ensure_shielded_note
-  local pairs
-  if ! pairs="$(shielded_logs_pairs "$from_epoch")"; then
-    return 1
-  fi
-  if [[ -z "$pairs" ]]; then
-    return 0
-  fi
-  local idx=0
-  while read -r commitment ciphertext; do
-    if [[ -z "$commitment" || -z "$ciphertext" ]]; then
-      idx=$((idx + 1))
-      continue
-    fi
-    local note_json
-    note_json="$("$SHIELDED_NOTE_BIN" decrypt --secret "$secret" --commitment "$commitment" --ciphertext "$ciphertext" 2>/dev/null)" || { idx=$((idx + 1)); continue; }
-    local value rho rseed nullifier
-    value="$(printf '%s' "$note_json" | py -c 'import json,sys; print(json.load(sys.stdin)["value"])')" || { idx=$((idx + 1)); continue; }
-    rho="$(printf '%s' "$note_json" | py -c 'import json,sys; print(json.load(sys.stdin)["rho"])')" || { idx=$((idx + 1)); continue; }
-    rseed="$(printf '%s' "$note_json" | py -c 'import json,sys; print(json.load(sys.stdin)["rseed"])')" || { idx=$((idx + 1)); continue; }
-    nullifier="$(printf '%s' "$note_json" | py -c 'import json,sys; print(json.load(sys.stdin)["nullifier"])')" || { idx=$((idx + 1)); continue; }
-    if nullifier_is_spent "$nullifier"; then
-      idx=$((idx + 1))
-      continue
-    fi
-    printf '%s %s %s %s %s %s\n' "$idx" "$commitment" "$value" "$rho" "$rseed" "$nullifier"
-    idx=$((idx + 1))
-  done <<< "$pairs"
-}
-
-shielded_balance_for_secret() {
-  local secret="$1"
-  local from_epoch="${2:-$SHIELDED_FROM_EPOCH}"
-  local total="0"
-  local line
-  while read -r value _nullifier; do
-    if [[ -z "$value" ]]; then
-      continue
-    fi
-    total="$(py -c 'import sys; print(int(sys.argv[1]) + int(sys.argv[2]))' "$total" "$value")"
-  done < <(shielded_notes_for_secret "$secret" "$from_epoch")
-  printf '%s' "$total"
-}
-
-wei_add() {
-  py -c 'import sys; print(int(sys.argv[1]) + int(sys.argv[2]))' "$1" "$2"
-}
-
-wei_sub() {
-  py -c 'import sys; print(int(sys.argv[1]) - int(sys.argv[2]))' "$1" "$2"
-}
-
-wei_lt() {
-  py -c 'import sys; print(int(sys.argv[1]) < int(sys.argv[2]))' "$1" "$2"
-}
-
-shielded_commitments_file() {
-  local from_epoch="${1:-$SHIELDED_FROM_EPOCH}"
-  local tmp
-  tmp="$(mktemp)"
-  if ! shielded_logs_pairs "$from_epoch" > "$tmp"; then
-    rm -f "$tmp"
-    return 1
-  fi
-  printf '%s' "$tmp"
-}
-
-build_shielded_inputs_json() {
-  local notes_file="$1"
-  local commitments_file="$2"
-  local secret="$3"
-  local recipient="$4"
-  local out_file="$5"
-  py - "$notes_file" "$commitments_file" "$secret" "$recipient" "$SHIELDED_NOTE_BIN" "$out_file" <<'PY'
-import json
-import subprocess
-import sys
-
-notes_file, commitments_file, secret, recipient, note_bin, out_file = sys.argv[1:7]
-
-inputs = []
-with open(notes_file, "r", encoding="utf-8") as handle:
-    for line in handle:
-        parts = line.strip().split()
-        if len(parts) < 6:
-            continue
-        idx, commitment, value, rho, rseed, _nullifier = parts[:6]
-        path = json.loads(
-            subprocess.check_output(
-                [note_bin, "path", "--commitments", commitments_file, "--index", idx],
-                text=True,
-            )
-        )
-        inputs.append(
-            {
-                "recipient": recipient,
-                "value": value,
-                "rho": rho,
-                "rseed": rseed,
-                "secret": secret,
-                "commitment": commitment,
-                "path": {"elements": path["elements"], "bits": path["bits"]},
-            }
-        )
-
-payload = {"inputs": inputs}
-with open(out_file, "w", encoding="utf-8") as handle:
-    json.dump(payload, handle)
-PY
-}
-
 hex_to_dec() {
   local value="$1"
   py -c 'import sys
@@ -824,53 +546,6 @@ if v.startswith("0x") or v.startswith("0X"):
     print(int(v,16))
 else:
     print(int(v))' "$value"
-}
-
-dec_to_hex() {
-  local value="$1"
-  py -c 'import sys
-v=int(sys.argv[1])
-print(hex(v))' "$value"
-}
-
-resolve_epoch_to_dec() {
-  local value="$1"
-  if [[ "$value" == "latest_state" || "$value" == "latest" ]]; then
-    local status
-    status="$(rpc_call_with_retry mazze_getStatus "[]")" || return 1
-    local latest_hex
-    latest_hex="$(printf '%s' "$status" | json_get_quiet latestState)"
-    [[ -z "$latest_hex" ]] && return 1
-    hex_to_dec "$latest_hex"
-    return
-  fi
-  if [[ "$value" == "latest_confirmed" ]]; then
-    local status
-    status="$(rpc_call_with_retry mazze_getStatus "[]")" || return 1
-    local latest_hex
-    latest_hex="$(printf '%s' "$status" | json_get_quiet latestConfirmed)"
-    [[ -z "$latest_hex" ]] && return 1
-    hex_to_dec "$latest_hex"
-    return
-  fi
-  if [[ "$value" == "latest_checkpoint" ]]; then
-    local status
-    status="$(rpc_call_with_retry mazze_getStatus "[]")" || return 1
-    local latest_hex
-    latest_hex="$(printf '%s' "$status" | json_get_quiet latestCheckpoint)"
-    [[ -z "$latest_hex" ]] && return 1
-    hex_to_dec "$latest_hex"
-    return
-  fi
-  if [[ "$value" == 0x* || "$value" == 0X* ]]; then
-    hex_to_dec "$value"
-    return
-  fi
-  if [[ "$value" =~ ^[0-9]+$ ]]; then
-    printf '%s' "$value"
-    return
-  fi
-  return 1
 }
 
 dashboard_print() {
@@ -936,13 +611,10 @@ $(bold "Wallet:")
   wallet new <name> [--password]
   wallet import <name> <secret-hex> [--password]
   wallet list [--no-balances]
-  wallet balance --name <name> [--epoch <epoch>] [--public|--private|--all] [--from-epoch <epoch>]
-  wallet transfer --name <name> --dest <base32|wallet> --amount <value> [--shielded]
-  wallet unshield --name <name> --dest <base32|wallet> --amount <value>
-  wallet shield-deposit --name <name> --amount <value> [--to <shielded|wallet>]
+  wallet balance --name <name> [--epoch <epoch>]
+  wallet transfer --name <name> --dest <base32|wallet> --amount <value>
   wallet show <name>
   wallet address --name <name>
-  wallet shielded-address --name <name>
   wallet delete <name>
 
 $(bold "Chain:")
@@ -964,13 +636,6 @@ $(bold "Chain:")
 $(bold "Transfers:")
   send <from-secret|wallet> <to-base32|wallet> <amount-mazze>
   faucet --name <wallet> [--amount <value>]
-  shield-deposit <from-secret|wallet> <amount-mazze> [shielded-output]
-  shield-send [--inputs <file>] <shielded-output|wallet> <amount-mazze>
-
-$(bold "Shielded pool (read-only):")
-  root
-  vkhash
-  nullifier <hex32>
 
 EOF
 }
@@ -1056,9 +721,6 @@ cmd_wallet_new() {
     echo "Failed to derive address for new wallet." >&2
     return 1
   fi
-  ensure_shielded_note
-  local shielded_addr
-  shielded_addr="$("$SHIELDED_NOTE_BIN" address --secret "$secret" --network-id "$NETWORK_ID" 2>/dev/null || true)"
   hex_addr="${hex_addr#0x}"
   hex_addr="0x${hex_addr}"
   local dir
@@ -1067,9 +729,6 @@ cmd_wallet_new() {
   chmod 700 "$dir" 2>/dev/null || true
   printf '%s' "$base32_addr" > "$dir/address"
   printf '%s' "$hex_addr" > "$dir/address_hex"
-  if [[ -n "$shielded_addr" ]]; then
-    printf '%s' "$shielded_addr" > "$dir/shielded_address"
-  fi
   date -u +"%Y-%m-%dT%H:%M:%SZ" > "$dir/created"
 
   if [[ "$with_password" == "--password" || "$with_password" == "-p" ]]; then
@@ -1092,9 +751,6 @@ cmd_wallet_new() {
 
   echo "Wallet created: $name"
   echo "Address: $base32_addr"
-  if [[ -n "$shielded_addr" ]]; then
-    echo "Shielded: $shielded_addr"
-  fi
 }
 
 cmd_wallet_info() {
@@ -1109,16 +765,12 @@ cmd_wallet_info() {
   fi
   local dir
   dir="$(wallet_dir "$name")"
-  local address hex shielded
+  local address hex
   address="$(wallet_get_address "$name")"
   hex="$(wallet_get_address_hex "$name")"
-  shielded="$(wallet_get_shielded_address "$name" 2>/dev/null || true)"
   echo "name: $name"
   echo "address: $address"
   echo "hex: $hex"
-  if [[ -n "$shielded" ]]; then
-    echo "shielded: $shielded"
-  fi
   if wallet_is_encrypted "$name"; then
     echo "encrypted: true"
   else
@@ -1159,36 +811,6 @@ cmd_wallet_address() {
   wallet_get_address "$name"
 }
 
-cmd_wallet_shielded_address() {
-  local name=""
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --name|-n)
-        name="${2:-}"
-        shift 2
-        ;;
-      *)
-        if [[ -z "$name" ]]; then
-          name="$1"
-        else
-          echo "Unknown argument: $1" >&2
-          return 1
-        fi
-        shift
-        ;;
-    esac
-  done
-  if [[ -z "$name" ]]; then
-    echo "Usage: wallet shielded-address <name>" >&2
-    return 1
-  fi
-  if ! wallet_exists "$name"; then
-    echo "Wallet not found: $name" >&2
-    return 1
-  fi
-  wallet_get_shielded_address "$name"
-}
-
 cmd_wallet_import() {
   local name="${1:-}"
   local secret="${2:-}"
@@ -1215,9 +837,6 @@ cmd_wallet_import() {
     echo "Failed to derive address for wallet import." >&2
     return 1
   fi
-  ensure_shielded_note
-  local shielded_addr
-  shielded_addr="$("$SHIELDED_NOTE_BIN" address --secret "$secret" --network-id "$NETWORK_ID" 2>/dev/null || true)"
   hex_addr="${hex_addr#0x}"
   hex_addr="0x${hex_addr}"
   local dir
@@ -1226,9 +845,6 @@ cmd_wallet_import() {
   chmod 700 "$dir" 2>/dev/null || true
   printf '%s' "$base32_addr" > "$dir/address"
   printf '%s' "$hex_addr" > "$dir/address_hex"
-  if [[ -n "$shielded_addr" ]]; then
-    printf '%s' "$shielded_addr" > "$dir/shielded_address"
-  fi
   date -u +"%Y-%m-%dT%H:%M:%SZ" > "$dir/created"
 
   if [[ "$with_password" == "--password" || "$with_password" == "-p" ]]; then
@@ -1251,9 +867,6 @@ cmd_wallet_import() {
 
   echo "Wallet imported: $name"
   echo "Address: $base32_addr"
-  if [[ -n "$shielded_addr" ]]; then
-    echo "Shielded: $shielded_addr"
-  fi
 }
 
 cmd_wallet_list() {
@@ -1273,11 +886,11 @@ cmd_wallet_list() {
   local header_line sep_line
   header_line="$(printf '%-*s  %-*s' "$name_w" "name" "$addr_w" "address")"
   if [[ "$with_balances" == "true" ]]; then
-    header_line+="$(printf '  %-*s  %-*s' "$bal_w" "public" "$bal_w" "private")"
+    header_line+="$(printf '  %-*s' "$bal_w" "balance")"
   fi
   sep_line="$(printf '%-*s  %-*s' "$name_w" "$(repeat_char '-' "$name_w")" "$addr_w" "$(repeat_char '-' "$addr_w")")"
   if [[ "$with_balances" == "true" ]]; then
-    sep_line+="$(printf '  %-*s  %-*s' "$bal_w" "$(repeat_char '-' "$bal_w")" "$bal_w" "$(repeat_char '-' "$bal_w")")"
+    sep_line+="$(printf '  %-*s' "$bal_w" "$(repeat_char '-' "$bal_w")")"
   fi
   printf '%s\n' "$(bold "$header_line")"
   printf '%s\n' "$(dim "$sep_line")"
@@ -1287,30 +900,13 @@ cmd_wallet_list() {
     addr="$(wallet_get_address "$name")"
     printf '%-*s  %-*s' "$name_w" "$name" "$addr_w" "$addr"
     if [[ "$with_balances" == "true" ]]; then
-      local bal_raw priv_raw priv_label
+      local bal_raw
       bal_raw="$(rpc_call_result mazze_getBalance "[\"${addr}\",\"latest_state\"]" 2>/dev/null || true)"
       if [[ -n "$bal_raw" ]]; then
         printf '  %-*s' "$bal_w" "$(format_mazze_value "$bal_raw")"
       else
         printf '  %-*s' "$bal_w" "n/a"
       fi
-      if wallet_is_encrypted "$name" && [[ -z "${MAZZE_WALLET_PASS:-}" ]]; then
-        priv_label="locked"
-      else
-        local secret
-        secret="$(wallet_get_secret "$name" 2>/dev/null || true)"
-        if [[ -n "$secret" ]]; then
-          priv_raw="$(shielded_balance_for_secret "$secret" "$SHIELDED_FROM_EPOCH" 2>/dev/null || true)"
-          if [[ -n "$priv_raw" ]]; then
-            priv_label="$(format_mazze_value "$priv_raw")"
-          else
-            priv_label="n/a"
-          fi
-        else
-          priv_label="n/a"
-        fi
-      fi
-      printf '  %-*s' "$bal_w" "$priv_label"
     fi
     printf '\n'
   done
@@ -1319,8 +915,6 @@ cmd_wallet_list() {
 cmd_wallet_balance() {
   local name=""
   local epoch="latest_state"
-  local mode="all"
-  local from_epoch="$SHIELDED_FROM_EPOCH"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --name|-n)
@@ -1329,22 +923,6 @@ cmd_wallet_balance() {
         ;;
       --epoch|-e)
         epoch="${2:-latest_state}"
-        shift 2
-        ;;
-      --public)
-        mode="public"
-        shift
-        ;;
-      --private)
-        mode="private"
-        shift
-        ;;
-      --all)
-        mode="all"
-        shift
-        ;;
-      --from-epoch)
-        from_epoch="${2:-$SHIELDED_FROM_EPOCH}"
         shift 2
         ;;
       *)
@@ -1358,52 +936,28 @@ cmd_wallet_balance() {
     esac
   done
   if [[ -z "$name" ]]; then
-    echo "Usage: wallet balance --name <name> [--epoch <epoch>] [--public|--private|--all] [--from-epoch <epoch>]" >&2
+    echo "Usage: wallet balance --name <name> [--epoch <epoch>]" >&2
     return 1
   fi
   if ! wallet_exists "$name"; then
     echo "Wallet not found: $name" >&2
     return 1
   fi
-  if [[ "$mode" == "public" || "$mode" == "all" ]]; then
-    local addr pub_raw pub_fmt
-    addr="$(wallet_get_address "$name")"
-    pub_raw="$(rpc_call_result mazze_getBalance "[\"${addr}\",\"${epoch}\"]")" || return 1
-    pub_fmt="$(format_mazze_value "$pub_raw")"
-    printf '%s\n' "$(dim "public:") $(bold "${pub_fmt}") MAZZE"
-  fi
-  if [[ "$mode" == "private" || "$mode" == "all" ]]; then
-    local secret priv_raw priv_fmt
-    secret="$(wallet_get_secret "$name")" || return 1
-    priv_raw="$(shielded_balance_for_secret "$secret" "$from_epoch")"
-    priv_fmt="$(format_mazze_value "$priv_raw")"
-    printf '%s\n' "$(dim "private:") $(bold "${priv_fmt}") MAZZE"
-  fi
+  local addr bal_raw bal_fmt
+  addr="$(wallet_get_address "$name")"
+  bal_raw="$(rpc_call_result mazze_getBalance "[\"${addr}\",\"${epoch}\"]")" || return 1
+  bal_fmt="$(format_mazze_value "$bal_raw")"
+  printf '%s\n' "$(dim "balance:") $(bold "${bal_fmt}") MAZZE"
 }
 
 cmd_wallet_transfer() {
   local name=""
   local dest=""
   local amount=""
-  local shielded="false"
-  local pk_check="0"
-  local from_epoch="$SHIELDED_FROM_EPOCH"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --name|-n)
         name="${2:-}"
-        shift 2
-        ;;
-      --shielded|--private)
-        shielded="true"
-        shift
-        ;;
-      --pk-check)
-        pk_check="1"
-        shift
-        ;;
-      --from-epoch)
-        from_epoch="${2:-$SHIELDED_FROM_EPOCH}"
         shift 2
         ;;
       --dest|--to)
@@ -1432,70 +986,16 @@ cmd_wallet_transfer() {
     esac
   done
   if [[ -z "$name" || -z "$dest" || -z "$amount" ]]; then
-    echo "Usage: wallet transfer --name <name> --dest <base32|wallet> --amount <value> [--shielded] [--from-epoch <epoch>]" >&2
+    echo "Usage: wallet transfer --name <name> --dest <base32|wallet> --amount <value>" >&2
     return 1
   fi
   if ! wallet_exists "$name"; then
     echo "Wallet not found: $name" >&2
     return 1
   fi
-  local amount_wei
-  if ! amount_wei="$(amount_to_wei "$amount")"; then
+  if ! amount_to_wei "$amount" >/dev/null; then
     echo "Invalid amount: $amount" >&2
     return 1
-  fi
-  if [[ "$shielded" == "true" ]]; then
-    local secret
-    secret="$(resolve_wallet_secret "$name")" || return 1
-    local dest_shielded self_shielded
-    dest_shielded="$(resolve_wallet_shielded_address "$dest")" || return 1
-    self_shielded="$(wallet_get_shielded_address "$name")" || return 1
-    local commitments_file selected_file inputs_json
-    commitments_file="$(shielded_commitments_file "$from_epoch")" || return 1
-    selected_file="$(mktemp)"
-    local selected_total="0"
-    while read -r idx commitment value rho rseed nullifier; do
-      if [[ -z "$idx" || -z "$commitment" || -z "$value" || -z "$rho" || -z "$rseed" ]]; then
-        continue
-      fi
-      if [[ "$(wei_lt "$selected_total" "$amount_wei")" == "True" ]]; then
-        selected_total="$(wei_add "$selected_total" "$value")"
-        printf '%s %s %s %s %s %s\n' "$idx" "$commitment" "$value" "$rho" "$rseed" "$nullifier" >> "$selected_file"
-      fi
-      if [[ "$(wei_lt "$selected_total" "$amount_wei")" == "False" ]]; then
-        break
-      fi
-    done < <(shielded_notes_full "$secret" "$from_epoch")
-    if [[ "$(wei_lt "$selected_total" "$amount_wei")" == "True" ]]; then
-      rm -f "$commitments_file" "$selected_file"
-      echo "Insufficient private balance for shielded transfer." >&2
-      return 1
-    fi
-    local change
-    change="$(wei_sub "$selected_total" "$amount_wei")"
-    local outputs values
-    outputs="$dest_shielded"
-    values="$amount_wei"
-    if [[ "$change" != "0" ]]; then
-      outputs="${outputs},${self_shielded}"
-      values="${values},${change}"
-    fi
-    local anchor
-    anchor="$(rpc_call_result mazze_call "[{\"to\":\"${SHIELDED_POOL_BASE32}\",\"data\":\"${SELECTOR_ROOT}\"},\"latest_state\"]" 2>/dev/null || true)"
-    inputs_json="$(mktemp)"
-    build_shielded_inputs_json "$selected_file" "$commitments_file" "$secret" "$self_shielded" "$inputs_json" || {
-      rm -f "$commitments_file" "$selected_file" "$inputs_json"
-      return 1
-    }
-    SHIELDED_OUTPUTS="$outputs" \
-    SHIELDED_VALUES="$values" \
-    ANCHOR="$anchor" \
-    SHIELDED_INPUTS="$inputs_json" \
-    MAZZE_SHIELDED_PK_CHECK="$pk_check" \
-      "$SCRIPT_DIR/send-shielded.sh"
-    local status=$?
-    rm -f "$commitments_file" "$selected_file" "$inputs_json"
-    return $status
   fi
 
   local secret to_addr
@@ -1507,188 +1007,6 @@ cmd_wallet_transfer() {
   fi
   require_base32 "$to_addr" || return 1
   "$SCRIPT_DIR/send-transfer.sh" "$secret" "$to_addr" "$amount"
-}
-
-cmd_wallet_unshield() {
-  local name=""
-  local dest=""
-  local amount=""
-  local pk_check="0"
-  local from_epoch="$SHIELDED_FROM_EPOCH"
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --name|-n)
-        name="${2:-}"
-        shift 2
-        ;;
-      --pk-check)
-        pk_check="1"
-        shift
-        ;;
-      --from-epoch)
-        from_epoch="${2:-$SHIELDED_FROM_EPOCH}"
-        shift 2
-        ;;
-      --dest|--to)
-        dest="${2:-}"
-        shift 2
-        ;;
-      dest)
-        dest="${2:-}"
-        shift 2
-        ;;
-      --amount|-a)
-        amount="${2:-}"
-        shift 2
-        ;;
-      *)
-        if [[ -z "$dest" ]]; then
-          dest="$1"
-        elif [[ -z "$amount" ]]; then
-          amount="$1"
-        else
-          echo "Unknown argument: $1" >&2
-          return 1
-        fi
-        shift
-        ;;
-    esac
-  done
-  if [[ -z "$name" || -z "$dest" || -z "$amount" ]]; then
-    echo "Usage: wallet unshield --name <name> --dest <base32|wallet> --amount <value> [--from-epoch <epoch>]" >&2
-    return 1
-  fi
-  if ! wallet_exists "$name"; then
-    echo "Wallet not found: $name" >&2
-    return 1
-  fi
-  local amount_wei
-  if ! amount_wei="$(amount_to_wei "$amount")"; then
-    echo "Invalid amount: $amount" >&2
-    return 1
-  fi
-  local dest_addr dest_hex
-  dest_addr="$(resolve_wallet_address "$dest")"
-  if [[ -z "$dest_addr" ]]; then
-    echo "Invalid destination: $dest" >&2
-    return 1
-  fi
-  require_base32 "$dest_addr" || return 1
-  dest_hex="$(resolve_wallet_address_hex "$dest_addr")"
-  if [[ -z "$dest_hex" ]]; then
-    echo "Failed to resolve destination hex for $dest_addr" >&2
-    return 1
-  fi
-
-  local secret self_shielded
-  secret="$(resolve_wallet_secret "$name")" || return 1
-  self_shielded="$(wallet_get_shielded_address "$name")" || return 1
-
-  local commitments_file selected_file inputs_json
-  commitments_file="$(shielded_commitments_file "$from_epoch")" || return 1
-  selected_file="$(mktemp)"
-  local selected_total="0"
-  while read -r idx commitment value rho rseed nullifier; do
-    if [[ -z "$idx" || -z "$commitment" || -z "$value" || -z "$rho" || -z "$rseed" ]]; then
-      continue
-    fi
-    if [[ "$(wei_lt "$selected_total" "$amount_wei")" == "True" ]]; then
-      selected_total="$(wei_add "$selected_total" "$value")"
-      printf '%s %s %s %s %s %s\n' "$idx" "$commitment" "$value" "$rho" "$rseed" "$nullifier" >> "$selected_file"
-    fi
-    if [[ "$(wei_lt "$selected_total" "$amount_wei")" == "False" ]]; then
-      break
-    fi
-  done < <(shielded_notes_full "$secret" "$from_epoch")
-  if [[ "$(wei_lt "$selected_total" "$amount_wei")" == "True" ]]; then
-    rm -f "$commitments_file" "$selected_file"
-    echo "Insufficient private balance for unshield." >&2
-    return 1
-  fi
-
-  local change
-  change="$(wei_sub "$selected_total" "$amount_wei")"
-  local anchor
-  anchor="$(rpc_call_result mazze_call "[{\"to\":\"${SHIELDED_POOL_BASE32}\",\"data\":\"${SELECTOR_ROOT}\"},\"latest_state\"]" 2>/dev/null || true)"
-  inputs_json="$(mktemp)"
-  build_shielded_inputs_json "$selected_file" "$commitments_file" "$secret" "$self_shielded" "$inputs_json" || {
-    rm -f "$commitments_file" "$selected_file" "$inputs_json"
-    return 1
-  }
-
-  if [[ "$change" != "0" ]]; then
-    OUTPUTS="$dest_hex" \
-    VALUES="$amount_wei" \
-    SHIELDED_OUTPUTS="$self_shielded" \
-    SHIELDED_VALUES="$change" \
-    ANCHOR="$anchor" \
-    SHIELDED_INPUTS="$inputs_json" \
-    MAZZE_SHIELDED_PK_CHECK="$pk_check" \
-      "$SCRIPT_DIR/send-shielded.sh"
-  else
-    OUTPUTS="$dest_hex" \
-    VALUES="$amount_wei" \
-    ANCHOR="$anchor" \
-    SHIELDED_INPUTS="$inputs_json" \
-    MAZZE_SHIELDED_PK_CHECK="$pk_check" \
-      "$SCRIPT_DIR/send-shielded.sh"
-  fi
-  local status=$?
-  rm -f "$commitments_file" "$selected_file" "$inputs_json"
-  return $status
-}
-
-cmd_wallet_shield_deposit() {
-  local name=""
-  local amount=""
-  local dest=""
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --name|-n)
-        name="${2:-}"
-        shift 2
-        ;;
-      --amount|-a)
-        amount="${2:-}"
-        shift 2
-        ;;
-      --to|--dest)
-        dest="${2:-}"
-        shift 2
-        ;;
-      *)
-        if [[ -z "$name" ]]; then
-          name="$1"
-        elif [[ -z "$amount" ]]; then
-          amount="$1"
-        else
-          echo "Unknown argument: $1" >&2
-          return 1
-        fi
-        shift
-        ;;
-    esac
-  done
-  if [[ -z "$name" || -z "$amount" ]]; then
-    echo "Usage: wallet shield-deposit --name <name> --amount <value> [--to <shielded|wallet>]" >&2
-    return 1
-  fi
-  if ! wallet_exists "$name"; then
-    echo "Wallet not found: $name" >&2
-    return 1
-  fi
-  if ! amount_to_wei "$amount" >/dev/null; then
-    echo "Invalid amount: $amount" >&2
-    return 1
-  fi
-  local secret
-  secret="$(resolve_wallet_secret "$name")" || return 1
-  if [[ -n "$dest" ]]; then
-    dest="$(resolve_wallet_shielded_address "$dest")" || return 1
-    "$SCRIPT_DIR/shield-deposit.sh" "$secret" "$amount" "$dest"
-    return $?
-  fi
-  "$SCRIPT_DIR/shield-deposit.sh" "$secret" "$amount"
 }
 
 cmd_wallet_delete() {
@@ -2106,67 +1424,6 @@ cmd_faucet() {
   "$SCRIPT_DIR/send-transfer.sh" "$dest" "$amount"
 }
 
-cmd_shield_deposit() {
-  local args=("$@")
-  if [[ ${#args[@]} -lt 2 ]]; then
-    echo "Usage: shield-deposit <from-wallet|secret> <amount> [shielded-output]" >&2
-    return 1
-  fi
-  if [[ ${#args[@]} -ge 1 ]] && wallet_exists "${args[0]}"; then
-    args[0]="$(resolve_wallet_secret "${args[0]}")"
-  fi
-  if [[ ${#args[@]} -ge 3 ]] && wallet_exists "${args[2]}"; then
-    args[2]="$(wallet_get_shielded_address "${args[2]}")"
-  fi
-  "$SCRIPT_DIR/shield-deposit.sh" "${args[@]}"
-}
-
-cmd_shield_send() {
-  local inputs=""
-  if [[ "$1" == "--inputs" ]]; then
-    inputs="${2:-}"
-    shift 2
-  fi
-  if [[ $# -lt 2 ]]; then
-    echo "Usage: shield-send [--inputs <file>] <shielded-output|wallet> <amount>" >&2
-    return 1
-  fi
-  if [[ -z "$inputs" && -z "${SHIELDED_INPUTS:-}" ]]; then
-    echo "shield-send requires --inputs <file> (inputs JSON)." >&2
-    return 1
-  fi
-  local output
-  output="$(resolve_wallet_shielded_address "$1")"
-  shift
-  if [[ -n "$inputs" ]]; then
-    SHIELDED_INPUTS="$inputs" "$SCRIPT_DIR/send-shielded.sh" "$output" "$@"
-  else
-    "$SCRIPT_DIR/send-shielded.sh" "$output" "$@"
-  fi
-}
-
-cmd_root() {
-  rpc_call_pretty "mazze_call" "[{\"to\":\"${SHIELDED_POOL_BASE32}\",\"data\":\"${SELECTOR_ROOT}\"},\"latest_state\"]"
-}
-
-cmd_vkhash() {
-  rpc_call_pretty "mazze_call" "[{\"to\":\"${SHIELDED_POOL_BASE32}\",\"data\":\"${SELECTOR_VK_HASH}\"},\"latest_state\"]"
-}
-
-cmd_nullifier() {
-  local nullifier="${1:-}"
-  if [[ -z "$nullifier" ]]; then
-    echo "Usage: nullifier <hex32>" >&2
-    return 1
-  fi
-  local padded
-  if ! padded="$(pad32_hex "$nullifier")"; then
-    echo "Invalid nullifier hex; expected <= 32 bytes." >&2
-    return 1
-  fi
-  rpc_call_pretty "mazze_call" "[{\"to\":\"${SHIELDED_POOL_BASE32}\",\"data\":\"${SELECTOR_NULLIFIER}${padded}\"},\"latest_state\"]"
-}
-
 cmd_wait() {
   local seconds="${1:-10}"
   local end=$((SECONDS + seconds))
@@ -2195,13 +1452,10 @@ run_command() {
         list) shift; cmd_wallet_list "$@" ;;
         balance) shift; cmd_wallet_balance "$@" ;;
         transfer) shift; cmd_wallet_transfer "$@" ;;
-        unshield) shift; cmd_wallet_unshield "$@" ;;
-        shield-deposit) shift; cmd_wallet_shield_deposit "$@" ;;
         show|info) shift; cmd_wallet_info "$@" ;;
         address) shift; cmd_wallet_address "$@" ;;
-        shielded-address) shift; cmd_wallet_shielded_address "$@" ;;
         delete|rm) shift; cmd_wallet_delete "$@" ;;
-        *) echo "Usage: wallet {new|import|list|balance|transfer|unshield|shield-deposit|show|address|shielded-address|delete}" >&2; return 1 ;;
+        *) echo "Usage: wallet {new|import|list|balance|transfer|show|address|delete}" >&2; return 1 ;;
       esac
       ;;
     balance) cmd_balance "$@" ;;
@@ -2210,17 +1464,12 @@ run_command() {
     pending) cmd_pending "$@" ;;
     pending-txs) cmd_pending_txs "$@" ;;
     send) cmd_send "$@" ;;
-    shield-deposit) cmd_shield_deposit "$@" ;;
-    shield-send) cmd_shield_send "$@" ;;
     tx) cmd_tx "$@" ;;
     receipt) cmd_receipt "$@" ;;
     tx-status) cmd_tx_status "$@" ;;
     watch) cmd_watch "$@" ;;
     addr) cmd_addr "$@" ;;
     dashboard) cmd_dashboard "$@" ;;
-    root) cmd_root ;;
-    vkhash) cmd_vkhash ;;
-    nullifier) cmd_nullifier "$@" ;;
     faucet) cmd_faucet "$@" ;;
     wait) cmd_wait "$@" ;;
     exit|quit) return 2 ;;

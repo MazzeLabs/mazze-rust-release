@@ -23,8 +23,6 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
   exit 1
 fi
 
-export MAZZE_SHIELDED_VK_HEX="${MAZZE_SHIELDED_VK_HEX:-$SCRIPT_DIR/shielded_vk.hex}"
-
 echo "-------$(date '+%Y-%m-%d %H:%M:%S')-------" >> "$LOG_FILE"
 
 SECRETS_FILE="$SCRIPT_DIR/hydra.secrets.toml"

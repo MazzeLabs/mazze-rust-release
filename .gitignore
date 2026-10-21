@@ -38,14 +38,6 @@ run/hydra.miner.runtime.toml
 # run. The committed example is run/hydra.secrets.toml.example.
 run/hydra.secrets.toml
 
-# Groth16 shielded proving key — large (~54 MB), not consensus-critical.
-# Joining/validating nodes only need the verifying key baked into genesis;
-# only wallets that *create* shielded transactions need the PK. Obtain it
-# out-of-band (download or `cargo run -p mazze-executor --bin shielded_keygen`
-# — the latter only works at chain genesis time, since the new PK pairs with
-# a new VK that won't match the chain's on-chain VK).
-run/shielded_pk.hex
-
 # Editors/OS
 .vscode/
 .idea/

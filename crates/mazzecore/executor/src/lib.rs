@@ -60,9 +60,6 @@ pub mod spec;
 /// meaningful database interfaces for the execution.
 pub mod state;
 
-/// Shielded primitives used by the pool, tooling, and circuits.
-pub mod shielded;
-
 /// Stage B of the post-quantum shielded space: applying shielded sections.
 pub mod shielded_engine;
 

@@ -11,7 +11,7 @@ pub use eth_transaction::{
 };
 pub use native_transaction::{
     Mip1559Transaction, Mip2930Transaction, NativeTransaction,
-    ShieldedTransaction, TypedNativeTransaction,
+    TypedNativeTransaction,
 };
 
 use crate::{bytes::Bytes, hash::keccak};
@@ -42,7 +42,6 @@ pub const EIP2930_TYPE: u8 = 0x01;
 pub const EIP1559_TYPE: u8 = 0x02;
 pub const MIP2930_TYPE: u8 = 0x01;
 pub const MIP1559_TYPE: u8 = 0x02;
-pub const MIP_SHIELDED_TYPE: u8 = 0x03;
 
 /// Shorter id for transactions in compact blocks
 // TODO should be u48
@@ -127,8 +126,6 @@ pub enum TransactionError {
     FutureTransactionType,
     /// Receiver with invalid type bit.
     InvalidReceiver,
-    /// Shielded transaction violates required constraints.
-    InvalidShielded(String),
     /// Transaction nonce exceeds local limit.
     TooLargeNonce,
 }
@@ -194,9 +191,6 @@ impl fmt::Display for TransactionError {
             ZeroGasPrice => "Zero gas price is not allowed".into(),
             FutureTransactionType => "Ethereum like transaction should have u64::MAX storage limit".into(),
             InvalidReceiver => "Sending transaction to invalid address. The first four bits of address must be 0x0, 0x1, or 0x8.".into(),
-            InvalidShielded(ref err) => {
-                format!("Invalid shielded transaction: {}", err)
-            }
             TooLargeNonce => "Transaction nonce is too large.".into(),
         };
 
@@ -368,10 +362,6 @@ impl Transaction {
             | Transaction::Ethereum(EthereumTransaction::Eip1559(_)) => {
                 MIP1559_TYPE
             }
-
-            Transaction::Native(TypedNativeTransaction::Shielded(_)) => {
-                MIP_SHIELDED_TYPE
-            }
         }
     }
 
@@ -400,13 +390,6 @@ impl Transaction {
             Transaction::Native(tx) => tx.access_list(),
             Transaction::Ethereum(tx) => tx.access_list(),
         }
-    }
-
-    pub fn is_shielded(&self) -> bool {
-        matches!(
-            self,
-            Transaction::Native(TypedNativeTransaction::Shielded(_))
-        )
     }
 }
 
@@ -441,11 +424,6 @@ impl Transaction {
                 s.append(tx);
                 type_prefix.extend_from_slice(TYPED_NATIVE_TX_PREFIX);
                 type_prefix.push(MIP2930_TYPE);
-            }
-            Transaction::Native(TypedNativeTransaction::Shielded(tx)) => {
-                s.append(tx);
-                type_prefix.extend_from_slice(TYPED_NATIVE_TX_PREFIX);
-                type_prefix.push(MIP_SHIELDED_TYPE);
             }
             Transaction::Ethereum(EthereumTransaction::Eip155(tx)) => {
                 s.append(tx);
@@ -603,15 +581,6 @@ impl Encodable for TransactionWithSignatureSerializePart {
                 s.append(&self.r);
                 s.append(&self.s);
             }
-            Transaction::Native(TypedNativeTransaction::Shielded(ref tx)) => {
-                s.append_raw(TYPED_NATIVE_TX_PREFIX, 0);
-                s.append_raw(&[MIP_SHIELDED_TYPE], 0);
-                s.begin_list(4);
-                s.append(tx);
-                s.append(&self.v);
-                s.append(&self.r);
-                s.append(&self.s);
-            }
         }
     }
 }
@@ -725,17 +694,6 @@ impl TransactionWithSignatureSerializePart {
                     Ok(TransactionWithSignatureSerializePart {
                         unsigned: Transaction::Native(
                             TypedNativeTransaction::Mip1559(tx),
-                        ),
-                        v,
-                        r,
-                        s,
-                    })
-                }
-                MIP_SHIELDED_TYPE => {
-                    let tx: ShieldedTransaction = rlp.val_at(0)?;
-                    Ok(TransactionWithSignatureSerializePart {
-                        unsigned: Transaction::Native(
-                            TypedNativeTransaction::Shielded(tx),
                         ),
                         v,
                         r,
@@ -947,10 +905,6 @@ impl TransactionWithSignature {
         self.hash
     }
 
-    pub fn is_shielded(&self) -> bool {
-        self.unsigned.is_shielded()
-    }
-
     /// Recovers the public key of the sender.
     pub fn recover_public(&self) -> Result<Public, keylib::Error> {
         Ok(recover(&self.signature(), &self.unsigned.signature_hash())?)
@@ -1049,15 +1003,6 @@ impl SignedTransaction {
         }
     }
 
-    pub fn new_shielded(transaction: TransactionWithSignature) -> Self {
-        let sender = shielded_sender_from_hash(&transaction.hash());
-        SignedTransaction {
-            transaction,
-            sender,
-            public: None,
-        }
-    }
-
     pub fn set_public(&mut self, public: Public) {
         let type_nibble = self.unsigned.space() == Space::Native;
         self.sender = public_to_address(&public, type_nibble);
@@ -1067,10 +1012,6 @@ impl SignedTransaction {
     /// Returns transaction sender.
     pub fn sender(&self) -> AddressWithSpace {
         self.sender.with_space(self.space())
-    }
-
-    pub fn is_shielded(&self) -> bool {
-        self.transaction.is_shielded()
     }
 
     pub fn nonce(&self) -> &U256 {
@@ -1128,15 +1069,48 @@ impl SignedTransaction {
     }
 }
 
-fn shielded_sender_from_hash(hash: &H256) -> Address {
-    let mut bytes = [0u8; 20];
-    bytes.copy_from_slice(&hash.as_ref()[12..]);
-    bytes[0] = (bytes[0] & 0x0f) | 0x80;
-    Address::from(bytes)
-}
-
 impl MallocSizeOf for SignedTransaction {
     fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
         self.transaction.size_of(ops)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn typed_native_raw(type_byte: u8, tx: &impl Encodable) -> Vec<u8> {
+        let mut s = RlpStream::new_list(4);
+        s.append(tx);
+        s.append(&0u8);
+        s.append(&U256::one());
+        s.append(&U256::one());
+        let mut raw = TYPED_NATIVE_TX_PREFIX.to_vec();
+        raw.push(type_byte);
+        raw.extend_from_slice(&s.out());
+        raw
+    }
+
+    #[test]
+    fn typed_native_decoding_accepts_only_known_types() {
+        let tx = Mip1559Transaction::default();
+        let decoded = TransactionWithSignatureSerializePart::decode_typed_raw(
+            &typed_native_raw(MIP1559_TYPE, &tx),
+        )
+        .expect("MIP-1559 decodes");
+        assert_eq!(
+            decoded.unsigned,
+            Transaction::Native(TypedNativeTransaction::Mip1559(tx))
+        );
+
+        // 0x03 was the retired Groth16 shielded transaction type; it must
+        // stay undecodable.
+        let retired = NativeTransaction::default();
+        for type_byte in [0x03u8, 0x04, 0xff] {
+            assert!(TransactionWithSignatureSerializePart::decode_typed_raw(
+                &typed_native_raw(type_byte, &retired)
+            )
+            .is_err());
+        }
     }
 }

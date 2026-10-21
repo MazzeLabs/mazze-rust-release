@@ -99,7 +99,6 @@ MINERS="${MINERS:-1 2}"   # nodes that CPU-mine (must be in PERMANENT)
 PORT_BASE="${PORT_BASE:-20000}"   # ports are PORT_BASE + node*100 + offset
 
 export MAZZE_RANDOMX_LIGHT_ONLY=1
-export MAZZE_SHIELDED_VK_HEX="${MAZZE_SHIELDED_VK_HEX:-$REPO_ROOT/run/shielded_vk.hex}"
 ulimit -n 200000 2>/dev/null || true
 
 port() { echo $((PORT_BASE + $1 * 100 + $2)); }   # port <node> <offset>; below the ephemeral range (32768+) so outgoing connections cannot steal a listen port

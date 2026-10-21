@@ -27,7 +27,12 @@ use alloy_primitives::U256 as AU256;
 use log::trace;
 use mazze_types::{H256, U256};
 use mazze_vm_types::Context as MazzeContext;
+use mazze_parameters::internal_contract_addresses::SHIELDED_BRIDGE_ADDRESS;
 use revm::bytecode::Bytecode;
+
+/// `PUSH1 0 PUSH1 0 REVERT`: the shielded bridge as seen from inside the
+/// EVM (see `basic`).
+pub const SHIELDED_BRIDGE_GUARD_CODE: [u8; 5] = [0x60, 0x00, 0x60, 0x00, 0xfd];
 use revm::primitives::{Address, KECCAK_EMPTY, B256};
 use revm::state::AccountInfo;
 use revm::Database;
@@ -131,6 +136,23 @@ impl<'ctx> Database for MazzeDatabase<'ctx> {
                 code_hash: KECCAK_EMPTY,
                 account_id: None,
                 code: None,
+            }));
+        }
+
+        // The shielded bridge is reachable from eSpace only as a transaction's
+        // target, where the executor dispatches it before any VM runs. A
+        // contract calling it from inside the EVM would bypass the bridge
+        // and strand its value, so inside the EVM it is code that reverts.
+        if addr == SHIELDED_BRIDGE_ADDRESS {
+            let code = Bytecode::new_raw(SHIELDED_BRIDGE_GUARD_CODE.to_vec().into());
+            let code_hash = code.hash_slow();
+            self.code_cache.insert(code_hash, code.clone());
+            return Ok(Some(AccountInfo {
+                balance: to_alloy_u256(self.ctx.balance(&addr).unwrap_or_default()),
+                nonce: 0,
+                code_hash,
+                account_id: None,
+                code: Some(code),
             }));
         }
 

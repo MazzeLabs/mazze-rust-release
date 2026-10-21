@@ -71,6 +71,9 @@ impl MallocSizeOf for Block {
         self.block_header.size_of(ops)
             + self.transactions.size_of(ops)
             + self.shielded.len() * std::mem::size_of::<ShieldedTxBody>()
+            // The witness dominates a shielded block (~190 KB per proof):
+            // leaving it out would let the block cache overrun its budget.
+            + self.witness.iter().map(|p| p.capacity()).sum::<usize>()
     }
 }
 
@@ -130,12 +133,6 @@ impl Block {
         self
     }
 
-    /// Whether this block can be sent to a peer: a shielded section needs
-    /// its witness, and a block whose witness was pruned is not served.
-    pub fn is_servable(&self) -> bool {
-        self.shielded.is_empty() || self.has_complete_witness()
-    }
-
     /// Whether the block carries one proof per shielded body.
     pub fn has_complete_witness(&self) -> bool {
         self.witness.len() == self.shielded.len()
@@ -175,8 +172,11 @@ impl Block {
                         "Empty shielded section must be omitted",
                     ));
                 }
+                // One proof per body, or none at all: the witness of a
+                // buried block is pruned, and the block is served without it.
                 let proofs = rlp.at(3)?;
-                if proofs.item_count()? != bodies.len() {
+                let count = proofs.item_count()?;
+                if count != bodies.len() && count != 0 {
                     return Err(DecoderError::Custom(
                         "One proof per shielded body",
                     ));
@@ -656,6 +656,12 @@ mod tests {
 
         let short = block(2).with_witness(vec![Arc::new(vec![1u8; 10])]);
         assert!(rlp::decode::<Block>(&rlp::encode(&short)).is_err());
+
+        // A pruned witness: the section alone, served for buried blocks.
+        let pruned = block(2).with_witness(vec![]);
+        let decoded = rlp::decode::<Block>(&rlp::encode(&pruned)).unwrap();
+        assert_eq!(decoded.shielded, pruned.shielded);
+        assert!(decoded.witness.is_empty());
 
         let huge = block(1).with_witness(vec![Arc::new(vec![
             0u8;

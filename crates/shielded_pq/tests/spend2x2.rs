@@ -347,3 +347,35 @@ fn ps1_constants_give_128_proven_bits() {
     let bits = ProvenSecurity::compute_from_proof(log_n, &params).security_bits();
     assert!(bits >= ps1::PROVEN_SECURITY_BITS, "PS-1 gives {bits} proven bits");
 }
+
+/// N-UNIQ and the column ties (spec §4.1, §10): every register a nullifier
+/// depends on is tied to its source. Changing one cell where it is used must
+/// be caught, so no prover can make a second nullifier for a real note.
+#[test]
+fn nullifier_inputs_are_tied_to_their_sources() {
+    let air = Tx2Air::new(CHAIN);
+    let l = layout();
+    let w = tx([Some(100), None], [74, 25], 0, 0, 1);
+    let (trace, pv) = build_trace(&w, CHAIN, HEIGHT, None);
+    assert!(accepts(&air, &trace, &pv), "positive control");
+    let inl = l.ins[0];
+    let mutate = |row: usize, col: usize| {
+        let mut t = trace.clone();
+        t.values[row * COLS + col] += F::ONE;
+        t
+    };
+    let cases = [
+        ("nk register at the mk chunk", inl.mk * R, REG_NK),
+        ("psi register at its mk chunk", (inl.mk + 1) * R, REG_PSI),
+        ("owner register inside the region", inl.hm * R + 5, REG_OWNER),
+        ("position limb (low)", inl.nf * R + R + 1, ACC_LO),
+        ("position limb (high)", inl.nf * R + R + 1, ACC_HI),
+        ("position chunk", (inl.nf + 1) * R, CHUNK),
+        ("a Merkle bit on a non-bit row", inl.merkle * R + 3, BIT),
+        ("a value limb register", inl.hm * R + 2, REG_VAL),
+        ("the dummy gate", inl.nk * R + 7, REG_Z),
+    ];
+    for (name, row, col) in cases {
+        assert!(!accepts(&air, &mutate(row, col), &pv), "{name} is not tied");
+    }
+}

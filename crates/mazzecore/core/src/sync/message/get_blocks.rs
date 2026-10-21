@@ -105,7 +105,6 @@ impl GetBlocks {
                 .manager
                 .graph
                 .block_by_hash(hash)
-                .filter(|block| block.is_servable())
             {
                 let block_size = if with_public {
                     block.approximated_rlp_size_with_public()

@@ -344,7 +344,11 @@ fn apply_state_diff(
         // by the presence of a non-default Bytecode in the account info.
         if let Some(code) = account.info.code.as_ref() {
             let bytes = code.original_byte_slice();
-            if !bytes.is_empty() {
+            // The bridge's guard code is virtual (database.rs): never stored.
+            if !bytes.is_empty()
+                && m_addr
+                    != mazze_parameters::internal_contract_addresses::SHIELDED_BRIDGE_ADDRESS
+            {
                 ctx.set_code(&m_addr, bytes.to_vec())?;
             }
         }

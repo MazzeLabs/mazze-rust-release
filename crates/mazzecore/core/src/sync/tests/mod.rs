@@ -532,7 +532,6 @@ fn shielded_section_survives_the_block_database() {
             .expect("block in the database");
         assert_eq!(reloaded.shielded, shielded);
         assert_eq!(reloaded.witness, witness, "the witness is retained");
-        assert!(reloaded.is_servable());
         assert_eq!(reloaded.hash(), block.hash());
 
         // Pruning below the block's height keeps it; above deletes it.
@@ -541,7 +540,6 @@ fn shielded_section_survives_the_block_database() {
         let reloaded = data_man.db_manager.block_from_db(&block.hash()).unwrap();
         assert_eq!(reloaded.shielded, shielded, "the body stays");
         assert!(reloaded.witness.is_empty());
-        assert!(!reloaded.is_servable(), "a block without its proofs is not served");
     }
     let _ = fs::remove_dir_all(dir);
 }

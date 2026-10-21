@@ -4,7 +4,9 @@
 
 //! The shield-in bridge (spec §8.1). A shielded body carries no signature,
 //! so it cannot debit an account: the depositor calls `shieldIn(bodyHash)`
-//! from a signed native transaction with the amount as its value. The value
+//! from a signed native or eSpace transaction with the amount as its value.
+//! From eSpace the call must be the transaction itself (a MetaMask send):
+//! inside the EVM the address is code that reverts, see `mazze-eth-vm`. The value
 //! lands in this contract's balance, which is the backing of the shielded
 //! space, and a credit for `bodyHash` is recorded. The shielded body with
 //! that hash consumes the credit when its slot executes.
@@ -13,10 +15,13 @@
 //! from the backing to its destination when it executes.
 
 use mazze_parameters::internal_contract_addresses::SHIELDED_BRIDGE_ADDRESS;
-use mazze_types::{H256, U256};
+use mazze_types::{AddressSpaceUtil, Space, H256, U256};
 
 use super::preludes::*;
-use crate::{internal_bail, shielded_engine};
+use crate::{
+    executive_observer::AddressPocket, internal_bail, shielded_engine,
+    substate::cleanup_mode,
+};
 
 make_solidity_contract! {
     pub struct ShieldedBridge(SHIELDED_BRIDGE_ADDRESS, generate_fn_table, initialize: |_params: &CommonParams| 0, is_active: |_spec: &Spec| true);
@@ -57,6 +62,23 @@ impl SimpleExecutionTrait for ShieldIn {
         }
         if value > U256::from(u64::MAX) {
             internal_bail!("shield-in value above 2^64");
+        }
+        // From eSpace the value landed on the bridge's eSpace account; the
+        // backing is the native one, so it moves there.
+        if params.space == Space::Ethereum {
+            let espace = SHIELDED_BRIDGE_ADDRESS.with_evm_space();
+            let backing = shielded_engine::backing_account();
+            context.state.transfer_balance(
+                &espace,
+                &backing,
+                &value,
+                cleanup_mode(context.substate, context.spec),
+            )?;
+            context.tracer.trace_internal_transfer(
+                AddressPocket::Balance(espace),
+                AddressPocket::Balance(backing),
+                value,
+            );
         }
         shielded_engine::record_deposit(
             context.state,

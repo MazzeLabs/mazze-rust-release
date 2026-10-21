@@ -7,10 +7,11 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
+use p3_field::PrimeField32;
 use primitives::shielded::{proof_hash, ShieldedDigest, ShieldedTxBody};
 
 use crate::{
-    air::spend2x2::{pvi, Tx2Air},
+    air::spend2x2::{pvi, Tx2Air, DEGREE_BITS},
     field::{from_bytes, limbs, Digest, DIGEST, F},
     ps1::{self, PROOF_LEN_MAX, PROOF_SYSTEM_ID},
     wire,
@@ -84,6 +85,17 @@ pub fn verify_body(
     }
     let decoded = wire::decode(proof, PROOF_LEN_MAX)
         .map_err(|e| Rejection::MalformedProof(e.to_string()))?;
+    if decoded.degree_bits != DEGREE_BITS {
+        return Err(Rejection::MalformedProof(format!(
+            "trace height 2^{} instead of 2^{}",
+            decoded.degree_bits, DEGREE_BITS
+        )));
+    }
+    // Chain ids are field elements in the circuit: two ids that differ by a
+    // multiple of p would share every commitment.
+    if chain_id >= F::ORDER_U32 {
+        return Err(Rejection::MalformedProof("chain id not below p".into()));
+    }
     let air = air(chain_id);
     ps1::verify(&*air, chain_id, &decoded, &public_values(body, chain_id))
         .map_err(Rejection::InvalidProof)

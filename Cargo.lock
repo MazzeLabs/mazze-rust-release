@@ -4529,6 +4529,7 @@ dependencies = [
  "log",
  "mazze-bytes",
  "mazze-db-errors",
+ "mazze-parameters",
  "mazze-types",
  "mazze-vm-types",
  "revm",

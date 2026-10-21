@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use mazze_parameters::internal_contract_addresses::SHIELDED_BRIDGE_ADDRESS;
 use mazze_types::{Address, AddressWithSpace, Space};
 use mazze_vm_types::Spec;
 use primitives::BlockNumber;
@@ -74,8 +75,13 @@ impl InternalContractMap {
     pub fn contract(
         &self, address: &AddressWithSpace, spec: &Spec,
     ) -> Option<&Box<dyn InternalContractTrait>> {
-        if address.space != Space::Native {
-            return None;
+        // Only the native space has internal contracts, except the shielded
+        // bridge, which an eSpace transaction may also target (shield-in
+        // from eSpace, spec §8.5.1).
+        match address.space {
+            Space::Native => {}
+            Space::Ethereum if address.address == SHIELDED_BRIDGE_ADDRESS => {}
+            _ => return None,
         }
         self.builtin
             .get(&address.address)

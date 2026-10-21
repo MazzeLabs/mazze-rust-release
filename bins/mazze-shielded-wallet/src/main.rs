@@ -19,13 +19,15 @@
 //! mazze-shielded-wallet export-bundle --wallet W --rpc URL --out FILE
 //! mazze-shielded-wallet sync       --wallet W --rpc URL
 //! mazze-shielded-wallet balance    --wallet W
-//! mazze-shielded-wallet shield-in  --wallet W --rpc URL --amount A --funder-key HEX
+//! mazze-shielded-wallet shield-in  --wallet W --rpc URL --amount A --funder-key HEX [--espace-rpc URL]
 //! mazze-shielded-wallet send       --wallet W --rpc URL --to mzs1.. --amount A
 //!                                  (--bundle FILE --sealed-out FILE | --opening-out FILE)
 //! mazze-shielded-wallet receive    --wallet W --rpc URL --opening FILE   (mzn1 or mzx1)
 //! mazze-shielded-wallet unshield   --wallet W --rpc URL --to 0xADDR [--espace] --amount A
 //! mazze-shielded-wallet claim      --wallet W --rpc URL
 //! mazze-shielded-wallet restore    --wallet W --rpc URL --seed HEX
+//! mazze-shielded-wallet fund-espace --wallet W --rpc URL --funder-key HEX --amount A   (test helper)
+//! mazze-shielded-wallet resubmit   --wallet W --rpc URL   (re-sends proven txs not yet on chain)
 //! ```
 //!
 //! Recovery (spec §9.5): every note the wallet keeps for itself (change,
@@ -47,7 +49,7 @@ use mazze_shielded_pq::{
     ps1::ProverRandomness,
     tree::{Tree, DEPTH},
     wallet::{
-        build_transaction, fresh_fields, from_shielded_digest, recovery_key,
+        build_transaction, uniform_fields, from_shielded_digest, recovery_key,
         recovery_tag, WalletKeys, GAP_LIMIT, MAX_SELF_INDEX,
     },
 };
@@ -55,7 +57,7 @@ use mazze_types::{Address, H160, U256};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use primitives::{
     shielded::{RecoverySlot, ShieldedDest, ShieldedDigest},
-    transaction::native_transaction::NativeTransaction,
+    transaction::{eth_transaction::Eip155Transaction, native_transaction::NativeTransaction},
     Action, Transaction,
 };
 use rand::RngCore;
@@ -63,9 +65,13 @@ use rand10::SeedableRng;
 use serde_json::{json, Value};
 
 use rpc::{as_u64, hex0x, unhex, Node};
-use store::{StoredNote, Wallet};
+use store::{PendingTx, StoredNote, Wallet};
 
-/// The native-space account of the shield-in bridge (0x0888…09).
+/// The cross-space bridge, `0x0888…06`.
+const CROSS_SPACE_ADDRESS: [u8; 20] = [
+    0x08, 0x88, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x06,
+];
+/// The shield-in bridge, `0x0888…09`.
 const SHIELDED_BRIDGE_ADDRESS: [u8; 20] = [
     0x08, 0x88, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x09,
 ];
@@ -175,6 +181,23 @@ fn run(args: &[String]) -> Result<(), String> {
         "restore" => restore(path, &a),
         "send" => send(path, &a),
         "unshield" => unshield(path, &a),
+        "resubmit" => resubmit(path, &a),
+        "fund-espace" => {
+            // A native → eSpace transfer to the same key's eSpace address,
+            // through the cross-space bridge (for testing eSpace shield-in).
+            let node = Node::connect(a.get("rpc")?)?;
+            let secret = mazzekey::Secret::from_slice(
+                &hex::decode(a.get("funder-key")?.trim_start_matches("0x")).map_err(|e| e.to_string())?,
+            )
+            .ok_or("--funder-key must be a 32-byte secret")?;
+            let to = mazzekey::KeyPair::from_secret(secret.clone()).map_err(|e| format!("{e:?}"))?.evm_address();
+            let mut data = keccak_hash::keccak(b"transferEVM(bytes20)").0[..4].to_vec();
+            data.extend_from_slice(to.as_bytes());
+            data.extend_from_slice(&[0u8; 12]);
+            send_native(&node, &secret, Address::from(CROSS_SPACE_ADDRESS), a.amount()?, data)?;
+            println!("funded eSpace {to:?}");
+            Ok(())
+        }
         other => Err(format!("unknown command {other}")),
     }
 }
@@ -187,7 +210,7 @@ fn entropy() -> [u8; 32] {
     e
 }
 
-fn fresh<const N: usize>() -> [F; N] { fresh_fields(&entropy()) }
+fn fresh<const N: usize>() -> [F; N] { uniform_fields(|| rand::rngs::OsRng.next_u32()) }
 
 fn prover_randomness() -> ProverRandomness {
     ProverRandomness::from_csprng(&mut rand10::rngs::StdRng::from_seed(entropy()))
@@ -249,6 +272,8 @@ fn sync(w: &mut Wallet, node: &Node) -> Result<(), String> {
                         return Err(format!("tree gap: position {pos}, have {}", w.leaves.len()));
                     }
                     w.leaves.push(from_shielded_digest(&cm).map(|x| x.as_canonical_u32()));
+                    let leaf = w.leaves[pos as usize];
+                    w.pending.retain(|p| p.cm != leaf);
                     for note in w.notes.iter_mut().filter(|n| n.position.is_none()) {
                         if note.cm == w.leaves[pos as usize] {
                             note.position = Some(pos);
@@ -331,8 +356,8 @@ fn spend_input(ctx: &Context, w: &Wallet, tree: &Tree, i: usize) -> SpendIn {
     }
 }
 
-/// Proves and submits; returns the body hash.
-fn prove_and_submit(
+/// Proves a transaction.
+fn prove(
     ctx: &Context, mut witness: Tx2Witness, dest: Option<ShieldedDest>,
     recovery: RecoverySlot,
 ) -> Result<(primitives::shielded::ShieldedTxBody, Vec<u8>), String> {
@@ -352,13 +377,52 @@ fn submit(ctx: &Context, body: &primitives::shielded::ShieldedTxBody, proof: &[u
 }
 
 /// The next self-note, its recovery slot, and its stored form. The index
-/// advances only when the wallet is saved after a successful submission.
-fn self_note(ctx: &Context, w: &Wallet, value: u64) -> (Note, RecoverySlot, StoredNote) {
+/// is reserved and saved before anything is proven: a crash must never
+/// let two notes share an index, which would link them by their tag.
+fn self_note(
+    ctx: &Context, w: &mut Wallet, path: &str, value: u64,
+) -> Result<(Note, RecoverySlot, StoredNote), String> {
     let i = w.next_self;
+    w.next_self += 1;
+    w.save(path)?;
     let note = ctx.keys.self_note(&ctx.sponge, i, value);
     let mut stored = StoredNote::from_note(&note, &ctx.sponge);
     stored.self_index = Some(i);
-    (note, ctx.keys.seal_recovery(i, value), stored)
+    Ok((note, ctx.keys.seal_recovery(i, value), stored))
+}
+
+/// Saves a proven transaction and the wallet's output before any network
+/// side effect (a deposit, a submission), so `resubmit` can always finish it.
+fn record_pending(
+    w: &mut Wallet, path: &str, body: &primitives::shielded::ShieldedTxBody,
+    proof: &[u8], stored: StoredNote,
+) -> Result<(), String> {
+    w.pending.push(PendingTx {
+        body: hex::encode(rlp::encode(body)),
+        proof: hex::encode(proof),
+        cm: stored.cm,
+    });
+    w.notes.push(stored);
+    w.save(path)
+}
+
+/// Submits again every proven transaction not yet on chain.
+fn resubmit(path: &str, a: &Args) -> Result<(), String> {
+    let mut w = Wallet::load(path)?;
+    let node = Node::connect(a.get("rpc")?)?;
+    sync(&mut w, &node)?;
+    w.save(path)?;
+    for p in &w.pending {
+        let r = node.call(
+            "shielded_sendRawTransaction",
+            vec![json!(format!("0x{}", p.body)), json!(format!("0x{}", p.proof))],
+        );
+        match r {
+            Ok(hash) => println!("resubmitted {hash}"),
+            Err(e) => println!("not accepted: {e}"),
+        }
+    }
+    Ok(())
 }
 
 /// Random output order, so the change is not recognisable by position.
@@ -373,7 +437,7 @@ fn shield_in(path: &str, a: &Args) -> Result<(), String> {
     if amount <= ctx.fee {
         return Err(format!("the amount must exceed the fee {}", ctx.fee));
     }
-    let (mine, recovery, stored) = self_note(&ctx, &w, amount - ctx.fee);
+    let (mine, recovery, stored) = self_note(&ctx, &mut w, path, amount - ctx.fee)?;
     let witness = Tx2Witness {
         inputs: [dummy_input(&ctx.sponge), dummy_input(&ctx.sponge)],
         outputs: shuffle_outputs(mine, dummy_output()),
@@ -384,28 +448,32 @@ fn shield_in(path: &str, a: &Args) -> Result<(), String> {
         anchor: tree(&w).root(),
         out_limb_override: [None, None],
     };
-    let (body, proof) = prove_and_submit(&ctx, witness, None, recovery)?;
+    let (body, proof) = prove(&ctx, witness, None, recovery)?;
+    record_pending(&mut w, path, &body, &proof, stored)?;
 
-    // The deposit: a signed native call to the bridge with the amount.
+    // The deposit: a signed call to the bridge with the amount, from native
+    // or, with --espace-rpc, from eSpace (the same key, its eSpace address).
     let secret = mazzekey::Secret::from_slice(
         &hex::decode(a.get("funder-key")?.trim_start_matches("0x")).map_err(|e| e.to_string())?,
     )
     .ok_or("--funder-key must be a 32-byte secret")?;
     let mut data = keccak_hash::keccak(b"shieldIn(bytes32)").0[..4].to_vec();
     data.extend_from_slice(body.hash().as_bytes());
-    send_native(&ctx.node, &secret, Address::from(SHIELDED_BRIDGE_ADDRESS), amount, data)?;
+    let bridge = Address::from(SHIELDED_BRIDGE_ADDRESS);
+    match a.get("espace-rpc") {
+        Ok(url) => send_espace(&Node::connect(url)?, &secret, bridge, amount, data)?,
+        Err(_) => send_native(&ctx.node, &secret, bridge, amount, data)?,
+    };
     // The bridge's credit is the authority, not the receipt: in a DAG the
     // same transaction can be packed twice, and the receipt returned may be
     // the skipped duplicate's.
     let credit = deposit_credit(&ctx.node, body.hash().as_bytes())?;
-    if credit != amount {
+    if credit < amount {
         return Err(format!("the bridge holds a credit of {credit} for this body, expected {amount}"));
     }
     println!("deposit credited: {credit}");
     submit(&ctx, &body, &proof)?;
-    w.notes.push(stored);
-    w.next_self += 1;
-    w.save(path)
+    Ok(())
 }
 
 fn send(path: &str, a: &Args) -> Result<(), String> {
@@ -416,10 +484,10 @@ fn send(path: &str, a: &Args) -> Result<(), String> {
     let (d, owner) = (to.d, to.owner);
     let inputs = select_inputs(&w, amount + ctx.fee)?;
     let total: u64 = inputs.iter().map(|&i| w.notes[i].value).sum();
+    let (change, recovery, stored) = self_note(&ctx, &mut w, path, total - amount - ctx.fee)?;
     let t = tree(&w);
     let input = |k: usize| inputs.get(k).map(|&i| spend_input(&ctx, &w, &t, i)).unwrap_or_else(|| dummy_input(&ctx.sponge));
     let theirs = new_note(d, owner, amount);
-    let (change, recovery, stored) = self_note(&ctx, &w, total - amount - ctx.fee);
     let witness = Tx2Witness {
         inputs: [input(0), input(1)],
         outputs: shuffle_outputs(theirs.clone(), change),
@@ -430,7 +498,8 @@ fn send(path: &str, a: &Args) -> Result<(), String> {
         anchor: t.root(),
         out_limb_override: [None, None],
     };
-    let (body, proof) = prove_and_submit(&ctx, witness, None, recovery)?;
+    let (body, proof) = prove(&ctx, witness, None, recovery)?;
+    record_pending(&mut w, path, &body, &proof, stored)?;
     submit(&ctx, &body, &proof)?;
     let opening = delivery::Opening { d: theirs.d, value: theirs.value, psi: theirs.psi, y: theirs.y };
     if let Ok(bundle_file) = a.get("bundle") {
@@ -442,9 +511,7 @@ fn send(path: &str, a: &Args) -> Result<(), String> {
         std::fs::write(a.get("opening-out")?, opening.to_plain()).map_err(|e| e.to_string())?;
         println!("plain opening written to {} (use only over a private channel)", a.get("opening-out")?);
     }
-    w.notes.push(stored);
-    w.next_self += 1;
-    w.save(path)
+    Ok(())
 }
 
 fn unshield(path: &str, a: &Args) -> Result<(), String> {
@@ -455,9 +522,9 @@ fn unshield(path: &str, a: &Args) -> Result<(), String> {
     let space = if a.0.contains_key("espace") { mazze_types::Space::Ethereum } else { mazze_types::Space::Native };
     let inputs = select_inputs(&w, amount + ctx.fee)?;
     let total: u64 = inputs.iter().map(|&i| w.notes[i].value).sum();
+    let (change, recovery, stored) = self_note(&ctx, &mut w, path, total - amount - ctx.fee)?;
     let t = tree(&w);
     let input = |k: usize| inputs.get(k).map(|&i| spend_input(&ctx, &w, &t, i)).unwrap_or_else(|| dummy_input(&ctx.sponge));
-    let (change, recovery, stored) = self_note(&ctx, &w, total - amount - ctx.fee);
     let witness = Tx2Witness {
         inputs: [input(0), input(1)],
         outputs: shuffle_outputs(change, dummy_output()),
@@ -469,11 +536,10 @@ fn unshield(path: &str, a: &Args) -> Result<(), String> {
         out_limb_override: [None, None],
     };
     let (body, proof) =
-        prove_and_submit(&ctx, witness, Some(ShieldedDest { space, address: to }), recovery)?;
+        prove(&ctx, witness, Some(ShieldedDest { space, address: to }), recovery)?;
+    record_pending(&mut w, path, &body, &proof, stored)?;
     submit(&ctx, &body, &proof)?;
-    w.notes.push(stored);
-    w.next_self += 1;
-    w.save(path)
+    Ok(())
 }
 
 /// Claims received notes (spec §9.5): each is spent, together with the
@@ -496,7 +562,7 @@ fn claim(path: &str, a: &Args) -> Result<(), String> {
     }
     let t = tree(&w);
     let second = main.map(|i| spend_input(&ctx, &w, &t, i)).unwrap_or_else(|| dummy_input(&ctx.sponge));
-    let (mine, recovery, stored) = self_note(&ctx, &w, total - ctx.fee);
+    let (mine, recovery, stored) = self_note(&ctx, &mut w, path, total - ctx.fee)?;
     let witness = Tx2Witness {
         inputs: [spend_input(&ctx, &w, &t, received), second],
         outputs: shuffle_outputs(mine, dummy_output()),
@@ -507,11 +573,10 @@ fn claim(path: &str, a: &Args) -> Result<(), String> {
         anchor: t.root(),
         out_limb_override: [None, None],
     };
-    let (body, proof) = prove_and_submit(&ctx, witness, None, recovery)?;
+    let (body, proof) = prove(&ctx, witness, None, recovery)?;
+    record_pending(&mut w, path, &body, &proof, stored)?;
     submit(&ctx, &body, &proof)?;
-    w.notes.push(stored);
-    w.next_self += 1;
-    w.save(path)
+    Ok(())
 }
 
 /// Rebuilds a wallet from the seed alone: scans every section, matches the
@@ -607,6 +672,42 @@ fn deposit_credit(node: &Node, body_hash: &[u8]) -> Result<u64, String> {
         return Err(format!("unexpected deposit() result {out}"));
     }
     Ok(u64::from_be_bytes(bytes[24..].try_into().unwrap()))
+}
+
+/// Sends a signed eSpace (EIP-155) transaction and waits for its receipt.
+fn send_espace(
+    node: &Node, secret: &mazzekey::Secret, to: Address, value: u64, data: Vec<u8>,
+) -> Result<Value, String> {
+    let chain_id = as_u64(&node.call("eth_chainId", vec![])?)? as u32;
+    let gas_price = U256::from(as_u64(&node.call("eth_gasPrice", vec![])?)?);
+    let build = |nonce: U256| -> primitives::SignedTransaction {
+        let tx: Transaction = Eip155Transaction {
+            nonce,
+            gas_price,
+            gas: 300_000.into(),
+            action: Action::Call(to),
+            value: value.into(),
+            chain_id: Some(chain_id),
+            data: data.clone(),
+        }
+        .into();
+        tx.sign(secret)
+    };
+    let sender = build(U256::zero()).sender().address;
+    let nonce = U256::from(as_u64(
+        &node.call("eth_getTransactionCount", vec![json!(format!("{sender:?}")), json!("latest")])?,
+    )?);
+    let signed = build(nonce);
+    let hash = node.call("eth_sendRawTransaction", vec![hex0x(&rlp::encode(&signed.transaction))])?;
+    eprintln!("eSpace deposit {hash} sent from {sender:?}, waiting for execution…");
+    for _ in 0..600 {
+        let receipt = node.call("eth_getTransactionReceipt", vec![hash.clone()])?;
+        if !receipt.is_null() {
+            return Ok(receipt);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    Err("the deposit was not executed within 5 minutes".into())
 }
 
 fn send_native(

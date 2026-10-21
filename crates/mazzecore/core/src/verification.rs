@@ -301,6 +301,30 @@ pub fn is_valid_receipt_inclusion_proof(
     )
 }
 
+/// How a block's shielded proofs are checked at acceptance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WitnessPolicy {
+    /// Every proof present and verified: every block from the network that
+    /// is not deeply buried.
+    Require,
+    /// A block buried under at least `WITNESS_BURIAL_ERAS` eras of valid
+    /// headers may come without its witness, which every node has pruned
+    /// by then (an archive rebuilding from genesis). Its bodies are still
+    /// bound to the header; only the proofs are taken on checkpoint trust,
+    /// as they were verified by the network when the block was new. A
+    /// witness that is present is still verified.
+    AllowPruned,
+    /// A block re-read from this node's own database: verified when it was
+    /// accepted.
+    Skip,
+}
+
+/// Burial depth, in eras, from which a block may arrive without its
+/// witness. Witnesses are kept until an era behind the stable checkpoint,
+/// which itself trails the tip by about two eras, so any block shallower
+/// than this still has its proofs on every honest peer.
+pub const WITNESS_BURIAL_ERAS: u64 = 2;
+
 impl VerificationConfig {
     pub fn new(
         test_mode: bool, referee_bound: usize, max_block_size_in_bytes: usize,
@@ -563,14 +587,13 @@ impl VerificationConfig {
     /// should discard this block and all its descendants.
     #[inline]
     ///
-    /// `verify_witness` is false only for a block re-read from this node's
-    /// own database: it was verified when it was accepted, and its witness
-    /// is not stored. Every block from the network is verified in full.
+    /// `witness` says how the shielded proofs are checked (see
+    /// `WitnessPolicy`).
     pub fn verify_sync_graph_block_basic(
-        &self, block: &Block, chain_id: AllChainID, verify_witness: bool,
+        &self, block: &Block, chain_id: AllChainID, witness: WitnessPolicy,
     ) -> Result<(), Error> {
         self.verify_block_integrity(block)?;
-        self.verify_shielded_section(block, chain_id, verify_witness)?;
+        self.verify_shielded_section(block, chain_id, witness)?;
 
         let block_height = block.block_header.height();
 
@@ -606,7 +629,7 @@ impl VerificationConfig {
     /// not the miner, so the block is requested again; anything else makes
     /// the block invalid.
     fn verify_shielded_section(
-        &self, block: &Block, chain_id: AllChainID, verify_witness: bool,
+        &self, block: &Block, chain_id: AllChainID, witness: WitnessPolicy,
     ) -> Result<(), Error> {
         if block.shielded.is_empty() {
             return Ok(());
@@ -639,13 +662,34 @@ impl VerificationConfig {
                 }
             }
         }
-        if !verify_witness {
-            return Ok(());
+        match witness {
+            WitnessPolicy::Skip => return Ok(()),
+            // Pruned everywhere: only the absence of every proof qualifies,
+            // never a partial witness.
+            WitnessPolicy::AllowPruned if block.witness.is_empty() => {
+                debug!(
+                    "Accepting buried block {:?} whose witness was pruned",
+                    block.hash()
+                );
+                return Ok(());
+            }
+            _ => {}
         }
         if !block.has_complete_witness() {
             bail!(BlockError::ShieldedWitnessMismatch(
                 "missing proofs".into()
             ));
+        }
+        // Every proof must hash to its body before any STARK runs: a peer
+        // that sends one wrong proof among eight costs us a hash, not seven
+        // verifications.
+        for (body, proof) in block.shielded.iter().zip(&block.witness) {
+            if primitives::shielded::proof_hash(proof) != body.proof_hash {
+                bail!(BlockError::ShieldedWitnessMismatch(format!(
+                    "proof does not match body {:?}",
+                    body.hash()
+                )));
+            }
         }
         let shielded_chain_id = chain_id.in_shielded_space();
         for (body, proof) in block.shielded.iter().zip(&block.witness) {
@@ -1070,7 +1114,7 @@ impl<'a> VerifyTxMode<'a> {
 
 #[cfg(test)]
 mod shielded_root_tests {
-    use super::{compute_block_transactions_root, compute_transaction_root};
+    use super::{compute_block_transactions_root, compute_transaction_root, WitnessPolicy};
     use primitives::shielded::ShieldedTxBody;
     use std::sync::Arc;
 
@@ -1181,7 +1225,8 @@ mod shielded_root_tests {
         let check = |cfg: &super::VerificationConfig,
                      b: &primitives::Block,
                      witness: bool| {
-            kind(cfg.verify_sync_graph_block_basic(b, chain, witness))
+            let policy = if witness { WitnessPolicy::Require } else { WitnessPolicy::Skip };
+            kind(cfg.verify_sync_graph_block_basic(b, chain, policy))
         };
 
         let good = block_at(5, vec![body.clone()], vec![proof.clone()]);
@@ -1192,6 +1237,15 @@ mod shielded_root_tests {
 
         // The peer's fault: the block is requested again, not condemned.
         assert_eq!(check(&cfg, &from_db, true), "ShieldedWitnessMismatch");
+        // Buried deep enough, a pruned witness is accepted; a partial or a
+        // wrong one never is.
+        let buried = |b: &primitives::Block| {
+            kind(cfg.verify_sync_graph_block_basic(b, chain, WitnessPolicy::AllowPruned))
+        };
+        assert_eq!(buried(&from_db), "ok");
+        assert_eq!(buried(&good), "ok");
+        let partial = block_at(5, vec![body.clone()], vec![proof.clone(), proof.clone()]);
+        assert_eq!(buried(&partial), "ShieldedWitnessMismatch");
         let wrong = block_at(5, vec![body.clone()], vec![Arc::new(vec![7u8; 1000])]);
         assert_eq!(check(&cfg, &wrong, true), "ShieldedWitnessMismatch");
 
@@ -1206,7 +1260,7 @@ mod shielded_root_tests {
         assert_eq!(check(&other_fee, &good, true), "InvalidShieldedTransaction");
         let other_chain = AllChainID::new(1, 1, 2);
         assert_eq!(
-            kind(cfg.verify_sync_graph_block_basic(&good, other_chain, true)),
+            kind(cfg.verify_sync_graph_block_basic(&good, other_chain, WitnessPolicy::Require)),
             "InvalidShieldedTransaction"
         );
 

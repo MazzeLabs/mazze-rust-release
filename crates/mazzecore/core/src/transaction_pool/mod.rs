@@ -220,13 +220,18 @@ impl TransactionPool {
     }
 
     /// Admits a shielded transaction (spec §8.2): the lane must be active,
-    /// the fee exact, the proof valid (the full stage A verification, so
-    /// invalid proofs never reach a block), and its nullifiers and anchor
-    /// valid against the latest executed state.
+    /// the fee exact, its nullifiers unspent, its anchor valid and, for a
+    /// shield-in, its deposit credited, all against the latest executed
+    /// state; then the proof (the full stage A verification, so invalid
+    /// proofs never reach a block). Every cheap check runs before the
+    /// STARK, so a flood of duplicates or stale bodies costs no proof time.
     pub fn insert_shielded(
         &self, body: primitives::shielded::ShieldedTxBody, proof: Vec<u8>,
+        stem: bool,
     ) -> Result<H256, shielded::ShieldedPoolError> {
-        use mazze_executor::shielded_engine::{anchor_valid, nullifier_spent};
+        use mazze_executor::shielded_engine::{
+            anchor_valid, deposit_covers, nullifier_spent,
+        };
         use shielded::{PooledShieldedTx, ShieldedPoolError};
 
         let params = &self.machine.params().shielded;
@@ -239,13 +244,11 @@ impl TransactionPool {
                 found: body.fee,
             });
         }
+        if proof.len() > primitives::shielded::MAX_PROOF_BYTES {
+            return Err(ShieldedPoolError::InvalidProof("too long".into()));
+        }
+        self.shielded.precheck(&body)?;
         let best = self.consensus_best_info.lock().clone();
-        mazze_shielded_pq::verify::verify_body(
-            &body,
-            &proof,
-            best.chain_id.in_shielded_space(),
-        )
-        .map_err(|e| ShieldedPoolError::InvalidProof(format!("{:?}", e)))?;
         {
             let state = self.best_executed_state.lock().clone();
             for nf in &body.nf {
@@ -258,10 +261,19 @@ impl TransactionPool {
             {
                 return Err(ShieldedPoolError::UnknownAnchor);
             }
+            if !deposit_covers(&state, &body).unwrap_or(false) {
+                return Err(ShieldedPoolError::NoDeposit);
+            }
         }
+        mazze_shielded_pq::verify::verify_body(
+            &body,
+            &proof,
+            best.chain_id.in_shielded_space(),
+        )
+        .map_err(|e| ShieldedPoolError::InvalidProof(format!("{:?}", e)))?;
         let tx = PooledShieldedTx::new(body, proof);
         let hash = tx.hash;
-        self.shielded.insert(tx)?;
+        self.shielded.insert(tx, stem)?;
         Ok(hash)
     }
 
@@ -270,28 +282,58 @@ impl TransactionPool {
         self.best_executed_state.lock().clone()
     }
 
+    /// Whether a pooled shielded transaction can be packed at `height`.
+    fn shielded_verdict(
+        state: &State, body: &primitives::shielded::ShieldedTxBody,
+        height: u64, params: &mazze_executor::spec::ShieldedParams,
+    ) -> shielded::Verdict {
+        use mazze_executor::shielded_engine::{
+            anchor_valid, deposit_covers, nullifier_spent,
+        };
+        use shielded::Verdict;
+        let spent =
+            body.nf.iter().any(|nf| nullifier_spent(state, nf).unwrap_or(true));
+        if !anchor_valid(state, &body.anchor, height, params).unwrap_or(false) {
+            // On chain, a reorg may still undo its spend: hold it. Otherwise
+            // it can never be packed.
+            return if spent { Verdict::Hold } else { Verdict::Drop };
+        }
+        if spent || !deposit_covers(state, body).unwrap_or(false) {
+            return Verdict::Hold;
+        }
+        Verdict::Pack
+    }
+
+    /// Applies the packing verdicts to the whole shielded lane, so nodes
+    /// that never mine also evict what is on chain or expired.
+    fn sweep_shielded(&self) {
+        let params = &self.machine.params().shielded;
+        if params.activation_height == u64::MAX || self.shielded.len() == 0 {
+            return;
+        }
+        let height = self.consensus_best_info.lock().best_epoch_number;
+        let state = self.best_executed_state.lock().clone();
+        self.shielded.pick(0, height, |body| {
+            Self::shielded_verdict(&state, body, height, params)
+        });
+    }
+
     /// The shielded section and witness for a block at `height`: empty
-    /// unless `height` is a shielded slot. Transactions spent or anchored
-    /// too long ago by now are dropped from the pool.
+    /// unless `height` is a shielded slot. Transactions that can never be
+    /// packed are dropped; those on chain are held through reorgs.
     pub fn pack_shielded(
         &self, height: u64,
     ) -> (
         Vec<Arc<primitives::shielded::ShieldedTxBody>>,
         Vec<Arc<Vec<u8>>>,
     ) {
-        use mazze_executor::shielded_engine::{anchor_valid, nullifier_spent};
-
         let params = &self.machine.params().shielded;
         if !params.is_slot(height) || self.shielded.len() == 0 {
             return (Vec::new(), Vec::new());
         }
         let state = self.best_executed_state.lock().clone();
-        let picked = self.shielded.pick(params.max_txs_per_block, |body| {
-            body.nf
-                .iter()
-                .all(|nf| !nullifier_spent(&state, nf).unwrap_or(true))
-                && anchor_valid(&state, &body.anchor, height, params)
-                    .unwrap_or(false)
+        let picked = self.shielded.pick(params.max_txs_per_block, height, |body| {
+            Self::shielded_verdict(&state, body, height, params)
         });
         picked.into_iter().map(|tx| (tx.body, tx.proof)).unzip()
     }
@@ -1222,6 +1264,7 @@ impl TransactionPool {
     ) -> StateDbResult<()> {
         *self.best_executed_state.lock() =
             Self::best_executed_state(&self.data_man, best_executed_epoch)?;
+        self.sweep_shielded();
 
         Ok(())
     }

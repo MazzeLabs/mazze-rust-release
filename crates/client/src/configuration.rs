@@ -945,6 +945,16 @@ impl Configuration {
                         self.raw_conf.evm_chain_id.unwrap_or(chain_id);
                     let shielded_chain_id =
                         self.raw_conf.shielded_chain_id.unwrap_or(chain_id);
+                    // The shielded chain id is a KoalaBear element inside
+                    // the circuit; at or above p it would alias another id.
+                    if self.raw_conf.shielded_activation_height.is_some() {
+                        assert!(
+                            shielded_chain_id < 0x7f00_0001,
+                            "shielded_chain_id {} must be below the KoalaBear \
+                             prime 2^31 - 2^24 + 1",
+                            shielded_chain_id
+                        );
+                    }
                     *to_init = Some(ChainIdParamsInner::new_simple(
                         AllChainID::new(
                             chain_id,

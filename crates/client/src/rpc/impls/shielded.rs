@@ -11,7 +11,7 @@ use crate::rpc::{
     },
 };
 use mazze_executor::shielded_engine::{
-    backing_account, nullifier_spent, tree_state, ShieldedOutcome,
+    backing_account, tree_state, ShieldedOutcome,
 };
 use mazze_rpc_error::Result as JsonRpcResult;
 use mazze_shielded_pq::field::to_bytes;
@@ -48,7 +48,7 @@ impl ShieldedServer for ShieldedHandler {
             .map_err(|e| invalid_params("body", e))?;
         let hash = self
             .tx_pool
-            .insert_shielded(body, proof.0)
+            .insert_shielded(body, proof.0, true)
             .map_err(|e| invalid_params("transaction", e))?;
         self.tx_pool.shielded.mark_originated(hash);
         Ok(hash)
@@ -72,17 +72,9 @@ impl ShieldedServer for ShieldedHandler {
             root: Bytes(to_bytes(&root)),
             leaves: leaves.into(),
             backing,
-            pool_size: (self.tx_pool.shielded.len() as u64).into(),
+            pool_size: (self.tx_pool.shielded.pending_len() as u64).into(),
             executed_epoch: self.consensus.best_executed_state_epoch_number().into(),
         })
-    }
-
-    fn shielded_is_nullifier_spent(&self, nf: Bytes) -> JsonRpcResult<bool> {
-        let nf = ShieldedDigest::from_bytes(&nf.0)
-            .map_err(|e| invalid_params("nf", e))?;
-        let state = self.tx_pool.best_executed_state_view();
-        nullifier_spent(&state, &nf)
-            .map_err(|e| invalid_params("state", format!("{:?}", e)))
     }
 
     fn shielded_get_sections(

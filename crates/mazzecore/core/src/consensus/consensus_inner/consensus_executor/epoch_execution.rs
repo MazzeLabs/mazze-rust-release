@@ -312,6 +312,7 @@ impl ConsensusExecutionHandler {
         }
 
         let phantom_txs = r.phantom_txs.clone();
+        let skipped = r.receipt.tx_skipped();
 
         recorder.receive_tx_outcome(r, transaction, block_context);
 
@@ -321,6 +322,17 @@ impl ConsensusExecutionHandler {
         }
 
         let hash = transaction.hash();
+
+        // A transaction can be packed in several blocks, of one epoch or of
+        // later ones; one copy executes and the others are skipped. A
+        // skipped copy indexes the transaction only if nothing did before,
+        // so it never hides the executed copy from the receipt RPC. An
+        // executed copy always indexes.
+        if skipped
+            && self.data_man.transaction_index_by_hash(&hash, false).is_some()
+        {
+            return Ok(());
+        }
 
         self.data_man.insert_transaction_index(
             &hash,

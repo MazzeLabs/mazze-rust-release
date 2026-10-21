@@ -7,7 +7,7 @@ use std::{
     collections::{BinaryHeap, HashMap, HashSet, VecDeque},
     mem,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     thread,
@@ -1199,6 +1199,10 @@ pub struct SynchronizationGraph {
     /// without entering the graph: the bootstrap authenticates the ones it
     /// uses by hash, and the graph is rebuilt from the root afterwards.
     pub fast_sync_anchor: Mutex<Option<AnchorPair>>,
+
+    /// The greatest height of a header that passed verification: how deep a
+    /// block is buried, for accepting one whose witness was pruned.
+    max_valid_header_height: AtomicU64,
 }
 
 impl MallocSizeOf for SynchronizationGraph {
@@ -1265,6 +1269,7 @@ impl SynchronizationGraph {
             new_block_hashes: notifications.new_block_hashes.clone(),
             machine,
             fast_sync_anchor: Mutex::new(None),
+            max_valid_header_height: AtomicU64::new(0),
         };
 
         // It receives `BLOCK_GRAPH_READY` blocks in order and handles them in
@@ -2134,6 +2139,8 @@ impl SynchronizationGraph {
 
         let header_arc = Arc::new(header.clone());
         let me = if verification_passed {
+            self.max_valid_header_height
+                .fetch_max(header.height(), Ordering::Relaxed);
             inner.insert(header_arc.clone())
         } else {
             inner.insert_invalid(header_arc.clone())
@@ -2449,10 +2456,22 @@ impl SynchronizationGraph {
         inner.arena[me].block_ready = true;
 
         if need_to_verify {
+            use crate::verification::{WitnessPolicy, WITNESS_BURIAL_ERAS};
+            let era = self.consensus.get_config().inner_conf.era_epoch_count;
+            let buried = block.block_header.height()
+                + WITNESS_BURIAL_ERAS * era
+                <= self.max_valid_header_height.load(Ordering::Relaxed);
+            let policy = if recover_from_db {
+                WitnessPolicy::Skip
+            } else if buried {
+                WitnessPolicy::AllowPruned
+            } else {
+                WitnessPolicy::Require
+            };
             let r = self.verification_config.verify_sync_graph_block_basic(
                 &block,
                 self.consensus.best_chain_id(),
-                !recover_from_db,
+                policy,
             );
             match r {
                 Err(Error(

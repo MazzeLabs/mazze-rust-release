@@ -96,6 +96,9 @@ impl Encodable for ShieldedDigest {
 
 impl Decodable for ShieldedDigest {
     fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
+        if !rlp.is_data() {
+            return Err(DecoderError::RlpExpectedToBeData);
+        }
         Self::from_bytes(rlp.data()?)
     }
 }
@@ -121,8 +124,11 @@ impl Encodable for RecoverySlot {
 fn fixed_bytes<const N: usize>(
     rlp: &Rlp, index: usize,
 ) -> Result<[u8; N], DecoderError> {
-    rlp.at(index)?
-        .data()?
+    let item = rlp.at(index)?;
+    if !item.is_data() {
+        return Err(DecoderError::RlpExpectedToBeData);
+    }
+    item.data()?
         .try_into()
         .map_err(|_| DecoderError::Custom("Bad shielded field length"))
 }
@@ -327,6 +333,12 @@ impl Decodable for ShieldedTxBody {
             proof_hash: rlp.val_at(13)?,
         };
         body.check_structure().map_err(DecoderError::Custom)?;
+        // One body, one encoding: anything the encoder would not produce
+        // (a list where data belongs, a non-minimal length) is refused, so
+        // the bytes relayed are always the bytes hashed.
+        if rlp.as_raw() != &rlp::encode(&body)[..] {
+            return Err(DecoderError::Custom("Non-canonical shielded body"));
+        }
         Ok(body)
     }
 }
@@ -334,6 +346,25 @@ impl Decodable for ShieldedTxBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_canonical_encoding_decodes() {
+        let body = ShieldedTxBody::sample_for_tests(7);
+        let bytes = rlp::encode(&body);
+        assert_eq!(ShieldedTxBody::decode_canonical(&bytes).unwrap(), body);
+        // The anchor (item 3) re-encoded as a one-item list of its bytes.
+        let rlp = Rlp::new(&bytes);
+        let mut s = RlpStream::new_list(14);
+        for i in 0..14 {
+            if i == 3 {
+                s.begin_list(1);
+                s.append(&&body.anchor.as_bytes()[..]);
+            } else {
+                s.append_raw(rlp.at(i).unwrap().as_raw(), 1);
+            }
+        }
+        assert!(ShieldedTxBody::decode_canonical(&s.out()).is_err());
+    }
 
     fn digest(seed: u32) -> ShieldedDigest {
         ShieldedDigest::from_elements(std::array::from_fn(|i| {

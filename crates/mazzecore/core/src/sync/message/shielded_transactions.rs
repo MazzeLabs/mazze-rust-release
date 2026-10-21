@@ -70,10 +70,13 @@ impl Handleable for ShieldedTransactions {
             let hash = body.hash();
             let known = pool.shielded.contains(&hash);
             if !known {
-                if let Err(e) = pool.insert_shielded(body, proof) {
+                if let Err(e) = pool.insert_shielded(body, proof, self.stem) {
                     debug!("shielded transaction {:?} refused: {:?}", hash, e);
                     continue;
                 }
+            }
+            if !self.stem {
+                pool.shielded.mark_fluffed(&hash);
             }
             let route = if self.stem {
                 ctx.manager.dandelion.route_stem(hash, &ctx.node_id, &ctx.manager.peer_ids())

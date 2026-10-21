@@ -91,7 +91,6 @@ impl Handleable for GetCompactBlocks {
                 .manager
                 .graph
                 .block_by_hash(hash)
-                .filter(|block| block.is_servable())
             {
                 debug!("Have complete block but no compact block, return complete block instead");
                 if (blocks.len() as u64) < MAX_BLOCKS_TO_SEND {

@@ -90,7 +90,11 @@ impl Default for ShieldedParams {
     fn default() -> Self {
         ShieldedParams {
             activation_height: u64::MAX,
-            slot_epochs: 20,
+            // Measured on the fleet 2026-10-20: ~1.44 epochs/s (4.2 blocks/s),
+            // so 10 epochs is ~6.9 s, inside the 5-10 s target for epoch
+            // rates from 1 to 2 per second, and above the 5-epoch execution
+            // lag the slot chain needs (spec §8.6).
+            slot_epochs: 10,
             max_txs_per_block: 8,
             tx_fee: SHIELDED_BASE_PRICE * SHIELDED_TX_WEIGHT,
             anchor_window_epochs: 100_000,

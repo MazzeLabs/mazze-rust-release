@@ -19,6 +19,19 @@ pub struct Wallet {
     /// The next self-note index (spec §9.5).
     #[serde(default)]
     pub next_self: u32,
+    /// Proven transactions not yet seen on chain, kept so that a crash or a
+    /// lost submission after a deposit never loses the value (`resubmit`).
+    #[serde(default)]
+    pub pending: Vec<PendingTx>,
+}
+
+/// A proven transaction and the commitment of the wallet's own output in
+/// it: the entry is dropped once that commitment appears in the tree.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PendingTx {
+    pub body: String,
+    pub proof: String,
+    pub cm: [u32; DIGEST],
 }
 
 /// A note opening: what the owner needs to spend it. As written to a file
@@ -64,7 +77,7 @@ impl StoredNote {
 
 impl Wallet {
     pub fn new(seed: [u8; 32]) -> Self {
-        Wallet { seed, synced_epoch: 0, leaves: Vec::new(), notes: Vec::new(), next_self: 0 }
+        Wallet { seed, synced_epoch: 0, leaves: Vec::new(), notes: Vec::new(), next_self: 0, pending: Vec::new() }
     }
 
     pub fn load(path: &str) -> Result<Self, String> {

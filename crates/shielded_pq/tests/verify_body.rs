@@ -167,6 +167,17 @@ fn a_wallet_transaction_passes_stage_a_and_tampering_does_not() {
     longer.push(0);
     recommitted.proof_hash = proof_hash(&longer);
     assert!(matches!(verify_body(&recommitted, &longer, CHAIN), Err(Rejection::MalformedProof(_))));
+    // A proof claiming another trace height is refused before the STARK,
+    // even when the body is re-committed to it.
+    let mut taller = wire::decode(&proof, PROOF_LEN_MAX).unwrap();
+    taller.degree_bits += 1;
+    let taller = wire::encode(&taller);
+    let mut recommitted = body.clone();
+    recommitted.proof_hash = proof_hash(&taller);
+    assert!(matches!(
+        verify_body(&recommitted, &taller, CHAIN),
+        Err(Rejection::MalformedProof(m)) if m.contains("trace height")
+    ));
     let oversized = vec![0u8; PROOF_LEN_MAX + 1];
     assert_eq!(verify_body(&body, &oversized, CHAIN), Err(Rejection::ProofTooLong(PROOF_LEN_MAX + 1)));
 

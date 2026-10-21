@@ -10,7 +10,6 @@ use crate::{
     air::spend2x2::{build_trace, pvi, Tx2Air, Tx2Witness, HEIGHT},
     field::{Digest, Sponge, Xof, DIGEST, F},
     keys::SpendKeys,
-    note::HM_L,
     ps1::{self, ProverRandomness, PROOF_LEN_MAX},
     wire,
 };
@@ -45,13 +44,19 @@ impl WalletKeys {
     }
 }
 
-/// Fresh uniform field elements from OS randomness (the no-trace mode: the
-/// commitment is statistically hiding, spec §4.2).
-pub fn fresh_fields<const N: usize>(entropy: &[u8; 32]) -> [F; N] {
-    Xof::new("mazze/os-random", &[entropy]).fields()
+/// Uniform field elements, each drawn from its own 31 random bits by
+/// rejection (the no-trace mode, spec §4.2). `next_u32` must be the OS
+/// generator: the commitment is statistically hiding only if `y` carries
+/// its full ~1984 bits of entropy, which no 32-byte seed stretched by a
+/// hash can supply.
+pub fn uniform_fields<const N: usize>(mut next_u32: impl FnMut() -> u32) -> [F; N] {
+    std::array::from_fn(|_| loop {
+        let x = next_u32() & 0x7fff_ffff;
+        if x < F::ORDER_U32 {
+            break F::new(x);
+        }
+    })
 }
-
-pub fn fresh_y(entropy: &[u8; 32]) -> [F; HM_L] { fresh_fields(entropy) }
 
 /// Proves `w` and returns the body and its proof. `w.sighash` is set here.
 /// A proof longer than the cap is redone with new randomness.

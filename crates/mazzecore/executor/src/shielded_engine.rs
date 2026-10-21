@@ -233,13 +233,46 @@ pub fn nullifier_spent(state: &State, nf: &ShieldedDigest) -> DbResult<bool> {
     Ok(!get(state, &nf_key(nf))?.is_zero())
 }
 
-/// Whether `anchor` is a recorded root still inside the window at `height`.
+/// Whether `anchor` is acceptable at `height`: the current tree root
+/// always is, however long ago it was recorded (an idle lane must not lock
+/// itself); an older root only within the window.
 pub fn anchor_valid(
     state: &State, anchor: &ShieldedDigest, height: u64, params: &ShieldedParams,
 ) -> DbResult<bool> {
+    let (current, _) = tree_state(state)?;
+    if anchor.as_bytes()[..] == to_bytes(&current)[..] {
+        return Ok(true);
+    }
     let seen = get(state, &root_key(anchor.as_bytes()))?;
     Ok(!seen.is_zero()
         && height.saturating_sub(seen.as_u64() - 1) <= params.anchor_window_epochs)
+}
+
+/// Whether a shield-in body's deposit is credited (at least its
+/// `v_public_in`). Bodies without a shield-in need none.
+pub fn deposit_covers(state: &State, body: &ShieldedTxBody) -> DbResult<bool> {
+    Ok(body.v_public_in == 0
+        || get(state, &credit_key(body.hash().as_bytes()))?
+            >= U256::from(body.v_public_in))
+}
+
+/// Turnstile counters: value that entered and left the shielded space and
+/// fees burned in it. `backing == in - out - burnt` must always hold.
+const TOTAL_IN_KEY: &[u8] = b"total_in";
+const TOTAL_OUT_KEY: &[u8] = b"total_out";
+const TOTAL_BURNT_KEY: &[u8] = b"total_burnt";
+
+/// Deposits credited by the bridge and not yet consumed by a shield-in.
+const PENDING_CREDITS_KEY: &[u8] = b"pending_credits";
+
+fn pending_credits(state: &State) -> DbResult<U256> { get(state, PENDING_CREDITS_KEY) }
+
+pub fn turnstile(state: &State) -> DbResult<(U256, U256, U256)> {
+    Ok((
+        get(state, TOTAL_IN_KEY)?,
+        get(state, TOTAL_OUT_KEY)?,
+        get(state, TOTAL_BURNT_KEY)?,
+    ))
 }
 
 /// The current root of the commitment tree and its number of leaves.
@@ -268,7 +301,9 @@ pub fn record_deposit(
     ensure_initialized(state, height)?;
     let key = credit_key(body_hash);
     let credit = get(state, &key)?.saturating_add(amount);
-    set(state, key, credit)
+    set(state, key, credit)?;
+    let pending = pending_credits(state)?.saturating_add(amount);
+    set(state, PENDING_CREDITS_KEY.to_vec(), pending)
 }
 
 // ---- the stage --------------------------------------------------------------
@@ -286,6 +321,19 @@ pub fn execute_section(
     for body in section {
         outcomes.push(apply(state, body, height, params)?);
     }
+    // The turnstile (spec §8.4): every unit in the backing entered through
+    // a shield-in and has not left. Credits not yet consumed sit in the
+    // backing too.
+    let (total_in, total_out, total_burnt) = turnstile(state)?;
+    let backing = state.balance(&backing_account())?;
+    let expected = (total_in + pending_credits(state)?)
+        .saturating_sub(total_out + total_burnt);
+    if backing != expected {
+        error!(
+            "SHIELDED TURNSTILE BREACH at height {}: backing {} below {}",
+            height, backing, expected
+        );
+    }
     Ok(outcomes)
 }
 
@@ -295,19 +343,17 @@ fn apply(
 ) -> DbResult<ShieldedOutcome> {
     use ShieldedOutcome::Skipped;
 
-    // 1. Shield-in: the bridge must have recorded exactly this deposit.
+    // 1. Shield-in: the bridge holds at least this deposit for this body.
+    //    A larger credit (a top-up by anyone) does not block it; the excess
+    //    stays credited to the body.
     let credit = credit_key(body.hash().as_bytes());
-    if body.v_public_in > 0
-        && get(state, &credit)? != U256::from(body.v_public_in)
-    {
+    let credited = get(state, &credit)?;
+    if body.v_public_in > 0 && credited < U256::from(body.v_public_in) {
         return Ok(Skipped(SkipReason::NoDeposit));
     }
 
-    // 2. The anchor is a recorded root inside the window.
-    let seen = get(state, &root_key(body.anchor.as_bytes()))?;
-    if seen.is_zero()
-        || height.saturating_sub(seen.as_u64() - 1) > params.anchor_window_epochs
-    {
+    // 2. The anchor: the current root, or a recorded root in the window.
+    if !anchor_valid(state, &body.anchor, height, params)? {
         return Ok(Skipped(SkipReason::UnknownAnchor));
     }
 
@@ -341,8 +387,14 @@ fn apply(
     store_frontier(state, &frontier)?;
     record_root(state, &frontier.root(), height)?;
     if body.v_public_in > 0 {
-        set(state, credit, U256::zero())?;
+        set(state, credit, credited - U256::from(body.v_public_in))?;
+        let pending = pending_credits(state)?.saturating_sub(U256::from(body.v_public_in));
+        set(state, PENDING_CREDITS_KEY.to_vec(), pending)?;
     }
+    let (total_in, total_out, total_burnt) = turnstile(state)?;
+    set(state, TOTAL_IN_KEY.to_vec(), total_in + U256::from(body.v_public_in))?;
+    set(state, TOTAL_OUT_KEY.to_vec(), total_out + U256::from(body.v_public_out))?;
+    set(state, TOTAL_BURNT_KEY.to_vec(), total_burnt + U256::from(body.fee))?;
 
     if body.v_public_out > 0 {
         let dest = body.dest.expect("stage A: a shield-out has a destination");

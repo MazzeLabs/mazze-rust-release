@@ -26,9 +26,9 @@ pub trait Shielded {
     #[method(name = "shielded_getStatus", blocking)]
     fn shielded_get_status(&self) -> JsonRpcResult<ShieldedStatus>;
 
-    /// Whether a 48-byte nullifier is spent in the latest executed state.
-    #[method(name = "shielded_isNullifierSpent", blocking)]
-    fn shielded_is_nullifier_spent(&self, nf: Bytes) -> JsonRpcResult<bool>;
+    // There is deliberately no `isNullifierSpent`: a wallet asking about
+    // its own nullifiers would tell the node which notes are its own. A
+    // wallet sees spends in the sections it scans (spec §7, Z-7).
 
     /// The executed shielded sections of up to `count` epochs from
     /// `from_epoch` on, for wallets to rebuild the tree and find notes.

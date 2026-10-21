@@ -179,3 +179,74 @@ fn shield_in_pay_shield_out_and_every_refusal() {
         U256::from(100)
     );
 }
+
+fn fresh_state() -> (mazze_storage::tests::FakeStateManager, State) {
+    let storage_manager = new_state_manager_for_unit_test();
+    let state =
+        State::new(StateDb::new(storage_manager.get_state_for_genesis_write())).unwrap();
+    (storage_manager, state)
+}
+
+/// An idle lane does not lock itself: after a gap longer than the anchor
+/// window, the current root is still a valid anchor.
+#[test]
+fn the_current_root_never_expires() {
+    let (_sm, mut state) = fresh_state();
+    let p = params();
+    let shield_in = body(1, empty_root(), 10_000, 0);
+    deposit(&mut state, &shield_in, 1);
+    assert!(matches!(
+        execute_section(&mut state, &[Arc::new(shield_in.clone())], 2, &p).unwrap()[0],
+        ShieldedOutcome::Applied { .. }
+    ));
+    let current = root_after(&shield_in.cm_out);
+    // Far past the window, nothing applied in between.
+    let late = 2 + 10 * p.anchor_window_epochs;
+    assert_eq!(
+        execute_section(&mut state, &[Arc::new(body(2, current, 0, 0))], late, &p).unwrap(),
+        vec![ShieldedOutcome::Applied { positions: [2, 3] }],
+        "the current root is always valid"
+    );
+    // An older root is still bound by the window.
+    let older = body(3, empty_root(), 0, 0);
+    assert_eq!(
+        execute_section(&mut state, &[Arc::new(older)], late + 1, &p).unwrap(),
+        vec![ShieldedOutcome::Skipped(SkipReason::UnknownAnchor)]
+    );
+}
+
+/// A top-up of someone else's credit does not block their shield-in, and
+/// the turnstile holds throughout.
+#[test]
+fn top_ups_do_not_block_and_the_turnstile_holds() {
+    use mazze_executor::shielded_engine::turnstile;
+    let (_sm, mut state) = fresh_state();
+    let p = params();
+    let victim = body(1, empty_root(), 10_000, 0);
+    deposit(&mut state, &victim, 1);
+    // An attacker adds 1 to the victim's credit.
+    let mut grief = victim.clone();
+    grief.v_public_in = 1;
+    state
+        .add_balance(&backing_account(), &U256::one(), CleanupMode::ForceCreate)
+        .unwrap();
+    record_deposit(&mut state, victim.hash().as_bytes(), U256::one(), 1).unwrap();
+    assert!(matches!(
+        execute_section(&mut state, &[Arc::new(victim.clone())], 2, &p).unwrap()[0],
+        ShieldedOutcome::Applied { .. }
+    ));
+    assert_eq!(
+        state.storage_at(&pool_account(), &credit_key(victim.hash().as_bytes())).unwrap(),
+        U256::one(),
+        "the excess stays credited to the body"
+    );
+    let (total_in, total_out, total_burnt) = turnstile(&state).unwrap();
+    assert_eq!(total_in, U256::from(10_000));
+    assert_eq!(total_out, U256::zero());
+    assert_eq!(total_burnt, U256::from(FEE));
+    // backing = in - out - burnt + unconsumed credits (the 1)
+    assert_eq!(
+        state.balance(&backing_account()).unwrap(),
+        U256::from(10_000 - FEE + 1)
+    );
+}

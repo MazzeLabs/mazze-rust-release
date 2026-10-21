@@ -590,6 +590,11 @@ impl SynchronizationProtocolHandler {
             Some(tx) => tx,
             None => return,
         };
+        // Fluffing, or already seen fluffing (`Drop`): the transaction is
+        // public and may be packed.
+        if !matches!(route, Route::Stem(_)) {
+            pool.shielded.mark_fluffed(&hash);
+        }
         let msg = |stem: bool| ShieldedTransactions {
             stem,
             txs: vec![((*tx.body).clone(), (*tx.proof).clone())],

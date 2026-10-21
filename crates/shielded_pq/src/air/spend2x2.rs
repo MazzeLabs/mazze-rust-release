@@ -47,6 +47,11 @@ pub const AIR_ID: &str = "mazze/shielded/spend-2x2/v1";
 /// Trace height of the statement (rows).
 pub const HEIGHT: usize = 4096;
 
+/// `degree_bits` a proof of the statement declares: the zero-knowledge
+/// (hiding) configuration doubles the domain. A proof of any other height
+/// is refused, so soundness never rests on a repeated schedule.
+pub const DEGREE_BITS: usize = HEIGHT.trailing_zeros() as usize + 1;
+
 // ---- columns ----
 pub const S: usize = 0;
 pub const CHUNK: usize = SW;

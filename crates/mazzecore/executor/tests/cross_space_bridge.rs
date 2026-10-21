@@ -62,12 +62,12 @@ struct Harness {
 }
 
 impl Harness {
-    fn new() -> Self {
+    fn new() -> Self { Self::with_params(Default::default()) }
+
+    fn with_params(params: mazze_executor::spec::CommonParams) -> Self {
         let storage_manager = new_state_manager_for_unit_test();
-        let machine = new_machine_with_builtin(
-            Default::default(),
-            VmFactory::new(1024 * 32),
-        );
+        let machine =
+            new_machine_with_builtin(params, VmFactory::new(1024 * 32));
         let state = {
             let mut state = State::new(StateDb::new(
                 storage_manager.get_state_for_genesis_write(),
@@ -523,4 +523,76 @@ fn transfer_evm_traps_into_sub_call() {
             )
         }
     }
+}
+
+// ============================================================
+// Shield-in from eSpace (spec §8.5.1)
+// ============================================================
+
+/// An eSpace transaction to the shielded bridge: the frame has already
+/// moved its value onto the bridge's eSpace account; `shieldIn` moves it
+/// to the native backing and records the credit.
+#[test]
+fn shield_in_from_espace_moves_the_value_to_the_native_backing() {
+    use mazze_executor::shielded_engine::{backing_account, deposit_credit};
+    use mazze_parameters::internal_contract_addresses::SHIELDED_BRIDGE_ADDRESS;
+    use mazze_types::H256;
+
+    let mut common = mazze_executor::spec::CommonParams::default();
+    common.shielded.activation_height = 0;
+    let mut harness = Harness::with_params(common);
+    let spec = harness.spec();
+    assert!(spec.shielded_active);
+
+    let espace_bridge = SHIELDED_BRIDGE_ADDRESS.with_evm_space();
+    assert!(
+        harness
+            .machine
+            .internal_contracts()
+            .contract(&CROSS_SPACE_CONTRACT_ADDRESS.with_evm_space(), &spec)
+            .is_none(),
+        "no other internal contract is"
+    );
+
+    let amount = U256::from(5_000u64);
+    harness
+        .state
+        .add_balance(&espace_bridge, &amount, CleanupMode::NoEmpty)
+        .unwrap();
+    let body_hash = H256::repeat_byte(0x42);
+    let data = encode_call("shieldIn(bytes32)", &body_hash);
+    let mut params = make_call_params(
+        Address::random(),
+        SHIELDED_BRIDGE_ADDRESS,
+        100_000,
+        amount,
+        data,
+    );
+    params.space = Space::Ethereum;
+
+    let Harness { state, substate, callstack, tracer, env, machine, .. } =
+        &mut harness;
+    let contract = machine
+        .internal_contracts()
+        .contract(&espace_bridge, &spec)
+        .unwrap();
+    let mut ref_ctx = InternalRefContext {
+        env,
+        spec: &spec,
+        callstack,
+        state,
+        substate,
+        tracer: tracer as &mut dyn TracerTrait,
+        static_flag: false,
+        depth: 0,
+    };
+    let result = contract.execute(&params, &mut ref_ctx);
+    assert!(matches!(result, InternalTrapResult::Return(Ok(_))));
+
+    assert_eq!(harness.state.balance(&espace_bridge).unwrap(), U256::zero());
+    assert_eq!(harness.state.balance(&backing_account()).unwrap(), amount);
+    assert_eq!(
+        deposit_credit(&harness.state, body_hash.as_bytes()).unwrap(),
+        amount
+    );
 }

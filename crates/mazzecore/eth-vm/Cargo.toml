@@ -9,6 +9,7 @@ edition = "2021"
 [dependencies]
 # Mazze
 mazze-bytes      = { path = "../../mazze_bytes" }
+mazze-parameters = { path = "../parameters" }
 mazze-types      = { path = "../../mazze_types" }
 mazze-vm-types   = { path = "../vm-types" }
 

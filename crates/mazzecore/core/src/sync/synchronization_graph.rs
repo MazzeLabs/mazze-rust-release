@@ -2676,6 +2676,9 @@ impl SynchronizationGraph {
     /// maintain a set `not_ready_blocks_frontier` which is the root nodes in
     /// the parental tree formed by not graph ready blocks. Find all expire
     /// blocks which can be reached by `not_ready_blocks_frontier`.
+    ///
+    /// Blocks consensus already holds are never expired, and neither is
+    /// anything below them: see `removable_future`.
     pub fn remove_expire_blocks(&self, expire_time: u64) {
         let inner = &mut *self.inner.write();
         let now = SystemTime::now()
@@ -2683,7 +2686,7 @@ impl SynchronizationGraph {
             .unwrap()
             .as_secs();
         let frontier = inner.not_ready_blocks_frontier.get_frontier().clone();
-        let all_not_ready: HashSet<_> = inner.get_future(frontier);
+        let all_not_ready = self.removable_future(inner, frontier);
         let mut expire_set = HashSet::new();
         for index in all_not_ready {
             let ts = match inner.arena.get(index) {
@@ -2696,23 +2699,89 @@ impl SynchronizationGraph {
         }
 
         // find blocks reached by previous found expired blocks
-        let all_expire: HashSet<_> = inner.get_future(expire_set);
+        let all_expire = self.removable_future(inner, expire_set);
         debug!("all_expire: {:?}", all_expire);
         inner.remove_blocks(&all_expire);
     }
 
     /// Remove all blocks in `to_remove_set` and their future set from the
-    /// graph.
+    /// graph, except blocks consensus already holds (see `removable_future`).
     pub fn remove_blocks_and_future(&self, to_remove_set: &HashSet<H256>) {
-        let mut inner = self.inner.write();
+        let inner = &mut *self.inner.write();
         let mut index_set = Vec::new();
         for block_hash in to_remove_set {
             if let Some(index) = inner.hash_to_arena_indices.get(block_hash) {
                 index_set.push(*index);
             }
         }
-        let index_set_and_future: HashSet<_> = inner.get_future(index_set);
+        let index_set_and_future = self.removable_future(inner, index_set);
         inner.remove_blocks(&index_set_and_future);
+    }
+
+    /// The future of `roots` in the sync graph without the blocks consensus
+    /// already holds, and without any block that has such a block in its
+    /// future (removing it would orphan a consensus block in the sync graph).
+    ///
+    /// Expiry and request cancellation remove a block together with its
+    /// future and delete headers/bodies from the DB. In a header-to-consensus
+    /// phase every HEADER_GRAPH_READY block is in consensus, yet it stays
+    /// "not ready" here until its body arrives: body sync runs in every phase
+    /// (§5.20), and `set_graph_ready` puts the HEADER_GRAPH_READY children of
+    /// each block whose body arrived into `not_ready_blocks_frontier`. On a
+    /// header sync longer than `sync_expire_block_timeout` (2 h) the oldest
+    /// frontier block expired and the whole chain above it went with it,
+    /// every 15 minutes: m2's from-genesis archive replay (2026-10-20) lost
+    /// the sync-graph nodes above height 9374, `complete_filling_block_bodies`
+    /// then rebuilt consensus from the gutted sync graph (best epoch 9374,
+    /// every later block an out-era stub) and the node never advanced again.
+    fn removable_future<Iter>(
+        &self, inner: &SynchronizationGraphInner, roots: Iter,
+    ) -> HashSet<usize>
+    where Iter: IntoIterator<Item = usize> {
+        let in_consensus = |i: usize| {
+            inner.arena[i].sent_to_consensus
+                || self
+                    .consensus
+                    .contains_block(&inner.arena[i].block_header.hash())
+        };
+        let roots: Vec<usize> = roots
+            .into_iter()
+            .filter(|i| inner.arena.contains(*i) && !in_consensus(*i))
+            .collect();
+        let mut future: HashSet<usize> =
+            inner.get_future_with_stop_condition(roots, |i| in_consensus(i));
+        // A block delivered to consensus normally has all its predecessors
+        // delivered first, so the stop condition alone keeps every consensus
+        // block; still never remove a block whose future we keep.
+        let mut keep = HashSet::new();
+        let mut stack: Vec<usize> = future
+            .iter()
+            .copied()
+            .filter(|i| {
+                inner
+                    .successor_edges(*i)
+                    .into_iter()
+                    .any(|s| !future.contains(&s))
+            })
+            .collect();
+        while let Some(i) = stack.pop() {
+            if keep.insert(i) {
+                for p in inner.predecessor_edges(i) {
+                    if future.contains(&p) && !keep.contains(&p) {
+                        stack.push(p);
+                    }
+                }
+            }
+        }
+        if !keep.is_empty() {
+            warn!(
+                "sync graph: keeping {} block(s) scheduled for removal \
+                 because consensus holds blocks in their future",
+                keep.len()
+            );
+            future.retain(|i| !keep.contains(i));
+        }
+        future
     }
 
     pub fn consensus_unprocessed_count(&self) -> usize {

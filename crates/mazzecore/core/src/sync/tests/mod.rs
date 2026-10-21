@@ -583,3 +583,126 @@ fn test_pivot_advances_when_bodies_trail_headers_across_a_checkpoint() {
     }
     remove_test_db(db);
 }
+
+/// In a header-to-consensus phase a block is in consensus at
+/// HEADER_GRAPH_READY, but it stays in `not_ready_blocks_frontier` until its
+/// body arrives (body sync runs in every phase, §5.20). Expiry must not remove
+/// such a block, nor the chain above it: m2's from-genesis archive replay
+/// (2026-10-20) lost every sync-graph node above height 9374 two hours into
+/// header sync, then rebuilt consensus from the gutted sync graph at the end
+/// of body fill and froze at epoch 9374 for good.
+#[test]
+fn test_expiry_keeps_blocks_consensus_holds() {
+    use crate::sync::utils::create_simple_block_impl;
+    let db = "./test_expiry_keeps_consensus.db/";
+    {
+        let (sync, consensus, _, genesis) = initialize_synchronization_graph(
+            db,
+            1,
+            1,
+            1,
+            1,
+            50000,
+            H256::default(),
+        );
+        let blocks = simple_chain(&sync, &genesis, 4);
+
+        // Header phase: every header goes to consensus at HGR.
+        for b in &blocks {
+            let mut h = b.block_header.clone();
+            sync.insert_block_header(&mut h, false, true, true, true);
+        }
+        // An orphan header whose parent never arrives: not in consensus.
+        let (_, orphan) = create_simple_block_impl(
+            H256::from_low_u64_be(0xdead),
+            vec![],
+            7,
+            U256::from(77),
+            U256::from(10),
+            1,
+            false,
+        );
+        let mut oh = orphan.block_header.clone();
+        sync.insert_block_header(&mut oh, false, true, true, true);
+        wait_consensus_drained(&sync);
+
+        // Only the first body arrives: its HGR child joins the frontier.
+        sync.insert_block(blocks[0].clone(), false, true, false);
+        wait_consensus_drained(&sync);
+        {
+            let mut inner = sync.inner.write();
+            let i1 = inner.hash_to_arena_indices[&blocks[1].hash()];
+            assert!(
+                inner.not_ready_blocks_frontier.contains(&i1),
+                "test setup: the HGR child must be a not-ready frontier block"
+            );
+            let old = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                - 10_000;
+            let idx: Vec<usize> =
+                inner.hash_to_arena_indices.values().copied().collect();
+            for i in idx {
+                inner.arena[i].last_update_timestamp = old;
+            }
+        }
+
+        sync.remove_expire_blocks(500 /* expire_time */);
+
+        let inner = sync.inner.read();
+        for b in &blocks {
+            assert!(
+                inner.hash_to_arena_indices.contains_key(&b.hash()),
+                "block {:?} held by consensus was expired from the sync graph",
+                b.hash()
+            );
+            assert!(
+                sync.data_man.block_header_by_hash(&b.hash()).is_some(),
+                "header of {:?} held by consensus was deleted",
+                b.hash()
+            );
+            assert!(consensus.contains_block(&b.hash()));
+        }
+        assert!(
+            !inner.hash_to_arena_indices.contains_key(&orphan.hash()),
+            "a stale orphan must still expire"
+        );
+    }
+    remove_test_db(db);
+}
+
+/// Cancelling a body request must not remove a block consensus holds, or the
+/// chain above it.
+#[test]
+fn test_cancelled_request_keeps_blocks_consensus_holds() {
+    let db = "./test_cancel_keeps_consensus.db/";
+    {
+        let (sync, _, _, genesis) = initialize_synchronization_graph(
+            db,
+            1,
+            1,
+            1,
+            1,
+            50000,
+            H256::default(),
+        );
+        let blocks = simple_chain(&sync, &genesis, 3);
+        for b in &blocks {
+            let mut h = b.block_header.clone();
+            sync.insert_block_header(&mut h, false, true, true, true);
+        }
+        wait_consensus_drained(&sync);
+
+        let mut to_remove = std::collections::HashSet::new();
+        to_remove.insert(blocks[0].hash());
+        sync.remove_blocks_and_future(&to_remove);
+
+        let inner = sync.inner.read();
+        for b in &blocks {
+            assert!(inner.hash_to_arena_indices.contains_key(&b.hash()));
+            assert!(sync.data_man.block_header_by_hash(&b.hash()).is_some());
+        }
+    }
+    remove_test_db(db);
+}

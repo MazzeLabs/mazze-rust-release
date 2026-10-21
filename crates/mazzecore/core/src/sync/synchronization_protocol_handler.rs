@@ -468,6 +468,9 @@ pub struct SynchronizationProtocolHandler {
     /// Dandelion++ routing of shielded transactions.
     #[ignore_malloc_size_of = "routing state only"]
     pub dandelion: crate::sync::dandelion::Dandelion,
+    /// Fetching shielded history below this node's first executed epoch.
+    #[ignore_malloc_size_of = "a cursor and a request only"]
+    pub shielded_backfill: crate::sync::shielded_history::ShieldedBackfill,
 }
 
 #[derive(Clone, Default, DeriveMallocSizeOf)]
@@ -569,6 +572,7 @@ impl SynchronizationProtocolHandler {
             synced_epoch_id: Default::default(),
             light_provider,
             dandelion: Default::default(),
+            shielded_backfill: Default::default(),
         }
     }
 
@@ -2680,6 +2684,7 @@ impl NetworkProtocolHandler for SynchronizationProtocolHandler {
             TX_TIMER => {
                 self.propagate_new_transactions(io);
                 self.propagate_shielded_transactions(io);
+                self.shielded_backfill.tick(self, io);
             }
             CHECK_FUTURE_BLOCK_TIMER => {
                 self.check_future_blocks(io);

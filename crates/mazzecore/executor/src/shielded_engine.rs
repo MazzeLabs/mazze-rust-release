@@ -228,6 +228,14 @@ fn digest_of(d: &ShieldedDigest) -> Digest {
     from_bytes::<DIGEST>(d.as_bytes()).expect("a decoded body holds canonical digests")
 }
 
+/// The height at which `root` was recorded: after the transaction that
+/// produced it (or, for the empty tree, at initialization). Roots are never
+/// deleted, which lets history from a peer be checked against the state.
+pub fn root_height(state: &State, root: &Digest) -> DbResult<Option<u64>> {
+    let seen = get(state, &root_key(&to_bytes(root)))?;
+    Ok((!seen.is_zero()).then(|| seen.as_u64() - 1))
+}
+
 /// Whether `nf` is spent in `state`.
 pub fn nullifier_spent(state: &State, nf: &ShieldedDigest) -> DbResult<bool> {
     Ok(!get(state, &nf_key(nf))?.is_zero())

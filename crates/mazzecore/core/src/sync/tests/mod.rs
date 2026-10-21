@@ -543,3 +543,46 @@ fn shielded_section_survives_the_block_database() {
     }
     let _ = fs::remove_dir_all(dir);
 }
+
+/// The shielded history is kept per (epoch, pivot): a reorg that switches
+/// the pivot back without re-executing still finds its own entry, and an
+/// epoch whose pivot is unknown (below a fast-sync anchor) uses the only one.
+#[test]
+fn shielded_history_is_kept_per_pivot() {
+    use crate::{
+        block_data_manager::ShieldedHistoryEntry, pow::PowComputer,
+        sync::utils::initialize_data_manager,
+    };
+    use mazze_executor::{
+        machine::VmFactory,
+        shielded_engine::{ShieldedOutcome, SkipReason},
+    };
+    use primitives::shielded::ShieldedTxBody;
+
+    let dir = "./test_shielded_history.db/";
+    let _ = fs::remove_dir_all(dir);
+    {
+        let (data_man, _) = initialize_data_manager(
+            dir,
+            Arc::new(PowComputer::new(H256::zero())),
+            VmFactory::new(1024),
+        );
+        let entry = |seed: u32, outcome: ShieldedOutcome| ShieldedHistoryEntry {
+            bodies: vec![ShieldedTxBody::sample_for_tests(seed)],
+            outcomes: vec![outcome],
+        };
+        let (a, b) = (H256::repeat_byte(0xa), H256::repeat_byte(0xb));
+        let ea = entry(1, ShieldedOutcome::Applied { positions: [4, 5] });
+        let eb = entry(2, ShieldedOutcome::Skipped(SkipReason::UnknownAnchor));
+        data_man.insert_shielded_history(20, &a, &ea);
+        assert_eq!(data_man.shielded_history(20, None), Some((a, ea.clone())));
+        data_man.insert_shielded_history(20, &b, &eb);
+        assert_eq!(data_man.shielded_history(20, Some(&a)), Some((a, ea.clone())));
+        assert_eq!(data_man.shielded_history(20, Some(&b)), Some((b, eb)));
+        assert_eq!(data_man.shielded_history(20, None), None, "ambiguous");
+        assert_eq!(data_man.shielded_history(30, Some(&a)), None);
+        assert_eq!(data_man.shielded_history(19, None), None);
+        assert_eq!(data_man.shielded_history(21, None), None);
+    }
+    let _ = fs::remove_dir_all(dir);
+}

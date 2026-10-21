@@ -95,6 +95,12 @@ impl ConsensusExecutionHandler {
                 &mut epoch_recorder,
             )?;
         }
+        // History below the first epoch this node executes comes from
+        // peers (`sync::shielded_history`); from it on, it is recorded here.
+        if !dry_run && self.data_man.shielded_history_start().is_none() {
+            self.data_man
+                .set_shielded_history_start(main_block.block_header.height());
+        }
         // The shielded section of the pivot block of a slot epoch (spec
         // §8.6), after the epoch's account transactions. Its proofs were
         // verified when the block was accepted.
@@ -108,8 +114,18 @@ impl ConsensusExecutionHandler {
                 shielded,
             )?;
             if !dry_run {
-                self.data_man
-                    .insert_shielded_outcomes(&main_block.hash(), &outcomes);
+                self.data_man.insert_shielded_history(
+                    height,
+                    &main_block.hash(),
+                    &crate::block_data_manager::ShieldedHistoryEntry {
+                        bodies: main_block
+                            .shielded
+                            .iter()
+                            .map(|b| (**b).clone())
+                            .collect(),
+                        outcomes,
+                    },
+                );
             }
         }
 

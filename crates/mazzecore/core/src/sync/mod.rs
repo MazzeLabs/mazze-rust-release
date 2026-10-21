@@ -5,6 +5,7 @@ pub mod dandelion;
 mod error;
 pub mod fast_sync_anchor;
 pub mod message;
+pub mod shielded_history;
 pub mod request_manager;
 mod state;
 

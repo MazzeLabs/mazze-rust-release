@@ -32,6 +32,10 @@ use threadpool::ThreadPool;
 pub mod block_data_types;
 pub mod db_gc_manager;
 pub mod db_manager;
+pub use db_manager::ShieldedHistoryEntry;
+
+const SHIELDED_HISTORY_START_KEY: &[u8] = b"shielded_history_start";
+const SHIELDED_BACKFILL_CURSOR_KEY: &[u8] = b"shielded_backfill_cursor";
 pub mod tx_data_manager;
 use crate::block_data_manager::{
     db_manager::DBManager,
@@ -576,19 +580,59 @@ impl BlockDataManager {
         self.blocks.write().insert(hash, block);
     }
 
-    /// The outcomes of a pivot block's shielded section, from its last
-    /// execution.
-    pub fn insert_shielded_outcomes(
-        &self, block_hash: &H256,
-        outcomes: &[mazze_executor::shielded_engine::ShieldedOutcome],
+    /// Records the executed shielded section of slot `epoch`'s pivot.
+    pub fn insert_shielded_history(
+        &self, epoch: u64, block_hash: &H256, entry: &ShieldedHistoryEntry,
     ) {
-        self.db_manager.insert_shielded_outcomes_to_db(block_hash, outcomes)
+        self.db_manager
+            .insert_shielded_history_to_db(epoch, block_hash, entry)
     }
 
-    pub fn shielded_outcomes(
-        &self, block_hash: &H256,
-    ) -> Option<Vec<mazze_executor::shielded_engine::ShieldedOutcome>> {
-        self.db_manager.shielded_outcomes_from_db(block_hash)
+    /// The recorded sections of the epochs in `[from, to)`, in order.
+    pub fn shielded_history_range(
+        &self, from: u64, to: u64,
+    ) -> Vec<(u64, H256, ShieldedHistoryEntry)> {
+        self.db_manager.shielded_history_range_from_db(from, to)
+    }
+
+    pub fn delete_shielded_history_range(&self, from: u64, to: u64) {
+        self.db_manager.delete_shielded_history_range(from, to)
+    }
+
+    /// The first epoch from which this node's shielded history is complete:
+    /// the first epoch it executed itself, lowered to the lane's first slot
+    /// once a backfill from peers has filled and verified everything below.
+    pub fn shielded_history_start(&self) -> Option<u64> {
+        self.db_manager.misc_u64_from_db(SHIELDED_HISTORY_START_KEY)
+    }
+
+    pub fn set_shielded_history_start(&self, epoch: u64) {
+        self.db_manager
+            .insert_misc_u64_to_db(SHIELDED_HISTORY_START_KEY, epoch)
+    }
+
+    /// The next epoch a backfill from peers will fetch.
+    pub fn shielded_backfill_cursor(&self) -> Option<u64> {
+        self.db_manager.misc_u64_from_db(SHIELDED_BACKFILL_CURSOR_KEY)
+    }
+
+    pub fn set_shielded_backfill_cursor(&self, epoch: u64) {
+        self.db_manager
+            .insert_misc_u64_to_db(SHIELDED_BACKFILL_CURSOR_KEY, epoch)
+    }
+
+    /// The section of slot `epoch` executed for `pivot`. When the pivot of
+    /// that epoch is unknown here (below a fast-sync anchor), the only
+    /// recorded one.
+    pub fn shielded_history(
+        &self, epoch: u64, pivot: Option<&H256>,
+    ) -> Option<(H256, ShieldedHistoryEntry)> {
+        let mut entries = self.db_manager.shielded_history_from_db(epoch);
+        match pivot {
+            Some(pivot) => entries.into_iter().find(|(h, _)| h == pivot),
+            None if entries.len() == 1 => entries.pop(),
+            None => None,
+        }
     }
 
     /// remove block body in memory cache and db

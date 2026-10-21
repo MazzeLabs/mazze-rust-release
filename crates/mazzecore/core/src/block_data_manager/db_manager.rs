@@ -107,6 +107,7 @@ pub enum DBTable {
     BlockTraces,
     HashByBlockNumber,
     ShieldedWitness,
+    ShieldedHistory,
 }
 
 impl DBTable {
@@ -126,6 +127,7 @@ impl DBTable {
             DBTable::BlockTraces => "BlockTraces",
             DBTable::HashByBlockNumber => "HashByBlockNumber",
             DBTable::ShieldedWitness => "ShieldedWitness",
+            DBTable::ShieldedHistory => "ShieldedHistory",
         }
     }
 
@@ -145,6 +147,7 @@ impl DBTable {
             "BlockTraces" => DBTable::BlockTraces,
             "HashByBlockNumber" => DBTable::HashByBlockNumber,
             "ShieldedWitness" => DBTable::ShieldedWitness,
+            "ShieldedHistory" => DBTable::ShieldedHistory,
             _ => return None,
         })
     }
@@ -475,6 +478,10 @@ impl DBManager {
             DBTable::ShieldedWitness,
             make_simple_entry(MdbxColumn::ShieldedWitness),
         );
+        backends.insert(
+            DBTable::ShieldedHistory,
+            make_simple_entry(MdbxColumn::ShieldedHistory),
+        );
 
         // Compound: Blocks (7 sub-columns keyed by suffix byte,
         // with the bare 32B key routing to `BlockHeaders`).
@@ -786,27 +793,80 @@ impl DBManager {
         Some(witness)
     }
 
-    pub fn insert_shielded_outcomes_to_db(
-        &self, block_hash: &H256,
-        outcomes: &[mazze_executor::shielded_engine::ShieldedOutcome],
+    /// Records the executed shielded section of `block_hash`, the pivot of
+    /// slot `epoch`: its bodies and their outcomes (never pruned).
+    pub fn insert_shielded_history_to_db(
+        &self, epoch: u64, block_hash: &H256, entry: &ShieldedHistoryEntry,
     ) {
-        let mut stream = RlpStream::new_list(outcomes.len());
-        for outcome in outcomes {
-            stream.append(outcome);
-        }
         self.insert_to_db(
-            DBTable::Misc,
-            &shielded_outcomes_key(block_hash),
-            stream.out().to_vec(),
+            DBTable::ShieldedHistory,
+            &history_key(epoch, block_hash),
+            rlp::encode(entry).to_vec(),
         )
     }
 
-    pub fn shielded_outcomes_from_db(
-        &self, block_hash: &H256,
-    ) -> Option<Vec<mazze_executor::shielded_engine::ShieldedOutcome>> {
-        let encoded = self
-            .load_from_db(DBTable::Misc, &shielded_outcomes_key(block_hash))?;
-        Rlp::new(&encoded).as_list().ok()
+    /// Every recorded section of slot `epoch`, one per block that was its
+    /// pivot when executed.
+    pub fn shielded_history_from_db(
+        &self, epoch: u64,
+    ) -> Vec<(H256, ShieldedHistoryEntry)> {
+        self.shielded_history_range_from_db(epoch, epoch + 1)
+            .into_iter()
+            .map(|(_, hash, entry)| (hash, entry))
+            .collect()
+    }
+
+    /// Every recorded section of the epochs in `[from, to)`, in order.
+    pub fn shielded_history_range_from_db(
+        &self, from: u64, to: u64,
+    ) -> Vec<(u64, H256, ShieldedHistoryEntry)> {
+        let backend = match self.table_backends.get(&DBTable::ShieldedHistory)
+        {
+            Some(TableBackend::Simple(b)) => b,
+            _ => return Vec::new(),
+        };
+        let rows = match backend
+            .kvdb
+            .iter_range_owned(&from.to_be_bytes(), Some(&to.to_be_bytes()))
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                warn!("reading shielded history failed: {:?}", e);
+                return Vec::new();
+            }
+        };
+        rows.into_iter()
+            .filter_map(|(k, v)| {
+                let epoch = u64::from_be_bytes(k.get(..8)?.try_into().ok()?);
+                let hash = H256::from_slice(k.get(8..40)?);
+                Some((epoch, hash, rlp::decode(&v).ok()?))
+            })
+            .collect()
+    }
+
+    /// Deletes the recorded sections of the epochs in `[from, to)`.
+    pub fn delete_shielded_history_range(&self, from: u64, to: u64) {
+        if let Some(TableBackend::Simple(b)) =
+            self.table_backends.get(&DBTable::ShieldedHistory)
+        {
+            if let Err(e) = b.kvdb.delete_range_chunked(
+                &from.to_be_bytes(),
+                Some(&to.to_be_bytes()),
+                4096,
+            ) {
+                warn!("deleting shielded history failed: {:?}", e);
+            }
+        }
+    }
+
+    /// A u64 kept in the `Misc` table.
+    pub fn misc_u64_from_db(&self, key: &[u8]) -> Option<u64> {
+        let v = self.load_from_db(DBTable::Misc, key)?;
+        Some(u64::from_be_bytes((&v[..]).try_into().ok()?))
+    }
+
+    pub fn insert_misc_u64_to_db(&self, key: &[u8], value: u64) {
+        self.insert_to_db(DBTable::Misc, key, value.to_be_bytes().to_vec())
     }
 
     /// Deletes the witnesses of every block below `height`, by key range.
@@ -1417,8 +1477,40 @@ fn blamed_header_verified_roots_key(block_height: u64) -> [u8; 8] {
     height_key
 }
 
-fn shielded_outcomes_key(block_hash: &H256) -> Vec<u8> {
-    [b"shielded_outcomes".as_ref(), block_hash.as_bytes()].concat()
+fn history_key(epoch: u64, block_hash: &H256) -> Vec<u8> {
+    [&epoch.to_be_bytes()[..], block_hash.as_bytes()].concat()
+}
+
+/// One executed shielded section: the bodies, in order, and what execution
+/// made of each.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShieldedHistoryEntry {
+    pub bodies: Vec<primitives::shielded::ShieldedTxBody>,
+    pub outcomes: Vec<mazze_executor::shielded_engine::ShieldedOutcome>,
+}
+
+impl rlp::Encodable for ShieldedHistoryEntry {
+    fn rlp_append(&self, s: &mut RlpStream) {
+        s.begin_list(2);
+        s.append_list(&self.bodies);
+        s.append_list(&self.outcomes);
+    }
+}
+
+impl rlp::Decodable for ShieldedHistoryEntry {
+    fn decode(rlp: &Rlp) -> Result<Self, rlp::DecoderError> {
+        if rlp.item_count()? != 2 {
+            return Err(rlp::DecoderError::RlpIncorrectListLen);
+        }
+        let entry = ShieldedHistoryEntry {
+            bodies: rlp.list_at(0)?,
+            outcomes: rlp.list_at(1)?,
+        };
+        if entry.bodies.len() != entry.outcomes.len() {
+            return Err(rlp::DecoderError::Custom("One outcome per body"));
+        }
+        Ok(entry)
+    }
 }
 
 /// `height (8B BE) ‖ hash`: heights sort first, so pruning is a range delete.

@@ -637,6 +637,16 @@ pub enum Column {
     /// block is an era behind the stable checkpoint, on every node
     /// including archive ones.
     ShieldedWitness = 50,
+
+    /// **`ShieldedHistory`** — `epoch (8B BE) ‖ block_hash (32B) →
+    /// [bodies, outcomes] (RLP)`.
+    ///
+    /// The executed shielded sections: every body (441 B, no proof) with
+    /// its outcome. Wallets need them to rebuild the tree, see spends and
+    /// restore from the seed, so they are **never pruned**, on every node,
+    /// whatever its block-body retention. Keyed by block hash too: a reorg
+    /// that does not re-execute an epoch must still find its pivot's entry.
+    ShieldedHistory = 51,
 }
 
 /// Total number of MDBX columns. Update on adding a variant.
@@ -644,7 +654,7 @@ pub enum Column {
 /// The `KvdbMdbx` env is created with `set_max_tables(64)` (see
 /// [`DEFAULT_MAX_TABLES`](super::kvdb_mdbx)); ~14 slots remain
 /// after Phase 4c (`DeltaMpt`).
-pub const NUM_COLUMNS: u32 = 51;
+pub const NUM_COLUMNS: u32 = 52;
 
 impl Column {
     /// The stable `u32` id assigned to this column. `#[repr(u32)]` on
@@ -709,6 +719,7 @@ impl Column {
         Column::Misc,
         Column::DeltaMpt,
         Column::ShieldedWitness,
+        Column::ShieldedHistory,
     ];
 
     /// Human-readable name — same as the variant identifier, hoisted
@@ -766,6 +777,7 @@ impl Column {
             Column::Misc => "Misc",
             Column::DeltaMpt => "DeltaMpt",
             Column::ShieldedWitness => "ShieldedWitness",
+            Column::ShieldedHistory => "ShieldedHistory",
         }
     }
 }

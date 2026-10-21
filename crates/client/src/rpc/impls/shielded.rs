@@ -92,33 +92,31 @@ impl ShieldedServer for ShieldedHandler {
             if !params.is_slot(epoch) {
                 continue;
             }
-            let hash = match self
+            // From the history column, never from block bodies: it is kept
+            // on every node, whatever its block retention.
+            let pivot = self
                 .consensus
                 .get_hash_from_epoch_number(EpochNumber::Number(epoch))
-            {
-                Ok(hash) => hash,
-                Err(_) => continue,
-            };
-            let block = match data_man.block_by_hash(&hash, false) {
-                Some(block) if !block.shielded.is_empty() => block,
-                _ => continue,
-            };
-            let outcomes = data_man.shielded_outcomes(&hash).unwrap_or_default();
-            let transactions = block
-                .shielded
+                .ok();
+            let (hash, entry) =
+                match data_man.shielded_history(epoch, pivot.as_ref()) {
+                    Some(found) => found,
+                    None => continue,
+                };
+            let transactions = entry
+                .bodies
                 .iter()
-                .enumerate()
-                .map(|(i, body)| {
-                    let (applied, positions, skip_reason) = match outcomes.get(i) {
-                        Some(ShieldedOutcome::Applied { positions }) => (
+                .zip(&entry.outcomes)
+                .map(|(body, outcome)| {
+                    let (applied, positions, skip_reason) = match outcome {
+                        ShieldedOutcome::Applied { positions } => (
                             true,
                             Some([positions[0].into(), positions[1].into()]),
                             None,
                         ),
-                        Some(ShieldedOutcome::Skipped(reason)) => {
+                        ShieldedOutcome::Skipped(reason) => {
                             (false, None, Some(format!("{:?}", reason)))
                         }
-                        None => (false, None, Some("NotExecuted".into())),
                     };
                     ShieldedTxInfo {
                         body_hash: body.hash(),

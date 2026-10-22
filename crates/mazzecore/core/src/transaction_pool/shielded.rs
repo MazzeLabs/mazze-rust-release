@@ -34,6 +34,17 @@ impl PooledShieldedTx {
     }
 }
 
+/// Who hands the pool a shielded transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShieldedSource {
+    /// A wallet, through the node's RPC: it gets an answer.
+    Rpc,
+    /// A peer, in its Dandelion++ stem phase.
+    PeerStem,
+    /// A peer, broadcasting it.
+    PeerFluff,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum ShieldedPoolError {
     /// The lane is not active.
@@ -48,6 +59,10 @@ pub enum ShieldedPoolError {
     UnknownAnchor,
     /// A shield-in whose deposit is not (yet) credited by the bridge.
     NoDeposit,
+    /// Refused for a reason that depends on the pool's contents. Given to
+    /// RPC callers in place of `Conflict` and `Full`, which would tell them
+    /// what the pool holds.
+    NotAccepted,
 }
 
 #[derive(Default)]

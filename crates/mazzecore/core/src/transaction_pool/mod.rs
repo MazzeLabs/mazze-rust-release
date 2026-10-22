@@ -222,20 +222,30 @@ impl TransactionPool {
         }
     }
 
-    /// Admits a shielded transaction (spec §8.2): the lane must be active,
-    /// the fee exact, its nullifiers unspent, its anchor valid and, for a
-    /// shield-in, its deposit credited, all against the latest executed
-    /// state; then the proof (the full stage A verification, so invalid
-    /// proofs never reach a block). Every cheap check runs before the
-    /// STARK, so a flood of duplicates or stale bodies costs no proof time.
+    /// Admits a shielded transaction (spec §8.2) from `source`; returns its
+    /// hash and whether it is new to the pool.
+    ///
+    /// The lane must be active and the fee exact; its nullifiers must be
+    /// unspent, and its anchor and (for a shield-in) deposit valid against
+    /// the latest executed state; and the proof must verify (the full stage
+    /// A, so invalid proofs never reach a block).
+    ///
+    /// The order depends on who asks. A peer gets no answer, so its
+    /// transactions go through the cheap checks first, and a flood of
+    /// duplicates or stale bodies costs no STARK. An RPC caller does get an
+    /// answer, and must learn nothing about what the pool holds (spec §9.6:
+    /// a spy would ask every node whether it has a stem transaction): its
+    /// proof is verified before any pool state is consulted, a transaction
+    /// already held is acknowledged exactly like a new one, and refusals
+    /// that depend on the pool are one generic error.
     pub fn insert_shielded(
         &self, body: primitives::shielded::ShieldedTxBody, proof: Vec<u8>,
-        stem: bool,
-    ) -> Result<H256, shielded::ShieldedPoolError> {
+        source: shielded::ShieldedSource,
+    ) -> Result<(H256, bool), shielded::ShieldedPoolError> {
         use mazze_executor::shielded_engine::{
             anchor_valid, deposit_covers, nullifier_spent,
         };
-        use shielded::{PooledShieldedTx, ShieldedPoolError};
+        use shielded::{PooledShieldedTx, ShieldedPoolError, ShieldedSource};
 
         let params = &self.machine.params().shielded;
         let best = self.consensus_best_info.lock().clone();
@@ -249,10 +259,27 @@ impl TransactionPool {
                 found: body.fee,
             });
         }
-        if proof.len() > primitives::shielded::MAX_PROOF_BYTES {
-            return Err(ShieldedPoolError::InvalidProof("too long".into()));
+        if proof.len() != primitives::shielded::MAX_PROOF_BYTES {
+            return Err(ShieldedPoolError::InvalidProof("wrong length".into()));
         }
-        self.shielded.precheck(&body)?;
+        let verify = || {
+            mazze_shielded_pq::verify::verify_body(
+                &body,
+                &proof,
+                best.chain_id.in_shielded_space(),
+            )
+            .map_err(|e| ShieldedPoolError::InvalidProof(format!("{:?}", e)))
+        };
+        let hash = body.hash();
+        let from_rpc = source == ShieldedSource::Rpc;
+        if from_rpc {
+            verify()?;
+            if self.shielded.contains(&hash) {
+                return Ok((hash, false));
+            }
+        } else {
+            self.shielded.precheck(&body)?;
+        }
         {
             let state = self.best_executed_state.lock().clone();
             for nf in &body.nf {
@@ -260,25 +287,36 @@ impl TransactionPool {
                     return Err(ShieldedPoolError::Spent);
                 }
             }
-            if !anchor_valid(&state, &body.anchor, best.best_epoch_number, params)
-                .unwrap_or(false)
-            {
-                return Err(ShieldedPoolError::UnknownAnchor);
-            }
-            if !deposit_covers(&state, &body).unwrap_or(false) {
-                return Err(ShieldedPoolError::NoDeposit);
+            // A stem relay may run a few epochs behind the sender: an anchor
+            // or a deposit it does not know yet is no reason to drop the
+            // stem, which would leave the origin to fluff it. It is held,
+            // and packing re-checks it.
+            let lenient = source == ShieldedSource::PeerStem;
+            if !lenient {
+                if !anchor_valid(&state, &body.anchor, best.best_epoch_number, params)
+                    .unwrap_or(false)
+                {
+                    return Err(ShieldedPoolError::UnknownAnchor);
+                }
+                if !deposit_covers(&state, &body).unwrap_or(false) {
+                    return Err(ShieldedPoolError::NoDeposit);
+                }
             }
         }
-        mazze_shielded_pq::verify::verify_body(
-            &body,
-            &proof,
-            best.chain_id.in_shielded_space(),
-        )
-        .map_err(|e| ShieldedPoolError::InvalidProof(format!("{:?}", e)))?;
-        let tx = PooledShieldedTx::new(body, proof);
-        let hash = tx.hash;
-        self.shielded.insert(tx, stem)?;
-        Ok(hash)
+        if !from_rpc {
+            verify()?;
+        }
+        let stem = source != ShieldedSource::PeerFluff;
+        match self.shielded.insert(PooledShieldedTx::new(body, proof), stem) {
+            Ok(()) => Ok((hash, true)),
+            Err(ShieldedPoolError::Duplicate) if from_rpc => Ok((hash, false)),
+            Err(ShieldedPoolError::Conflict) | Err(ShieldedPoolError::Full)
+                if from_rpc =>
+            {
+                Err(ShieldedPoolError::NotAccepted)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// The latest executed state the pool checks against.

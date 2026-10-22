@@ -60,9 +60,11 @@ impl Decodable for ShieldedTransactions {
 
 impl Handleable for ShieldedTransactions {
     fn handle(self, ctx: &Context) -> Result<(), Error> {
-        // Admission needs the executed state, which is not current while
-        // catching up.
-        if ctx.manager.catch_up_mode() {
+        // A broadcast needs the executed state, which is not current while
+        // catching up. A stem does not: its proof is checked statelessly and
+        // its state leniently, and it goes on, since a stem dropped here
+        // would leave its origin to fluff it.
+        if ctx.manager.catch_up_mode() && !self.stem {
             return Ok(());
         }
         let pool = ctx.manager.graph.consensus.get_tx_pool();
@@ -70,7 +72,13 @@ impl Handleable for ShieldedTransactions {
             let hash = body.hash();
             let known = pool.shielded.contains(&hash);
             if !known {
-                if let Err(e) = pool.insert_shielded(body, proof, self.stem) {
+                use crate::transaction_pool::shielded::ShieldedSource;
+                let source = if self.stem {
+                    ShieldedSource::PeerStem
+                } else {
+                    ShieldedSource::PeerFluff
+                };
+                if let Err(e) = pool.insert_shielded(body, proof, source) {
                     debug!("shielded transaction {:?} refused: {:?}", hash, e);
                     continue;
                 }
@@ -79,7 +87,7 @@ impl Handleable for ShieldedTransactions {
                 pool.shielded.mark_fluffed(&hash);
             }
             let route = if self.stem {
-                ctx.manager.dandelion.route_stem(hash, &ctx.node_id, &ctx.manager.peer_ids())
+                ctx.manager.dandelion.route_stem(hash, &ctx.node_id, &ctx.manager.outbound_peer_ids(ctx.io))
             } else {
                 ctx.manager.dandelion.route_fluff(hash)
             };

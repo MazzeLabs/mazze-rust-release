@@ -581,6 +581,15 @@ impl SynchronizationProtocolHandler {
         self.syn.peers.read().keys().copied().collect()
     }
 
+    /// Ids of the connected peers this node dialed itself: the only stem
+    /// successors (an attacker can open inbound connections at will).
+    pub fn outbound_peer_ids(&self, io: &dyn NetworkContext) -> Vec<NodeId> {
+        self.peer_ids()
+            .into_iter()
+            .filter(|id| io.get_peer_connection_origin(id) == Some(true))
+            .collect()
+    }
+
     /// Sends a pooled shielded transaction along `route`. Nothing is sent
     /// while the lane is inactive, so nodes that predate the message never
     /// receive it.
@@ -594,11 +603,6 @@ impl SynchronizationProtocolHandler {
             Some(tx) => tx,
             None => return,
         };
-        // Fluffing, or already seen fluffing (`Drop`): the transaction is
-        // public and may be packed.
-        if !matches!(route, Route::Stem(_)) {
-            pool.shielded.mark_fluffed(&hash);
-        }
         let msg = |stem: bool| ShieldedTransactions {
             stem,
             txs: vec![((*tx.body).clone(), (*tx.proof).clone())],
@@ -607,9 +611,22 @@ impl SynchronizationProtocolHandler {
             Route::Stem(peer) => msg(true).send(io, &peer),
             Route::Fluff => {
                 let skip = from.copied().unwrap_or_default();
+                if self.peer_ids().iter().all(|p| *p == skip) {
+                    // Nobody to broadcast to: it is not public yet, so it is
+                    // neither packed nor forgotten, and is retried later.
+                    self.dandelion.retry_later(hash);
+                    return;
+                }
+                // Fluffing: the transaction is public and may be packed.
+                pool.shielded.mark_fluffed(&hash);
                 self.broadcast_message(io, &skip, &msg(false))
             }
-            Route::Drop => Ok(()),
+            // Already seen fluffing: public, and packable.
+            Route::Drop => {
+                pool.shielded.mark_fluffed(&hash);
+                Ok(())
+            }
+            Route::Wait => Ok(()),
         };
         if let Err(e) = result {
             debug!("relaying shielded transaction {:?} failed: {:?}", hash, e);
@@ -623,10 +640,18 @@ impl SynchronizationProtocolHandler {
         if pool.machine().params().shielded.activation_height == u64::MAX {
             return;
         }
-        let peers = self.peer_ids();
+        let outbound = self.outbound_peer_ids(io);
         for hash in pool.shielded.take_originated() {
-            let route = self.dandelion.route_originated(hash, &peers);
-            self.relay_shielded(io, hash, route, None);
+            match self.dandelion.route_originated(hash, &outbound) {
+                // A single dev node has no peer: its own transactions are
+                // packed locally. Anywhere else they wait for a successor,
+                // since mining one's own transaction would reveal its origin.
+                crate::sync::dandelion::Route::Wait if self.protocol_config.dev_mode => {
+                    pool.shielded.mark_fluffed(&hash);
+                }
+                crate::sync::dandelion::Route::Wait => pool.shielded.mark_originated(hash),
+                route => self.relay_shielded(io, hash, route, None),
+            }
         }
         for hash in self.dandelion.expired_embargoes() {
             self.relay_shielded(io, hash, crate::sync::dandelion::Route::Fluff, None);
@@ -2621,7 +2646,13 @@ impl NetworkProtocolHandler for SynchronizationProtocolHandler {
             }
         };
 
-        debug!("on_message: peer={}, msgid={:?}", peer, msg_id);
+        // Never pair a peer with a shielded transaction in the logs: a
+        // seized node's logs would name its stem predecessor.
+        if msg_id == msgid::SHIELDED_TRANSACTIONS {
+            debug!("on_message: msgid={:?}", msg_id);
+        } else {
+            debug!("on_message: peer={}, msgid={:?}", peer, msg_id);
+        }
 
         self.dispatch_message(io, peer, msg_id.into(), rlp)
             .unwrap_or_else(|e| self.handle_error(io, peer, msg_id.into(), e));

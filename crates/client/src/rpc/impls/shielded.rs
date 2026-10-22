@@ -50,11 +50,19 @@ impl ShieldedServer for ShieldedHandler {
     ) -> JsonRpcResult<H256> {
         let body = ShieldedTxBody::decode_canonical(&body.0)
             .map_err(|e| invalid_params("body", e))?;
-        let hash = self
+        let (hash, new) = self
             .tx_pool
-            .insert_shielded(body, proof.0, true)
+            .insert_shielded(
+                body,
+                proof.0,
+                mazzecore::transaction_pool::shielded::ShieldedSource::Rpc,
+            )
             .map_err(|e| invalid_params("transaction", e))?;
-        self.tx_pool.shielded.mark_originated(hash);
+        // A transaction the pool already held is acknowledged the same way,
+        // but not sent into a new stem.
+        if new {
+            self.tx_pool.shielded.mark_originated(hash);
+        }
         Ok(hash)
     }
 

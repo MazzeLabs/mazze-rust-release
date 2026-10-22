@@ -25,6 +25,15 @@ pub struct Wallet {
     pub synced_epoch: u64,
     /// Every leaf of the commitment tree, in position order.
     pub leaves: Vec<[u32; DIGEST]>,
+    /// The epoch each leaf entered the tree at (the anchor is the tree at a
+    /// fixed epoch boundary, spec §5).
+    #[serde(default)]
+    pub leaf_epochs: Vec<u64>,
+    /// The shielded chain id, fixed at creation: commands that need no
+    /// chain data never contact a node, and a node claiming another chain
+    /// is refused.
+    #[serde(default)]
+    pub chain_id: Option<u32>,
     pub notes: Vec<StoredNote>,
     /// The next self-note index (spec §9.5).
     #[serde(default)]
@@ -65,6 +74,10 @@ pub struct StoredNote {
     /// Set for the wallet's own notes, which the seed alone can recover.
     #[serde(default)]
     pub self_index: Option<u32>,
+    /// A received note is claimed only after this time (Unix seconds), a
+    /// random delay that keeps its sender from timing the claim (spec §9.5).
+    #[serde(default)]
+    pub claim_after: u64,
 }
 
 fn elems<const N: usize>(xs: &[u32]) -> [F; N] { std::array::from_fn(|i| F::new(xs[i])) }
@@ -80,6 +93,7 @@ impl StoredNote {
             position: None,
             spent: false,
             self_index: None,
+            claim_after: 0,
         }
     }
 
@@ -101,6 +115,8 @@ impl Wallet {
             seed,
             synced_epoch: 0,
             leaves: Vec::new(),
+            leaf_epochs: Vec::new(),
+            chain_id: None,
             notes: Vec::new(),
             next_self: 0,
             pending: Vec::new(),
@@ -145,6 +161,10 @@ impl Wallet {
         }
         std::fs::rename(&tmp, path).map_err(|e| e.to_string())
     }
+}
+
+impl Drop for Wallet {
+    fn drop(&mut self) { zeroize::Zeroize::zeroize(&mut self.seed); }
 }
 
 /// The file format; also the associated data, with the KDF parameters.

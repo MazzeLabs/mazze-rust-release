@@ -26,10 +26,11 @@ rand = { version = "0.10.1", default-features = false, features = ["std_rng"] }
 serde = { version = "1", features = ["derive"] }
 tiny-keccak = { version = "2", features = ["shake"] }
 chacha20poly1305 = { version = "0.10", optional = true }
+zeroize = { version = "1.8", optional = true }
 
 [features]
 # Witness and trace generation: wallets only, never the node.
-prover = ["chacha20poly1305"]
+prover = ["chacha20poly1305", "zeroize"]
 
 [dev-dependencies]
 # Only to check that the wire format equals the bincode configuration the

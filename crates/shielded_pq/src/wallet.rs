@@ -1,7 +1,7 @@
 //! Building a shielded transaction (wallet side): fix the body, bind it with
 //! the sighash, prove, then commit the body to its proof.
 
-use p3_field::PrimeField32;
+use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use primitives::shielded::{
     proof_hash, RecoverySlot, ShieldedDest, ShieldedDigest, ShieldedTxBody,
 };
@@ -23,7 +23,8 @@ pub fn from_shielded_digest(d: &ShieldedDigest) -> Digest {
     crate::field::from_bytes::<DIGEST>(d.as_bytes()).expect("canonical digest")
 }
 
-/// Spend keys and diversifiers derived from a 32-byte seed (spec §3).
+/// Spend keys and diversifiers derived from a 32-byte seed (spec §3). The
+/// seed and the spend secret are wiped when dropped.
 pub struct WalletKeys {
     pub seed: [u8; 32],
     pub spend: SpendKeys,
@@ -41,6 +42,17 @@ impl WalletKeys {
 
     pub fn owner(&self, sponge: &Sponge, j: u32) -> Digest {
         self.spend.owner(sponge, &self.diversifier(j))
+    }
+}
+
+impl Drop for WalletKeys {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.seed.zeroize();
+        for x in self.spend.nsk.iter_mut() {
+            // Volatile, so the wipe is not optimized away.
+            unsafe { std::ptr::write_volatile(x, F::ZERO) };
+        }
     }
 }
 
@@ -100,8 +112,15 @@ pub const INTERNAL: u32 = u32::MAX;
 /// Consecutive missing tags before a restore stops.
 pub const GAP_LIMIT: u32 = 20;
 
-/// Highest self-note index a restore looks at.
-pub const MAX_SELF_INDEX: u32 = 1 << 16;
+/// A self-note index is `prefix << SELF_COUNTER_BITS | counter`: each device
+/// holding a seed draws its own random 16-bit prefix, so two devices (or a
+/// device and a restore) never reuse an index. A reused index would give
+/// two transactions the same public tag, linking them, and the same slot
+/// key; a restore scans every prefix.
+pub const SELF_COUNTER_BITS: u32 = 16;
+
+/// The first self-note index of `prefix`.
+pub fn self_index_base(prefix: u16) -> u32 { (prefix as u32) << SELF_COUNTER_BITS }
 
 /// The recovery key: derives every self-note and its slot.
 pub fn recovery_key(seed: &[u8; 32]) -> [u8; 32] { Xof::new("mazze/rec", &[seed]).bytes() }

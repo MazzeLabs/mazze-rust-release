@@ -9,25 +9,27 @@
 //! public data. The wallet rebuilds the commitment tree itself from the
 //! node's sections (there is no `getTreePath`), finds its notes by their
 //! commitments, and proves locally. Payments are delivered out of band: the
-//! sender gives the recipient the note opening, plain (`mzn1`) over a
-//! private channel, or sealed (`mzx1`, spec §9.2) to the recipient's bundle
-//! over any channel.
+//! sender gives the recipient the note opening sealed (`mzx1`, spec §9.2) to
+//! the recipient's bundle, over any channel. The channel still shows that
+//! the two communicated, never what or how much.
 //!
 //! ```text
 //! (the wallet file is sealed under a passphrase: MAZZE_WALLET_PASSPHRASE, or asked)
-//! mazze-shielded-wallet init       --wallet W
+//! mazze-shielded-wallet init       --wallet W --rpc URL
 //! mazze-shielded-wallet export-seed --wallet W                         (back it up offline)
-//! mazze-shielded-wallet address    --wallet W --rpc URL [--index J]
-//! mazze-shielded-wallet new-address --wallet W --rpc URL                (an unlinkable new address)
-//! mazze-shielded-wallet export-bundle --wallet W --rpc URL --out FILE [--index J]
+//! mazze-shielded-wallet address    --wallet W [--index J]
+//! mazze-shielded-wallet new-address --wallet W                         (an unlinkable new address)
+//! mazze-shielded-wallet export-bundle --wallet W --out FILE [--index J]
 //! mazze-shielded-wallet sync       --wallet W --rpc URL
 //! mazze-shielded-wallet balance    --wallet W
 //! mazze-shielded-wallet shield-in  --wallet W --rpc URL --amount A --funder-key HEX [--espace-rpc URL]
 //! mazze-shielded-wallet send       --wallet W --rpc URL --to mzs1.. --amount A
-//!                                  (--bundle FILE --sealed-out FILE | --opening-out FILE)
-//! mazze-shielded-wallet receive    --wallet W --rpc URL --opening FILE   (mzn1 or mzx1)
+//!                                  --bundle FILE --sealed-out FILE
+//! mazze-shielded-wallet receive    --wallet W --opening FILE              (an mzx1 file; offline)
 //! mazze-shielded-wallet unshield   --wallet W --rpc URL --to 0xADDR [--espace] --amount A
-//! mazze-shielded-wallet claim      --wallet W --rpc URL
+//! mazze-shielded-wallet claim      --wallet W --rpc URL [--now]
+//! Commands that prove also take --verify-rpc URL: a second node that must
+//! agree about the anchor's tree.
 //! mazze-shielded-wallet restore    --wallet W --rpc URL   (seed asked, or MAZZE_RESTORE_SEED)
 //! mazze-shielded-wallet fund-espace --wallet W --rpc URL --funder-key HEX --amount A   (test helper)
 //! mazze-shielded-wallet resubmit   --wallet W --rpc URL   (re-sends proven txs not yet on chain)
@@ -43,17 +45,20 @@ mod delivery;
 mod rpc;
 mod store;
 
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use mazze_shielded_pq::{
     air::spend2x2::{SpendIn, Tx2Witness},
-    field::{Digest, Sponge, DIGEST, F},
+    field::{to_bytes, Digest, Sponge, DIGEST, F},
     note::{nullifier, Note},
     ps1::ProverRandomness,
     tree::{Tree, DEPTH},
     wallet::{
-        build_transaction, uniform_fields, from_shielded_digest, recovery_key,
-        recovery_tag, WalletKeys, GAP_LIMIT, MAX_SELF_INDEX,
+        build_transaction, from_shielded_digest, recovery_key, recovery_tag,
+        self_index_base, uniform_fields, WalletKeys, GAP_LIMIT, SELF_COUNTER_BITS,
     },
 };
 use mazze_types::{Address, H160, U256};
@@ -71,6 +76,62 @@ use serde_json::{json, Value};
 use rpc::{as_u256, as_u64, hex0x, unhex, Node};
 use store::{PendingTx, StoredNote, Wallet};
 
+/// The anchor is the tree at the last multiple of this many epochs (about a
+/// minute on the fleet): every honest wallet proving in that minute uses
+/// the same root, so an anchor cannot tell wallets apart, and a node feeding
+/// one wallet its own view of the tree is caught by `getStateAt`.
+const ANCHOR_STEP: u64 = 100;
+
+/// A received note is claimed after 10 to 120 minutes.
+const CLAIM_DELAY_MIN: u64 = 10 * 60;
+const CLAIM_DELAY_SPAN: u64 = 110 * 60;
+
+fn now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// The wallet's chain, fixed when it was created.
+fn wallet_sponge(w: &Wallet) -> Result<Sponge, String> {
+    w.chain_id
+        .map(Sponge::new)
+        .ok_or_else(|| "the wallet has no chain id; restore it from its seed".to_string())
+}
+
+/// A random self-index prefix not in `taken` (see `SELF_COUNTER_BITS`).
+fn fresh_prefix(taken: &HashSet<u16>) -> u16 {
+    loop {
+        let p = (rand::rngs::OsRng.next_u32() & 0xffff) as u16;
+        if !taken.contains(&p) {
+            return p;
+        }
+    }
+}
+
+/// Writes a file only its owner can read.
+fn write_private(path: &str, data: &[u8]) -> Result<(), String> {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .and_then(|mut f| f.write_all(data))
+        .map_err(|e| format!("{path}: {e}"))
+}
+
+/// Submitting to a remote node over plain HTTP shows the node (and anyone on
+/// the path) the IP a transaction came from.
+fn warn_if_exposed(url: &str) {
+    let local = ["http://127.", "http://localhost", "http://[::1]"].iter().any(|p| url.starts_with(p));
+    if !local && !url.contains(".onion") {
+        eprintln!(
+            "warning: {url} is a remote node: it sees the IP this transaction comes from. \
+             Use your own node, or reach it through Tor (torsocks)."
+        );
+    }
+}
+
 /// Mazzy per shielded unit (consensus `SHIELDED_UNIT`, checked against the
 /// node): every shielded amount is a whole number of GMazzy.
 const UNIT: u64 = 1_000_000_000;
@@ -81,6 +142,8 @@ fn mazzy(units: u64) -> U256 { U256::from(units) * U256::from(UNIT) }
 /// The wallet passphrase: `MAZZE_WALLET_PASSPHRASE`, or asked on the
 /// terminal.
 fn passphrase() -> Result<Zeroizing<String>, String> {
+    // Note: an environment variable is readable by the user's other
+    // processes (/proc/<pid>/environ); the prompt is safer.
     if let Ok(p) = std::env::var("MAZZE_WALLET_PASSPHRASE") {
         return Ok(Zeroizing::new(p));
     }
@@ -141,7 +204,8 @@ impl Args {
         let mut it = rest.iter();
         while let Some(key) = it.next() {
             let key = key.strip_prefix("--").ok_or(format!("unexpected argument {key}"))?;
-            if key == "espace" {
+            // Flags without a value.
+            if key == "espace" || key == "now" {
                 map.insert(key.into(), "1".into());
                 continue;
             }
@@ -179,9 +243,13 @@ fn run(args: &[String]) -> Result<(), String> {
             if std::path::Path::new(path).exists() {
                 return Err(format!("{path} exists; refusing to overwrite a wallet"));
             }
+            let chain = chain_id(&Node::connect(a.get("rpc")?)?)?;
             let mut seed = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut seed);
-            Wallet::new(seed, &new_passphrase()?)?.save(path)?;
+            let mut w = Wallet::new(seed, &new_passphrase()?)?;
+            w.chain_id = Some(chain);
+            w.next_self = self_index_base(fresh_prefix(&HashSet::new()));
+            w.save(path)?;
             println!("created {path}; back up its seed with export-seed");
             Ok(())
         }
@@ -193,7 +261,7 @@ fn run(args: &[String]) -> Result<(), String> {
         "address" => {
             let w = Wallet::load(path, passphrase)?;
             let j = address_index(&w, &a)?;
-            let sponge = Sponge::new(chain_id(&Node::connect(a.get("rpc")?)?)?);
+            let sponge = wallet_sponge(&w)?;
             let keys = WalletKeys::from_seed(&sponge, w.seed);
             println!("{}", delivery::address(&keys, &sponge, j).0.encode());
             Ok(())
@@ -205,7 +273,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let j = w.next_address;
             w.next_address += 1;
             w.save(path)?;
-            let sponge = Sponge::new(chain_id(&Node::connect(a.get("rpc")?)?)?);
+            let sponge = wallet_sponge(&w)?;
             let keys = WalletKeys::from_seed(&sponge, w.seed);
             println!("{j} {}", delivery::address(&keys, &sponge, j).0.encode());
             Ok(())
@@ -213,7 +281,7 @@ fn run(args: &[String]) -> Result<(), String> {
         "export-bundle" => {
             let w = Wallet::load(path, passphrase)?;
             let j = address_index(&w, &a)?;
-            let sponge = Sponge::new(chain_id(&Node::connect(a.get("rpc")?)?)?);
+            let sponge = wallet_sponge(&w)?;
             let keys = WalletKeys::from_seed(&sponge, w.seed);
             let (_, bundle) = delivery::address(&keys, &sponge, j);
             std::fs::write(a.get("out")?, &bundle.0).map_err(|e| e.to_string())?;
@@ -233,21 +301,22 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "receive" => {
+            // Offline: opening a payment tells no node anything.
             let mut w = Wallet::load(path, passphrase)?;
-            let sponge = Sponge::new(chain_id(&Node::connect(a.get("rpc")?)?)?);
+            let sponge = wallet_sponge(&w)?;
             let keys = WalletKeys::from_seed(&sponge, w.seed);
             let text = std::fs::read_to_string(a.get("opening")?).map_err(|e| e.to_string())?;
-            let opening = if text.trim_start().starts_with("mzx1") {
-                // Sealed to one of this wallet's addresses.
-                (0..w.next_address)
-                    .find_map(|j| {
-                        let (addr, _) = delivery::address(&keys, &sponge, j);
-                        delivery::open(&w.seed, j, &addr.bundle_hash, &text)
-                    })
-                    .ok_or("the sealed opening is not for this wallet (or was tampered with)")?
-            } else {
-                delivery::Opening::from_plain(&text).ok_or("not an mzn1 or mzx1 opening")?
-            };
+            if !text.trim_start().starts_with("mzx1") {
+                return Err("not a sealed opening (mzx1)".into());
+            }
+            // Sealed to one of this wallet's addresses, for that address's
+            // diversifier.
+            let opening = (0..w.next_address)
+                .find_map(|j| {
+                    let (addr, _) = delivery::address(&keys, &sponge, j);
+                    delivery::open(&w.seed, j, &addr, &text).filter(|o| o.d == addr.d)
+                })
+                .ok_or("the sealed opening is not for this wallet (or was tampered with)")?;
             let note = Note {
                 d: opening.d,
                 owner: keys.spend.owner(&sponge, &opening.d),
@@ -255,9 +324,17 @@ fn run(args: &[String]) -> Result<(), String> {
                 psi: opening.psi,
                 y: opening.y,
             };
-            w.notes.push(StoredNote::from_note(&note, &sponge));
+            let mut stored = StoredNote::from_note(&note, &sponge);
+            if w.notes.iter().any(|n| n.cm == stored.cm) {
+                println!("already received");
+                return Ok(());
+            }
+            // Claimed after a random delay, so the sender cannot tell from
+            // the timing of the next transaction that it was the claim.
+            stored.claim_after = now_secs() + CLAIM_DELAY_MIN + rand::rngs::OsRng.next_u64() % CLAIM_DELAY_SPAN;
+            w.notes.push(stored);
             w.save(path)?;
-            println!("received {}; run sync, then claim it", mazzy(opening.value));
+            println!("received {}; it can be claimed after a random delay (claim)", mazzy(opening.value));
             Ok(())
         }
         "sync" => {
@@ -337,19 +414,37 @@ fn parse_digest(v: &Value) -> Result<ShieldedDigest, String> {
     ShieldedDigest::from_bytes(&unhex(v)?).map_err(|e| format!("{e:?}"))
 }
 
-/// Rebuilds the tree from the node's sections and updates the notes.
+/// Rebuilds the tree from the node's sections and updates the notes. It
+/// starts a random stretch before where it stopped, so a node cannot tell
+/// from the first epoch asked for that two sessions are the same wallet.
 fn sync(w: &mut Wallet, node: &Node) -> Result<(), String> {
     let chain = chain_id(node)?;
+    if w.chain_id.map_or(false, |c| c != chain) {
+        return Err(format!("the node serves chain {chain}, not this wallet's"));
+    }
+    w.chain_id = Some(chain);
     let sponge = Sponge::new(chain);
     let keys = WalletKeys::from_seed(&sponge, w.seed);
+    if w.leaf_epochs.len() != w.leaves.len() {
+        // A wallet from before leaf epochs were kept: rebuild the tree.
+        w.leaves.clear();
+        w.leaf_epochs.clear();
+        w.synced_epoch = 0;
+        for note in &mut w.notes {
+            note.position = None;
+            note.spent = false;
+        }
+    }
     let status = node.call("shielded_getStatus", vec![])?;
     let executed = as_u64(&status["executedEpoch"])?;
-    while w.synced_epoch <= executed {
+    let mut from = w.synced_epoch.saturating_sub(rand::rngs::OsRng.next_u64() % 200);
+    while from <= executed {
         let sections = node.call(
             "shielded_getSections",
-            vec![json!(format!("0x{:x}", w.synced_epoch)), json!("0x3e8")],
+            vec![json!(format!("0x{:x}", from)), json!("0x3e8")],
         )?;
         for section in sections.as_array().ok_or("sections")? {
+            let epoch = as_u64(&section["epoch"])?;
             for tx in section["transactions"].as_array().ok_or("transactions")? {
                 if tx["applied"] != Value::Bool(true) {
                     continue;
@@ -358,14 +453,22 @@ fn sync(w: &mut Wallet, node: &Node) -> Result<(), String> {
                 for k in 0..2 {
                     let pos = as_u64(&positions[k])?;
                     let cm = parse_digest(&tx["outputCommitments"][k])?;
+                    let leaf = from_shielded_digest(&cm).map(|x| x.as_canonical_u32());
+                    if (pos as usize) < w.leaves.len() {
+                        // Overlap with what is already synced: must agree.
+                        if w.leaves[pos as usize] != leaf {
+                            return Err(format!("the node's history changed at position {pos}"));
+                        }
+                        continue;
+                    }
                     if pos != w.leaves.len() as u64 {
                         return Err(format!("tree gap: position {pos}, have {}", w.leaves.len()));
                     }
-                    w.leaves.push(from_shielded_digest(&cm).map(|x| x.as_canonical_u32()));
-                    let leaf = w.leaves[pos as usize];
+                    w.leaves.push(leaf);
+                    w.leaf_epochs.push(epoch);
                     w.pending.retain(|p| p.cm != leaf);
                     for note in w.notes.iter_mut().filter(|n| n.position.is_none()) {
-                        if note.cm == w.leaves[pos as usize] {
+                        if note.cm == leaf {
                             note.position = Some(pos);
                         }
                     }
@@ -381,8 +484,9 @@ fn sync(w: &mut Wallet, node: &Node) -> Result<(), String> {
                 }
             }
         }
-        w.synced_epoch = w.synced_epoch.saturating_add(1000).min(executed + 1);
+        from = from.saturating_add(1000).min(executed + 1);
     }
+    w.synced_epoch = executed + 1;
     let spendable: u64 =
         w.notes.iter().filter(|n| n.position.is_some() && !n.spent).map(|n| n.value).sum();
     println!(
@@ -393,10 +497,6 @@ fn sync(w: &mut Wallet, node: &Node) -> Result<(), String> {
     Ok(())
 }
 
-fn tree(w: &Wallet) -> Tree {
-    Tree { leaves: w.leaves.iter().map(|l| l.map(F::new)).collect() }
-}
-
 // ---- transactions -----------------------------------------------------------
 
 struct Context {
@@ -405,9 +505,34 @@ struct Context {
     sponge: Sponge,
     keys: WalletKeys,
     fee: u64,
+    /// The tree at the anchor epoch, and how many leaves it has: only
+    /// notes below that are spendable now.
+    anchor: Tree,
+    anchor_leaves: u64,
+}
+
+/// The canonical anchor (see `ANCHOR_STEP`): the tree at the last boundary
+/// epoch, checked against the state of the node and of every `--verify-rpc`
+/// node at that epoch.
+fn anchor_at(w: &Wallet, executed: u64, nodes: &[&Node]) -> Result<(Tree, u64), String> {
+    let epoch = executed / ANCHOR_STEP * ANCHOR_STEP;
+    let n = w.leaf_epochs.partition_point(|e| *e <= epoch);
+    let tree = Tree { leaves: w.leaves[..n].iter().map(|l| l.map(F::new)).collect() };
+    let root = to_bytes(&tree.root());
+    for node in nodes {
+        let state = node.call("shielded_getStateAt", vec![json!(format!("0x{epoch:x}"))])?;
+        if unhex(&state["root"])? != root || as_u64(&state["leaves"])? != n as u64 {
+            return Err(format!(
+                "a node disagrees with this wallet about the tree at epoch {epoch}; \
+                 not proving against it"
+            ));
+        }
+    }
+    Ok((tree, n as u64))
 }
 
 fn context(w: &mut Wallet, a: &Args) -> Result<Context, String> {
+    warn_if_exposed(a.get("rpc")?);
     let node = Node::connect(a.get("rpc")?)?;
     sync(w, &node)?;
     let status = node.call("shielded_getStatus", vec![])?;
@@ -421,19 +546,35 @@ fn context(w: &mut Wallet, a: &Args) -> Result<Context, String> {
         return Err(format!("the node's shielded unit is not {UNIT} mazzy"));
     }
     let fee = (as_u256(&status["txFee"])? / U256::from(UNIT)).as_u64();
-    Ok(Context { node, chain, sponge, keys, fee })
+    let executed = as_u64(&status["executedEpoch"])?;
+    let verify = match a.get("verify-rpc") {
+        Ok(url) => Some(Node::connect(url)?),
+        Err(_) => None,
+    };
+    let mut nodes = vec![&node];
+    nodes.extend(verify.as_ref());
+    let (anchor, anchor_leaves) = anchor_at(w, executed, &nodes)?;
+    Ok(Context { node, chain, sponge, keys, fee, anchor, anchor_leaves })
 }
 
-/// Picks up to two unspent notes worth at least `need`, largest first.
-fn select_inputs(w: &Wallet, need: u64) -> Result<Vec<usize>, String> {
+/// Picks up to two unspent notes worth at least `need`, largest first,
+/// among those inside the anchor's tree.
+fn select_inputs(ctx: &Context, w: &Wallet, need: u64) -> Result<Vec<usize>, String> {
     let mut idx: Vec<usize> = (0..w.notes.len())
-        .filter(|&i| w.notes[i].position.is_some() && !w.notes[i].spent)
+        .filter(|&i| {
+            w.notes[i].position.map_or(false, |p| p < ctx.anchor_leaves) && !w.notes[i].spent
+        })
         .collect();
     idx.sort_by_key(|&i| std::cmp::Reverse(w.notes[i].value));
     idx.truncate(2);
     let total: u64 = idx.iter().map(|&i| w.notes[i].value).sum();
     if total < need {
-        return Err(format!("spendable {} in two notes is below {}", mazzy(total), mazzy(need)));
+        return Err(format!(
+            "spendable {} in two notes is below {} (a note received in the last ~{ANCHOR_STEP} \
+             epochs becomes spendable at the next anchor)",
+            mazzy(total),
+            mazzy(need)
+        ));
     }
     Ok(idx)
 }
@@ -477,7 +618,13 @@ fn self_note(
     ctx: &Context, w: &mut Wallet, path: &str, value: u64,
 ) -> Result<(Note, RecoverySlot, StoredNote), String> {
     let i = w.next_self;
-    w.next_self += 1;
+    let counter_mask = (1u32 << SELF_COUNTER_BITS) - 1;
+    w.next_self = if (i + 1) & counter_mask == 0 {
+        // This prefix is used up: move to a new random one.
+        self_index_base(fresh_prefix(&HashSet::new()))
+    } else {
+        i + 1
+    };
     w.save(path)?;
     let note = ctx.keys.self_note(&ctx.sponge, i, value);
     let mut stored = StoredNote::from_note(&note, &ctx.sponge);
@@ -539,7 +686,7 @@ fn shield_in(path: &str, a: &Args) -> Result<(), String> {
         v_out: 0,
         fee: ctx.fee,
         sighash: [0; 32],
-        anchor: tree(&w).root(),
+        anchor: ctx.anchor.root(),
         out_limb_override: [None, None],
     };
     let (body, proof) = prove(&ctx, witness, None, recovery)?;
@@ -574,14 +721,22 @@ fn send(path: &str, a: &Args) -> Result<(), String> {
     let mut w = Wallet::load(path, passphrase)?;
     let ctx = context(&mut w, a)?;
     let amount = a.shielded_amount()?;
-    let to = delivery::Address::decode(a.get("to")?).ok_or("--to is not an mzs1 address")?;
+    let to = delivery::Address::decode(a.get("to")?)
+        .ok_or("--to is not a valid mzs1 address (check for typos)")?;
     let (d, owner) = (to.d, to.owner);
-    let inputs = select_inputs(&w, amount + ctx.fee)?;
+    // Everything the delivery needs is checked before anything is proven or
+    // sent: a payment whose opening cannot be delivered is lost.
+    let bundle = delivery::Bundle(std::fs::read(a.get("bundle")?).map_err(|e| e.to_string())?);
+    let sealed_out = a.get("sealed-out")?.to_string();
+    let inputs = select_inputs(&ctx, &w, amount + ctx.fee)?;
     let total: u64 = inputs.iter().map(|&i| w.notes[i].value).sum();
     let (change, recovery, stored) = self_note(&ctx, &mut w, path, total - amount - ctx.fee)?;
-    let t = tree(&w);
-    let input = |k: usize| inputs.get(k).map(|&i| spend_input(&ctx, &w, &t, i)).unwrap_or_else(|| dummy_input(&ctx.sponge));
+    let t = &ctx.anchor;
+    let input = |k: usize| inputs.get(k).map(|&i| spend_input(&ctx, &w, t, i)).unwrap_or_else(|| dummy_input(&ctx.sponge));
     let theirs = new_note(d, owner, amount);
+    let opening = delivery::Opening { d: theirs.d, value: theirs.value, psi: theirs.psi, y: theirs.y };
+    let sealed = delivery::seal(&to, &bundle, &opening)?;
+    write_private(&sealed_out, sealed.as_bytes())?;
     let witness = Tx2Witness {
         inputs: [input(0), input(1)],
         outputs: shuffle_outputs(theirs.clone(), change),
@@ -589,22 +744,13 @@ fn send(path: &str, a: &Args) -> Result<(), String> {
         v_out: 0,
         fee: ctx.fee,
         sighash: [0; 32],
-        anchor: t.root(),
+        anchor: ctx.anchor.root(),
         out_limb_override: [None, None],
     };
     let (body, proof) = prove(&ctx, witness, None, recovery)?;
     record_pending(&mut w, path, &body, &proof, stored)?;
     submit(&ctx, &body, &proof)?;
-    let opening = delivery::Opening { d: theirs.d, value: theirs.value, psi: theirs.psi, y: theirs.y };
-    if let Ok(bundle_file) = a.get("bundle") {
-        let bundle = delivery::Bundle(std::fs::read(bundle_file).map_err(|e| e.to_string())?);
-        let sealed = delivery::seal(&to, &bundle, &opening)?;
-        std::fs::write(a.get("sealed-out")?, &sealed).map_err(|e| e.to_string())?;
-        println!("sealed opening written to {}", a.get("sealed-out")?);
-    } else {
-        std::fs::write(a.get("opening-out")?, opening.to_plain()).map_err(|e| e.to_string())?;
-        println!("plain opening written to {} (use only over a private channel)", a.get("opening-out")?);
-    }
+    println!("sealed opening written to {sealed_out}; deliver it to the recipient");
     Ok(())
 }
 
@@ -614,11 +760,11 @@ fn unshield(path: &str, a: &Args) -> Result<(), String> {
     let amount = a.shielded_amount()?;
     let to: H160 = a.get("to")?.trim_start_matches("0x").parse().map_err(|e| format!("--to: {e:?}"))?;
     let space = if a.0.contains_key("espace") { mazze_types::Space::Ethereum } else { mazze_types::Space::Native };
-    let inputs = select_inputs(&w, amount + ctx.fee)?;
+    let inputs = select_inputs(&ctx, &w, amount + ctx.fee)?;
     let total: u64 = inputs.iter().map(|&i| w.notes[i].value).sum();
     let (change, recovery, stored) = self_note(&ctx, &mut w, path, total - amount - ctx.fee)?;
-    let t = tree(&w);
-    let input = |k: usize| inputs.get(k).map(|&i| spend_input(&ctx, &w, &t, i)).unwrap_or_else(|| dummy_input(&ctx.sponge));
+    let t = &ctx.anchor;
+    let input = |k: usize| inputs.get(k).map(|&i| spend_input(&ctx, &w, t, i)).unwrap_or_else(|| dummy_input(&ctx.sponge));
     let witness = Tx2Witness {
         inputs: [input(0), input(1)],
         outputs: shuffle_outputs(change, dummy_output()),
@@ -626,7 +772,7 @@ fn unshield(path: &str, a: &Args) -> Result<(), String> {
         v_out: amount,
         fee: ctx.fee,
         sighash: [0; 32],
-        anchor: t.root(),
+        anchor: ctx.anchor.root(),
         out_limb_override: [None, None],
     };
     let (body, proof) =
@@ -642,29 +788,46 @@ fn unshield(path: &str, a: &Args) -> Result<(), String> {
 fn claim(path: &str, a: &Args) -> Result<(), String> {
     let mut w = Wallet::load(path, passphrase)?;
     let ctx = context(&mut w, a)?;
+    let now = now_secs();
+    let claimable = |n: &StoredNote| {
+        n.self_index.is_none()
+            && n.position.map_or(false, |p| p < ctx.anchor_leaves)
+            && !n.spent
+    };
     let received = w
         .notes
         .iter()
-        .position(|n| n.self_index.is_none() && n.position.is_some() && !n.spent)
-        .ok_or("no received note to claim")?;
+        .position(|n| claimable(n) && (n.claim_after <= now || a.0.contains_key("now")))
+        .ok_or_else(|| match w.notes.iter().filter(|n| claimable(n)).map(|n| n.claim_after).min() {
+            Some(t) => format!(
+                "the received note can be claimed in {} minutes (a random delay, so its sender \
+                 cannot time the claim); --now claims at once",
+                (t - now).div_ceil(60)
+            ),
+            None => "no received note to claim (yet)".to_string(),
+        })?;
     let main = (0..w.notes.len())
-        .filter(|&i| w.notes[i].self_index.is_some() && w.notes[i].position.is_some() && !w.notes[i].spent)
+        .filter(|&i| {
+            w.notes[i].self_index.is_some()
+                && w.notes[i].position.map_or(false, |p| p < ctx.anchor_leaves)
+                && !w.notes[i].spent
+        })
         .max_by_key(|&i| w.notes[i].value);
     let total = w.notes[received].value + main.map(|i| w.notes[i].value).unwrap_or(0);
     if total <= ctx.fee {
         return Err(format!("the notes ({}) do not cover the fee {}", mazzy(total), mazzy(ctx.fee)));
     }
-    let t = tree(&w);
-    let second = main.map(|i| spend_input(&ctx, &w, &t, i)).unwrap_or_else(|| dummy_input(&ctx.sponge));
+    let t = &ctx.anchor;
+    let second = main.map(|i| spend_input(&ctx, &w, t, i)).unwrap_or_else(|| dummy_input(&ctx.sponge));
     let (mine, recovery, stored) = self_note(&ctx, &mut w, path, total - ctx.fee)?;
     let witness = Tx2Witness {
-        inputs: [spend_input(&ctx, &w, &t, received), second],
+        inputs: [spend_input(&ctx, &w, t, received), second],
         outputs: shuffle_outputs(mine, dummy_output()),
         v_in: 0,
         v_out: 0,
         fee: ctx.fee,
         sighash: [0; 32],
-        anchor: t.root(),
+        anchor: ctx.anchor.root(),
         out_limb_override: [None, None],
     };
     let (body, proof) = prove(&ctx, witness, None, recovery)?;
@@ -675,8 +838,8 @@ fn claim(path: &str, a: &Args) -> Result<(), String> {
 
 /// Rebuilds a wallet from the seed alone: scans every section, matches the
 /// self-note tags locally (the node never learns which tags are ours),
-/// opens their slots and rebuilds the notes. Stops after `GAP_LIMIT`
-/// consecutive missing tags.
+/// opens their slots and rebuilds the notes. Each device prefix is scanned
+/// until `GAP_LIMIT` consecutive missing tags.
 fn restore(path: &str, a: &Args) -> Result<(), String> {
     if std::path::Path::new(path).exists() {
         return Err(format!("{path} exists; restore into a new file"));
@@ -698,11 +861,15 @@ fn restore(path: &str, a: &Args) -> Result<(), String> {
     let sponge = Sponge::new(chain);
     let keys = WalletKeys::from_seed(&sponge, seed);
     let mut w = Wallet::new(seed, &new_passphrase()?)?;
+    w.chain_id = Some(chain);
 
-    // Every applied transaction with its recovery slot and outputs.
+    // Every applied transaction by recovery tag. Tags are public, so anyone
+    // may copy one into a transaction of their own: every transaction of a
+    // tag is kept, and the one whose slot opens and whose outputs hold the
+    // rebuilt note is the wallet's.
     let status = node.call("shielded_getStatus", vec![])?;
     let executed = as_u64(&status["executedEpoch"])?;
-    let mut by_tag = HashMap::new();
+    let mut by_tag: HashMap<Vec<u8>, Vec<Value>> = HashMap::new();
     let mut from = 0u64;
     while from <= executed {
         let sections = node.call(
@@ -712,38 +879,55 @@ fn restore(path: &str, a: &Args) -> Result<(), String> {
         for section in sections.as_array().ok_or("sections")? {
             for tx in section["transactions"].as_array().ok_or("transactions")? {
                 if tx["applied"] == Value::Bool(true) {
-                    by_tag.insert(unhex(&tx["recoveryTag"])?, tx.clone());
+                    by_tag.entry(unhex(&tx["recoveryTag"])?).or_default().push(tx.clone());
                 }
             }
         }
         from = from.saturating_add(1000);
     }
 
+    // Every device prefix, each until GAP_LIMIT consecutive misses.
     let rkey = recovery_key(&seed);
-    let mut misses = 0;
-    let mut i = 0u32;
-    while misses < GAP_LIMIT && i < MAX_SELF_INDEX {
-        let tag = recovery_tag(&rkey, i).to_vec();
-        if let Some(tx) = by_tag.get(&tag) {
-            misses = 0;
-            let slot = RecoverySlot {
-                tag: tag.clone().try_into().unwrap(),
-                slot: unhex(&tx["recoverySlot"])?.try_into().map_err(|_| "slot length")?,
-                mac: unhex(&tx["recoveryMac"])?.try_into().map_err(|_| "mac length")?,
-            };
-            let value = keys
-                .open_recovery(i, &slot)
-                .ok_or_else(|| format!("tag {i} matched but its slot does not open"))?;
-            let note = keys.self_note(&sponge, i, value);
-            let mut stored = StoredNote::from_note(&note, &sponge);
-            stored.self_index = Some(i);
-            w.notes.push(stored);
-            w.next_self = i + 1;
-        } else {
-            misses += 1;
+    let mut used = HashSet::new();
+    for prefix in 0..=u16::MAX {
+        let base = self_index_base(prefix);
+        let (mut misses, mut counter) = (0u32, 0u32);
+        while misses < GAP_LIMIT && counter < (1 << SELF_COUNTER_BITS) {
+            let i = base | counter;
+            counter += 1;
+            let found = by_tag.get(recovery_tag(&rkey, i).as_slice()).and_then(|txs| {
+                txs.iter().find_map(|tx| {
+                    let slot = RecoverySlot {
+                        tag: recovery_tag(&rkey, i),
+                        slot: unhex(&tx["recoverySlot"]).ok()?.try_into().ok()?,
+                        mac: unhex(&tx["recoveryMac"]).ok()?.try_into().ok()?,
+                    };
+                    let value = keys.open_recovery(i, &slot)?;
+                    let mut stored = StoredNote::from_note(&keys.self_note(&sponge, i, value), &sponge);
+                    let outputs = tx["outputCommitments"].as_array()?;
+                    let ours = outputs.iter().any(|cm| {
+                        parse_digest(cm)
+                            .map(|d| from_shielded_digest(&d).map(|x| x.as_canonical_u32()) == stored.cm)
+                            .unwrap_or(false)
+                    });
+                    ours.then(|| {
+                        stored.self_index = Some(i);
+                        stored
+                    })
+                })
+            });
+            match found {
+                Some(stored) => {
+                    misses = 0;
+                    used.insert(prefix);
+                    w.notes.push(stored);
+                }
+                None => misses += 1,
+            }
         }
-        i += 1;
     }
+    // This device continues under a prefix no earlier device used.
+    w.next_self = self_index_base(fresh_prefix(&used));
     println!("recovered {} self-notes from the seed", w.notes.len());
     // The ordinary sync rebuilds the tree, places the notes and marks the
     // spent ones.

@@ -1,17 +1,20 @@
 //! Addresses and note delivery (spec §3, §9.2–9.3).
 //!
-//! - An address `mzs1…` is `d ‖ owner ‖ H(bundle)`: enough to create a
-//!   payment. The bundle holds the recipient's three public delivery keys and
-//!   travels off-chain, once per relationship; it is checked against the
-//!   hash in the address. Nothing about delivery is on chain.
-//! - A plain opening `mzn1…` is for channels that are already private (in
-//!   person, a file, paper).
-//! - A sealed opening `mzx1…` is the opening under a hybrid KEM: ML-KEM-768
-//!   (lattices) + Classic McEliece-460896 (Goppa codes) + X25519. The KDF
-//!   hashes all three secrets and all ciphertexts, so the blob stays secret
-//!   while any one component holds. It carries no sender signature or
-//!   identifier (anyone holding the bundle could have produced it) and is
-//!   key-committing.
+//! - An address `mzs1…` is `d ‖ owner ‖ H(bundle) ‖ checksum`: enough to
+//!   create a payment. The bundle holds the recipient's three public delivery
+//!   keys and travels off-chain, once per relationship; it is checked against
+//!   the hash in the address. Nothing about delivery is on chain.
+//! - A payment's opening travels only sealed, `mzx1…`: the opening under a
+//!   hybrid KEM, ML-KEM-768 (lattices) + Classic McEliece-460896 (Goppa
+//!   codes) + X25519. The KDF hashes all three secrets, all ciphertexts and
+//!   the whole address, so the blob stays secret while any one component
+//!   holds, and a tampered address fails instead of creating an unspendable
+//!   note. It carries no sender signature or identifier (anyone holding the
+//!   bundle could have produced it), has a fixed size, and is
+//!   key-committing. Recipient anonymity (who the blob is for) needs both
+//!   the ML-KEM and the McEliece ciphertexts to be key-private; X25519's is
+//!   ephemeral. There is no plain form: an opening in clear would reveal the
+//!   value and let its holder find the note on chain.
 //!
 //! The derivation labels are those of the prototype (spikes/shielded-notes),
 //! so both produce the same addresses and bundles from a seed.
@@ -85,26 +88,50 @@ pub struct Address {
     pub bundle_hash: [u8; 32],
 }
 
+/// Bytes of an address's checksum: a typo is caught before any payment.
+const ADDRESS_CHECK_LEN: usize = 4;
+
 impl Address {
-    pub fn encode(&self) -> String {
-        let mut b = vec![1u8];
+    fn payload(&self) -> Vec<u8> {
+        let mut b = vec![2u8];
         b.extend(to_bytes(&self.d));
         b.extend(to_bytes(&self.owner));
         b.extend_from_slice(&self.bundle_hash);
+        b
+    }
+
+    fn check(payload: &[u8]) -> [u8; ADDRESS_CHECK_LEN] {
+        Xof::new("mazze/address-check", &[payload]).bytes()
+    }
+
+    pub fn encode(&self) -> String {
+        let mut b = self.payload();
+        b.extend_from_slice(&Self::check(&b));
         format!("mzs1{}", base32(&b))
     }
 
+    /// Canonical decoding only: the version, the checksum, field elements
+    /// below the prime, and the one string form (no stray trailing bits).
     pub fn decode(s: &str) -> Option<Self> {
-        let b = unbase32(s.trim().strip_prefix("mzs1")?)?;
-        if b.len() != 1 + 12 + 48 + 32 || b[0] != 1 {
+        let s = s.trim();
+        let b = unbase32(s.strip_prefix("mzs1")?)?;
+        if b.len() != 1 + 12 + 48 + 32 + ADDRESS_CHECK_LEN || b[0] != 2 {
             return None;
         }
-        Some(Address {
-            d: from_bytes(&b[1..13])?,
-            owner: from_bytes(&b[13..61])?,
-            bundle_hash: b[61..93].try_into().ok()?,
-        })
+        let (payload, check) = b.split_at(b.len() - ADDRESS_CHECK_LEN);
+        if check != Self::check(payload) {
+            return None;
+        }
+        let addr = Address {
+            d: from_bytes(&payload[1..13])?,
+            owner: from_bytes(&payload[13..61])?,
+            bundle_hash: payload[61..93].try_into().ok()?,
+        };
+        (addr.encode() == s).then_some(addr)
     }
+
+    /// What sealing binds: the whole address.
+    fn binding(&self) -> [u8; 32] { Xof::new("mazze/seal/address/v2", &[&self.payload()]).bytes() }
 }
 
 /// The recipient's three public delivery keys, versioned.
@@ -191,17 +218,14 @@ impl Opening {
         })
     }
 
-    pub fn to_plain(&self) -> String { format!("mzn1{}", base32(&self.to_bytes())) }
-
-    pub fn from_plain(s: &str) -> Option<Self> { Self::from_bytes(&unbase32(s.trim().strip_prefix("mzn1")?)?) }
 }
 
 // ---- sealing ---------------------------------------------------------------------
 
-fn kdf(ss: [&[u8]; 3], cts: [&[u8]; 3], bundle_hash: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
+fn kdf(ss: [&[u8]; 3], cts: [&[u8]; 3], address: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
     let k: [u8; 32] =
-        Xof::new("mazze/seal/kdf/v1", &[ss[0], ss[1], ss[2], cts[0], cts[1], cts[2], bundle_hash]).bytes();
-    let commit: [u8; 32] = Xof::new("mazze/seal/key-commit/v1", &[&k]).bytes();
+        Xof::new("mazze/seal/kdf/v2", &[ss[0], ss[1], ss[2], cts[0], cts[1], cts[2], address]).bytes();
+    let commit: [u8; 32] = Xof::new("mazze/seal/key-commit/v2", &[&k]).bytes();
     (k, commit)
 }
 
@@ -236,7 +260,7 @@ pub fn seal(addr: &Address, bundle: &Bundle, opening: &Opening) -> Result<String
     let (k, commit) = kdf(
         [ss1.as_slice(), ss2.as_array(), ss3.as_bytes()],
         [ct1.as_slice(), ct2.as_array(), epk.as_bytes()],
-        &addr.bundle_hash,
+        &addr.binding(),
     );
     // The key is fresh per blob, so the fixed nonce is never reused.
     let aead = ChaCha20Poly1305::new(&k.into())
@@ -252,9 +276,10 @@ pub fn seal(addr: &Address, bundle: &Bundle, opening: &Opening) -> Result<String
     Ok(format!("mzx1{}", base32(&blob)))
 }
 
-/// Opens a sealed blob with the delivery keys of address `j`, or `None` if
-/// it is not for that address (or was tampered with).
-pub fn open(seed: &[u8; 32], j: u32, bundle_hash: &[u8; 32], sealed: &str) -> Option<Opening> {
+/// Opens a sealed blob with the delivery keys of address `j` (whose public
+/// form is `addr`), or `None` if it is not for that address, was tampered
+/// with, or was sealed to a tampered copy of it.
+pub fn open(seed: &[u8; 32], j: u32, addr: &Address, sealed: &str) -> Option<Opening> {
     let blob = unbase32(sealed.trim().strip_prefix("mzx1")?)?;
     if blob.len() != SEALED_LEN || blob[0] != 1 {
         return None;
@@ -273,7 +298,7 @@ pub fn open(seed: &[u8; 32], j: u32, bundle_hash: &[u8; 32], sealed: &str) -> Op
     let ss2 = classic_mceliece_rust::decapsulate_boxed(&ct2.into(), &keys.mce_sk);
     let ss3 = keys.x_sk.diffie_hellman(&x25519_dalek::PublicKey::from(epk));
     let (k, expected) =
-        kdf([ss1.as_slice(), ss2.as_array(), ss3.as_bytes()], [ct1, &ct2, &epk], bundle_hash);
+        kdf([ss1.as_slice(), ss2.as_array(), ss3.as_bytes()], [ct1, &ct2, &epk], &addr.binding());
     if expected != commit {
         return None;
     }
@@ -296,13 +321,21 @@ mod tests {
     }
 
     #[test]
-    fn addresses_and_plain_openings_round_trip() {
+    fn addresses_round_trip_and_catch_typos() {
         let sponge = Sponge::new(9);
         let keys = WalletKeys::from_seed(&sponge, [3; 32]);
         let (addr, bundle) = address(&keys, &sponge, 0);
-        assert_eq!(Address::decode(&addr.encode()), Some(addr.clone()));
+        let text = addr.encode();
+        assert_eq!(Address::decode(&text), Some(addr.clone()));
         assert_eq!(bundle.hash(), addr.bundle_hash);
-        assert_eq!(Opening::from_plain(&opening().to_plain()), Some(opening()));
+        assert_eq!(Opening::from_bytes(&opening().to_bytes()), Some(opening()));
+        // Any single changed character is caught by the checksum or the
+        // canonical form.
+        for i in 4..text.len() {
+            let mut t = text.clone().into_bytes();
+            t[i] = if t[i] == b'a' { b'b' } else { b'a' };
+            assert_eq!(Address::decode(std::str::from_utf8(&t).unwrap()), None, "typo at {i}");
+        }
         let _ = F::ZERO;
     }
 
@@ -314,14 +347,21 @@ mod tests {
         let (addr, bundle) = address(&bob, &sponge, 0);
         let sealed = seal(&addr, &bundle, &opening()).unwrap();
         assert_eq!(unbase32(&sealed[4..]).unwrap().len(), SEALED_LEN);
-        assert_eq!(open(&bob.seed, 0, &addr.bundle_hash, &sealed), Some(opening()));
-        assert_eq!(open(&carol.seed, 0, &addr.bundle_hash, &sealed), None, "another wallet");
-        assert_eq!(open(&bob.seed, 1, &addr.bundle_hash, &sealed), None, "another address");
+        assert_eq!(open(&bob.seed, 0, &addr, &sealed), Some(opening()));
+        assert_eq!(open(&carol.seed, 0, &addr, &sealed), None, "another wallet");
+        assert_eq!(open(&bob.seed, 1, &addr, &sealed), None, "another address");
+        // Sealed to a copy of Bob's address with another owner (a tampered
+        // address): Bob does not open it, instead of receiving a note he
+        // could never spend.
+        let mut forged = addr.clone();
+        forged.owner[0] = forged.owner[0] + F::ONE;
+        let to_forged = seal(&forged, &bundle, &opening()).unwrap();
+        assert_eq!(open(&bob.seed, 0, &addr, &to_forged), None);
         // Tampering anywhere fails the key commitment or the AEAD.
         let mut raw = unbase32(&sealed[4..]).unwrap();
         let last = raw.len() - 1;
         raw[last] ^= 1;
-        assert_eq!(open(&bob.seed, 0, &addr.bundle_hash, &format!("mzx1{}", base32(&raw))), None);
+        assert_eq!(open(&bob.seed, 0, &addr, &format!("mzx1{}", base32(&raw))), None);
         // A bundle that does not match the address is refused.
         let (_, carol_bundle) = address(&carol, &sponge, 0);
         assert!(seal(&addr, &carol_bundle, &opening()).is_err());

@@ -348,8 +348,8 @@ pub fn deposit_credit(state: &State, body_hash: &[u8]) -> DbResult<U256> {
 /// The bridge's half of a shield-in: the depositor's `amount` has already
 /// moved into the backing account; this records the credit the shielded
 /// body `body_hash` consumes when its slot executes. A second deposit for
-/// the same body adds to the credit, which then no longer matches the body
-/// exactly, so neither can be consumed.
+/// the same body adds to the credit; the shield-in still consumes exactly
+/// its `v_public_in` and the excess stays credited to the body.
 pub fn record_deposit(
     state: &mut State, body_hash: &[u8], amount: U256, height: u64,
 ) -> DbResult<()> {

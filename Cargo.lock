@@ -4626,6 +4626,7 @@ dependencies = [
  "rlp 0.4.6",
  "serde",
  "tiny-keccak 2.0.2",
+ "zeroize",
 ]
 
 [[package]]
@@ -5170,6 +5171,7 @@ dependencies = [
  "kem",
  "rand_core 0.6.4",
  "sha3 0.10.9",
+ "zeroize",
 ]
 
 [[package]]

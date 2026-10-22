@@ -958,6 +958,10 @@ impl SynchronizationProtocolHandler {
                 network::ErrorKind::Disconnect(_) => disconnect = false,
                 network::ErrorKind::InvalidNodeId => disconnect = false,
                 network::ErrorKind::OversizedPacket => disconnect = false,
+                // It asks for data and does not read it.
+                network::ErrorKind::SendQueueFull => {
+                    op = Some(UpdateNodeOperation::Demotion)
+                }
                 network::ErrorKind::Io(_) => disconnect = false,
                 network::ErrorKind::Throttling(_) => disconnect = false,
                 network::ErrorKind::SocketIo(_) => {

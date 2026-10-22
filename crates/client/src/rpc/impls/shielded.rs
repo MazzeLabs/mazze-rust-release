@@ -73,7 +73,10 @@ impl ShieldedServer for ShieldedHandler {
         let (root, leaves) = tree_state(&state).map_err(db_err)?;
         let backing = state.balance(&backing_account()).map_err(db_err)?;
         Ok(ShieldedStatus {
-            active: params.activation_height != u64::MAX,
+            // Activated and not paused: a wallet must not deposit into a
+            // lane that will not execute.
+            active: params.is_active(self.consensus.best_epoch_number()),
+            pause_height: params.pause_height.into(),
             activation_height: params.activation_height.into(),
             slot_epochs: params.slot_epochs.into(),
             max_txs_per_block: (params.max_txs_per_block as u64).into(),

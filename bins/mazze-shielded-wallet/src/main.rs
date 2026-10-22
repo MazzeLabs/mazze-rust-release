@@ -33,6 +33,7 @@
 //! mazze-shielded-wallet restore    --wallet W --rpc URL   (seed asked, or MAZZE_RESTORE_SEED)
 //! mazze-shielded-wallet fund-espace --wallet W --rpc URL --funder-key HEX --amount A   (test helper)
 //! mazze-shielded-wallet resubmit   --wallet W --rpc URL   (re-sends proven txs not yet on chain)
+//! mazze-shielded-wallet abandon-pending --wallet W        (drops proven txs that will never land)
 //! ```
 //!
 //! Recovery (spec §9.5): every note the wallet keeps for itself (change,
@@ -290,12 +291,13 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         "balance" => {
             let w = Wallet::load(path, passphrase)?;
-            let spendable: u64 = w.notes.iter().filter(|n| n.position.is_some() && !n.spent).map(|n| n.value).sum();
-            let pending: u64 = w.notes.iter().filter(|n| n.position.is_none()).map(|n| n.value).sum();
+            let sum = |f: &dyn Fn(&StoredNote) -> bool| -> U256 {
+                w.notes.iter().filter(|n| f(n)).fold(U256::zero(), |s, n| s + mazzy(n.value))
+            };
             println!(
                 "{{\"spendable\": {}, \"pending\": {}, \"notes\": {}}}",
-                mazzy(spendable),
-                mazzy(pending),
+                sum(&|n| n.position.is_some() && !n.spent),
+                sum(&|n| n.position.is_none()),
                 w.notes.len()
             );
             Ok(())
@@ -349,6 +351,19 @@ fn run(args: &[String]) -> Result<(), String> {
         "send" => send(path, &a),
         "unshield" => unshield(path, &a),
         "resubmit" => resubmit(path, &a),
+        "abandon-pending" => {
+            // Gives up on proven transactions that will never land (their
+            // anchor expired, their deposit was never made): their inputs
+            // are spendable again and their outputs are dropped.
+            let mut w = Wallet::load(path, passphrase)?;
+            let outs: Vec<[u32; DIGEST]> = w.pending.iter().map(|p| p.cm).collect();
+            let n = w.pending.len();
+            w.pending.clear();
+            w.notes.retain(|note| note.position.is_some() || !outs.contains(&note.cm));
+            w.save(path)?;
+            println!("abandoned {n} pending transactions");
+            Ok(())
+        }
         "fund-espace" => {
             // A native → eSpace transfer to the same key's eSpace address,
             // through the cross-space bridge (for testing eSpace shield-in).
@@ -418,6 +433,31 @@ fn parse_digest(v: &Value) -> Result<ShieldedDigest, String> {
 /// starts a random stretch before where it stopped, so a node cannot tell
 /// from the first epoch asked for that two sessions are the same wallet.
 fn sync(w: &mut Wallet, node: &Node) -> Result<(), String> {
+    match sync_once(w, node) {
+        // The node's history moved under what this wallet had (a reorg
+        // deeper than the overlap): rebuild the tree from the start once,
+        // instead of staying stuck.
+        Err(e) if e.contains("history changed") || e.contains("tree gap") => {
+            eprintln!("{e}; rescanning from the start");
+            reset_tree(w);
+            sync_once(w, node)
+        }
+        r => r,
+    }
+}
+
+/// Forgets the tree and where notes sit in it; the next sync rebuilds them.
+fn reset_tree(w: &mut Wallet) {
+    w.leaves.clear();
+    w.leaf_epochs.clear();
+    w.synced_epoch = 0;
+    for note in &mut w.notes {
+        note.position = None;
+        note.spent = false;
+    }
+}
+
+fn sync_once(w: &mut Wallet, node: &Node) -> Result<(), String> {
     let chain = chain_id(node)?;
     if w.chain_id.map_or(false, |c| c != chain) {
         return Err(format!("the node serves chain {chain}, not this wallet's"));
@@ -427,13 +467,7 @@ fn sync(w: &mut Wallet, node: &Node) -> Result<(), String> {
     let keys = WalletKeys::from_seed(&sponge, w.seed);
     if w.leaf_epochs.len() != w.leaves.len() {
         // A wallet from before leaf epochs were kept: rebuild the tree.
-        w.leaves.clear();
-        w.leaf_epochs.clear();
-        w.synced_epoch = 0;
-        for note in &mut w.notes {
-            note.position = None;
-            note.spent = false;
-        }
+        reset_tree(w);
     }
     let status = node.call("shielded_getStatus", vec![])?;
     let executed = as_u64(&status["executedEpoch"])?;
@@ -557,17 +591,28 @@ fn context(w: &mut Wallet, a: &Args) -> Result<Context, String> {
     Ok(Context { node, chain, sponge, keys, fee, anchor, anchor_leaves })
 }
 
+/// Whether a pending transaction already spends note `i`.
+fn reserved(w: &Wallet, i: usize) -> bool {
+    w.pending.iter().any(|p| p.spends.contains(&w.notes[i].cm))
+}
+
 /// Picks up to two unspent notes worth at least `need`, largest first,
-/// among those inside the anchor's tree.
+/// among those inside the anchor's tree and not reserved by a pending
+/// transaction.
 fn select_inputs(ctx: &Context, w: &Wallet, need: u64) -> Result<Vec<usize>, String> {
     let mut idx: Vec<usize> = (0..w.notes.len())
         .filter(|&i| {
-            w.notes[i].position.map_or(false, |p| p < ctx.anchor_leaves) && !w.notes[i].spent
+            w.notes[i].position.map_or(false, |p| p < ctx.anchor_leaves)
+                && !w.notes[i].spent
+                && !reserved(w, i)
         })
         .collect();
     idx.sort_by_key(|&i| std::cmp::Reverse(w.notes[i].value));
     idx.truncate(2);
-    let total: u64 = idx.iter().map(|&i| w.notes[i].value).sum();
+    let total = idx
+        .iter()
+        .try_fold(0u64, |s, &i| s.checked_add(w.notes[i].value))
+        .ok_or("note values overflow")?;
     if total < need {
         return Err(format!(
             "spendable {} in two notes is below {} (a note received in the last ~{ANCHOR_STEP} \
@@ -636,12 +681,14 @@ fn self_note(
 /// side effect (a deposit, a submission), so `resubmit` can always finish it.
 fn record_pending(
     w: &mut Wallet, path: &str, body: &primitives::shielded::ShieldedTxBody,
-    proof: &[u8], stored: StoredNote,
+    proof: &[u8], stored: StoredNote, inputs: &[usize],
 ) -> Result<(), String> {
+    let spends = inputs.iter().map(|&i| w.notes[i].cm).collect();
     w.pending.push(PendingTx {
         body: hex::encode(rlp::encode(body)),
         proof: hex::encode(proof),
         cm: stored.cm,
+        spends,
     });
     w.notes.push(stored);
     w.save(path)
@@ -690,7 +737,24 @@ fn shield_in(path: &str, a: &Args) -> Result<(), String> {
         out_limb_override: [None, None],
     };
     let (body, proof) = prove(&ctx, witness, None, recovery)?;
-    record_pending(&mut w, path, &body, &proof, stored)?;
+    record_pending(&mut w, path, &body, &proof, stored, &[])?;
+
+    // Before any value moves: the node must accept this body in every
+    // respect but the missing deposit. An anchor it no longer accepts, or
+    // anything else, is found now, not after the deposit is stranded.
+    match ctx.node.call(
+        "shielded_sendRawTransaction",
+        vec![hex0x(&rlp::encode(&body)), hex0x(&proof)],
+    ) {
+        Err(e) if e.contains("NoDeposit") => {}
+        Ok(_) => {}
+        Err(e) => {
+            w.pending.pop();
+            w.notes.pop();
+            w.save(path)?;
+            return Err(format!("the node would refuse this shield-in ({e}); no deposit was made"));
+        }
+    }
 
     // The deposit: a signed call to the bridge with the amount, from native
     // or, with --espace-rpc, from eSpace (the same key, its eSpace address).
@@ -708,9 +772,21 @@ fn shield_in(path: &str, a: &Args) -> Result<(), String> {
     // The bridge's credit is the authority, not the receipt: in a DAG the
     // same transaction can be packed twice, and the receipt returned may be
     // the skipped duplicate's.
-    let credit = deposit_credit(&ctx.node, body.hash().as_bytes())?;
+    // The node may still be executing the epoch of the deposit.
+    let mut credit = U256::zero();
+    for _ in 0..30 {
+        credit = deposit_credit(&ctx.node, body.hash().as_bytes())?;
+        if credit >= mazzy(amount) {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
     if credit < mazzy(amount) {
-        return Err(format!("the bridge holds a credit of {credit} for this body, expected {amount}"));
+        return Err(format!(
+            "the bridge holds a credit of {credit} for this body, expected {}; the body is saved: \
+             run resubmit once the deposit is executed",
+            mazzy(amount)
+        ));
     }
     println!("deposit credited: {credit}");
     submit(&ctx, &body, &proof)?;
@@ -728,9 +804,13 @@ fn send(path: &str, a: &Args) -> Result<(), String> {
     // sent: a payment whose opening cannot be delivered is lost.
     let bundle = delivery::Bundle(std::fs::read(a.get("bundle")?).map_err(|e| e.to_string())?);
     let sealed_out = a.get("sealed-out")?.to_string();
-    let inputs = select_inputs(&ctx, &w, amount + ctx.fee)?;
-    let total: u64 = inputs.iter().map(|&i| w.notes[i].value).sum();
-    let (change, recovery, stored) = self_note(&ctx, &mut w, path, total - amount - ctx.fee)?;
+    let need = amount.checked_add(ctx.fee).ok_or("amount overflow")?;
+    let inputs = select_inputs(&ctx, &w, need)?;
+    let total = inputs
+        .iter()
+        .try_fold(0u64, |s, &i| s.checked_add(w.notes[i].value))
+        .ok_or("note values overflow")?;
+    let (change, recovery, stored) = self_note(&ctx, &mut w, path, total - need)?;
     let t = &ctx.anchor;
     let input = |k: usize| inputs.get(k).map(|&i| spend_input(&ctx, &w, t, i)).unwrap_or_else(|| dummy_input(&ctx.sponge));
     let theirs = new_note(d, owner, amount);
@@ -748,9 +828,12 @@ fn send(path: &str, a: &Args) -> Result<(), String> {
         out_limb_override: [None, None],
     };
     let (body, proof) = prove(&ctx, witness, None, recovery)?;
-    record_pending(&mut w, path, &body, &proof, stored)?;
+    record_pending(&mut w, path, &body, &proof, stored, &inputs)?;
     submit(&ctx, &body, &proof)?;
-    println!("sealed opening written to {sealed_out}; deliver it to the recipient");
+    println!(
+        "sealed opening written to {sealed_out}; deliver it to the recipient once the transaction \
+         is on chain (sync shows its outputs)"
+    );
     Ok(())
 }
 
@@ -760,9 +843,13 @@ fn unshield(path: &str, a: &Args) -> Result<(), String> {
     let amount = a.shielded_amount()?;
     let to: H160 = a.get("to")?.trim_start_matches("0x").parse().map_err(|e| format!("--to: {e:?}"))?;
     let space = if a.0.contains_key("espace") { mazze_types::Space::Ethereum } else { mazze_types::Space::Native };
-    let inputs = select_inputs(&ctx, &w, amount + ctx.fee)?;
-    let total: u64 = inputs.iter().map(|&i| w.notes[i].value).sum();
-    let (change, recovery, stored) = self_note(&ctx, &mut w, path, total - amount - ctx.fee)?;
+    let need = amount.checked_add(ctx.fee).ok_or("amount overflow")?;
+    let inputs = select_inputs(&ctx, &w, need)?;
+    let total = inputs
+        .iter()
+        .try_fold(0u64, |s, &i| s.checked_add(w.notes[i].value))
+        .ok_or("note values overflow")?;
+    let (change, recovery, stored) = self_note(&ctx, &mut w, path, total - need)?;
     let t = &ctx.anchor;
     let input = |k: usize| inputs.get(k).map(|&i| spend_input(&ctx, &w, t, i)).unwrap_or_else(|| dummy_input(&ctx.sponge));
     let witness = Tx2Witness {
@@ -777,7 +864,7 @@ fn unshield(path: &str, a: &Args) -> Result<(), String> {
     };
     let (body, proof) =
         prove(&ctx, witness, Some(ShieldedDest { space, address: to }), recovery)?;
-    record_pending(&mut w, path, &body, &proof, stored)?;
+    record_pending(&mut w, path, &body, &proof, stored, &inputs)?;
     submit(&ctx, &body, &proof)?;
     Ok(())
 }
@@ -793,6 +880,7 @@ fn claim(path: &str, a: &Args) -> Result<(), String> {
         n.self_index.is_none()
             && n.position.map_or(false, |p| p < ctx.anchor_leaves)
             && !n.spent
+            && !w.pending.iter().any(|p| p.spends.contains(&n.cm))
     };
     let received = w
         .notes
@@ -811,9 +899,13 @@ fn claim(path: &str, a: &Args) -> Result<(), String> {
             w.notes[i].self_index.is_some()
                 && w.notes[i].position.map_or(false, |p| p < ctx.anchor_leaves)
                 && !w.notes[i].spent
+                && !reserved(&w, i)
         })
         .max_by_key(|&i| w.notes[i].value);
-    let total = w.notes[received].value + main.map(|i| w.notes[i].value).unwrap_or(0);
+    let total = w.notes[received]
+        .value
+        .checked_add(main.map(|i| w.notes[i].value).unwrap_or(0))
+        .ok_or("note values overflow")?;
     if total <= ctx.fee {
         return Err(format!("the notes ({}) do not cover the fee {}", mazzy(total), mazzy(ctx.fee)));
     }
@@ -831,7 +923,8 @@ fn claim(path: &str, a: &Args) -> Result<(), String> {
         out_limb_override: [None, None],
     };
     let (body, proof) = prove(&ctx, witness, None, recovery)?;
-    record_pending(&mut w, path, &body, &proof, stored)?;
+    let spends: Vec<usize> = std::iter::once(received).chain(main).collect();
+    record_pending(&mut w, path, &body, &proof, stored, &spends)?;
     submit(&ctx, &body, &proof)?;
     Ok(())
 }

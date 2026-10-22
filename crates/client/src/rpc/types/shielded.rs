@@ -11,6 +11,8 @@ use serde::Serialize;
 pub struct ShieldedStatus {
     pub active: bool,
     pub activation_height: U64,
+    /// From this height the lane is frozen (`u64::MAX`: never).
+    pub pause_height: U64,
     pub slot_epochs: U64,
     pub max_txs_per_block: U64,
     /// The fee in mazzy.

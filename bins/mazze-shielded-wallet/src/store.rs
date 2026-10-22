@@ -56,6 +56,10 @@ pub struct PendingTx {
     pub body: String,
     pub proof: String,
     pub cm: [u32; DIGEST],
+    /// Commitments of the notes it spends: reserved until it lands, so a
+    /// second transaction does not pick them too.
+    #[serde(default)]
+    pub spends: Vec<[u32; DIGEST]>,
 }
 
 /// A note opening: what the owner needs to spend it. As written to a file
@@ -159,7 +163,14 @@ impl Wallet {
                 .and_then(|_| f.sync_all())
                 .map_err(|e| e.to_string())?;
         }
-        std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+        std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+        // The rename itself must reach the disk: after a power loss the
+        // old file could otherwise come back, without a pending body whose
+        // deposit was already made.
+        let dir = std::path::Path::new(path).parent().filter(|d| !d.as_os_str().is_empty());
+        std::fs::File::open(dir.unwrap_or(std::path::Path::new(".")))
+            .and_then(|d| d.sync_all())
+            .map_err(|e| e.to_string())
     }
 }
 

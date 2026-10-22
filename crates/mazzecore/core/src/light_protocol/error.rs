@@ -280,6 +280,7 @@ pub fn handle(
             | network::ErrorKind::InvalidNodeId
             | network::ErrorKind::Io(_)
             | network::ErrorKind::OversizedPacket
+            | network::ErrorKind::SendQueueFull
             | network::ErrorKind::Throttling(_) => disconnect = false,
 
             network::ErrorKind::BadProtocol | network::ErrorKind::Decoder(_) => {

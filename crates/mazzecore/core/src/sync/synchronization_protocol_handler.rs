@@ -971,6 +971,20 @@ impl SynchronizationProtocolHandler {
         }
     }
 
+    /// `request_epochs` in the catch-up phases that discover epochs (the
+    /// same phases `start_sync` drives), from the request timer.
+    fn continue_epoch_discovery(&self, io: &dyn NetworkContext) {
+        let phase = self.phase_manager.get_current_phase().phase_type();
+        if matches!(
+            phase,
+            SyncPhaseType::CatchUpSyncBlockHeader
+                | SyncPhaseType::CatchUpSyncBlock
+        ) && !self.graph.consensus.fast_sync_bootstrap_pending()
+        {
+            self.request_epochs(io);
+        }
+    }
+
     pub fn start_sync(&self, io: &dyn NetworkContext) {
         let current_phase_type =
             self.phase_manager.get_current_phase().phase_type();
@@ -2846,6 +2860,12 @@ impl NetworkProtocolHandler for SynchronizationProtocolHandler {
                 // when the set is empty (n_blocks_to_request == 0 → early
                 // return) so this is safe in Normal too.
                 self.request_block_bodies(io);
+                // Epoch discovery is otherwise driven only by epoch-hash
+                // responses and peer heartbeats (30 s). Once the window hits
+                // the seed horizon / max gap no response is outstanding, so
+                // after consensus moved on discovery idled until the next
+                // heartbeat -- or forever on a chain that stopped growing.
+                self.continue_epoch_discovery(io);
             }
             HEARTBEAT_TIMER => {
                 self.send_heartbeat(io);

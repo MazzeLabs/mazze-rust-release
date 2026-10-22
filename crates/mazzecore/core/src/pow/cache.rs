@@ -36,6 +36,61 @@ use std::{
 
 pub type H256 = [u8; 32];
 
+/// Process-wide RandomX counters, logged every 30 s while hashing happens
+/// (sync benchmarking / fleet diagnosis: hashes/s, time per hash, light
+/// context churn, dataset builds).
+pub mod stats {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    pub static HASHES: AtomicU64 = AtomicU64::new(0);
+    pub static HASH_NANOS: AtomicU64 = AtomicU64::new(0);
+    pub static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+    pub static LIGHT_CONTEXTS: AtomicU64 = AtomicU64::new(0);
+    pub static LIGHT_CONTEXT_NANOS: AtomicU64 = AtomicU64::new(0);
+    pub static FULL_DATASETS: AtomicU64 = AtomicU64::new(0);
+    static LAST_LOG: AtomicU64 = AtomicU64::new(0);
+    static LAST_HASHES: AtomicU64 = AtomicU64::new(0);
+
+    pub fn record_hash(elapsed: Duration) {
+        HASHES.fetch_add(1, Ordering::Relaxed);
+        HASH_NANOS.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+        maybe_log();
+    }
+
+    fn maybe_log() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let last = LAST_LOG.load(Ordering::Relaxed);
+        if now < last + 30
+            || LAST_LOG
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+        {
+            return;
+        }
+        let hashes = HASHES.load(Ordering::Relaxed);
+        let prev = LAST_HASHES.swap(hashes, Ordering::Relaxed);
+        let nanos = HASH_NANOS.load(Ordering::Relaxed);
+        info!(
+            "randomx stats: hashes={} (+{} in {}s) avg_hash_us={} \
+             cache_hits={} light_contexts={} (avg_ms={}) full_datasets={}",
+            hashes,
+            hashes - prev,
+            if last == 0 { 0 } else { now - last },
+            if hashes == 0 { 0 } else { nanos / hashes / 1000 },
+            CACHE_HITS.load(Ordering::Relaxed),
+            LIGHT_CONTEXTS.load(Ordering::Relaxed),
+            LIGHT_CONTEXT_NANOS.load(Ordering::Relaxed)
+                / LIGHT_CONTEXTS.load(Ordering::Relaxed).max(1)
+                / 1_000_000,
+            FULL_DATASETS.load(Ordering::Relaxed),
+        );
+    }
+}
+
 /// Seeds kept resident: the pinned chain seeds (tip + next) plus room for the
 /// previous seed (stragglers) and RPC lookups of old blocks.
 const MAX_SEEDS: usize = 4;
@@ -214,7 +269,11 @@ impl RandomXCacheBuilder {
         }
         info!("Creating light RandomX context for seed {:?}", seed_hash);
         // Built outside the `slots` lock: other seeds keep hashing meanwhile.
+        let started = std::time::Instant::now();
         let slot = Arc::new(SeedSlot::new(*seed_hash, false));
+        stats::LIGHT_CONTEXTS.fetch_add(1, Ordering::Relaxed);
+        stats::LIGHT_CONTEXT_NANOS
+            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
         slot.last_used
             .store(self.tick.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
         let mut slots = self.slots.write();
@@ -287,6 +346,7 @@ impl RandomXCacheBuilder {
                     slot.seed, pinned
                 );
                 let full = Arc::new(RandomXContext::new(&slot.seed, true));
+                stats::FULL_DATASETS.fetch_add(1, Ordering::Relaxed);
                 for s in victims {
                     info!("Demoting RandomX seed {:?} to light mode", s.seed);
                     let light = Arc::new(RandomXContext::new(&s.seed, false));

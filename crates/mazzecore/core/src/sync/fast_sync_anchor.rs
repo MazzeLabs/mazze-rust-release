@@ -39,7 +39,7 @@ use crate::{
     consensus::TrustedCheckpoint,
     sync::synchronization_protocol_handler::SynchronizationProtocolHandler,
 };
-use mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
+use mazze_parameters::pow::randomx_epoch_length;
 use mazze_types::H256;
 use network::NetworkContext;
 use parking_lot::Mutex;
@@ -109,17 +109,18 @@ pub fn choose_anchor_pair(
 /// Heights below `root_height` whose main-chain block is the RandomX seed of
 /// an epoch at or above `root_height`.
 pub fn seed_heights_below(root_height: u64) -> Vec<u64> {
-    let k = root_height / RANDOMX_EPOCH_LENGTH;
+    let l = randomx_epoch_length();
+    let k = root_height / l;
     if k == 0 {
         // Every epoch up to the root is in RandomX epoch 0 (seed =
         // genesis); the next seed height is the root's own or above.
         return Vec::new();
     }
     let mut heights = Vec::new();
-    let mut h = (k - 1) * RANDOMX_EPOCH_LENGTH;
+    let mut h = (k - 1) * l;
     while h < root_height {
         heights.push(h);
-        h += RANDOMX_EPOCH_LENGTH;
+        h += l;
     }
     heights
 }

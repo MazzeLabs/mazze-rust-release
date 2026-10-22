@@ -752,7 +752,7 @@ impl RpcImpl {
     }
 
     pub fn get_status(&self) -> RpcResult<RpcStatus> {
-        use mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
+        let rx_len = mazze_parameters::pow::randomx_epoch_length();
 
         let consensus_graph = self.consensus_graph();
 
@@ -783,11 +783,11 @@ impl RpcImpl {
 
         let best_epoch_number = best_info.best_epoch_number;
         let best_block_number = best_info.best_block_number;
-        let randomx_epoch_number = best_epoch_number / RANDOMX_EPOCH_LENGTH;
+        let randomx_epoch_number = best_epoch_number / rx_len;
         let randomx_start_epoch_number =
-            randomx_epoch_number * RANDOMX_EPOCH_LENGTH;
+            randomx_epoch_number * rx_len;
         let randomx_end_epoch_number =
-            randomx_start_epoch_number + RANDOMX_EPOCH_LENGTH - 1;
+            randomx_start_epoch_number + rx_len - 1;
         let state_manager = &self.consensus.get_data_manager().storage_manager;
         let storage_manager = state_manager.get_storage_manager();
         let latest_snapshot_epoch_number: U64 = storage_manager
@@ -850,7 +850,7 @@ impl RpcImpl {
             },
             randomx: RpcRandomXProgress {
                 epoch_number: randomx_epoch_number.into(),
-                epoch_length: RANDOMX_EPOCH_LENGTH.into(),
+                epoch_length: rx_len.into(),
                 start_epoch_number: randomx_start_epoch_number.into(),
                 end_epoch_number: randomx_end_epoch_number.into(),
                 next_transition_epoch_number: (randomx_end_epoch_number + 1)
@@ -1413,7 +1413,7 @@ impl RpcImpl {
     pub fn get_randomx_epoch_info(
         &self, epoch_number: Option<EpochNumber>,
     ) -> JsonRpcResult<jsonrpc_core::Value> {
-        use mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
+        let rx_len = mazze_parameters::pow::randomx_epoch_length();
         info!(
             "RPC Request: mazze_getRandomXEpochInfo epoch_number={:?}",
             epoch_number
@@ -1440,9 +1440,9 @@ impl RpcImpl {
                 EpochNumber::Num(n) => n.as_u64(),
             };
 
-        let randomx_epoch_number = epoch_num / RANDOMX_EPOCH_LENGTH;
-        let start_epoch_number = randomx_epoch_number * RANDOMX_EPOCH_LENGTH;
-        let end_epoch_number = start_epoch_number + RANDOMX_EPOCH_LENGTH - 1;
+        let randomx_epoch_number = epoch_num / rx_len;
+        let start_epoch_number = randomx_epoch_number * rx_len;
+        let end_epoch_number = start_epoch_number + rx_len - 1;
         let next_transition_epoch_number = end_epoch_number + 1;
 
         let seed_hash =

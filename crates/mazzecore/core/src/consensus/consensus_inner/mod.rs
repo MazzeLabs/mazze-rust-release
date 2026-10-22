@@ -2157,7 +2157,7 @@ impl ConsensusGraphInner {
             let db = &self.data_man.db_manager;
             if let Some(current) = db.try_get_current_seed_hash(epoch + 1) {
                 let next = db.try_get_current_seed_hash(
-                    epoch + 1 + mazze_parameters::pow::RANDOMX_EPOCH_LENGTH,
+                    epoch + 1 + mazze_parameters::pow::randomx_epoch_length(),
                 );
                 self.pow.set_chain_seeds(&current, next.as_ref());
             }

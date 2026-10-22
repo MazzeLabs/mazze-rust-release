@@ -13,7 +13,7 @@ use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use mazze_internal_common::{
     DatabaseDecodable, DatabaseEncodable, EpochExecutionCommitment,
 };
-use mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
+use mazze_parameters::pow::randomx_epoch_length;
 use mazze_storage::{
     storage_db::{KeyValueDbTrait, KeyValueDbTraitRead},
     KvdbMdbx, MdbxColumn, MdbxEnv,
@@ -1288,7 +1288,7 @@ impl DBManager {
     pub fn try_get_current_seed_hash(
         &self, epoch_height: u64,
     ) -> Option<H256> {
-        let current_epoch = epoch_height / RANDOMX_EPOCH_LENGTH;
+        let current_epoch = epoch_height / randomx_epoch_length();
 
         // Genesis window — seed is the genesis hash, always available.
         if current_epoch == 0 {
@@ -1297,7 +1297,7 @@ impl DBManager {
 
         // Non-genesis epochs: look up the block at the start of the
         // previous RandomX epoch.
-        let seed_height = (current_epoch - 1) * RANDOMX_EPOCH_LENGTH;
+        let seed_height = (current_epoch - 1) * randomx_epoch_length();
         let seed_hash = self
             .executed_epoch_set_hashes_from_db(seed_height)
             .and_then(|hashes| hashes.last().cloned())

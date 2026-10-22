@@ -17,7 +17,7 @@ use static_assertions::_core::str::FromStr;
 use std::{
     collections::{HashMap, VecDeque},
     convert::TryFrom,
-    sync::Arc,
+    sync::{atomic::Ordering as AtomicOrdering, Arc},
 };
 
 /// Bounded pow-hash memoization capacity (§5.21). Sized to cover ~2h of
@@ -332,15 +332,18 @@ impl PowComputer {
         // into cache hits, unwedging the era-boundary catchup.
         let key = (input, *seed_hash);
         if let Some(cached) = self.pow_hash_cache.write().get(&key) {
+            cache::stats::CACHE_HITS.fetch_add(1, AtomicOrdering::Relaxed);
             return *cached;
         }
 
+        let started = std::time::Instant::now();
         let handle = self
             .cache_builder
             .get_vm_handler(seed_hash.as_fixed_bytes());
         let vm = handle.get_vm();
         let hash_bytes = vm.hash(&input);
         let hash = H256::from_slice(&hash_bytes.as_ref());
+        cache::stats::record_hash(started.elapsed());
 
         self.pow_hash_cache.write().insert(key, hash);
         hash

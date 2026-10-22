@@ -15,7 +15,7 @@ use mazze_internal_common::{
     ChainIdParams, ChainIdParamsInner, ChainIdParamsOneChainInner,
 };
 use mazze_parameters::{
-    block::DEFAULT_TARGET_BLOCK_GAS_LIMIT, pow::RANDOMX_EPOCH_LENGTH,
+    block::DEFAULT_TARGET_BLOCK_GAS_LIMIT, pow::randomx_epoch_length,
     tx_pool::TXPOOL_DEFAULT_NONCE_BITS,
 };
 use mazze_storage::{
@@ -160,6 +160,9 @@ build_config! {
         // instead of pinning every block to the initial difficulty, so the
         // local harness can check that nodes agree on difficulty.
         (test_enable_asert, (bool), false)
+        // TEST-ONLY (honoured only with `mode = "test"`): RandomX seed
+        // rotation period, so a local sync benchmark crosses many seeds.
+        (test_randomx_epoch_length, (Option<u64>), None)
         (heavy_block_difficulty_ratio, (u64), HEAVY_BLOCK_DEFAULT_DIFFICULTY_RATIO)
         (genesis_accounts, (Option<String>), None)
         (genesis_secrets, (Option<String>), None)
@@ -484,6 +487,16 @@ impl Configuration {
             config.raw_conf.node_type = Some(NodeType::Light);
         }
 
+        if let Some(l) = config.raw_conf.test_randomx_epoch_length {
+            if !config.is_test_mode() {
+                return Err("test_randomx_epoch_length requires mode = \"test\"".into());
+            }
+            if l == 0 {
+                return Err("test_randomx_epoch_length must be > 0".into());
+            }
+            mazze_parameters::pow::set_randomx_epoch_length_for_test(l);
+        }
+
         config.apply_node_type_profile();
 
         // Validate fast-sync anchors early so a misconfiguration is a clear
@@ -657,10 +670,10 @@ impl Configuration {
         let test_small_snapshots = self.is_test_mode()
             && self.raw_conf.test_allow_small_snapshot_epoch_count;
         let raw = &mut self.raw_conf;
-        if raw.snapshot_epoch_count < RANDOMX_EPOCH_LENGTH as u32
+        if raw.snapshot_epoch_count < randomx_epoch_length() as u32
             && !test_small_snapshots
         {
-            raw.snapshot_epoch_count = RANDOMX_EPOCH_LENGTH as u32;
+            raw.snapshot_epoch_count = randomx_epoch_length() as u32;
         }
         // Keep the legacy field aligned so test mode cannot diverge from the
         // canonical snapshot cadence.

@@ -1495,7 +1495,7 @@ impl SynchronizationGraph {
         }
         let db = &self.data_man.db_manager;
         let mut known_seed: HashMap<u64, bool> = HashMap::new();
-        let l = mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
+        let l = mazze_parameters::pow::randomx_epoch_length();
         let ready: Vec<H256> = deferred
             .iter()
             .filter(|(_, height)| {
@@ -2068,7 +2068,7 @@ impl SynchronizationGraph {
                             .unwrap_or(0);
                         if now >= LAST.load(Ordering::Relaxed) + 60 {
                             LAST.store(now, Ordering::Relaxed);
-                            let l = mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
+                            let l = mazze_parameters::pow::randomx_epoch_length();
                             warn!(
                                 "deferring header {:?} at height {}: its \
                                  RandomX seed (the pivot at height {}) is \

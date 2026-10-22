@@ -85,6 +85,10 @@ pub enum WriteStatus {
 
 const MAX_PAYLOAD_SIZE: usize = (1 << 24) - 1;
 
+/// Bytes a connection may hold queued for sending: a few of the largest
+/// messages (a slot block is ~13.5 MB).
+const MAX_QUEUED_BYTES: usize = 64 * 1024 * 1024;
+
 pub trait GenericSocket: Read + Write {}
 
 impl GenericSocket for TcpStream {}
@@ -180,6 +184,8 @@ pub struct GenericConnection<Socket: GenericSocket> {
     recv_buf: BytesMut,
     /// Packets that waiting for sending out.
     send_queue: PrioritySendQueue<Packet>,
+    /// Bytes in `send_queue`, bounded by `MAX_QUEUED_BYTES`.
+    queued_bytes: usize,
     /// Sending packet.
     sending_packet: Option<Packet>,
     /// Event flags this connection interested
@@ -274,6 +280,7 @@ impl<Socket: GenericSocket> GenericConnection<Socket> {
                 Some(item) => item,
                 None => return Ok(WriteStatus::Complete),
             };
+            self.queued_bytes = self.queued_bytes.saturating_sub(packet.data.len());
 
             // assemble packet to send, e.g. prefix length to packet
             self.assembler.assemble(&mut packet.data)?;
@@ -341,6 +348,13 @@ impl<Socket: GenericSocket> GenericConnection<Socket> {
             if self.assembler.is_oversized(size) {
                 return Err(ErrorKind::OversizedPacket.into());
             }
+            // A peer that asks for data and does not read it must not make
+            // this node hold an unbounded backlog: requests for ~13 MB slot
+            // blocks would otherwise exhaust its memory.
+            if self.queued_bytes + size > MAX_QUEUED_BYTES {
+                return Err(ErrorKind::SendQueueFull.into());
+            }
+            self.queued_bytes += size;
 
             trace!("Sending packet, token = {}, size = {}", self.token, size);
 
@@ -385,6 +399,7 @@ impl Connection {
             socket,
             recv_buf: BytesMut::new(),
             send_queue: PrioritySendQueue::default(),
+            queued_bytes: 0,
             sending_packet: None,
             interest: Ready::hup() | Ready::readable(),
             registered: AtomicBool::new(false),
@@ -676,6 +691,7 @@ mod tests {
                 token: 1_234_567_890usize,
                 socket: TestSocket::new(),
                 send_queue: PrioritySendQueue::default(),
+                queued_bytes: 0,
                 sending_packet: None,
                 recv_buf: BytesMut::new(),
                 interest: Ready::hup() | Ready::readable(),
@@ -696,6 +712,26 @@ mod tests {
         assert!(status.is_ok());
         let status = status.unwrap();
         assert!(WriteStatus::Complete == status);
+    }
+
+    #[test]
+    fn a_peer_that_does_not_read_cannot_grow_the_queue_without_bound() {
+        let mut connection = TestConnection::new();
+        connection.assembler = Box::new(PacketWithLenAssembler::new(3, Some(MAX_PAYLOAD_SIZE)));
+        let io = test_io();
+        let chunk = 1024 * 1024;
+        let fits = MAX_QUEUED_BYTES / chunk;
+        for _ in 0..fits {
+            connection.send(&io, vec![0; chunk], SendQueuePriority::Normal).unwrap();
+        }
+        assert!(matches!(
+            connection.send(&io, vec![0; chunk], SendQueuePriority::Normal),
+            Err(Error(ErrorKind::SendQueueFull, _))
+        ));
+        // Draining a packet makes room again.
+        connection.socket = TestSocket::with_buf(2 * chunk);
+        connection.writable(&io).unwrap();
+        connection.send(&io, vec![0; chunk], SendQueuePriority::Normal).unwrap();
     }
 
     #[test]

@@ -82,15 +82,20 @@ struct Inner {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Verdict {
     Pack,
-    /// Not packable now (already on chain, deposit not yet credited); kept
-    /// in case a reorg changes that.
-    Hold,
+    /// Already on chain: kept `HOLD_EPOCHS` in case a reorg undoes it.
+    HoldOnChain,
+    /// Not packable yet (its deposit is not credited, the circuit breaker
+    /// is full): kept `SHORT_HOLD_EPOCHS`, then the wallet resubmits. Short,
+    /// because anyone can make such a transaction without funds.
+    HoldShort,
     /// Never packable again (its anchor expired).
     Drop,
 }
 
-/// How long a held transaction is kept: well past any reorg depth.
+/// How long a transaction on chain is kept: well past any reorg depth.
 pub const HOLD_EPOCHS: u64 = 1000;
+/// How long a transaction that is not packable yet is kept.
+pub const SHORT_HOLD_EPOCHS: u64 = 30;
 
 pub struct ShieldedTxPool {
     inner: RwLock<Inner>,
@@ -122,13 +127,13 @@ impl ShieldedTxPool {
     /// Transactions publicly known: fluffed, so packable.
     pub fn len(&self) -> usize {
         let inner = self.inner.read();
-        inner.txs.len() - inner.stem.len()
+        inner.txs.len().saturating_sub(inner.stem.len())
     }
 
     /// Transactions waiting to be packed: public and not already on chain.
     pub fn pending_len(&self) -> usize {
         let inner = self.inner.read();
-        inner.txs.len() - inner.stem.len() - inner.held.len()
+        inner.txs.len().saturating_sub(inner.stem.len() + inner.held.len())
     }
 
     /// Ends the stem phase of `hash`: from now on it may be packed.
@@ -153,7 +158,7 @@ impl ShieldedTxPool {
         if body.nf.iter().any(|nf| inner.by_nullifier.contains_key(nf)) {
             return Err(ShieldedPoolError::Conflict);
         }
-        if inner.txs.len() >= self.capacity {
+        if inner.txs.len() >= self.capacity && inner.held.is_empty() {
             return Err(ShieldedPoolError::Full);
         }
         Ok(())
@@ -170,8 +175,19 @@ impl ShieldedTxPool {
         if tx.body.nf.iter().any(|nf| inner.by_nullifier.contains_key(nf)) {
             return Err(ShieldedPoolError::Conflict);
         }
-        if inner.txs.len() >= self.capacity {
+        // Stems, which a node cannot fully check, take at most a quarter of
+        // the pool: they cannot crowd out what is packable.
+        if stem && inner.stem.len() >= self.capacity / 4 {
             return Err(ShieldedPoolError::Full);
+        }
+        if inner.txs.len() >= self.capacity {
+            // A held transaction (not packable now) gives way to a new one.
+            match inner.held.keys().next().copied() {
+                Some(evict) => {
+                    Self::remove_locked(&mut inner, &evict);
+                }
+                None => return Err(ShieldedPoolError::Full),
+            }
         }
         for nf in &tx.body.nf {
             inner.by_nullifier.insert(*nf, tx.hash);
@@ -184,7 +200,10 @@ impl ShieldedTxPool {
     }
 
     pub fn remove(&self, hash: &H256) -> Option<PooledShieldedTx> {
-        let mut inner = self.inner.write();
+        Self::remove_locked(&mut self.inner.write(), hash)
+    }
+
+    fn remove_locked(inner: &mut Inner, hash: &H256) -> Option<PooledShieldedTx> {
         let tx = inner.txs.remove(hash)?;
         inner.stem.remove(hash);
         inner.held.remove(hash);
@@ -215,20 +234,29 @@ impl ShieldedTxPool {
         let mut picked = Vec::new();
         let mut nullifiers = HashSet::new();
         for tx in candidates {
-            match verdict(&tx.body) {
+            let v = verdict(&tx.body);
+            match v {
                 Verdict::Drop => {
                     self.remove(&tx.hash);
                     continue;
                 }
-                Verdict::Hold => {
-                    let since = *self
-                        .inner
-                        .write()
-                        .held
-                        .entry(tx.hash)
-                        .or_insert(height);
-                    if height.saturating_sub(since) > HOLD_EPOCHS {
-                        self.remove(&tx.hash);
+                Verdict::HoldOnChain | Verdict::HoldShort => {
+                    let ttl = if v == Verdict::HoldOnChain { HOLD_EPOCHS } else { SHORT_HOLD_EPOCHS };
+                    let mut inner = self.inner.write();
+                    // Removed meanwhile: nothing to hold.
+                    if !inner.txs.contains_key(&tx.hash) {
+                        continue;
+                    }
+                    // Held transactions take at most half the pool.
+                    if !inner.held.contains_key(&tx.hash)
+                        && inner.held.len() >= self.capacity / 2
+                    {
+                        Self::remove_locked(&mut inner, &tx.hash);
+                        continue;
+                    }
+                    let since = *inner.held.entry(tx.hash).or_insert(height);
+                    if height.saturating_sub(since) > ttl {
+                        Self::remove_locked(&mut inner, &tx.hash);
                     }
                     continue;
                 }
@@ -302,15 +330,42 @@ mod tests {
         let pool = ShieldedTxPool::new(10);
         pool.insert(tx(1), false).unwrap();
         // Seen on chain at height 100: held, not packed.
-        assert!(pool.pick(10, 100, |_| Verdict::Hold).is_empty());
+        assert!(pool.pick(10, 100, |_| Verdict::HoldOnChain).is_empty());
         // A reorg undid the block: packable again.
         assert_eq!(pool.pick(10, 110, |_| Verdict::Pack).len(), 1);
         // On chain again, for good.
-        pool.pick(10, 200, |_| Verdict::Hold);
-        pool.pick(10, 200 + HOLD_EPOCHS, |_| Verdict::Hold);
+        pool.pick(10, 200, |_| Verdict::HoldOnChain);
+        pool.pick(10, 200 + HOLD_EPOCHS, |_| Verdict::HoldOnChain);
         assert!(pool.contains(&tx(1).hash), "held up to HOLD_EPOCHS");
         assert_eq!(pool.pending_len(), 0, "a held transaction is not pending");
-        pool.pick(10, 201 + HOLD_EPOCHS, |_| Verdict::Hold);
+        pool.pick(10, 201 + HOLD_EPOCHS, |_| Verdict::HoldOnChain);
         assert!(!pool.contains(&tx(1).hash), "then evicted");
+    }
+
+    #[test]
+    fn unpackable_transactions_are_held_briefly_and_give_way() {
+        let pool = ShieldedTxPool::new(4);
+        for i in 0..4 {
+            pool.insert(tx(i), false).unwrap();
+        }
+        // No deposit yet: held for SHORT_HOLD_EPOCHS only.
+        pool.pick(10, 100, |b| if b.hash() == tx(0).hash { Verdict::HoldShort } else { Verdict::Pack });
+        pool.pick(10, 100 + SHORT_HOLD_EPOCHS + 1, |b| if b.hash() == tx(0).hash { Verdict::HoldShort } else { Verdict::Pack });
+        assert!(!pool.contains(&tx(0).hash), "evicted after the short hold");
+        // A full pool makes room for a new transaction by evicting a held one.
+        pool.insert(tx(4), false).unwrap();
+        pool.pick(10, 200, |b| if b.hash() == tx(1).hash { Verdict::HoldOnChain } else { Verdict::Pack });
+        pool.insert(tx(5), false).unwrap();
+        assert!(!pool.contains(&tx(1).hash), "the held one gave way");
+        assert!(pool.contains(&tx(5).hash));
+    }
+
+    #[test]
+    fn stems_take_at_most_a_quarter_of_the_pool() {
+        let pool = ShieldedTxPool::new(8);
+        pool.insert(tx(1), true).unwrap();
+        pool.insert(tx(2), true).unwrap();
+        assert_eq!(pool.insert(tx(3), true), Err(ShieldedPoolError::Full));
+        pool.insert(tx(3), false).unwrap();
     }
 }

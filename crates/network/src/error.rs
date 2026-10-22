@@ -170,6 +170,11 @@ error_chain! {
             display("Packet is too large"),
         }
 
+        SendQueueFull {
+            description("The peer's send queue is full"),
+            display("The peer's send queue is full: it does not read what it asks for"),
+        }
+
         Io(err: io::Error) {
             description("IO Error"),
             display("Unexpected IO error: {}", err),

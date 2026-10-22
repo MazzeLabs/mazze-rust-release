@@ -627,6 +627,14 @@ impl VerificationConfig {
     /// proof that does not match its body's `proof_hash` came from the peer,
     /// not the miner, so the block is requested again; anything else makes
     /// the block invalid.
+    /// Stage A of a block's shielded section under `witness`: run before the
+    /// sync graph is locked, since its STARKs take milliseconds each.
+    pub fn verify_shielded(
+        &self, block: &Block, chain_id: AllChainID, witness: WitnessPolicy,
+    ) -> Result<(), Error> {
+        self.verify_shielded_section(block, chain_id, witness)
+    }
+
     /// Stage A for a block that needs no other check (one this node mined):
     /// its shielded section and every proof.
     pub fn verify_shielded_proofs(

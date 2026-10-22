@@ -2438,6 +2438,33 @@ impl SynchronizationGraph {
 
         debug!("insert_block {:?}", hash);
 
+        // The shielded proofs are checked before the graph is locked: up to
+        // `max_txs_per_block` STARKs would otherwise stall all sync while
+        // they run. A block already here is not verified again. Inside, only
+        // the cheap rules run, and this result decides.
+        use crate::verification::{WitnessPolicy, WITNESS_BURIAL_ERAS};
+        let shielded_check = if !recover_from_db
+            && !block.shielded.is_empty()
+            && !self.contains_block(&hash)
+        {
+            let policy = if !need_to_verify {
+                // This node's own block: every proof.
+                WitnessPolicy::Require
+            } else {
+                let era = self.consensus.get_config().inner_conf.era_epoch_count;
+                let buried = block.block_header.height() + WITNESS_BURIAL_ERAS * era
+                    <= self.max_ready_header_height.load(Ordering::Relaxed);
+                if buried { WitnessPolicy::AllowPruned } else { WitnessPolicy::Require }
+            };
+            Some(self.verification_config.verify_shielded(
+                &block,
+                self.consensus.best_chain_id(),
+                policy,
+            ))
+        } else {
+            None
+        };
+
         let inner = &mut *self.inner.write();
 
         let contains_block =
@@ -2475,23 +2502,16 @@ impl SynchronizationGraph {
         inner.arena[me].block_ready = true;
 
         if need_to_verify {
-            use crate::verification::{WitnessPolicy, WITNESS_BURIAL_ERAS};
-            let era = self.consensus.get_config().inner_conf.era_epoch_count;
-            let buried = block.block_header.height()
-                + WITNESS_BURIAL_ERAS * era
-                <= self.max_ready_header_height.load(Ordering::Relaxed);
-            let policy = if recover_from_db {
-                WitnessPolicy::Skip
-            } else if buried {
-                WitnessPolicy::AllowPruned
-            } else {
-                WitnessPolicy::Require
-            };
-            let r = self.verification_config.verify_sync_graph_block_basic(
-                &block,
-                self.consensus.best_chain_id(),
-                policy,
-            );
+            // The shielded section's structure here; its proofs were checked
+            // above, and their result counts unless a cheaper rule failed.
+            let r = self
+                .verification_config
+                .verify_sync_graph_block_basic(
+                    &block,
+                    self.consensus.best_chain_id(),
+                    WitnessPolicy::Skip,
+                )
+                .and_then(|()| shielded_check.unwrap_or(Ok(())));
             match r {
                 Err(Error(
                     ErrorKind::Block(BlockError::ShieldedWitnessMismatch(e)),
@@ -2537,13 +2557,10 @@ impl SynchronizationGraph {
                 }
                 _ => {}
             };
-        } else if !recover_from_db && !block.shielded.is_empty() {
+        } else if let Some(Err(e)) = shielded_check {
             // Stage A is never skipped (spec §8.2, lesson Z-3): a block that
             // needs no other check, the one this node mined, still has every
             // proof verified before it enters the graph.
-            if let Err(e) = self
-                .verification_config
-                .verify_shielded_proofs(&block, self.consensus.best_chain_id())
             {
                 error!(
                     "This node's own block {:?} has an invalid shielded section: {}",

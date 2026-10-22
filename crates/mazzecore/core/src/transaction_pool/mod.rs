@@ -335,21 +335,23 @@ impl TransactionPool {
         use shielded::Verdict;
         let spent =
             body.nf.iter().any(|nf| nullifier_spent(state, nf).unwrap_or(true));
-        if !anchor_valid(state, &body.anchor, height, params).unwrap_or(false) {
-            // On chain, a reorg may still undo its spend: hold it. Otherwise
-            // it can never be packed.
-            return if spent { Verdict::Hold } else { Verdict::Drop };
+        if spent {
+            // On chain (unless a reorg undoes it).
+            return Verdict::HoldOnChain;
         }
-        if spent || !deposit_covers(state, body).unwrap_or(false) {
-            return Verdict::Hold;
+        if !anchor_valid(state, &body.anchor, height, params).unwrap_or(false) {
+            return Verdict::Drop;
+        }
+        if !deposit_covers(state, body).unwrap_or(false) {
+            return Verdict::HoldShort;
         }
         // Over the circuit breaker's allowance: it would be skipped, so it
-        // waits for a later window instead of taking a slot.
+        // waits a little instead of taking a slot.
         if body.v_public_out > 0
             && breaker_allowance(state, height, params).unwrap_or_default()
                 < mazze_executor::spec::shielded_to_mazzy(body.v_public_out)
         {
-            return Verdict::Hold;
+            return Verdict::HoldShort;
         }
         Verdict::Pack
     }

@@ -9,6 +9,10 @@ edition = "2021"
 name = "mazze-shielded-wallet"
 path = "src/main.rs"
 
+[[bin]]
+name = "mazze-shielded-auditor"
+path = "src/auditor.rs"
+
 [dependencies]
 mazze-shielded-pq = { path = "../../crates/shielded_pq", features = ["prover"] }
 primitives = { path = "../../crates/primitives" }

@@ -58,3 +58,26 @@ pub struct ShieldedTxInfo {
     /// Why it was skipped, when skipped.
     pub skip_reason: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShieldedStateAt {
+    pub epoch: U64,
+    pub root: Bytes,
+    pub leaves: U64,
+    /// All in mazzy.
+    pub backing: U256,
+    pub total_in: U256,
+    pub total_out: U256,
+    pub total_burnt: U256,
+    pub pending_credits: U256,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShieldedWitnessInfo {
+    /// The body's canonical RLP.
+    pub body: Bytes,
+    /// `None` once the witness was pruned (an era behind the checkpoint).
+    pub proof: Option<Bytes>,
+}

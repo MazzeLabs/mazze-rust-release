@@ -319,7 +319,8 @@ fn breaker_record(
 /// Deposits credited by the bridge and not yet consumed by a shield-in.
 const PENDING_CREDITS_KEY: &[u8] = b"pending_credits";
 
-fn pending_credits(state: &State) -> DbResult<U256> { get(state, PENDING_CREDITS_KEY) }
+/// Deposits credited and not yet consumed by a shield-in (mazzy).
+pub fn pending_credits(state: &State) -> DbResult<U256> { get(state, PENDING_CREDITS_KEY) }
 
 pub fn turnstile(state: &State) -> DbResult<(U256, U256, U256)> {
     Ok((

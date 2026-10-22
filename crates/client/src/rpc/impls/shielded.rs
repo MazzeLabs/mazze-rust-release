@@ -6,13 +6,16 @@ use crate::rpc::{
     error_codes::invalid_params,
     traits::shielded::ShieldedServer,
     types::{
-        shielded::{ShieldedSection, ShieldedStatus, ShieldedTxInfo},
+        shielded::{
+            ShieldedSection, ShieldedStateAt, ShieldedStatus, ShieldedTxInfo,
+            ShieldedWitnessInfo,
+        },
         Bytes,
     },
 };
 use mazze_executor::spec::{shielded_to_mazzy, SHIELDED_UNIT};
 use mazze_executor::shielded_engine::{
-    backing_account, tree_state, ShieldedOutcome,
+    backing_account, pending_credits, tree_state, turnstile, ShieldedOutcome,
 };
 use mazze_rpc_error::Result as JsonRpcResult;
 use mazze_shielded_pq::field::to_bytes;
@@ -147,5 +150,44 @@ impl ShieldedServer for ShieldedHandler {
             });
         }
         Ok(sections)
+    }
+
+    fn shielded_get_state_at(&self, epoch: U64) -> JsonRpcResult<ShieldedStateAt> {
+        let db_err = |e| invalid_params("state", format!("{:?}", e));
+        let state_db = self
+            .consensus
+            .get_state_db_by_epoch_number(EpochNumber::Number(epoch.as_u64()), "epoch")?;
+        let state = mazze_executor::state::State::new(state_db).map_err(db_err)?;
+        let (root, leaves) = tree_state(&state).map_err(db_err)?;
+        let (total_in, total_out, total_burnt) = turnstile(&state).map_err(db_err)?;
+        Ok(ShieldedStateAt {
+            epoch,
+            root: Bytes(to_bytes(&root)),
+            leaves: leaves.into(),
+            backing: state.balance(&backing_account()).map_err(db_err)?,
+            total_in,
+            total_out,
+            total_burnt,
+            pending_credits: pending_credits(&state).map_err(db_err)?,
+        })
+    }
+
+    fn shielded_get_witness(
+        &self, block_hash: H256, index: U64,
+    ) -> JsonRpcResult<ShieldedWitnessInfo> {
+        let block = self
+            .consensus
+            .get_data_manager()
+            .block_by_hash(&block_hash, false)
+            .ok_or_else(|| invalid_params("blockHash", "unknown block"))?;
+        let i = index.as_u64() as usize;
+        let body = block
+            .shielded
+            .get(i)
+            .ok_or_else(|| invalid_params("index", "no such shielded transaction"))?;
+        Ok(ShieldedWitnessInfo {
+            body: Bytes(rlp::encode(&**body).to_vec()),
+            proof: block.witness.get(i).map(|p| Bytes((**p).clone())),
+        })
     }
 }

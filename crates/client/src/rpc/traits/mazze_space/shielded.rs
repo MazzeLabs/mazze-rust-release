@@ -7,7 +7,9 @@
 //! Merkle path, and there is deliberately no `getTreePath`.
 
 use crate::rpc::types::{
-    shielded::{ShieldedSection, ShieldedStatus},
+    shielded::{
+        ShieldedSection, ShieldedStateAt, ShieldedStatus, ShieldedWitnessInfo,
+    },
     Bytes,
 };
 use jsonrpsee::proc_macros::rpc;
@@ -36,4 +38,17 @@ pub trait Shielded {
     fn shielded_get_sections(
         &self, from_epoch: U64, count: U64,
     ) -> JsonRpcResult<Vec<ShieldedSection>>;
+
+    /// The shielded state at a past epoch (while the node still has it):
+    /// tree root and size, backing and turnstile counters, for auditing.
+    #[method(name = "shielded_getStateAt", blocking)]
+    fn shielded_get_state_at(&self, epoch: U64) -> JsonRpcResult<ShieldedStateAt>;
+
+    /// Transaction `index` of a block's shielded section: its canonical body
+    /// and, while the node still holds it, its proof. Public data, served
+    /// one proof at a time (~380 KB each).
+    #[method(name = "shielded_getWitness", blocking)]
+    fn shielded_get_witness(
+        &self, block_hash: H256, index: U64,
+    ) -> JsonRpcResult<ShieldedWitnessInfo>;
 }

@@ -21,7 +21,8 @@ fuzz_target!(|data: &[u8]| {
     body.proof_hash = proof_hash(proof);
     if mazze_shielded_pq::verify::verify_body(&body, proof, 1).is_ok() {
         assert!(decoded.is_some(), "a proof verified for a body it does not commit to");
-        let reencoded = wire::encode(&wire::decode(proof, PROOF_LEN_MAX).unwrap());
+        let decoded = wire::decode_padded(proof, PROOF_LEN_MAX).unwrap();
+        let reencoded = wire::encode_padded(&decoded, PROOF_LEN_MAX).unwrap();
         assert_eq!(reencoded, proof, "a verified proof in a non-canonical encoding");
     }
 });

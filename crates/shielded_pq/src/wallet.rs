@@ -85,8 +85,7 @@ pub fn build_transaction(
     let air = Tx2Air::new(chain_id);
     loop {
         let proof = ps1::prove(&air, chain_id, trace.clone(), &pv, randomness())?;
-        let bytes = wire::encode(&proof);
-        if bytes.len() <= PROOF_LEN_MAX {
+        if let Some(bytes) = wire::encode_padded(&proof, PROOF_LEN_MAX) {
             body.proof_hash = proof_hash(&bytes);
             return Ok((body, bytes));
         }

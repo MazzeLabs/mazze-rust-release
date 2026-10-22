@@ -35,15 +35,19 @@ pub const MAX_LOG_ARITY: usize = 3;
 pub const NUM_QUERIES: usize = 59;
 pub const QUERY_POW_BITS: usize = 16;
 pub const CAP_HEIGHT: usize = 0;
-pub const SALT_ELEMS: usize = 4;
+/// Salt per Merkle leaf of the hiding commitments: 8 elements (~248 bits,
+/// ~124 against Grover), so the openings hide the trace against a quantum
+/// adversary with the same margin as the soundness target.
+pub const SALT_ELEMS: usize = 8;
 pub const NUM_RANDOM_CODEWORDS: usize = 8;
 
 /// Proven soundness the constants above give for the 2×2 AIR.
 pub const PROVEN_SECURITY_BITS: usize = 192;
 
-/// Largest accepted proof, in bytes (spec §6.2). Measured proofs are
-/// 375–387 KB (proving ~1.6 s, verifying ~7 ms); a prover whose proof
-/// exceeds the cap re-proves.
+/// The size of every proof, in bytes (spec §6.2): encodings measure
+/// 388–400 KB (proving ~1.6 s, verifying ~7 ms) and are padded with zeros
+/// to exactly this, so proof size tells nothing; a prover whose encoding
+/// exceeds it re-proves.
 pub const PROOF_LEN_MAX: usize = 400 * 1024;
 
 // Blocks bound proofs by the same cap before any proof system is consulted.

@@ -112,7 +112,7 @@ fn wallet_tx(w: &mut Tx2Witness, dest: Option<ShieldedDest>) -> (ShieldedTxBody,
     let (trace, pv) = build_trace(w, CHAIN, HEIGHT, None);
     let air = Tx2Air::new(CHAIN);
     let proof = ps1::prove(&air, CHAIN, trace, &pv, ProverRandomness::from_csprng(&mut StdRng::seed_from_u64(7))).unwrap();
-    let bytes = wire::encode(&proof);
+    let bytes = wire::encode_padded(&proof, PROOF_LEN_MAX).unwrap();
     body.proof_hash = proof_hash(&bytes);
     (body, bytes)
 }
@@ -166,12 +166,21 @@ fn a_wallet_transaction_passes_stage_a_and_tampering_does_not() {
     let mut longer = proof.clone();
     longer.push(0);
     recommitted.proof_hash = proof_hash(&longer);
-    assert!(matches!(verify_body(&recommitted, &longer, CHAIN), Err(Rejection::MalformedProof(_))));
+    assert!(matches!(verify_body(&recommitted, &longer, CHAIN), Err(Rejection::ProofLength(_))));
+    // Every proof is exactly PROOF_LEN_MAX bytes, its padding all zeros.
+    assert_eq!(proof.len(), PROOF_LEN_MAX, "proofs are padded to one size");
+    let mut dirty = proof.clone();
+    *dirty.last_mut().unwrap() = 1;
+    recommitted.proof_hash = proof_hash(&dirty);
+    assert!(matches!(
+        verify_body(&recommitted, &dirty, CHAIN),
+        Err(Rejection::MalformedProof(m)) if m.contains("padding")
+    ));
     // A proof claiming another trace height is refused before the STARK,
     // even when the body is re-committed to it.
-    let mut taller = wire::decode(&proof, PROOF_LEN_MAX).unwrap();
+    let mut taller = wire::decode_padded(&proof, PROOF_LEN_MAX).unwrap();
     taller.degree_bits += 1;
-    let taller = wire::encode(&taller);
+    let taller = wire::encode_padded(&taller, PROOF_LEN_MAX).unwrap();
     let mut recommitted = body.clone();
     recommitted.proof_hash = proof_hash(&taller);
     assert!(matches!(
@@ -179,7 +188,7 @@ fn a_wallet_transaction_passes_stage_a_and_tampering_does_not() {
         Err(Rejection::MalformedProof(m)) if m.contains("trace height")
     ));
     let oversized = vec![0u8; PROOF_LEN_MAX + 1];
-    assert_eq!(verify_body(&body, &oversized, CHAIN), Err(Rejection::ProofTooLong(PROOF_LEN_MAX + 1)));
+    assert_eq!(verify_body(&body, &oversized, CHAIN), Err(Rejection::ProofLength(PROOF_LEN_MAX + 1)));
 
     // Unknown pool version or proof system: refused before any work.
     let mut b = body.clone();

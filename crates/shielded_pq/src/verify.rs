@@ -24,7 +24,8 @@ pub const POOL_VERSION: u8 = 1;
 pub enum Rejection {
     UnknownPoolVersion(u8),
     UnknownProofSystem(u8),
-    ProofTooLong(usize),
+    /// Every proof is padded to exactly `PROOF_LEN_MAX` bytes.
+    ProofLength(usize),
     ProofHashMismatch,
     MalformedProof(String),
     InvalidProof(String),
@@ -77,13 +78,13 @@ pub fn verify_body(
     if body.proof_system_id != PROOF_SYSTEM_ID {
         return Err(Rejection::UnknownProofSystem(body.proof_system_id));
     }
-    if proof.len() > PROOF_LEN_MAX {
-        return Err(Rejection::ProofTooLong(proof.len()));
+    if proof.len() != PROOF_LEN_MAX {
+        return Err(Rejection::ProofLength(proof.len()));
     }
     if proof_hash(proof) != body.proof_hash {
         return Err(Rejection::ProofHashMismatch);
     }
-    let decoded = wire::decode(proof, PROOF_LEN_MAX)
+    let decoded = wire::decode_padded(proof, PROOF_LEN_MAX)
         .map_err(|e| Rejection::MalformedProof(e.to_string()))?;
     if decoded.degree_bits != DEGREE_BITS {
         return Err(Rejection::MalformedProof(format!(

@@ -72,6 +72,33 @@ pub fn decode(bytes: &[u8], max_len: usize) -> Result<Proof, Error> {
     from_bytes(bytes)
 }
 
+/// A proof as it travels and is stored: its encoding padded with zeros to
+/// exactly `len` bytes, so every proof has the same size and its length
+/// tells an observer of the network nothing. `None` if it does not fit.
+pub fn encode_padded(proof: &Proof, len: usize) -> Option<Vec<u8>> {
+    let mut bytes = encode(proof);
+    if bytes.len() > len {
+        return None;
+    }
+    bytes.resize(len, 0);
+    Some(bytes)
+}
+
+/// Decodes a padded proof: exactly `len` bytes, the encoding followed only
+/// by zeros. The encoding delimits itself, so the padding is unambiguous
+/// and a proof still has a single accepted form.
+pub fn decode_padded(bytes: &[u8], len: usize) -> Result<Proof, Error> {
+    if bytes.len() != len {
+        return Err(Error(format!("proof is {} bytes, not {len}", bytes.len())));
+    }
+    let mut reader = Reader { input: bytes };
+    let proof = Proof::deserialize(&mut reader)?;
+    if reader.input.iter().any(|b| *b != 0) {
+        return err("non-zero padding");
+    }
+    Ok(proof)
+}
+
 struct Writer<'a> {
     out: &'a mut Vec<u8>,
 }

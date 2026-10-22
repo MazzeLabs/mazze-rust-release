@@ -684,7 +684,11 @@ impl RequestManager {
             missing_epochs
         };
         if !missing_epochs.is_empty() {
+            // A peer that answered without these epochs does not have them
+            // (a full node below its checkpoint); ask an archive if there is
+            // one rather than a random peer that may be another full node.
             let chosen_peer = PeerFilter::new(msgid::GET_BLOCK_HASHES_BY_EPOCH)
+                .with_preferred_node_type(NodeType::Archive)
                 .select(&self.syn);
             self.request_epoch_hashes(io, chosen_peer, missing_epochs, delay);
         }

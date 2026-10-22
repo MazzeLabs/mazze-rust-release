@@ -658,6 +658,26 @@ impl SynchronizationProtocolHandler {
             .saturating_sub(statistics.consensus_graph.inserted_block_count)
     }
 
+    /// Heights below this are deep history: full nodes keep blocks and epoch
+    /// sets only from about their era checkpoint up, so anything more than
+    /// DEEP_HISTORY_ERAS eras below the lowest full peer's tip is asked of
+    /// archive peers. 0 when every peer is an archive.
+    fn deep_history_floor(&self) -> u64 {
+        const DEEP_HISTORY_ERAS: u64 = 3;
+        let era = self.graph.consensus.get_config().inner_conf.era_epoch_count;
+        self.syn
+            .peers
+            .read()
+            .values()
+            .filter_map(|p| {
+                let p = p.read();
+                (p.node_type != NodeType::Archive).then_some(p.best_epoch)
+            })
+            .min()
+            .map(|best| best.saturating_sub(DEEP_HISTORY_ERAS * era))
+            .unwrap_or(0)
+    }
+
     fn should_backpressure_block_requests(&self) -> bool {
         let lag = self.sync_consensus_block_lag();
         SYNC_CONSENSUS_GAP.update(lag);
@@ -1404,20 +1424,7 @@ impl SynchronizationProtocolHandler {
         // bodies still go to every peer (the §3b wedge between two archives
         // that only asked each other), and with no archive peer every body
         // goes to every peer as before.
-        const DEEP_HISTORY_ERAS: u64 = 3;
-        let deep_below = {
-            let era = self.graph.consensus.get_config().inner_conf.era_epoch_count;
-            let peers = self.syn.peers.read();
-            peers
-                .values()
-                .filter_map(|p| {
-                    let p = p.read();
-                    (p.node_type != NodeType::Archive).then_some(p.best_epoch)
-                })
-                .min()
-                .map(|best| best.saturating_sub(DEEP_HISTORY_ERAS * era))
-                .unwrap_or(0)
-        };
+        let deep_below = self.deep_history_floor();
         let archive_peers: Vec<NodeId> = self
             .syn
             .peers
@@ -1624,9 +1631,16 @@ impl SynchronizationProtocolHandler {
 
             // Epoch hashes are not in db, so should be requested from another
             // peer
-            let peer = PeerFilter::new(msgid::GET_BLOCK_HASHES_BY_EPOCH)
-                .with_min_best_epoch(from)
-                .select(&self.syn);
+            // Deep-history epochs go to archive peers when there are any:
+            // full nodes answer them with an empty list, and m2 then never
+            // got those epochs and stalled with a full request window
+            // (2026-10-22).
+            let mut filter = PeerFilter::new(msgid::GET_BLOCK_HASHES_BY_EPOCH)
+                .with_min_best_epoch(from);
+            if from < self.deep_history_floor() {
+                filter = filter.with_preferred_node_type(NodeType::Archive);
+            }
+            let peer = filter.select(&self.syn);
 
             // no peer has the epoch we need; try later
             if peer.is_none() {

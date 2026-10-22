@@ -319,7 +319,7 @@ fn prover_randomness_makes_proofs_differ() {
 
 /// The constants still give the proven soundness they claim.
 #[test]
-fn ps1_constants_give_128_proven_bits() {
+fn ps1_constants_give_192_proven_bits() {
     use p3_field::coset::TwoAdicMultiplicativeCoset;
     use p3_security::fri::FriRegime;
     use p3_uni_stark::{AirLayout, GrindingSites, OpeningShape, ProvenSecurity, StarkSecurityParams};
@@ -339,7 +339,8 @@ fn ps1_constants_give_128_proven_bits() {
         AirLayout::from_air(&air),
         TwoAdicMultiplicativeCoset::new(F::ONE, log_n).unwrap(),
         248,
-        128,
+        // Collision bits of the 512-bit commitment digest.
+        256,
         2,
         OpeningShape::Hiding { num_random_codewords: ps1::NUM_RANDOM_CODEWORDS },
         GrindingSites::NONE,
@@ -379,3 +380,4 @@ fn nullifier_inputs_are_tied_to_their_sources() {
         assert!(!accepts(&air, &mutate(row, col), &pv), "{name} is not tied");
     }
 }
+

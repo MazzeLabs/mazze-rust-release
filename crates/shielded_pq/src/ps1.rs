@@ -1,6 +1,7 @@
 //! Proof system PS-1 (spec §6.4): KoalaBear with a degree-8 extension, FRI,
-//! Keccak-256 commitments and Fiat–Shamir, hiding FRI (zero-knowledge), 128
-//! bits of proven soundness.
+//! 512-bit Keccak commitments, Keccak-256 Fiat–Shamir, hiding FRI
+//! (zero-knowledge), 192 bits of proven soundness: about 96 against a
+//! quantum adversary, whose QROM advantage is roughly quadratic.
 //!
 //! Every parameter is a constant. The query count was chosen with the
 //! `p3-security` estimator once, and a test re-checks it; the estimator is
@@ -28,27 +29,36 @@ pub const PROOF_SYSTEM_ID: u8 = 1;
 
 pub const LOG_BLOWUP: usize = 6;
 pub const MAX_LOG_ARITY: usize = 3;
-pub const NUM_QUERIES: usize = 38;
+/// The fewest queries that reach 192 proven bits at this blowup (59 gives
+/// 192; blowup 2^7 needs 51 but doubles the proving time for a ~6% smaller
+/// proof, measured 2026-10-22).
+pub const NUM_QUERIES: usize = 59;
 pub const QUERY_POW_BITS: usize = 16;
 pub const CAP_HEIGHT: usize = 0;
 pub const SALT_ELEMS: usize = 4;
 pub const NUM_RANDOM_CODEWORDS: usize = 8;
 
 /// Proven soundness the constants above give for the 2×2 AIR.
-pub const PROVEN_SECURITY_BITS: usize = 128;
+pub const PROVEN_SECURITY_BITS: usize = 192;
 
 /// Largest accepted proof, in bytes (spec §6.2). Measured proofs are
-/// 184.7–188.7 KB; a prover whose proof exceeds the cap re-proves.
-pub const PROOF_LEN_MAX: usize = 192 * 1024;
+/// 375–387 KB (proving ~1.6 s, verifying ~7 ms); a prover whose proof
+/// exceeds the cap re-proves.
+pub const PROOF_LEN_MAX: usize = 400 * 1024;
 
 // Blocks bound proofs by the same cap before any proof system is consulted.
 const _: () = assert!(PROOF_LEN_MAX == primitives::shielded::MAX_PROOF_BYTES);
 
 pub type Challenge = BinomialExtensionField<F, 8>;
 type ByteHash = Keccak256Hash;
-type U64Hash = PaddingFreeSponge<KeccakF, 25, 17, 4>;
+/// Merkle digests of 8 Keccak lanes, 512 bits: with 256 bits the commitment's
+/// collision resistance caps proven soundness at 128 bits whatever the query
+/// count, and a quantum collision search (BHT, ~2^(n/3)) would cut that to
+/// ~85. At 512 bits the term is 256 classical, ~170 quantum.
+pub const DIGEST_WORDS: usize = 8;
+type U64Hash = PaddingFreeSponge<KeccakF, 25, 17, DIGEST_WORDS>;
 type FieldHash = SerializingHasher<U64Hash>;
-type Compress = CompressionFunctionFromHasher<U64Hash, 2, 4>;
+type Compress = CompressionFunctionFromHasher<U64Hash, 2, DIGEST_WORDS>;
 type ValMmcs = MerkleTreeHidingMmcs<
     [F; p3_keccak::VECTOR_LEN],
     [u64; p3_keccak::VECTOR_LEN],
@@ -56,7 +66,7 @@ type ValMmcs = MerkleTreeHidingMmcs<
     Compress,
     StdRng,
     2,
-    4,
+    DIGEST_WORDS,
     SALT_ELEMS,
 >;
 type ChallengeMmcs = ExtensionMmcs<F, Challenge, ValMmcs>;

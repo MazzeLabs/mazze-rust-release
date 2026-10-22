@@ -96,7 +96,7 @@ pub struct ShieldedParams {
 
 /// Weight of one shielded transaction: its body plus the largest proof
 /// (§8.3). Every transaction has the same shape, so the same weight.
-pub const SHIELDED_TX_WEIGHT: u64 = 441 + 192 * 1024;
+pub const SHIELDED_TX_WEIGHT: u64 = 441 + 400 * 1024;
 
 /// The unit of every shielded amount (notes, public amounts, the fee): one
 /// GMazzy, 10^-9 MAZZE. The circuit proves 64-bit amounts; counted in
@@ -117,7 +117,9 @@ impl Default for ShieldedParams {
             // rates from 1 to 2 per second, and above the 5-epoch execution
             // lag the slot chain needs (spec §8.6).
             slot_epochs: 10,
-            max_txs_per_block: 8,
+            // 32 proofs of ~380 KB: ~12 MB of witness per slot block
+            // (~4.6 tx/s); raised from 8, to be measured on the fleet.
+            max_txs_per_block: 32,
             tx_fee: SHIELDED_BASE_PRICE * SHIELDED_TX_WEIGHT,
             anchor_window_epochs: 100_000,
             pause_height: u64::MAX,

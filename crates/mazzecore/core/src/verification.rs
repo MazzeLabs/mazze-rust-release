@@ -698,20 +698,26 @@ impl VerificationConfig {
                 )));
             }
         }
+        // The STARKs in parallel: ~7 ms each, up to `max_txs_per_block` of
+        // them. The first failure in block order is reported, so the outcome
+        // does not depend on scheduling. Every proof already hashes to its
+        // body, so a failure here is the block's fault.
+        use mazze_shielded_pq::verify::verify_body;
+        use rayon::prelude::*;
         let shielded_chain_id = chain_id.in_shielded_space();
-        for (body, proof) in block.shielded.iter().zip(&block.witness) {
-            use mazze_shielded_pq::verify::{verify_body, Rejection};
-            match verify_body(body, proof, shielded_chain_id) {
-                Ok(()) => {}
-                Err(Rejection::ProofHashMismatch) => {
-                    bail!(BlockError::ShieldedWitnessMismatch(format!(
-                        "proof does not match body {:?}",
-                        body.hash()
-                    )))
-                }
-                Err(e) => bail!(BlockError::InvalidShieldedTransaction(
-                    format!("{:?}: {:?}", body.hash(), e)
-                )),
+        let results: Vec<_> = block
+            .shielded
+            .par_iter()
+            .zip(block.witness.par_iter())
+            .map(|(body, proof)| verify_body(body, proof, shielded_chain_id))
+            .collect();
+        for (body, result) in block.shielded.iter().zip(results) {
+            if let Err(e) = result {
+                bail!(BlockError::InvalidShieldedTransaction(format!(
+                    "{:?}: {:?}",
+                    body.hash(),
+                    e
+                )));
             }
         }
         Ok(())

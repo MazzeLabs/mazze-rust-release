@@ -46,7 +46,7 @@ pub fn proof_hash(proof: &[u8]) -> H512 {
 
 /// Largest accepted proof in bytes, for every proof system (spec §6.2). The
 /// prover crate checks that its own cap equals this one.
-pub const MAX_PROOF_BYTES: usize = 192 * 1024;
+pub const MAX_PROOF_BYTES: usize = 400 * 1024;
 
 pub const RECOVERY_TAG_BYTES: usize = 32;
 pub const RECOVERY_SLOT_BYTES: usize = 64;

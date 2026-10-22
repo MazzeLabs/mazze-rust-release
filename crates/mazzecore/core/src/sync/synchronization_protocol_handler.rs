@@ -125,14 +125,18 @@ const EPOCH_SYNC_MAX_INFLIGHT: u64 = 1200;
 /// epoch on the fleet) go out as one GetBlockHeaders and are verified as
 /// one PoW batch, so larger batches also keep the worker pool busier.
 const EPOCH_SYNC_BATCH_SIZE: u64 = 60;
-// At 4 blocks/sec, 400 in-flight = ~100s of blocks. Keeps RAM bounded.
-const BLOCK_SYNC_MAX_INFLIGHT: usize = 400;
+// Bodies in flight. 400 capped a from-genesis archive at ~170 bodies/s with
+// ~2.4 s round trips to its one archive peer (m2, 2026-10-22); 2000 bodies
+// of the fleet's mostly small blocks still keep RAM bounded.
+const BLOCK_SYNC_MAX_INFLIGHT: usize = 2000;
 // Under backpressure, throttle body fetch so consensus can drain its queue --
 // but bodies are precisely what lets consensus advance, so a 64-block cliff
 // starves the pipe on an execution-bound node and deepens the body debt.
 // Phase-0: raise to 256 (RAM stays bounded by the recover-queue byte cap and
 // max_pending_execution_epochs). See docs/internal/throughput-plan-3000tps.md.
-const BLOCK_SYNC_MAX_INFLIGHT_BACKPRESSURE: usize = 256;
+// Raised with BLOCK_SYNC_MAX_INFLIGHT: catch-up is backpressured most of
+// the time, so 256 was the effective window.
+const BLOCK_SYNC_MAX_INFLIGHT_BACKPRESSURE: usize = 1024;
 // Engage backpressure when sync is 256 blocks (~64s) ahead of consensus.
 const SYNC_CONSENSUS_BACKPRESSURE_BLOCK_GAP: usize = 256;
 const ACTIVE_FRONTIER_RESCUE_BATCH_SIZE: usize = 128;

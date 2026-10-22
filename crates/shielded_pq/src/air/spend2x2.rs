@@ -92,7 +92,6 @@ pub struct InLayout {
     pub hm: usize,
     pub leaf: usize,
     pub merkle: usize,
-    pub mk: usize,
     pub nf: usize,
 }
 #[derive(Clone, Copy, Debug, Default)]
@@ -145,11 +144,10 @@ pub fn layout() -> Layout {
         for _ in 0..DEPTH {
             v.push(p(Merkle, Free));
         }
-        inl.mk = v.len();
-        v.push(p(StartChunk { dom: dom::MK, len: 24 }, EqNk));
-        v.push(p(Cont, EqPsi));
+        // nf = H(nk ‖ ψ ‖ pos) in one sponge (spec §4).
         inl.nf = v.len();
-        v.push(p(StartFromPrev { dom: dom::NF, len: (DIGEST + 2) as u32 }, Zero));
+        v.push(p(StartChunk { dom: dom::NF, len: (2 * DIGEST + 2) as u32 }, EqNk));
+        v.push(p(Cont, EqPsi));
         v.push(p(Cont, Pos));
     }
     let mut outs = [OutLayout::default(); 2];
@@ -339,7 +337,7 @@ impl Tx2Air {
             c[pc::LOAD_NK][(inl.nk + 1) * R - 1] = F::ONE;
             c[pc::LOAD_OWNER][(inl.own + 3) * R - 1] = F::ONE;
             c[pc::ROOT][(inl.merkle + DEPTH) * R - 1] = F::ONE;
-            c[if x == 0 { pc::NF_A } else { pc::NF_B }][(inl.nf + 2) * R - 1] = F::ONE;
+            c[if x == 0 { pc::NF_A } else { pc::NF_B }][(inl.nf + 3) * R - 1] = F::ONE;
         }
         c[pc::CM_C][(l.outs[0].leaf + 4) * R - 1] = F::ONE;
         c[pc::CM_D][(l.outs[1].leaf + 4) * R - 1] = F::ONE;

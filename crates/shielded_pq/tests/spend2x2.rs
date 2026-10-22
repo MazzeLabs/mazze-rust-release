@@ -319,7 +319,7 @@ fn prover_randomness_makes_proofs_differ() {
 
 /// The constants still give the proven soundness they claim.
 #[test]
-fn ps1_constants_give_192_proven_bits() {
+fn ps1_constants_give_their_proven_bits() {
     use p3_field::coset::TwoAdicMultiplicativeCoset;
     use p3_security::fri::FriRegime;
     use p3_uni_stark::{AirLayout, GrindingSites, OpeningShape, ProvenSecurity, StarkSecurityParams};
@@ -338,7 +338,8 @@ fn ps1_constants_give_192_proven_bits() {
         &air,
         AirLayout::from_air(&air),
         TwoAdicMultiplicativeCoset::new(F::ONE, log_n).unwrap(),
-        248,
+        // The extension field: 8 · log2(p) = 247.9, rounded down.
+        247,
         // Collision bits of the 512-bit commitment digest.
         256,
         2,
@@ -366,12 +367,12 @@ fn nullifier_inputs_are_tied_to_their_sources() {
         t
     };
     let cases = [
-        ("nk register at the mk chunk", inl.mk * R, REG_NK),
-        ("psi register at its mk chunk", (inl.mk + 1) * R, REG_PSI),
+        ("nk register at the nullifier's nk chunk", inl.nf * R, REG_NK),
+        ("psi register at its psi chunk", (inl.nf + 1) * R, REG_PSI),
         ("owner register inside the region", inl.hm * R + 5, REG_OWNER),
-        ("position limb (low)", inl.nf * R + R + 1, ACC_LO),
-        ("position limb (high)", inl.nf * R + R + 1, ACC_HI),
-        ("position chunk", (inl.nf + 1) * R, CHUNK),
+        ("position limb (low)", inl.nf * R + 2 * R + 1, ACC_LO),
+        ("position limb (high)", inl.nf * R + 2 * R + 1, ACC_HI),
+        ("position chunk", (inl.nf + 2) * R, CHUNK),
         ("a Merkle bit on a non-bit row", inl.merkle * R + 3, BIT),
         ("a value limb register", inl.hm * R + 2, REG_VAL),
         ("the dummy gate", inl.nk * R + 7, REG_Z),
@@ -380,5 +381,6 @@ fn nullifier_inputs_are_tied_to_their_sources() {
         assert!(!accepts(&air, &mutate(row, col), &pv), "{name} is not tied");
     }
 }
+
 
 

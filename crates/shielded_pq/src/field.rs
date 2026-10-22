@@ -3,7 +3,14 @@
 //! - `F` is KoalaBear.
 //! - Poseidon2 of width 24 is the only in-circuit hash: a sponge with rate 12
 //!   and capacity 12 elements (372 bits), so a 12-element digest gives ~186
-//!   bits of classical and ~124 bits of quantum (BHT) collision resistance.
+//!   bits of generic classical and ~124 bits of quantum (BHT) collision
+//!   resistance.
+//! - Rounds: 8 full and 23 partial, with x^3. By the Poseidon paper's attack
+//!   constraints (eprint 2019/458, plus 2023/537), which the round count is
+//!   derived from, these hold up to a 316-bit target; a 192-bit target needs
+//!   (6, 22), so this is 192 bits with 2 extra full rounds and 1 extra
+//!   partial round (spec §2). Plonky3 labels them its 128-bit set because
+//!   that is the target it chose them for.
 //! - The chain id goes into the capacity of every sponge call. It is a
 //!   parameter of the chain, never a constant of this crate, so a proof or
 //!   a commitment from one chain is meaningless on another (spec P-5).
@@ -34,7 +41,7 @@ pub mod dom {
     pub const HM_DIGEST: u32 = 4;
     pub const LEAF: u32 = 5;
     pub const NODE: u32 = 6;
-    pub const MK: u32 = 7;
+    // 7 was the nullifier's intermediate mk, retired; never reuse it.
     pub const NF: u32 = 8;
 }
 

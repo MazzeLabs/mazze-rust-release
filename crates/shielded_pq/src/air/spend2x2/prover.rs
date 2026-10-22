@@ -134,10 +134,10 @@ pub fn build_trace(
             chunks[inl.merkle + k] = sp.path[k];
             bits[inl.merkle + k] = F::new(((sp.pos >> k) & 1) as u32);
         }
-        chunks[inl.mk] = keys[x].nk;
-        chunks[inl.mk + 1] = sp.note.psi;
-        chunks[inl.nf + 1][0] = F::new((sp.pos & 0xffff) as u32);
-        chunks[inl.nf + 1][1] = F::new(((sp.pos >> 16) & 0xffff) as u32);
+        chunks[inl.nf] = keys[x].nk;
+        chunks[inl.nf + 1] = sp.note.psi;
+        chunks[inl.nf + 2][0] = F::new((sp.pos & 0xffff) as u32);
+        chunks[inl.nf + 2][1] = F::new(((sp.pos >> 16) & 0xffff) as u32);
     }
     for (x, o) in l.outs.iter().enumerate() {
         fill_hm_leaf(&mut chunks, o.hm, o.leaf, &w.outputs[x], &w.outputs[x].owner, w.out_limb_override[x]);
@@ -188,7 +188,7 @@ pub fn build_trace(
         p2_permute(&mut o);
         outs[k] = o;
     }
-    let nf = [outs[l.ins[0].nf + 1], outs[l.ins[1].nf + 1]].map(|o| <Digest>::try_from(&o[..DIGEST]).unwrap());
+    let nf = [outs[l.ins[0].nf + 2], outs[l.ins[1].nf + 2]].map(|o| <Digest>::try_from(&o[..DIGEST]).unwrap());
     let cm = [outs[l.outs[0].leaf + 3], outs[l.outs[1].leaf + 3]].map(|o| <Digest>::try_from(&o[..DIGEST]).unwrap());
     let pv = public_values(w, nf, cm);
 

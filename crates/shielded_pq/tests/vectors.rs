@@ -1,6 +1,9 @@
 //! Cross-implementation vectors: these values were produced by the spike
 //! prototype (spikes/shielded-notes, tests/vectors.rs) with chain id 19802.
 //! A wallet built on the prototype and this crate must agree bit for bit.
+//! The nullifier is the exception: since 2026-10-22 it is one sponge over
+//! nk ‖ ψ ‖ pos (spec §4), so its vector is this crate's, checked against
+//! the formula.
 
 use mazze_shielded_pq::{
     field::{Digest, Sponge, Xof, F},
@@ -35,7 +38,12 @@ fn matches_the_prototype() {
     let note = Note { d: div, owner, value: 123_456_789, psi: d(2), y };
     let cm = note.cm(&s);
     assert_eq!(u(&cm), [600978626, 1770875173, 1652814060, 1302600931, 428813605, 829156714, 1234190805, 131738991, 1640867767, 1749989795, 2129008388, 476067186]);
-    assert_eq!(u(&nullifier(&s, &keys.nk, &note.psi, 77)), [1994153425, 662633234, 991746860, 1087717865, 441990238, 1772148886, 1657189122, 438366766, 1630338512, 1401547387, 1738232925, 1449348500]);
+    let nf = nullifier(&s, &keys.nk, &note.psi, 77);
+    let mut input = keys.nk.to_vec();
+    input.extend_from_slice(&note.psi);
+    input.extend_from_slice(&[F::new(77), F::new(0)]);
+    assert_eq!(nf, s.hash(mazze_shielded_pq::field::dom::NF, &input), "nf = H(nk ‖ ψ ‖ pos)");
+    assert_eq!(u(&nf), [1642589106, 1304184166, 420839513, 275591036, 229958394, 759498984, 92026102, 267562535, 99782627, 1945214056, 1285793294, 469789905]);
     let mut t = Tree::default();
     t.append(cm);
     t.append(d(3));

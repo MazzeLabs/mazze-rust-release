@@ -72,6 +72,11 @@ fn air(chain_id: u32) -> Arc<Tx2Air> {
 pub fn verify_body(
     body: &ShieldedTxBody, proof: &[u8], chain_id: u32,
 ) -> Result<(), Rejection> {
+    // The structural rules (distinct nullifiers, a destination exactly
+    // when value leaves) again, whatever path built the body: the engine
+    // relies on them, and a body with one nullifier twice would spend one
+    // note twice.
+    body.check_structure().map_err(|e| Rejection::MalformedProof(e.into()))?;
     if body.pool_version != POOL_VERSION {
         return Err(Rejection::UnknownPoolVersion(body.pool_version));
     }

@@ -92,11 +92,14 @@ impl Note {
 
 /// `nf = H_NF(mk, pos)` with `mk = H_MK(nk, ψ)`.
 pub fn nullifier(sponge: &Sponge, nk: &Digest, psi: &Digest, pos: u64) -> Digest {
-    let mut mk_in = Vec::with_capacity(2 * DIGEST);
-    mk_in.extend_from_slice(nk);
-    mk_in.extend_from_slice(psi);
-    let mk = sponge.hash(dom::MK, &mk_in);
-    let mut nf_in = mk.to_vec();
+    // One sponge over nk ‖ ψ ‖ pos. With an intermediate mk = H(nk, ψ) the
+    // final step maps 12 elements to 12, whose image misses ~37% of the
+    // outputs for a fixed position: an unbounded adversary could then rule
+    // out positions a nullifier cannot come from. Over 26 elements every
+    // output is reachable from every position.
+    let mut nf_in = Vec::with_capacity(2 * DIGEST + 2);
+    nf_in.extend_from_slice(nk);
+    nf_in.extend_from_slice(psi);
     // Two 16-bit limbs: pos < 2^32 > p, so a single element would wrap mod p
     // and give two positions the same nullifier.
     assert!(pos < 1 << 32, "tree depth is 32");

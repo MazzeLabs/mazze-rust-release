@@ -24,7 +24,7 @@ p3-symmetric = "=0.8.0"
 p3-uni-stark = "=0.8.0"
 rand = { version = "0.10.1", default-features = false, features = ["std_rng"] }
 serde = { version = "1", features = ["derive"] }
-tiny-keccak = { version = "2", features = ["shake"] }
+tiny-keccak = { version = "2", features = ["shake", "keccak"] }
 chacha20poly1305 = { version = "0.10", optional = true }
 zeroize = { version = "1.8", optional = true }
 

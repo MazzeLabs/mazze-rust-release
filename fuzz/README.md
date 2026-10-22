@@ -16,7 +16,7 @@ cargo install cargo-fuzz
 MAZZE_FUZZ_SEEDS=$PWD/fuzz/corpus cargo test --release -p mazze-shielded-pq \
   --test verify_body write_fuzz_seeds -- --ignored
 cd fuzz
-cargo +nightly fuzz run verify_body -- -max_len=420000 -rss_limit_mb=4096 -max_total_time=600
+cargo +nightly fuzz run verify_body -- -max_len=430000 -rss_limit_mb=4096 -max_total_time=600
 ```
 
 Run heavy fuzzing inside a memory-capped scope

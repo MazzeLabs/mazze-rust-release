@@ -1,5 +1,5 @@
 //! Proof system PS-1 (spec §6.4): KoalaBear with a degree-8 extension, FRI,
-//! 512-bit Keccak commitments, Keccak-256 Fiat–Shamir, hiding FRI
+//! 512-bit Keccak commitments, a 512-bit Keccak Fiat–Shamir transcript, hiding FRI
 //! (zero-knowledge), 192 bits of proven soundness: about 96 against a
 //! quantum adversary, whose QROM advantage is roughly quadratic.
 //!
@@ -12,7 +12,7 @@ use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
 use p3_field::extension::BinomialExtensionField;
 use p3_fri::{FriParameters, HidingFriPcs};
-use p3_keccak::{Keccak256Hash, KeccakF};
+use p3_keccak::KeccakF;
 use p3_merkle_tree::MerkleTreeHidingMmcs;
 use p3_symmetric::{
     CompressionFunctionFromHasher, PaddingFreeSponge, SerializingHasher,
@@ -29,10 +29,11 @@ pub const PROOF_SYSTEM_ID: u8 = 1;
 
 pub const LOG_BLOWUP: usize = 6;
 pub const MAX_LOG_ARITY: usize = 3;
-/// The fewest queries that reach 192 proven bits at this blowup (59 gives
-/// 192; blowup 2^7 needs 51 but doubles the proving time for a ~6% smaller
-/// proof, measured 2026-10-22).
-pub const NUM_QUERIES: usize = 59;
+/// Queries: 59 is the fewest that reach 192 proven bits at this blowup over
+/// the 247.9-bit extension; 61 gives 197, a margin of two queries. (Blowup
+/// 2^7 would need fewer but doubles the proving time for a ~6% smaller
+/// proof, measured 2026-10-22.)
+pub const NUM_QUERIES: usize = 61;
 pub const QUERY_POW_BITS: usize = 16;
 pub const CAP_HEIGHT: usize = 0;
 /// Salt per Merkle leaf of the hiding commitments: 8 elements (~248 bits,
@@ -42,19 +43,18 @@ pub const SALT_ELEMS: usize = 8;
 pub const NUM_RANDOM_CODEWORDS: usize = 8;
 
 /// Proven soundness the constants above give for the 2×2 AIR.
-pub const PROVEN_SECURITY_BITS: usize = 192;
+pub const PROVEN_SECURITY_BITS: usize = 197;
 
 /// The size of every proof, in bytes (spec §6.2): encodings measure
-/// 388–400 KB (proving ~1.6 s, verifying ~7 ms) and are padded with zeros
+/// 402–412 KB (proving ~1.6 s, verifying ~7 ms) and are padded with zeros
 /// to exactly this, so proof size tells nothing; a prover whose encoding
 /// exceeds it re-proves.
-pub const PROOF_LEN_MAX: usize = 400 * 1024;
+pub const PROOF_LEN_MAX: usize = 416 * 1024;
 
 // Blocks bound proofs by the same cap before any proof system is consulted.
 const _: () = assert!(PROOF_LEN_MAX == primitives::shielded::MAX_PROOF_BYTES);
 
 pub type Challenge = BinomialExtensionField<F, 8>;
-type ByteHash = Keccak256Hash;
 /// Merkle digests of 8 Keccak lanes, 512 bits: with 256 bits the commitment's
 /// collision resistance caps proven soundness at 128 bits whatever the query
 /// count, and a quantum collision search (BHT, ~2^(n/3)) would cut that to
@@ -74,7 +74,43 @@ type ValMmcs = MerkleTreeHidingMmcs<
     SALT_ELEMS,
 >;
 type ChallengeMmcs = ExtensionMmcs<F, Challenge, ValMmcs>;
-type Challenger = SerializingChallenger32<F, HashChallenger<u8, ByteHash, 32>>;
+/// The transcript chains 512-bit Keccak states: with 256 bits the chaining
+/// value alone would bound the transcript's security at ~128 bits classical
+/// and ~85 quantum, below the target the queries are sized for.
+type Challenger = SerializingChallenger32<F, HashChallenger<u8, Keccak512Hash, 64>>;
+
+/// Keccak with a 512-bit output, for the Fiat–Shamir transcript.
+#[derive(Copy, Clone, Debug)]
+pub struct Keccak512Hash;
+
+impl p3_symmetric::CryptographicHasher<u8, [u8; 64]> for Keccak512Hash {
+    fn hash_iter<I>(&self, input: I) -> [u8; 64]
+    where
+        I: IntoIterator<Item = u8>,
+    {
+        use tiny_keccak::Hasher;
+        let mut hasher = tiny_keccak::Keccak::v512();
+        let bytes: Vec<u8> = input.into_iter().collect();
+        hasher.update(&bytes);
+        let mut out = [0u8; 64];
+        hasher.finalize(&mut out);
+        out
+    }
+
+    fn hash_iter_slices<'a, I>(&self, input: I) -> [u8; 64]
+    where
+        I: IntoIterator<Item = &'a [u8]>,
+    {
+        use tiny_keccak::Hasher;
+        let mut hasher = tiny_keccak::Keccak::v512();
+        for chunk in input {
+            hasher.update(chunk);
+        }
+        let mut out = [0u8; 64];
+        hasher.finalize(&mut out);
+        out
+    }
+}
 type Dft = Radix2DitParallel<F>;
 type Pcs = HidingFriPcs<F, Dft, ValMmcs, ChallengeMmcs, StdRng>;
 pub type Config = StarkConfig<Pcs, Challenge, Challenger>;
@@ -91,7 +127,7 @@ pub struct Domain {
 
 impl Domain {
     pub fn transcript_seed(&self) -> Vec<u8> {
-        let mut v = b"mazze/shielded/fiat-shamir/v1".to_vec();
+        let mut v = b"mazze/shielded/fiat-shamir/v2".to_vec();
         v.push(PROOF_SYSTEM_ID);
         v.extend_from_slice(&self.chain_id.to_le_bytes());
         v.extend_from_slice(&(self.air_id.len() as u32).to_le_bytes());
@@ -137,7 +173,7 @@ fn build(domain: Domain, salts: StdRng, codewords: StdRng) -> Config {
         Pcs::new(Dft::default(), val_mmcs, fri, NUM_RANDOM_CODEWORDS, codewords);
     Config::new(
         pcs,
-        Challenger::from_hasher(domain.transcript_seed(), ByteHash {}),
+        Challenger::new(HashChallenger::new(domain.transcript_seed(), Keccak512Hash)),
     )
 }
 

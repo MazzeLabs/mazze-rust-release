@@ -95,13 +95,16 @@ pub fn build_transaction(
     w.sighash = body.sighash(chain_id);
     let (trace, pv) = build_trace(w, chain_id, HEIGHT, None);
     let air = Tx2Air::new(chain_id);
-    loop {
+    // Encodings stay well below the cap; a few retries are plenty, and a
+    // randomness source stuck on one value cannot loop forever.
+    for _ in 0..16 {
         let proof = ps1::prove(&air, chain_id, trace.clone(), &pv, randomness())?;
         if let Some(bytes) = wire::encode_padded(&proof, PROOF_LEN_MAX) {
             body.proof_hash = proof_hash(&bytes);
             return Ok((body, bytes));
         }
     }
+    Err("every proof exceeded the size cap; check the prover randomness".into())
 }
 
 // ---- recovery from the seed (spec §9.5) -----------------------------------

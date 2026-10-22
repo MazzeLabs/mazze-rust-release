@@ -10,7 +10,7 @@ use crate::{
             Context, GetCompactBlocks, Handleable,
         },
         synchronization_protocol_handler::RecoverPublicTask,
-        Error,
+        Error, ErrorKind,
     },
 };
 use mazze_types::H256;
@@ -140,6 +140,9 @@ impl Handleable for GetCompactBlocksResponse {
                     true,  // persistent
                     false, // recover_from_db
                 );
+                if ctx.manager.graph.take_shielded_offence(&hash) {
+                    return Err(ErrorKind::InvalidBlock.into());
+                }
 
                 if !insert_result.request_again() {
                     received_reconstructed_blocks.push(hash);

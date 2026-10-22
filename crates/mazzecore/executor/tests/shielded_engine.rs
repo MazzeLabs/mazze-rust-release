@@ -152,11 +152,12 @@ fn shield_in_pay_shield_out_and_every_refusal() {
     assert_eq!(
         outcomes,
         vec![
+            ShieldedOutcome::Skipped(SkipReason::Spent),
             ShieldedOutcome::Skipped(SkipReason::UnknownAnchor),
-            ShieldedOutcome::Skipped(SkipReason::UnknownAnchor),
-            ShieldedOutcome::Skipped(SkipReason::UnknownAnchor),
+            ShieldedOutcome::Skipped(SkipReason::Backing),
         ],
-        "root1 was recorded at height 3: outside a 50-epoch window at 54"
+        "a replayed nullifier; the empty root, replaced at 2, is outside the window at 54; \
+         a shield-out above the backing"
     );
     let mut replay = body(5, root1, 0, 0);
     replay.nf[1] = pay.nf[0];
@@ -309,4 +310,37 @@ fn the_network_fixes_the_shielded_parameters() {
     assert!(!other.is_active(0) && !other.is_slot(10), "inactive elsewhere");
     let paused = ShieldedParams { pause_height: 20, ..testnet };
     assert!(paused.is_slot(10) && !paused.is_slot(20) && !paused.is_active(25));
+}
+
+/// An anchor's window runs from when its root was replaced: after a quiet
+/// stretch longer than the window, a transaction proven against the root
+/// that the next one replaces is still accepted (audit 2026-10-22: before,
+/// it expired at once and stranded shield-in deposits).
+#[test]
+fn a_replaced_root_stays_valid_for_a_window() {
+    let (_sm, mut state) = fresh_state();
+    let p = params();
+    let first = body(1, empty_root(), 10_000, 0);
+    deposit(&mut state, &first, 1);
+    execute_section(&mut state, &[Arc::new(first.clone())], 2, &p).unwrap();
+    let root = root_after(&first.cm_out);
+    // Quiet for far longer than the window; two wallets prove against
+    // `root`. One lands and replaces it...
+    let late = 2 + 10 * p.anchor_window_epochs;
+    assert!(matches!(
+        execute_section(&mut state, &[Arc::new(body(2, root, 0, 0))], late, &p).unwrap()[0],
+        ShieldedOutcome::Applied { .. }
+    ));
+    // ...and the other, a little later, is still accepted.
+    assert!(matches!(
+        execute_section(&mut state, &[Arc::new(body(3, root, 0, 0))], late + p.anchor_window_epochs, &p)
+            .unwrap()[0],
+        ShieldedOutcome::Applied { .. }
+    ));
+    // But not beyond the window from when it was replaced.
+    assert_eq!(
+        execute_section(&mut state, &[Arc::new(body(4, root, 0, 0))], late + p.anchor_window_epochs + 1, &p)
+            .unwrap(),
+        vec![ShieldedOutcome::Skipped(SkipReason::UnknownAnchor)]
+    );
 }

@@ -1200,9 +1200,19 @@ pub struct SynchronizationGraph {
     /// uses by hash, and the graph is rebuilt from the root afterwards.
     pub fast_sync_anchor: Mutex<Option<AnchorPair>>,
 
-    /// The greatest height of a header that passed verification: how deep a
-    /// block is buried, for accepting one whose witness was pruned.
-    max_valid_header_height: AtomicU64,
+    /// The greatest height of a header that became graph-ready, i.e. whose
+    /// difficulty was checked against its parent (and so on down): how deep
+    /// a block is buried, for accepting one whose witness was pruned. A
+    /// header that only passed its own PoW at a difficulty it chose itself
+    /// does not count: any peer could otherwise push this up for free and
+    /// let a recent block in without its proofs (audit 2026-10-22).
+    max_ready_header_height: AtomicU64,
+
+    /// Blocks from peers whose shielded section failed stage A: an honest
+    /// peer never sends one (stage A is stateless, so it checked the same),
+    /// and each costs up to `max_txs_per_block` STARKs. The handler that
+    /// inserted it takes the hash back and disconnects the sender.
+    shielded_offences: Mutex<HashSet<H256>>,
 }
 
 impl MallocSizeOf for SynchronizationGraph {
@@ -1269,7 +1279,8 @@ impl SynchronizationGraph {
             new_block_hashes: notifications.new_block_hashes.clone(),
             machine,
             fast_sync_anchor: Mutex::new(None),
-            max_valid_header_height: AtomicU64::new(0),
+            max_ready_header_height: AtomicU64::new(0),
+            shielded_offences: Mutex::new(HashSet::new()),
         };
 
         // It receives `BLOCK_GRAPH_READY` blocks in order and handles them in
@@ -1770,6 +1781,10 @@ impl SynchronizationGraph {
                     );
                     continue;
                 }
+                self.max_ready_header_height.fetch_max(
+                    inner.arena[index].block_header.height(),
+                    Ordering::Relaxed,
+                );
 
                 // Maintain `old_era_blocks_frontier` for future garbage
                 // collection after making a checkpoint.
@@ -2139,8 +2154,6 @@ impl SynchronizationGraph {
 
         let header_arc = Arc::new(header.clone());
         let me = if verification_passed {
-            self.max_valid_header_height
-                .fetch_max(header.height(), Ordering::Relaxed);
             inner.insert(header_arc.clone())
         } else {
             inner.insert_invalid(header_arc.clone())
@@ -2410,6 +2423,12 @@ impl SynchronizationGraph {
         invalid_set
     }
 
+    /// Whether `hash` was a peer's block whose shielded section failed stage
+    /// A (and forgets it): the caller disconnects the peer that sent it.
+    pub fn take_shielded_offence(&self, hash: &H256) -> bool {
+        self.shielded_offences.lock().remove(hash)
+    }
+
     pub fn insert_block(
         &self, block: Block, need_to_verify: bool, persistent: bool,
         recover_from_db: bool,
@@ -2460,7 +2479,7 @@ impl SynchronizationGraph {
             let era = self.consensus.get_config().inner_conf.era_epoch_count;
             let buried = block.block_header.height()
                 + WITNESS_BURIAL_ERAS * era
-                <= self.max_valid_header_height.load(Ordering::Relaxed);
+                <= self.max_ready_header_height.load(Ordering::Relaxed);
             let policy = if recover_from_db {
                 WitnessPolicy::Skip
             } else if buried {
@@ -2504,6 +2523,16 @@ impl SynchronizationGraph {
                         "Invalid block! inserted_block={:?} err={:?}",
                         block.block_header, e
                     );
+                    if matches!(
+                        e,
+                        Error(ErrorKind::Block(BlockError::InvalidShieldedTransaction(_)), _)
+                    ) {
+                        let mut offences = self.shielded_offences.lock();
+                        if offences.len() >= 1024 {
+                            offences.clear();
+                        }
+                        offences.insert(hash);
+                    }
                     inner.arena[me].graph_status = BLOCK_INVALID;
                 }
                 _ => {}

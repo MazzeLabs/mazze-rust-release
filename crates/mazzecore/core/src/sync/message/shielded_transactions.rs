@@ -7,7 +7,7 @@
 
 use crate::sync::{
     message::{Context, Handleable},
-    Error,
+    Error, ErrorKind,
 };
 use primitives::shielded::{ShieldedTxBody, MAX_PROOF_BYTES};
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
@@ -78,9 +78,19 @@ impl Handleable for ShieldedTransactions {
                 } else {
                     ShieldedSource::PeerFluff
                 };
-                if let Err(e) = pool.insert_shielded(body, proof, source) {
-                    debug!("shielded transaction {:?} refused: {:?}", hash, e);
-                    continue;
+                match pool.insert_shielded(body, proof, source) {
+                    Ok(_) => {}
+                    // Validity of a proof does not depend on state: an
+                    // honest peer never relays an invalid one, and each
+                    // costs a STARK. The sender is disconnected.
+                    Err(crate::transaction_pool::shielded::ShieldedPoolError::InvalidProof(e)) => {
+                        debug!("shielded transaction {:?} with an invalid proof: {}", hash, e);
+                        return Err(ErrorKind::InvalidMessageFormat.into());
+                    }
+                    Err(e) => {
+                        debug!("shielded transaction {:?} refused: {:?}", hash, e);
+                        continue;
+                    }
                 }
             }
             if !self.stem {

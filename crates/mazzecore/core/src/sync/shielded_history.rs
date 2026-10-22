@@ -11,9 +11,10 @@
 //! below it, so it fetches that range from peers whose history is complete.
 //!
 //! Nothing a peer sends is trusted. Replaying the sections from the empty
-//! tree must reproduce, after every applied transaction, a root that the
-//! state recorded at exactly that epoch, and every nullifier must be spent
-//! in the state. Commitments, positions and nullifiers are thereby bound to
+//! tree must reproduce the state's roots: the root each applied
+//! transaction replaces must be recorded at exactly that transaction's
+//! epoch (roots are recorded when they stop being current), and every
+//! nullifier must be spent in the state. Commitments, positions and nullifiers are thereby bound to
 //! the chain. A peer that leaves sections out is caught at the end: the
 //! replayed tree, continued over the node's own history, must equal the
 //! state's. On any failure the range is fetched again from other peers.
@@ -84,6 +85,17 @@ pub fn replay_entry(
             ShieldedOutcome::Applied { positions } => *positions,
             ShieldedOutcome::Skipped(_) => continue,
         };
+        if let Some(state) = state {
+            // The root this transaction replaces was recorded as it did so.
+            let replaced = root_height(state, &frontier.root())
+                .map_err(|e| format!("state: {e:?}"))?;
+            if replaced != Some(epoch) {
+                return Err(format!(
+                    "epoch {epoch}: the root before {:?} was recorded at {replaced:?}",
+                    body.hash()
+                ));
+            }
+        }
         if positions != [frontier.leaves, frontier.leaves + 1] {
             return Err(format!(
                 "epoch {epoch}: positions {positions:?}, expected {}",
@@ -98,14 +110,6 @@ pub fn replay_entry(
                 .ok_or_else(|| format!("epoch {epoch}: tree full"))?;
         }
         if let Some(state) = state {
-            let recorded = root_height(state, &frontier.root())
-                .map_err(|e| format!("state: {e:?}"))?;
-            if recorded != Some(epoch) {
-                return Err(format!(
-                    "epoch {epoch}: the root after {:?} was recorded at {recorded:?}",
-                    body.hash()
-                ));
-            }
             for nf in &body.nf {
                 if !nullifier_spent(state, nf).map_err(|e| format!("state: {e:?}"))? {
                     return Err(format!("epoch {epoch}: nullifier not spent"));

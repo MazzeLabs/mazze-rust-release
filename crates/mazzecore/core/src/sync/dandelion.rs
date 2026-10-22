@@ -52,8 +52,11 @@ pub enum Route {
     Stem(NodeId),
     /// Broadcast to every peer except the sender.
     Fluff,
-    /// Already handled.
+    /// Already seen fluffing: public, nothing to send.
     Drop,
+    /// A copy of a stem already routed: nothing to send, and nothing learned
+    /// (it says nothing about the transaction being public).
+    Ignore,
     /// No stem successor yet: keep the transaction and try again later.
     Wait,
 }
@@ -166,8 +169,13 @@ impl Dandelion {
     /// diffuser, or when no successor other than the sender exists;
     /// otherwise forwarded to the successor `from` maps to.
     pub fn route_stem(&self, hash: H256, from: &NodeId, outbound: &[NodeId]) -> Route {
-        if self.fluffed.lock().contains(&hash) || !self.stemmed.lock().insert(hash) {
+        if self.fluffed.lock().contains(&hash) {
             return Route::Drop;
+        }
+        if !self.stemmed.lock().insert(hash) {
+            // A peer echoing a stem back must not be able to make this node
+            // treat it as public and pack it near its origin.
+            return Route::Ignore;
         }
         let next = self.with_epoch(outbound, |e| {
             if e.diffuser {
@@ -272,7 +280,7 @@ mod tests {
         let h = H256::repeat_byte(7);
         let from = NodeId::from_low_u64_be(99);
         assert!(matches!(d.route_stem(h, &from, &peers(3)), Route::Stem(_)));
-        assert_eq!(d.route_stem(h, &from, &peers(3)), Route::Drop, "a copy cannot draw again");
+        assert_eq!(d.route_stem(h, &from, &peers(3)), Route::Ignore, "a copy cannot draw again, nor make it public");
     }
 
     #[test]

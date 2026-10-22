@@ -626,7 +626,7 @@ impl SynchronizationProtocolHandler {
                 pool.shielded.mark_fluffed(&hash);
                 Ok(())
             }
-            Route::Wait => Ok(()),
+            Route::Wait | Route::Ignore => Ok(()),
         };
         if let Err(e) = result {
             debug!("relaying shielded transaction {:?} failed: {:?}", hash, e);
@@ -1757,6 +1757,13 @@ impl SynchronizationProtocolHandler {
                 true,  /* persistent */
                 false, /* recover_from_db */
             );
+            if self.graph.take_shielded_offence(&hash) {
+                io.disconnect_peer(
+                    &task.failed_peer,
+                    Some(UpdateNodeOperation::Failure),
+                    "sent a block whose shielded proofs do not verify",
+                );
+            }
             if insert_result.is_valid() {
                 // The requested block is correctly received
                 received_blocks.insert(hash);

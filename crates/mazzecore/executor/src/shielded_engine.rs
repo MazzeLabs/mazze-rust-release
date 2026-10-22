@@ -248,8 +248,8 @@ pub fn nullifier_spent(state: &State, nf: &ShieldedDigest) -> DbResult<bool> {
 }
 
 /// Whether `anchor` is acceptable at `height`: the current tree root
-/// always is, however long ago it was recorded (an idle lane must not lock
-/// itself); an older root only within the window.
+/// always is (an idle lane must not lock itself); an older root while the
+/// window since it was replaced is open.
 pub fn anchor_valid(
     state: &State, anchor: &ShieldedDigest, height: u64, params: &ShieldedParams,
 ) -> DbResult<bool> {
@@ -437,7 +437,13 @@ fn apply(
         return Ok(Skipped(SkipReason::TreeFull));
     }
 
-    // Every rule holds: apply.
+    // Every rule holds: apply. The root about to be replaced is recorded
+    // again now: an anchor's window runs from when its root stopped being
+    // current, not from when it first appeared. Otherwise, after a quiet
+    // stretch longer than the window, the next transaction would instantly
+    // expire every proof made against the root it replaces (and strand the
+    // deposits of shield-ins proven against it).
+    record_root(state, &frontier.root(), height)?;
     for nf in &body.nf {
         set(state, nf_key(nf), U256::one())?;
     }

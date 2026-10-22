@@ -8,7 +8,7 @@ use crate::{
         message::{
             metrics::BLOCK_TXN_HANDLE_TIMER, Context, GetBlockTxn, Handleable,
         },
-        Error,
+        Error, ErrorKind,
     },
     verification::compute_block_transactions_root,
 };
@@ -113,6 +113,9 @@ impl Handleable for GetBlockTxnResponse {
                         true,  // persistent
                         false, // recover_from_db
                     );
+                    if ctx.manager.graph.take_shielded_offence(&resp_hash) {
+                        return Err(ErrorKind::InvalidBlock.into());
+                    }
 
                     if !insert_result.request_again() {
                         received_blocks.insert(resp_hash);

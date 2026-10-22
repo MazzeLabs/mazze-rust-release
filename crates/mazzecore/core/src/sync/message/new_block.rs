@@ -114,6 +114,9 @@ fn on_new_decoded_block(
         persistent,
         false, // recover_from_db
     );
+    if ctx.manager.graph.take_shielded_offence(&hash) {
+        return Err(ErrorKind::InvalidBlock.into());
+    }
     if insert_result.should_relay() {
         need_to_relay.push(hash);
     }

@@ -82,7 +82,9 @@ impl Auditor {
     /// with the node's state there.
     fn round(&mut self) -> Result<(), String> {
         let status = self.node.call("shielded_getStatus", vec![])?;
-        let executed = as_u64(&status["executedEpoch"])?;
+        // A few epochs behind the tip, where the node's state is committed
+        // and can be compared.
+        let executed = as_u64(&status["executedEpoch"])?.saturating_sub(10);
         if self.next_epoch > executed {
             return Ok(());
         }
@@ -169,8 +171,16 @@ impl Auditor {
     fn compare_state(&mut self, epoch: u64) -> Result<(), String> {
         let state = match self.node.call("shielded_getStateAt", vec![json!(format!("0x{epoch:x}"))]) {
             Ok(state) => state,
-            // Older than the states the node keeps: compared next round.
-            Err(_) => return Ok(()),
+            // Not available (too old, or not yet committed): the sections
+            // were still checked; the state is compared next round.
+            Err(_) => {
+                println!(
+                    "audited sections to epoch {epoch}: {} leaves, {} proofs verified, {} alerts \
+                     (the node's state there is not available to compare)",
+                    self.tree.leaves, self.verified, self.alerts
+                );
+                return Ok(());
+            }
         };
         let at = format!("epoch {epoch}");
         if unhex(&state["root"])? != to_bytes(&self.tree.root()) || as_u64(&state["leaves"])? != self.tree.leaves {

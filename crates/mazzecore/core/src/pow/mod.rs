@@ -766,6 +766,45 @@ fn test_pow_compute_batch_matches_compute() {
     }
 }
 
+/// Throughput of batch verification (light context, then full dataset).
+/// `cargo test --release -p mazzecore --lib pow::bench_compute_batch -- --ignored --nocapture`
+/// Needs ~2.3 GB RAM for the dataset.
+#[test]
+#[ignore]
+fn bench_compute_batch() {
+    use std::time::Instant;
+    let seed = H256::from_low_u64_be(42);
+    let inputs = |n: u64, salt: u64| -> Vec<(U256, H256, H256)> {
+        (0..n)
+            .map(|i| (U256::from(i), H256::from_low_u64_be(salt + i), seed))
+            .collect()
+    };
+    let pow = PowComputer::new(H256::from_low_u64_be(7));
+    let batch = inputs(2000, 0);
+    let t = Instant::now();
+    pow.compute_batch(&batch);
+    let light = batch.len() as f64 / t.elapsed().as_secs_f64();
+    println!("light: {:.0} hashes/s on {} threads", light,
+        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0));
+    let t = Instant::now();
+    pow.prewarm(&seed);
+    // Wait for the dataset, then measure.
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let probe = Instant::now();
+        pow.compute(&U256::from(1), &H256::from_low_u64_be(999_999), &seed);
+        if probe.elapsed().as_millis() < 5 {
+            break;
+        }
+    }
+    println!("full dataset ready after {:.1}s", t.elapsed().as_secs_f64());
+    let batch = inputs(50_000, 10_000_000);
+    let t = Instant::now();
+    pow.compute_batch(&batch);
+    let full = batch.len() as f64 / t.elapsed().as_secs_f64();
+    println!("full: {:.0} hashes/s", full);
+}
+
 #[test]
 fn test_asert_difficulty() {
     let min = U256::from(5);

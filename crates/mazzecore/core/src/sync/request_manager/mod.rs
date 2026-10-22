@@ -1127,6 +1127,49 @@ impl RequestManager {
     /// body-backlog orphans too). Returns the number cleared. Only ever removes
     /// hashes with no live request behind them, so genuinely in-flight requests
     /// are untouched and the normal drain simply re-requests the freed hashes.
+    /// Epoch counterpart of `reconcile_inflight_block_orphans`: drop epoch
+    /// numbers from the in-flight set that no live request names. After a
+    /// network blip on m2 (2026-10-22) the whole 1200-epoch window was held
+    /// by such keys, nothing timed them out, and header sync stopped 57k
+    /// epochs short of the tip. At most every 2 s; returns the number cleared.
+    pub fn reconcile_inflight_epoch_orphans(&self) -> usize {
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static LAST_MS: AtomicU64 = AtomicU64::new(0);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let last = LAST_MS.load(Ordering::Relaxed);
+            if now_ms < last + 2000
+                || LAST_MS
+                    .compare_exchange(
+                        last,
+                        now_ms,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_err()
+            {
+                return 0;
+            }
+        }
+        let live = self.request_handler.live_epoch_requests();
+        let mut inflight =
+            self.inflight_keys.write(msgid::GET_BLOCK_HASHES_BY_EPOCH);
+        let orphans: Vec<u64> = inflight
+            .iter()
+            .filter_map(|k| match k {
+                Key::Num(n) if !live.contains(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        for n in &orphans {
+            inflight.remove(&Key::Num(*n));
+        }
+        orphans.len()
+    }
+
     pub fn reconcile_inflight_block_orphans(&self) -> usize {
         // At most every 2 s: it walks every live request of every peer, and
         // `request_block_bodies` (which calls it whenever the window is full)

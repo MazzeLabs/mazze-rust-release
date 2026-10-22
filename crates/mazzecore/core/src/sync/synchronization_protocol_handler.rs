@@ -1599,6 +1599,23 @@ impl SynchronizationProtocolHandler {
             }
         }
 
+        if self.request_manager.num_epochs_in_flight()
+            >= EPOCH_SYNC_MAX_INFLIGHT
+        {
+            let cleared =
+                self.request_manager.reconcile_inflight_epoch_orphans();
+            if cleared > 0 {
+                warn!(
+                    "request_epochs: reconciled {} orphaned in-flight epoch \
+                     request(s) holding the epoch window",
+                    cleared
+                );
+                // Freed epochs below `latest_requested_epoch` are requested
+                // again from `my_best_epoch` up.
+                latest_requested_epoch =
+                    min(latest_requested_epoch, my_best_epoch);
+            }
+        }
         while self.request_manager.num_epochs_in_flight()
             < EPOCH_SYNC_MAX_INFLIGHT
             && latest_requested_epoch < my_best_epoch + sync_max_gap

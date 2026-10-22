@@ -176,6 +176,24 @@ impl RequestHandler {
         hashes
     }
 
+    /// Epoch numbers named by any live GetBlockHashesByEpoch request.
+    pub fn live_epoch_requests(&self) -> HashSet<u64> {
+        let mut epochs = HashSet::new();
+        for container in self.peers.lock().values() {
+            for peer_req in container.inflight_requests.values() {
+                if let Some(req) = peer_req
+                    .message
+                    .request
+                    .as_any()
+                    .downcast_ref::<crate::sync::message::GetBlockHashesByEpoch>()
+                {
+                    epochs.extend(req.epochs.iter().cloned());
+                }
+            }
+        }
+        epochs
+    }
+
     pub fn process_timeout_requests(
         &self, io: &dyn NetworkContext,
     ) -> Vec<RequestMessage> {

@@ -1391,16 +1391,63 @@ impl SynchronizationProtocolHandler {
         use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
         static BODY_PEER_ROTATION: AtomicUsize = AtomicUsize::new(0);
         let rotation = BODY_PEER_ROTATION.fetch_add(1, AtomicOrdering::Relaxed);
-        for (i, block_chunk) in to_request_blocks[0..n_blocks_to_request]
-            .chunks(MAX_BLOCKS_TO_SEND as usize)
-            .enumerate()
-        {
-            let peer = if body_peers.is_empty() {
-                None
-            } else {
-                Some(body_peers[(rotation + i) % body_peers.len()])
-            };
-            self.request_blocks_without_check(io, peer, block_chunk.to_vec());
+        // Route deep-history bodies to archive peers. Full nodes keep bodies
+        // only from about their era checkpoint up, so a body more than
+        // DEEP_HISTORY_ERAS eras below a full peer's tip is one it no longer
+        // has; asking it costs a round trip and a retry. With one archive
+        // among four peers, a from-genesis archive fetched ~50 bodies/s and
+        // its header sync sat behind the fill debt (m2, 2026-10-22). Recent
+        // bodies still go to every peer (the §3b wedge between two archives
+        // that only asked each other), and with no archive peer every body
+        // goes to every peer as before.
+        const DEEP_HISTORY_ERAS: u64 = 3;
+        let deep_below = {
+            let era = self.graph.consensus.get_config().inner_conf.era_epoch_count;
+            let peers = self.syn.peers.read();
+            peers
+                .values()
+                .filter_map(|p| {
+                    let p = p.read();
+                    (p.node_type != NodeType::Archive).then_some(p.best_epoch)
+                })
+                .min()
+                .map(|best| best.saturating_sub(DEEP_HISTORY_ERAS * era))
+                .unwrap_or(0)
+        };
+        let archive_peers: Vec<NodeId> = self
+            .syn
+            .peers
+            .read()
+            .iter()
+            .filter(|(_, p)| p.read().node_type == NodeType::Archive)
+            .map(|(id, _)| *id)
+            .collect();
+        let (deep, recent): (Vec<H256>, Vec<H256>) = {
+            let inner = self.graph.inner.read();
+            to_request_blocks[0..n_blocks_to_request].iter().partition(|h| {
+                !archive_peers.is_empty()
+                    && inner
+                        .hash_to_arena_indices
+                        .get(*h)
+                        .map(|i| inner.arena[*i].block_header.height() < deep_below)
+                        .unwrap_or(false)
+            })
+        };
+        for (blocks, peers) in [(deep, &archive_peers), (recent, &body_peers)] {
+            for (i, block_chunk) in
+                blocks.chunks(MAX_BLOCKS_TO_SEND as usize).enumerate()
+            {
+                let peer = if peers.is_empty() {
+                    None
+                } else {
+                    Some(peers[(rotation + i) % peers.len()])
+                };
+                self.request_blocks_without_check(
+                    io,
+                    peer,
+                    block_chunk.to_vec(),
+                );
+            }
         }
     }
 

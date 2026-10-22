@@ -609,6 +609,26 @@ impl BlockDataManager {
         )
     }
 
+    /// A header for serving peers: from memory, else from the DB without
+    /// computing a missing RandomX hash (see `block_header_from_db_unhashed`).
+    pub fn block_header_for_peer(&self, hash: &H256) -> Option<BlockHeader> {
+        if let Some(h) = self.block_headers.read().get(hash) {
+            return Some(h.as_ref().clone());
+        }
+        self.db_manager.block_header_from_db_unhashed(hash)
+    }
+
+    /// A block for serving peers: from memory, else from the DB without
+    /// computing a missing RandomX hash for its header.
+    pub fn block_for_peer(&self, hash: &H256) -> Option<Arc<Block>> {
+        if let Some(b) = self.blocks.read().get(hash) {
+            return Some(b.clone());
+        }
+        let header = self.block_header_for_peer(hash)?;
+        let body = self.db_manager.block_body_from_db(hash)?;
+        Some(Arc::new(Block::new(header, body)))
+    }
+
     /// This function returns the block from db without wrapping it in `Arc`.
     pub fn block_from_db(&self, hash: &H256) -> Option<Block> {
         self.db_manager.block_from_db(hash)

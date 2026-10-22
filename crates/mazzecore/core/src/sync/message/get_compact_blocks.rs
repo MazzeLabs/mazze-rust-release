@@ -83,7 +83,9 @@ impl Handleable for GetCompactBlocks {
                 if (compact_blocks.len() as u64) < MAX_HEADERS_TO_SEND {
                     compact_blocks.push(compact_block);
                 }
-            } else if let Some(block) = ctx.manager.graph.block_by_hash(hash) {
+            } else if let Some(block) =
+                ctx.manager.graph.data_man.block_for_peer(hash)
+            {
                 debug!("Have complete block but no compact block, return complete block instead");
                 if (blocks.len() as u64) < MAX_BLOCKS_TO_SEND {
                     blocks.push(block.as_ref().clone());

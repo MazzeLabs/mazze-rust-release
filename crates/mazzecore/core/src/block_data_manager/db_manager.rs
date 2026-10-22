@@ -638,6 +638,16 @@ impl DBManager {
         Some(block_header)
     }
 
+    /// The header as stored, without filling a missing RandomX hash. For
+    /// serving peers, who verify PoW themselves: m1's headers written by
+    /// older binaries carry no hash, and hashing each one served kept its
+    /// socket thread at 100% while an archive synced from it (2026-10-22).
+    pub fn block_header_from_db_unhashed(
+        &self, hash: &H256,
+    ) -> Option<BlockHeader> {
+        self.load_decodable_val(DBTable::Blocks, hash.as_bytes())
+    }
+
     pub fn remove_block_header_from_db(&self, hash: &H256) {
         self.remove_from_db(DBTable::Blocks, hash.as_bytes());
     }

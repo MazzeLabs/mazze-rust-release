@@ -630,3 +630,10 @@ fn a_paused_lane_takes_no_deposit() {
     });
     assert!(matches!(result, InternalTrapResult::Return(Err(_))));
 }
+
+/// The bridge address the body rules refuse as a destination is the bridge.
+#[test]
+fn the_body_rules_know_the_bridge_address() {
+    use mazze_parameters::internal_contract_addresses::SHIELDED_BRIDGE_ADDRESS;
+    assert_eq!(primitives::shielded::SHIELDED_BRIDGE_ADDRESS_BYTES, SHIELDED_BRIDGE_ADDRESS.0);
+}

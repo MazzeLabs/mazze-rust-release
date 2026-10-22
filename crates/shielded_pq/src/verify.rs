@@ -89,6 +89,15 @@ pub fn verify_body(
     if proof_hash(proof) != body.proof_hash {
         return Err(Rejection::ProofHashMismatch);
     }
+    // The verifier is library code fed with untrusted bytes: a panic in it
+    // must reject the proof, never take the node down.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        verify_decoded(body, proof, chain_id)
+    }))
+    .unwrap_or_else(|_| Err(Rejection::InvalidProof("the verifier panicked".into())))
+}
+
+fn verify_decoded(body: &ShieldedTxBody, proof: &[u8], chain_id: u32) -> Result<(), Rejection> {
     let decoded = wire::decode_padded(proof, PROOF_LEN_MAX)
         .map_err(|e| Rejection::MalformedProof(e.to_string()))?;
     if decoded.degree_bits != DEGREE_BITS {

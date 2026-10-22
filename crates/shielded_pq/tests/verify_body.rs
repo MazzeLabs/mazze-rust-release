@@ -135,7 +135,13 @@ fn a_wallet_transaction_passes_stage_a_and_tampering_does_not() {
     // and `proof_hash` still matches, so it is the STARK that refuses.
     let tamperings: Vec<(&str, Box<dyn Fn(&mut ShieldedTxBody)>)> = vec![
         ("destination", Box::new(|b| b.dest.as_mut().unwrap().address = Address::repeat_byte(0x66))),
-        ("destination space", Box::new(|b| b.dest.as_mut().unwrap().space = Space::Native)),
+        ("destination space", Box::new(|b| {
+            // To a valid native user address, so that the proof (not the
+            // structural rules) is what refuses it.
+            let mut user = [0x42u8; 20];
+            user[0] = 0x10;
+            *b.dest.as_mut().unwrap() = ShieldedDest { space: Space::Native, address: Address::from(user) };
+        })),
         ("shield-out amount", Box::new(|b| b.v_public_out += 1)),
         ("fee", Box::new(|b| b.fee += 1)),
         ("recovery slot", Box::new(|b| b.recovery.slot[9] ^= 1)),

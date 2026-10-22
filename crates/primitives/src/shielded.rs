@@ -14,7 +14,7 @@
 //! elements out of range). Every byte is paid for (lesson Z-4).
 
 use crate::hash::keccak;
-use mazze_types::{Address, Space, H256, H512};
+use mazze_types::{address_util::AddressUtil, Address, Space, H256, H512};
 use tiny_keccak::{Hasher, Shake};
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 
@@ -207,10 +207,34 @@ impl ShieldedTxBody {
                 space: Space::Shielded,
                 ..
             }) => Err("the shielded space is not a destination"),
+            // A native destination is an account someone can use: a user or
+            // a contract. Anything else (an internal or builtin address, a
+            // wrong type nibble) would strand the value, and the bridge
+            // itself would pay the backing to itself.
+            Some(ShieldedDest {
+                space: Space::Native,
+                address,
+            }) if !(address.is_user_account_address()
+                || address.is_contract_address()) =>
+            {
+                Err("a native destination must be a user or contract address")
+            }
+            // The bridge's eSpace account cannot pass value on.
+            Some(ShieldedDest {
+                space: Space::Ethereum,
+                address,
+            }) if address.0 == SHIELDED_BRIDGE_ADDRESS_BYTES => {
+                Err("the bridge is not a destination")
+            }
             _ => Ok(()),
         }
     }
 }
+
+/// The shield-in bridge, `0x0888…09` (`SHIELDED_BRIDGE_ADDRESS` in the
+/// parameters crate, which a test checks this against).
+pub const SHIELDED_BRIDGE_ADDRESS_BYTES: [u8; 20] =
+    [0x08, 0x88, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x09];
 
 impl ShieldedTxBody {
     /// A structurally valid body, distinct per `seed`, for tests in any
@@ -617,6 +641,26 @@ mod tests {
         assert!(into_pool.check_structure().is_err());
         assert!(ShieldedTxBody::decode_canonical(&rlp::encode(&into_pool))
             .is_err());
+
+        // Native destinations must be user or contract addresses; the
+        // bridge is no destination in either space.
+        let native = |bytes: [u8; 20]| ShieldedTxBody {
+            dest: Some(ShieldedDest { space: Space::Native, address: Address::from(bytes) }),
+            ..shield_out()
+        };
+        let mut user = [0x11u8; 20];
+        user[0] = 0x10;
+        let mut contract = [0x11u8; 20];
+        contract[0] = 0x80;
+        let mut wrong_type = [0x11u8; 20];
+        wrong_type[0] = 0x50;
+        assert!(native(user).check_structure().is_ok());
+        assert!(native(contract).check_structure().is_ok());
+        assert!(native(wrong_type).check_structure().is_err(), "a type nibble no account has");
+        assert!(native(SHIELDED_BRIDGE_ADDRESS_BYTES).check_structure().is_err(), "an internal address");
+        let mut to_bridge = shield_out();
+        to_bridge.dest.as_mut().unwrap().address = Address::from(SHIELDED_BRIDGE_ADDRESS_BYTES);
+        assert!(to_bridge.check_structure().is_err(), "the bridge's eSpace account");
 
         assert!(body().check_structure().is_ok());
         assert!(shield_out().check_structure().is_ok());

@@ -383,10 +383,18 @@ pub fn execute_section(
     let backing = state.balance(&backing_account())?;
     let expected = (total_in + pending_credits(state)?)
         .saturating_sub(total_out + total_burnt);
-    if backing != expected {
+    // Only a deficit is a breach (value left that never entered). A
+    // surplus is someone's donation: a SELFDESTRUCT naming the backing as
+    // beneficiary can add to it, but nothing can take from it.
+    if backing < expected {
         error!(
             "SHIELDED TURNSTILE BREACH at height {}: backing {} below {}",
             height, backing, expected
+        );
+    } else if backing > expected {
+        debug!(
+            "shielded backing {} above the turnstile's {} by donations",
+            backing, expected
         );
     }
     Ok(outcomes)

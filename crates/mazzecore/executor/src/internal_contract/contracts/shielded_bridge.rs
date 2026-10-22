@@ -86,6 +86,8 @@ impl SimpleExecutionTrait for ShieldIn {
                 AddressPocket::Balance(backing),
                 value,
             );
+            // The value left eSpace; a shield-out to eSpace adds it back.
+            context.state.sub_total_evm_tokens(value);
         }
         shielded_engine::record_deposit(
             context.state,

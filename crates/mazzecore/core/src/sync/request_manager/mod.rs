@@ -1154,7 +1154,18 @@ impl RequestManager {
                 return 0;
             }
         }
-        let live = self.request_handler.live_epoch_requests();
+        let mut live = self.request_handler.live_epoch_requests();
+        // Requests waiting to be resent after a failure are live too.
+        for w in self.waiting_requests.lock().iter() {
+            if let Some(req) = w
+                .request
+                .0
+                .as_any()
+                .downcast_ref::<GetBlockHashesByEpoch>()
+            {
+                live.extend(req.epochs.iter().cloned());
+            }
+        }
         let mut inflight =
             self.inflight_keys.write(msgid::GET_BLOCK_HASHES_BY_EPOCH);
         let orphans: Vec<u64> = inflight
@@ -1197,7 +1208,12 @@ impl RequestManager {
                 return 0;
             }
         }
-        let live = self.request_handler.live_block_request_hashes();
+        let mut live = self.request_handler.live_block_request_hashes();
+        for w in self.waiting_requests.lock().iter() {
+            if let Some(hs) = try_get_block_hashes(&w.request.0) {
+                live.extend(hs.iter().cloned());
+            }
+        }
         let mut inflight = self.inflight_keys.write(msgid::GET_BLOCKS);
         let orphans: Vec<H256> = inflight
             .iter()

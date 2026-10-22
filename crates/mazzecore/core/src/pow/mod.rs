@@ -349,6 +349,47 @@ impl PowComputer {
         hash
     }
 
+    /// RandomX hashes of many `(nonce, problem_hash, seed_hash)` inputs, in
+    /// input order, computed on the shared PoW worker pool (all cores) and
+    /// grouped by seed so each seed's context is resolved once per batch.
+    /// Results are identical to calling `compute` on each input: same
+    /// function, same memo cache.
+    pub fn compute_batch(&self, inputs: &[(U256, H256, H256)]) -> Vec<H256> {
+        use rayon::prelude::*;
+        if inputs.len() <= 1 {
+            return inputs
+                .iter()
+                .map(|(nonce, hash, seed)| self.compute(nonce, hash, seed))
+                .collect();
+        }
+        // Seed-major order: consecutive work items share a seed, so a worker
+        // keeps reusing one VM, and a new seed's context is built once (the
+        // other workers wait on `create_lock` instead of evicting it).
+        let mut order: Vec<usize> = (0..inputs.len()).collect();
+        order.sort_by_key(|i| inputs[*i].2);
+        let mut out = vec![H256::zero(); inputs.len()];
+        let results: Vec<(usize, H256)> = pow_worker_pool().install(|| {
+            order
+                .par_iter()
+                .with_min_len(4)
+                .map(|i| {
+                    let (nonce, hash, seed) = &inputs[*i];
+                    (*i, self.compute(nonce, hash, seed))
+                })
+                .collect()
+        });
+        for (i, h) in results {
+            out[i] = h;
+        }
+        out
+    }
+
+    /// Build `seed_hash`'s context ahead of use (full dataset unless the
+    /// node is light-only). Never blocks.
+    pub fn prewarm(&self, seed_hash: &H256) {
+        self.cache_builder.prewarm(seed_hash.as_fixed_bytes());
+    }
+
     pub fn get_seed_hash(&self) -> H256 {
         self.cache_builder.get_seed_hash().into()
     }
@@ -360,6 +401,25 @@ impl PowComputer {
             next.map(|n| n.as_fixed_bytes()),
         );
     }
+}
+
+/// Worker pool for batch PoW verification (`PowComputer::compute_batch`).
+/// Separate from rayon's global pool (used by the executor) so header
+/// verification never queues behind execution work, and named so it shows
+/// up as such in `top -H` / perf.
+fn pow_worker_pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> =
+        std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("pow-verify-{}", i))
+            .build()
+            .expect("failed to build the PoW worker pool")
+    })
 }
 
 pub fn validate(
@@ -682,6 +742,27 @@ fn test_pow_multi_seed_concurrent() {
         .collect();
     for h in handles {
         h.join().unwrap();
+    }
+}
+
+/// `compute_batch` must return exactly what `compute` returns for each
+/// input, in input order, for inputs spanning several seeds.
+#[test]
+fn test_pow_compute_batch_matches_compute() {
+    let seeds: Vec<H256> = (1..=3u64).map(H256::from_low_u64_be).collect();
+    let inputs: Vec<(U256, H256, H256)> = (0..24u64)
+        .map(|i| {
+            (
+                U256::from(i * 7 + 1),
+                H256::from_low_u64_be(0x1000 + i),
+                seeds[(i % 3) as usize],
+            )
+        })
+        .collect();
+    let batch = PowComputer::new(seeds[0]).compute_batch(&inputs);
+    let single = PowComputer::new(seeds[0]);
+    for (i, (nonce, hash, seed)) in inputs.iter().enumerate() {
+        assert_eq!(batch[i], single.compute(nonce, hash, seed), "input {}", i);
     }
 }
 

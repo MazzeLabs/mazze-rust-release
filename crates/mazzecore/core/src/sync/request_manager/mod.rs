@@ -1124,6 +1124,32 @@ impl RequestManager {
     /// hashes with no live request behind them, so genuinely in-flight requests
     /// are untouched and the normal drain simply re-requests the freed hashes.
     pub fn reconcile_inflight_block_orphans(&self) -> usize {
+        // At most every 2 s: it walks every live request of every peer, and
+        // `request_block_bodies` (which calls it whenever the window is full)
+        // runs on every body response during catch-up. Unthrottled it kept
+        // the IO workers busy and capped a body fill at ~25 bodies/s (m2:
+        // 150k bodies in ~3 h). Orphans are rare; 2 s is prompt enough.
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static LAST_MS: AtomicU64 = AtomicU64::new(0);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let last = LAST_MS.load(Ordering::Relaxed);
+            if now_ms < last + 2000
+                || LAST_MS
+                    .compare_exchange(
+                        last,
+                        now_ms,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_err()
+            {
+                return 0;
+            }
+        }
         let live = self.request_handler.live_block_request_hashes();
         let mut inflight = self.inflight_keys.write(msgid::GET_BLOCKS);
         let orphans: Vec<H256> = inflight

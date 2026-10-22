@@ -92,8 +92,12 @@ pub mod stats {
 }
 
 /// Seeds kept resident: the pinned chain seeds (tip + next) plus room for the
-/// previous seed (stragglers) and RPC lookups of old blocks.
-const MAX_SEEDS: usize = 4;
+/// previous seed (stragglers), the seeds of a catch-up's header window and
+/// RPC lookups of old blocks. A light context is a 256 MB Argon2 cache that
+/// takes ~0.5 s to build, so evicting a seed still in use is expensive: with
+/// 4 slots an archive catching up across several seeds rebuilt one every
+/// ~0.3 s (m2, 2026-10-20: 116k light contexts, ~14 epochs/s).
+const MAX_SEEDS: usize = 6;
 /// Full datasets (~2 GB each) kept resident: the pinned chain seeds plus ONE
 /// floating slot shared by everything else.
 ///

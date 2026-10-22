@@ -1486,6 +1486,61 @@ impl SynchronizationGraph {
         true
     }
 
+    /// Batch PoW for headers about to be inserted (a GetBlockHeaders
+    /// response): fills `pow_hash` of every header that is new to the graph
+    /// and whose RandomX seed is known, computing the hashes on the PoW
+    /// worker pool (all cores, seed-grouped) instead of one by one on the
+    /// network IO thread inside `insert_block_header`.
+    ///
+    /// Only the hash is computed here; `insert_block_header` still does the
+    /// whole verification (difficulty boundary, params, graph checks) with
+    /// it. Returns, per header, the seed its hash was computed with, so the
+    /// caller can drop a hash whose seed changed before insertion
+    /// (`pow_hash_seed_still_current`).
+    pub fn prefill_pow_hashes(
+        &self, headers: &mut [BlockHeader],
+    ) -> Vec<Option<H256>> {
+        let mut used = vec![None; headers.len()];
+        if self.is_consortium() || headers.len() < 2 {
+            return used;
+        }
+        let l = mazze_parameters::pow::randomx_epoch_length();
+        let mut seeds: HashMap<u64, Option<H256>> = HashMap::new();
+        let mut jobs = Vec::new();
+        let mut inputs = Vec::new();
+        for (i, header) in headers.iter().enumerate() {
+            if header.pow_hash.is_some()
+                || self.contains_block_header(&header.hash())
+            {
+                continue;
+            }
+            let height = header.height();
+            let seed = *seeds.entry(height / l).or_insert_with(|| {
+                self.data_man.db_manager.try_get_current_seed_hash(height)
+            });
+            if let Some(seed) = seed {
+                jobs.push((i, seed));
+                inputs.push((header.nonce(), header.problem_hash(), seed));
+            }
+        }
+        if inputs.len() < 2 {
+            return used;
+        }
+        let hashes = self.pow.compute_batch(&inputs);
+        for ((i, seed), hash) in jobs.into_iter().zip(hashes) {
+            headers[i].pow_hash = Some(hash);
+            used[i] = Some(seed);
+        }
+        used
+    }
+
+    /// Whether `seed` is still the RandomX seed of `height` (the main-chain
+    /// block it comes from can only change through a reorg below it).
+    pub fn pow_hash_seed_still_current(&self, height: u64, seed: &H256) -> bool {
+        self.data_man.db_manager.try_get_current_seed_hash(height).as_ref()
+            == Some(seed)
+    }
+
     /// Deferred headers whose RandomX seed is known now; they are removed
     /// from the deferred set and must be requested again.
     pub fn take_seed_ready_headers(&self) -> Vec<H256> {

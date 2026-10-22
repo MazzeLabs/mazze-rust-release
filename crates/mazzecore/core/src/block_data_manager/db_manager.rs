@@ -617,13 +617,23 @@ impl DBManager {
         let mut block_header: BlockHeader =
             self.load_decodable_val(DBTable::Blocks, hash.as_bytes())?;
 
-        let seed_hash = self.get_current_seed_hash(block_header.height());
-
-        VerificationConfig::get_or_fill_header_pow_quality(
-            &self.pow,
-            &mut block_header,
-            &seed_hash,
-        );
+        // The RandomX hash is stored with the header (`db_encode` writes
+        // `pow_hash`), so a load normally costs no PoW and no seed lookup.
+        // Only a header written without one (e.g. an anchor-bootstrap header
+        // persisted before its seed was known) is hashed here -- and only
+        // with its real seed: a zero seed would memoise a wrong hash that
+        // consensus then reads as the block's PoW quality.
+        if block_header.pow_hash.is_none() {
+            if let Some(seed_hash) =
+                self.try_get_current_seed_hash(block_header.height())
+            {
+                VerificationConfig::get_or_fill_header_pow_quality(
+                    &self.pow,
+                    &mut block_header,
+                    &seed_hash,
+                );
+            }
+        }
 
         Some(block_header)
     }

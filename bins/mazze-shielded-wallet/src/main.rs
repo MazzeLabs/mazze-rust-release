@@ -14,9 +14,12 @@
 //! over any channel.
 //!
 //! ```text
+//! (the wallet file is sealed under a passphrase: MAZZE_WALLET_PASSPHRASE, or asked)
 //! mazze-shielded-wallet init       --wallet W
-//! mazze-shielded-wallet address    --wallet W --rpc URL
-//! mazze-shielded-wallet export-bundle --wallet W --rpc URL --out FILE
+//! mazze-shielded-wallet export-seed --wallet W                         (back it up offline)
+//! mazze-shielded-wallet address    --wallet W --rpc URL [--index J]
+//! mazze-shielded-wallet new-address --wallet W --rpc URL                (an unlinkable new address)
+//! mazze-shielded-wallet export-bundle --wallet W --rpc URL --out FILE [--index J]
 //! mazze-shielded-wallet sync       --wallet W --rpc URL
 //! mazze-shielded-wallet balance    --wallet W
 //! mazze-shielded-wallet shield-in  --wallet W --rpc URL --amount A --funder-key HEX [--espace-rpc URL]
@@ -25,7 +28,7 @@
 //! mazze-shielded-wallet receive    --wallet W --rpc URL --opening FILE   (mzn1 or mzx1)
 //! mazze-shielded-wallet unshield   --wallet W --rpc URL --to 0xADDR [--espace] --amount A
 //! mazze-shielded-wallet claim      --wallet W --rpc URL
-//! mazze-shielded-wallet restore    --wallet W --rpc URL --seed HEX
+//! mazze-shielded-wallet restore    --wallet W --rpc URL   (seed asked, or MAZZE_RESTORE_SEED)
 //! mazze-shielded-wallet fund-espace --wallet W --rpc URL --funder-key HEX --amount A   (test helper)
 //! mazze-shielded-wallet resubmit   --wallet W --rpc URL   (re-sends proven txs not yet on chain)
 //! ```
@@ -61,6 +64,7 @@ use primitives::{
     Action, Transaction,
 };
 use rand::RngCore;
+use zeroize::Zeroizing;
 use rand10::SeedableRng;
 use serde_json::{json, Value};
 
@@ -73,6 +77,44 @@ const UNIT: u64 = 1_000_000_000;
 
 /// A shielded amount in mazzy, for display and for deposits.
 fn mazzy(units: u64) -> U256 { U256::from(units) * U256::from(UNIT) }
+
+/// The wallet passphrase: `MAZZE_WALLET_PASSPHRASE`, or asked on the
+/// terminal.
+fn passphrase() -> Result<Zeroizing<String>, String> {
+    if let Ok(p) = std::env::var("MAZZE_WALLET_PASSPHRASE") {
+        return Ok(Zeroizing::new(p));
+    }
+    rpassword::read_password_from_tty(Some("Wallet passphrase: "))
+        .map(Zeroizing::new)
+        .map_err(|e| e.to_string())
+}
+
+/// A passphrase for a new wallet file, typed twice when asked.
+fn new_passphrase() -> Result<Zeroizing<String>, String> {
+    if let Ok(p) = std::env::var("MAZZE_WALLET_PASSPHRASE") {
+        return Ok(Zeroizing::new(p));
+    }
+    let first = passphrase()?;
+    let again = Zeroizing::new(
+        rpassword::read_password_from_tty(Some("Again: ")).map_err(|e| e.to_string())?,
+    );
+    if *first != *again {
+        return Err("the passphrases differ".into());
+    }
+    Ok(first)
+}
+
+/// `--index` (default 0): an address this wallet has issued.
+fn address_index(w: &Wallet, a: &Args) -> Result<u32, String> {
+    let j = match a.0.get("index") {
+        Some(v) => v.parse().map_err(|e| format!("--index: {e}"))?,
+        None => 0,
+    };
+    if j >= w.next_address {
+        return Err(format!("address {j} not issued yet (use new-address)"));
+    }
+    Ok(j)
+}
 
 /// The cross-space bridge, `0x0888…06`.
 const CROSS_SPACE_ADDRESS: [u8; 20] = [
@@ -134,30 +176,52 @@ fn run(args: &[String]) -> Result<(), String> {
     let path = a.get("wallet")?;
     match command.as_str() {
         "init" => {
+            if std::path::Path::new(path).exists() {
+                return Err(format!("{path} exists; refusing to overwrite a wallet"));
+            }
             let mut seed = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut seed);
-            Wallet::new(seed).save(path)?;
-            println!("created {path}");
+            Wallet::new(seed, &new_passphrase()?)?.save(path)?;
+            println!("created {path}; back up its seed with export-seed");
+            Ok(())
+        }
+        "export-seed" => {
+            let w = Wallet::load(path, passphrase)?;
+            println!("{}", hex::encode(w.seed));
             Ok(())
         }
         "address" => {
-            let w = Wallet::load(path)?;
+            let w = Wallet::load(path, passphrase)?;
+            let j = address_index(&w, &a)?;
             let sponge = Sponge::new(chain_id(&Node::connect(a.get("rpc")?)?)?);
             let keys = WalletKeys::from_seed(&sponge, w.seed);
-            println!("{}", delivery::address(&keys, &sponge, 0).0.encode());
+            println!("{}", delivery::address(&keys, &sponge, j).0.encode());
+            Ok(())
+        }
+        "new-address" => {
+            // Each address has its own diversifier and its own KEM keys:
+            // two addresses of one wallet cannot be linked (spec §3).
+            let mut w = Wallet::load(path, passphrase)?;
+            let j = w.next_address;
+            w.next_address += 1;
+            w.save(path)?;
+            let sponge = Sponge::new(chain_id(&Node::connect(a.get("rpc")?)?)?);
+            let keys = WalletKeys::from_seed(&sponge, w.seed);
+            println!("{j} {}", delivery::address(&keys, &sponge, j).0.encode());
             Ok(())
         }
         "export-bundle" => {
-            let w = Wallet::load(path)?;
+            let w = Wallet::load(path, passphrase)?;
+            let j = address_index(&w, &a)?;
             let sponge = Sponge::new(chain_id(&Node::connect(a.get("rpc")?)?)?);
             let keys = WalletKeys::from_seed(&sponge, w.seed);
-            let (_, bundle) = delivery::address(&keys, &sponge, 0);
+            let (_, bundle) = delivery::address(&keys, &sponge, j);
             std::fs::write(a.get("out")?, &bundle.0).map_err(|e| e.to_string())?;
             println!("bundle ({} bytes) written to {}", bundle.0.len(), a.get("out")?);
             Ok(())
         }
         "balance" => {
-            let w = Wallet::load(path)?;
+            let w = Wallet::load(path, passphrase)?;
             let spendable: u64 = w.notes.iter().filter(|n| n.position.is_some() && !n.spent).map(|n| n.value).sum();
             let pending: u64 = w.notes.iter().filter(|n| n.position.is_none()).map(|n| n.value).sum();
             println!(
@@ -169,13 +233,17 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "receive" => {
-            let mut w = Wallet::load(path)?;
+            let mut w = Wallet::load(path, passphrase)?;
             let sponge = Sponge::new(chain_id(&Node::connect(a.get("rpc")?)?)?);
             let keys = WalletKeys::from_seed(&sponge, w.seed);
             let text = std::fs::read_to_string(a.get("opening")?).map_err(|e| e.to_string())?;
             let opening = if text.trim_start().starts_with("mzx1") {
-                let (addr, _) = delivery::address(&keys, &sponge, 0);
-                delivery::open(&w.seed, 0, &addr.bundle_hash, &text)
+                // Sealed to one of this wallet's addresses.
+                (0..w.next_address)
+                    .find_map(|j| {
+                        let (addr, _) = delivery::address(&keys, &sponge, j);
+                        delivery::open(&w.seed, j, &addr.bundle_hash, &text)
+                    })
                     .ok_or("the sealed opening is not for this wallet (or was tampered with)")?
             } else {
                 delivery::Opening::from_plain(&text).ok_or("not an mzn1 or mzx1 opening")?
@@ -193,7 +261,7 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "sync" => {
-            let mut w = Wallet::load(path)?;
+            let mut w = Wallet::load(path, passphrase)?;
             let node = Node::connect(a.get("rpc")?)?;
             sync(&mut w, &node)?;
             w.save(path)
@@ -434,7 +502,7 @@ fn record_pending(
 
 /// Submits again every proven transaction not yet on chain.
 fn resubmit(path: &str, a: &Args) -> Result<(), String> {
-    let mut w = Wallet::load(path)?;
+    let mut w = Wallet::load(path, passphrase)?;
     let node = Node::connect(a.get("rpc")?)?;
     sync(&mut w, &node)?;
     w.save(path)?;
@@ -457,7 +525,7 @@ fn shuffle_outputs(a: Note, b: Note) -> [Note; 2] {
 }
 
 fn shield_in(path: &str, a: &Args) -> Result<(), String> {
-    let mut w = Wallet::load(path)?;
+    let mut w = Wallet::load(path, passphrase)?;
     let ctx = context(&mut w, a)?;
     let amount = a.shielded_amount()?;
     if amount <= ctx.fee {
@@ -503,7 +571,7 @@ fn shield_in(path: &str, a: &Args) -> Result<(), String> {
 }
 
 fn send(path: &str, a: &Args) -> Result<(), String> {
-    let mut w = Wallet::load(path)?;
+    let mut w = Wallet::load(path, passphrase)?;
     let ctx = context(&mut w, a)?;
     let amount = a.shielded_amount()?;
     let to = delivery::Address::decode(a.get("to")?).ok_or("--to is not an mzs1 address")?;
@@ -541,7 +609,7 @@ fn send(path: &str, a: &Args) -> Result<(), String> {
 }
 
 fn unshield(path: &str, a: &Args) -> Result<(), String> {
-    let mut w = Wallet::load(path)?;
+    let mut w = Wallet::load(path, passphrase)?;
     let ctx = context(&mut w, a)?;
     let amount = a.shielded_amount()?;
     let to: H160 = a.get("to")?.trim_start_matches("0x").parse().map_err(|e| format!("--to: {e:?}"))?;
@@ -572,7 +640,7 @@ fn unshield(path: &str, a: &Args) -> Result<(), String> {
 /// wallet's largest self-note, into one new self-note. Afterwards the value
 /// is recoverable from the seed and the wallet holds one large note.
 fn claim(path: &str, a: &Args) -> Result<(), String> {
-    let mut w = Wallet::load(path)?;
+    let mut w = Wallet::load(path, passphrase)?;
     let ctx = context(&mut w, a)?;
     let received = w
         .notes
@@ -610,7 +678,18 @@ fn claim(path: &str, a: &Args) -> Result<(), String> {
 /// opens their slots and rebuilds the notes. Stops after `GAP_LIMIT`
 /// consecutive missing tags.
 fn restore(path: &str, a: &Args) -> Result<(), String> {
-    let seed: [u8; 32] = hex::decode(a.get("seed")?.trim_start_matches("0x"))
+    if std::path::Path::new(path).exists() {
+        return Err(format!("{path} exists; restore into a new file"));
+    }
+    // Never from the command line, where it would sit in the shell's
+    // history and in every process listing.
+    let text = match std::env::var("MAZZE_RESTORE_SEED") {
+        Ok(v) => Zeroizing::new(v),
+        Err(_) => Zeroizing::new(
+            rpassword::read_password_from_tty(Some("Seed (hex): ")).map_err(|e| e.to_string())?,
+        ),
+    };
+    let seed: [u8; 32] = hex::decode(text.trim().trim_start_matches("0x"))
         .map_err(|e| e.to_string())?
         .try_into()
         .map_err(|_| "the seed is 32 bytes")?;
@@ -618,7 +697,7 @@ fn restore(path: &str, a: &Args) -> Result<(), String> {
     let chain = chain_id(&node)?;
     let sponge = Sponge::new(chain);
     let keys = WalletKeys::from_seed(&sponge, seed);
-    let mut w = Wallet::new(seed);
+    let mut w = Wallet::new(seed, &new_passphrase()?)?;
 
     // Every applied transaction with its recovery slot and outputs.
     let status = node.call("shielded_getStatus", vec![])?;

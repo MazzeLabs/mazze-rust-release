@@ -484,6 +484,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69f7f8c3906b62b754cd5326047894316021dcfe5a194c8ea52bdd94934a3457"
 
 [[package]]
+name = "argon2"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures 0.2.14",
+ "password-hash",
+ "zeroize",
+]
+
+[[package]]
 name = "ark-bls12-381"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4619,6 +4632,7 @@ dependencies = [
 name = "mazze-shielded-wallet"
 version = "0.1.0"
 dependencies = [
+ "argon2",
  "chacha20poly1305",
  "classic-mceliece-rust",
  "hex 0.4.3",
@@ -4635,10 +4649,12 @@ dependencies = [
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rlp 0.4.6",
+ "rpassword 5.0.1",
  "serde",
  "serde_json",
  "tokio",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

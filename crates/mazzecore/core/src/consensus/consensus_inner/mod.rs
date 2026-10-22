@@ -6,6 +6,7 @@ mod blame_verifier;
 pub mod confirmation_meter;
 pub mod consensus_executor;
 pub mod consensus_new_block_handler;
+mod outlier_penalty;
 mod state_divergence;
 
 use crate::{

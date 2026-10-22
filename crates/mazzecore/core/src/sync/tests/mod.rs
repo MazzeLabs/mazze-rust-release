@@ -706,3 +706,226 @@ fn test_cancelled_request_keeps_blocks_consensus_holds() {
     }
     remove_test_db(db);
 }
+
+/// Random DAGs: the windowed outlier difficulty used by the reward
+/// computation (`outlier_difficulty_windowed`) equals the arena-wide brute
+/// force for every executable epoch block, including stale side chains,
+/// partial-invalid blocks (wrong parent choice), blocks left inactive by
+/// referencing them, and (with a small era) blocks across checkpoints.
+#[test]
+fn test_outlier_difficulty_windowed_matches_bruteforce() {
+    use rand_08::{rngs::StdRng, Rng, SeedableRng};
+    // (seed, blocks, parent window, stale %, max referees, era epochs)
+    let cases: &[(u64, usize, usize, u32, usize, u64)] = &[
+        (1, 600, 2, 5, 2, 50000),
+        (2, 800, 4, 10, 3, 50000),
+        (3, 800, 8, 20, 4, 50000),
+        (4, 1000, 3, 15, 3, 40),
+        (5, 1200, 6, 25, 5, 30),
+        (6, 1000, 12, 30, 6, 50000),
+        (7, 1500, 2, 2, 1, 20),
+        (8, 1500, 3, 10, 3, 20),
+        (10, 1500, 5, 20, 4, 30),
+    ];
+    let mut total_nonzero = 0;
+    let mut total_compared = 0;
+    let mut total_no_epoch = 0;
+    for &(seed, n, window, stale_pct, max_refs, era) in cases {
+        let db = format!("./test_outlier_windowed_{}.db/", seed);
+        {
+            // beta, heavy ratio, timer ratio, timer beta: weight-3 blocks are
+            // timer blocks, so checkpoints (eras) can form.
+            let (sync, consensus, _, genesis) =
+                initialize_synchronization_graph(
+                    &db,
+                    1000,
+                    3,
+                    3,
+                    5,
+                    era,
+                    H256::default(),
+                );
+            let mut rng = StdRng::seed_from_u64(seed);
+            // (hash, height)
+            let mut blocks: Vec<(H256, u64)> = vec![(genesis.hash(), 0)];
+            let mut has_child: Vec<bool> = vec![false];
+            for i in 0..n {
+                let len = blocks.len();
+                let p = if rng.gen_range(0..100) < stale_pct {
+                    // stale: a parent far behind the tip
+                    rng.gen_range(len.saturating_sub(40)..len)
+                } else {
+                    rng.gen_range(len.saturating_sub(window)..len)
+                };
+                let mut refs = Vec::new();
+                let nrefs = rng.gen_range(0..=max_refs);
+                for _ in 0..nrefs {
+                    // prefer tips, sometimes any recent block
+                    let lo = len.saturating_sub(30);
+                    let cand: Vec<usize> = (lo..len)
+                        .filter(|j| *j != p && !has_child[*j])
+                        .collect();
+                    let r = if !cand.is_empty() && rng.gen_bool(0.7) {
+                        cand[rng.gen_range(0..cand.len())]
+                    } else {
+                        rng.gen_range(lo..len)
+                    };
+                    if r != p && !refs.contains(&blocks[r].0) {
+                        refs.push(blocks[r].0);
+                        has_child[r] = true;
+                    }
+                }
+                let weight = if rng.gen_range(0..100) < 5 { 3 } else { 1 };
+                let (_, b) = create_simple_block_impl(
+                    blocks[p].0,
+                    refs,
+                    blocks[p].1 + 1,
+                    U256::from(i as u64 + 1),
+                    U256::from(10),
+                    weight,
+                    false,
+                );
+                let mut h = b.block_header.clone();
+                sync.insert_block_header(&mut h, false, true, true, true);
+                has_child[p] = true;
+                blocks.push((b.hash(), blocks[p].1 + 1));
+                has_child.push(false);
+                // Also compare on intermediate graphs (tips outside the
+                // main chain's past have no epoch yet).
+                if i % 97 == 96 {
+                    wait_consensus_drained(&sync);
+                    let st = consensus
+                        .inner
+                        .read()
+                        .check_outlier_difficulty_windowed();
+                    total_no_epoch += st.no_epoch;
+                    total_compared += st.compared;
+                    total_nonzero += st.nonzero;
+                }
+            }
+            wait_consensus_drained(&sync);
+            let inner = consensus.inner.read();
+            let st = inner.check_outlier_difficulty_windowed();
+            println!(
+                "seed {}: arena {} best_epoch {} max_height {} {:?}",
+                seed,
+                inner.arena.len(),
+                inner.best_epoch_number(),
+                blocks.iter().map(|b| b.1).max().unwrap(),
+                st
+            );
+            assert!(st.compared > 0);
+            total_nonzero += st.nonzero;
+            total_compared += st.compared;
+        }
+        remove_test_db(&db);
+    }
+    println!(
+        "compared {} nonzero {} no_epoch (summed over checks) {}",
+        total_compared, total_nonzero, total_no_epoch
+    );
+    assert!(total_nonzero > 0, "no case exercised a non-zero penalty");
+}
+
+/// Cost of the outlier difficulty of old epochs on a large arena (the
+/// archive replay case): brute force vs windowed. Not a correctness test.
+/// `OUTLIER_BENCH_BLOCKS=90000 cargo test --release -p mazzecore --lib
+///  bench_outlier_difficulty -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn bench_outlier_difficulty_large_arena() {
+    use rand_08::{rngs::StdRng, Rng, SeedableRng};
+    use std::time::Instant;
+    let n: usize = std::env::var("OUTLIER_BENCH_BLOCKS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30000);
+    let db = "./bench_outlier_large.db/";
+    {
+        let (sync, consensus, _, genesis) = initialize_synchronization_graph(
+            db,
+            1000,
+            3,
+            3,
+            100,
+            1_000_000_000,
+            H256::default(),
+        );
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut blocks: Vec<(H256, u64)> = vec![(genesis.hash(), 0)];
+        let t = Instant::now();
+        for i in 0..n {
+            let len = blocks.len();
+            let p = rng.gen_range(len.saturating_sub(3)..len);
+            let mut refs = Vec::new();
+            for _ in 0..rng.gen_range(0..=2) {
+                let r = rng.gen_range(len.saturating_sub(6)..len);
+                if r != p && !refs.contains(&blocks[r].0) {
+                    refs.push(blocks[r].0);
+                }
+            }
+            let (_, b) = create_simple_block_impl(
+                blocks[p].0,
+                refs,
+                blocks[p].1 + 1,
+                U256::from(i as u64 + 1),
+                U256::from(10),
+                1,
+                false,
+            );
+            let mut h = b.block_header.clone();
+            sync.insert_block_header(&mut h, false, true, true, true);
+            blocks.push((b.hash(), blocks[p].1 + 1));
+        }
+        while sync.is_consensus_worker_busy() {
+            sleep(Duration::from_millis(50));
+        }
+        let inner = consensus.inner.read();
+        println!(
+            "inserted {} blocks in {:?}; arena {} best_epoch {}",
+            n,
+            t.elapsed(),
+            inner.arena.len(),
+            inner.best_epoch_number()
+        );
+        let sample: Vec<(usize, usize, Vec<usize>)> = (100..300)
+            .filter_map(|h| {
+                let me = inner.get_main_block_arena_index(h);
+                inner.get_main_reward_index(me).map(|(m, c)| {
+                    (m, c, inner.get_ordered_executable_epoch_blocks(m).clone())
+                })
+            })
+            .collect();
+        let blocks_in_sample: usize = sample.iter().map(|s| s.2.len()).sum();
+        let t = Instant::now();
+        let mut brute = Vec::new();
+        for (m, c, bs) in &sample {
+            for b in bs {
+                brute.push(inner.outlier_difficulty_bruteforce(*b, *c, *m));
+            }
+        }
+        let t_brute = t.elapsed();
+        let t = Instant::now();
+        let mut win = Vec::new();
+        for (m, c, bs) in &sample {
+            for b in bs {
+                win.push(
+                    inner.outlier_difficulty_windowed(*b, *c, *m).unwrap(),
+                );
+            }
+        }
+        let t_win = t.elapsed();
+        assert_eq!(brute, win);
+        println!(
+            "{} epochs / {} blocks: brute force {:?} ({:.3} ms/epoch), \
+             windowed {:?} ({:.4} ms/epoch)",
+            sample.len(),
+            blocks_in_sample,
+            t_brute,
+            t_brute.as_secs_f64() * 1e3 / sample.len() as f64,
+            t_win,
+            t_win.as_secs_f64() * 1e3 / sample.len() as f64
+        );
+    }
+    remove_test_db(db);
+}

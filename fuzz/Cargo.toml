@@ -1,0 +1,47 @@
+[package]
+name = "mazze-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+description = "Fuzz targets for the decoders that take untrusted shielded data"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+primitives = { path = "../crates/primitives" }
+mazze-shielded-pq = { path = "../crates/shielded_pq" }
+rlp = "0.4.0"
+
+# Not part of the node's workspace: built only by `cargo fuzz`.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "shielded_body"
+path = "fuzz_targets/shielded_body.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "block"
+path = "fuzz_targets/block.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proof_wire"
+path = "fuzz_targets/proof_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "verify_body"
+path = "fuzz_targets/verify_body.rs"
+test = false
+doc = false
+bench = false

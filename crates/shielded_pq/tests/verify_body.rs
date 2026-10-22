@@ -204,3 +204,24 @@ fn proofs_do_not_move_between_transactions() {
     swapped.proof_hash = b2.proof_hash;
     assert!(matches!(verify_body(&swapped, &p2, CHAIN), Err(Rejection::InvalidProof(_))));
 }
+
+/// Writes real proofs as fuzz seeds when `MAZZE_FUZZ_SEEDS` names a
+/// directory (`fuzz/corpus`): mutating valid proofs reaches the verifier's
+/// deep checks, which random bytes rarely do.
+#[test]
+#[ignore]
+fn write_fuzz_seeds() {
+    let Ok(dir) = std::env::var("MAZZE_FUZZ_SEEDS") else { return };
+    let dir = std::path::Path::new(&dir);
+    std::fs::create_dir_all(dir.join("proof_wire")).unwrap();
+    std::fs::create_dir_all(dir.join("verify_body")).unwrap();
+    for seed in 0..3u64 {
+        let (body, proof) = mazze_shielded_pq::testkit::payment(1, 1_000, 10, seed);
+        std::fs::write(dir.join("proof_wire").join(format!("real{seed}")), &proof).unwrap();
+        let body_bytes = rlp::encode(&body);
+        let mut input = (body_bytes.len() as u16).to_le_bytes().to_vec();
+        input.extend_from_slice(&body_bytes);
+        input.extend_from_slice(&proof);
+        std::fs::write(dir.join("verify_body").join(format!("real{seed}")), input).unwrap();
+    }
+}

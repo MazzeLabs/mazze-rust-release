@@ -110,6 +110,18 @@ const MAX_FULL_DATASETS: usize = 3;
 /// Stragglers from the previous seed epoch stay well below this; the tip seed
 /// (or the seed being replayed in catch-up) crosses it within seconds.
 const PROMOTE_AFTER_HASHES: u64 = 64;
+/// An unpinned full dataset is not demoted until it has been full this long.
+/// Without it two historical seeds in alternating use (explorer RPC on old
+/// epochs plus headers served to a syncing archive) promoted and demoted a
+/// 2 GB dataset every 2-3 s and held m1's CPU at 100% (2026-10-22).
+const MIN_FULL_RESIDENCY_SECS: u64 = 120;
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// TEST-ONLY: `MAZZE_RANDOMX_LIGHT_ONLY=1` keeps every seed in light mode
 /// (no ~2 GB full datasets). Used by the local multi-node harness
@@ -131,6 +143,8 @@ struct SeedSlot {
     vms: Mutex<Vec<Hasher>>,
     hashes: AtomicU64,
     last_used: AtomicU64,
+    /// Unix seconds when this slot last became a full dataset.
+    promoted_at: AtomicU64,
 }
 
 impl SeedSlot {
@@ -143,6 +157,7 @@ impl SeedSlot {
             vms: Mutex::new(Vec::new()),
             hashes: AtomicU64::new(0),
             last_used: AtomicU64::new(0),
+            promoted_at: AtomicU64::new(0),
         }
     }
 }
@@ -332,6 +347,9 @@ impl RandomXCacheBuilder {
                             s.seed != slot.seed
                                 && s.is_full.load(Ordering::Acquire)
                                 && !builder.is_pinned(&s.seed)
+                                && s.promoted_at.load(Ordering::Relaxed)
+                                    + MIN_FULL_RESIDENCY_SECS
+                                    <= unix_now()
                         })
                         .cloned()
                         .collect();
@@ -362,6 +380,7 @@ impl RandomXCacheBuilder {
                 }
                 *slot.context.write() = full;
                 slot.vms.lock().clear();
+                slot.promoted_at.store(unix_now(), Ordering::Relaxed);
                 slot.is_full.store(true, Ordering::Release);
             });
         if spawned.is_err() {
@@ -440,9 +459,12 @@ mod tests {
         // First old seed takes the floating full slot.
         hammer(&builder, &old1);
         assert!(wait_until(|| is_full(&builder, &old1)));
-        // Second old seed may only displace the first, never a pinned one.
+        // A second old seed neither displaces a pinned seed nor, within
+        // MIN_FULL_RESIDENCY_SECS, the first old seed: it stays light.
         hammer(&builder, &old2);
-        assert!(wait_until(|| is_full(&builder, &old2) && !is_full(&builder, &old1)));
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        assert!(is_full(&builder, &old1), "floating seed demoted early");
+        assert!(!is_full(&builder, &old2), "second old seed promoted");
         assert!(is_full(&builder, &tip), "tip seed was demoted");
         assert!(is_full(&builder, &next), "next seed was demoted");
         assert!(builder.slots.read().len() <= MAX_SEEDS);

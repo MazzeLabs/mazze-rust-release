@@ -586,3 +586,118 @@ fn shielded_history_is_kept_per_pivot() {
     }
     let _ = fs::remove_dir_all(dir);
 }
+
+/// Spec A6 / lesson Z-3: a block whose shielded proof does not verify is
+/// rejected on every path into the graph: from a peer (gossip, catch-up,
+/// fast-sync replay all insert with verification) and as this node's own
+/// mined block (inserted without the other checks). Only a block re-read
+/// from this node's own database, verified when first accepted, skips it.
+/// A reorg cannot bring the block back: it never entered the graph.
+#[test]
+fn an_invalid_proof_is_rejected_on_every_path() {
+    use crate::{
+        pow::PowComputer,
+        sync::{
+            synchronization_graph::BlockInsertionResult,
+            utils::{initialize_data_manager, initialize_synchronization_graph_with_params},
+        },
+        verification::compute_block_transactions_root,
+    };
+    use mazze_executor::{machine::VmFactory, spec::CommonParams};
+
+    let db = "./test_invalid_proof_paths.db/";
+    let _ = fs::remove_dir_all(db);
+    {
+        let vm = VmFactory::new(1024 * 32);
+        let pow = Arc::new(PowComputer::new(H256::default()));
+        let (data_man, genesis) = initialize_data_manager(db, pow.clone(), vm.clone());
+        let mut params = CommonParams::default();
+        params.shielded.activation_height = 0;
+        params.shielded.slot_epochs = 1;
+        let fee = params.shielded.tx_fee;
+        let (sync, _consensus) = initialize_synchronization_graph_with_params(
+            data_man, 1, 1, 1, 1, 50000, pow, vm, params,
+        );
+        let chain = sync.consensus.best_chain_id().in_shielded_space();
+        let (good_body, proof) =
+            mazze_shielded_pq::testkit::payment(chain, 100 * fee, fee, 1);
+        // The proof still hashes to the body, but proves other outputs.
+        let mut bad_body = good_body.clone();
+        bad_body.cm_out.swap(0, 1);
+
+        let base = simple_chain(&sync, &genesis, 2);
+        // A child of `base[1]` at height 3 with the section, priced the way
+        // `simple_chain` prices its blocks.
+        let with_section = |nonce: u64, body: &primitives::shielded::ShieldedTxBody| {
+            use mazze_parameters::{
+                consensus::GENESIS_GAS_LIMIT, consensus_internal::ELASTICITY_MULTIPLIER,
+            };
+            use mazze_types::{address_util::AddressUtil, Address, SpaceMap};
+            use primitives::{block_header::compute_next_price_tuple, BlockHeaderBuilder};
+            let machine = sync.machine();
+            let params = machine.params();
+            let parent = &base[1].block_header;
+            let gas_limit = U256::from(GENESIS_GAS_LIMIT);
+            let espace_limit = if params.can_pack_evm_transaction(3) {
+                gas_limit * 5 / 10
+            } else {
+                U256::zero()
+            };
+            let gas_target = SpaceMap::new(gas_limit * 9 / 10, espace_limit, U256::zero())
+                .map_all(|x| x / ELASTICITY_MULTIPLIER);
+            let price = SpaceMap::zip4(
+                gas_target,
+                SpaceMap::default(),
+                parent.base_price().unwrap(),
+                params.min_base_price(),
+            )
+            .map_all(compute_next_price_tuple);
+            let shielded = vec![Arc::new(body.clone())];
+            let mut author = Address::zero();
+            author.set_user_account_type_bits();
+            let mut header = BlockHeaderBuilder::new()
+                .with_parent_hash(base[1].hash())
+                .with_height(3)
+                .with_gas_limit(gas_limit)
+                .with_nonce(U256::from(nonce))
+                .with_difficulty(U256::from(10))
+                .with_author(author)
+                .with_base_price(Some(price))
+                .with_transactions_root(compute_block_transactions_root(&vec![], &shielded))
+                .build();
+            header.compute_hash();
+            header.pow_hash =
+                Some(crate::pow::pow_quality_to_hash(&U256::from(10), &header.nonce()));
+            Block::new(header, vec![])
+                .with_shielded(shielded)
+                .with_witness(vec![Arc::new(proof.clone())])
+        };
+        for b in &base {
+            let mut h = b.block_header.clone();
+            sync.insert_block_header(&mut h, false, true, true, true);
+            sync.insert_block(b.clone(), false, true, false);
+        }
+        let insert = |block: &Block, need_to_verify: bool, recover_from_db: bool| {
+            let mut h = block.block_header.clone();
+            sync.insert_block_header(&mut h, false, true, true, true);
+            sync.insert_block(block.clone(), need_to_verify, true, recover_from_db)
+        };
+        let invalid = |r: BlockInsertionResult| matches!(r, BlockInsertionResult::Invalid);
+
+        // Three blocks on the same parent, each with the invalid section.
+        assert!(invalid(insert(&with_section(5000, &bad_body), true, false)), "from a peer");
+        assert!(
+            invalid(insert(&with_section(5001, &bad_body), false, false)),
+            "mined by this node"
+        );
+        let from_db = with_section(5002, &bad_body);
+        sync.data_man.insert_block(Arc::new(from_db.clone()), true);
+        assert!(
+            !invalid(insert(&from_db, true, true)),
+            "re-read from this node's database: verified when first accepted"
+        );
+        // Control: the honest section is accepted from a peer.
+        assert!(!invalid(insert(&with_section(6000, &good_body), true, false)));
+    }
+    let _ = fs::remove_dir_all(db);
+}

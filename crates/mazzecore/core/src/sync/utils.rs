@@ -173,7 +173,24 @@ pub fn initialize_synchronization_graph_with_data_manager(
     data_man: Arc<BlockDataManager>, beta: u64, h: u64, tcr: u64, tcb: u64,
     era_epoch_count: u64, pow: Arc<PowComputer>, vm: VmFactory,
 ) -> (Arc<SynchronizationGraph>, Arc<ConsensusGraph>) {
-    let params = CommonParams::default();
+    initialize_synchronization_graph_with_params(
+        data_man,
+        beta,
+        h,
+        tcr,
+        tcb,
+        era_epoch_count,
+        pow,
+        vm,
+        CommonParams::default(),
+    )
+}
+
+pub fn initialize_synchronization_graph_with_params(
+    data_man: Arc<BlockDataManager>, beta: u64, h: u64, tcr: u64, tcb: u64,
+    era_epoch_count: u64, pow: Arc<PowComputer>, vm: VmFactory,
+    params: CommonParams,
+) -> (Arc<SynchronizationGraph>, Arc<ConsensusGraph>) {
     let machine = Arc::new(new_machine_with_builtin(params, vm));
 
     let verification_config = VerificationConfig::new(

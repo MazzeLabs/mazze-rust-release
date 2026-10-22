@@ -2508,6 +2508,20 @@ impl SynchronizationGraph {
                 }
                 _ => {}
             };
+        } else if !recover_from_db && !block.shielded.is_empty() {
+            // Stage A is never skipped (spec §8.2, lesson Z-3): a block that
+            // needs no other check, the one this node mined, still has every
+            // proof verified before it enters the graph.
+            if let Err(e) = self
+                .verification_config
+                .verify_shielded_proofs(&block, self.consensus.best_chain_id())
+            {
+                error!(
+                    "This node's own block {:?} has an invalid shielded section: {}",
+                    hash, e
+                );
+                inner.arena[me].graph_status = BLOCK_INVALID;
+            }
         }
 
         // The body has now arrived and passed the tx-root check (the

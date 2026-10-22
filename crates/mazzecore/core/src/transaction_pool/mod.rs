@@ -50,7 +50,7 @@ use std::{
     mem,
     ops::DerefMut,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
 };
@@ -144,6 +144,8 @@ pub struct TransactionPool {
     to_propagate_trans: Arc<RwLock<HashMap<H256, Arc<SignedTransaction>>>>,
     pub data_man: Arc<BlockDataManager>,
     best_executed_state: Mutex<Arc<State>>,
+    /// Height of the epoch `best_executed_state` belongs to.
+    best_executed_height: AtomicU64,
     consensus_best_info: Mutex<Arc<BestInformation>>,
     set_tx_requests: Mutex<Vec<Arc<SignedTransaction>>>,
     recycle_tx_requests: Mutex<Vec<Arc<SignedTransaction>>>,
@@ -208,6 +210,7 @@ impl TransactionPool {
             to_propagate_trans: Arc::new(RwLock::new(HashMap::new())),
             data_man: data_man.clone(),
             best_executed_state,
+            best_executed_height: AtomicU64::new(0),
             consensus_best_info: Mutex::new(Arc::new(Default::default())),
             set_tx_requests: Mutex::new(Default::default()),
             recycle_tx_requests: Mutex::new(Default::default()),
@@ -1266,14 +1269,28 @@ impl TransactionPool {
         ))?))
     }
 
+    /// The state of an epoch just executed. Always taken: after a reorg
+    /// it may be lower than the current one, and it is the right one.
     pub fn set_best_executed_epoch(
-        &self, best_executed_epoch: StateIndex,
+        &self, best_executed_epoch: StateIndex, height: u64,
     ) -> StateDbResult<()> {
-        *self.best_executed_state.lock() =
-            Self::best_executed_state(&self.data_man, best_executed_epoch)?;
+        let state = Self::best_executed_state(&self.data_man, best_executed_epoch)?;
+        *self.best_executed_state.lock() = state;
+        self.best_executed_height.store(height, Ordering::SeqCst);
         self.sweep_shielded();
 
         Ok(())
+    }
+
+    /// The state of an epoch whose execution was skipped (executed before):
+    /// taken only if it is not older than the current one.
+    pub fn set_best_executed_epoch_if_newer(
+        &self, best_executed_epoch: StateIndex, height: u64,
+    ) -> StateDbResult<()> {
+        if height < self.best_executed_height.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        self.set_best_executed_epoch(best_executed_epoch, height)
     }
 
     fn get_best_state_account_cache(&self) -> AccountCache {

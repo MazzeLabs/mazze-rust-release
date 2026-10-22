@@ -1341,7 +1341,11 @@ impl ConsensusExecutionHandler {
         prof.mark(exec_profile::Phase::Commit);
 
         if on_local_main {
-            self.notify_txpool(&commit_result, epoch_hash);
+            self.notify_txpool(
+                &commit_result,
+                epoch_hash,
+                main_block.block_header.height(),
+            );
         };
 
         self.data_man.insert_epoch_execution_commitment(
@@ -1393,8 +1397,14 @@ impl ConsensusExecutionHandler {
                 .read()
                 .check_availability(main_block_header.height(), epoch_hash)
             {
-                if let Err(err) = self.tx_pool.set_best_executed_epoch(
+                // An epoch skipped here was executed before, usually
+                // optimistically ahead of this task, and the pool already
+                // has a newer state: it must not be moved back to this one.
+                // (It was, 2026-10-22: the pool then saw spent nullifiers as
+                // unspent and repacked shielded transactions.)
+                if let Err(err) = self.tx_pool.set_best_executed_epoch_if_newer(
                     StateIndex::new_for_readonly(epoch_hash, &state_root),
+                    main_block_header.height(),
                 ) {
                     error!(
                         "Failed to update txpool best executed epoch for skipped epoch {:?}: {}",
@@ -1412,6 +1422,7 @@ impl ConsensusExecutionHandler {
 
     fn notify_txpool(
         &self, commit_result: &StateCommitResult, epoch_hash: &H256,
+        height: u64,
     ) {
         let accounts_for_txpool = commit_result.accounts_for_txpool.clone();
         {
@@ -1438,13 +1449,10 @@ impl ConsensusExecutionHandler {
             }
         }
 
-        if let Err(err) =
-            self.tx_pool
-                .set_best_executed_epoch(StateIndex::new_for_readonly(
-                    epoch_hash,
-                    &commit_result.state_root,
-                ))
-        {
+        if let Err(err) = self.tx_pool.set_best_executed_epoch(
+            StateIndex::new_for_readonly(epoch_hash, &commit_result.state_root),
+            height,
+        ) {
             error!(
                 "Failed to update txpool best executed epoch for committed epoch {:?}: {}",
                 epoch_hash, err

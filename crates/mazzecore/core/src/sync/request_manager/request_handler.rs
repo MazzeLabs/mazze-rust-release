@@ -164,16 +164,45 @@ impl RequestHandler {
     /// never time out and permanently starve the body-request drain.
     pub fn live_block_request_hashes(&self) -> HashSet<H256> {
         let mut hashes = HashSet::new();
+        // Queued requests are live too (see `live_epoch_requests`).
         for container in self.peers.lock().values() {
-            for peer_req in container.inflight_requests.values() {
-                if let Some(hs) =
-                    super::try_get_block_hashes(&peer_req.message.request)
-                {
+            for request in container
+                .inflight_requests
+                .values()
+                .map(|r| &r.message.request)
+                .chain(container.pending_requests.iter().map(|m| &m.request))
+            {
+                if let Some(hs) = super::try_get_block_hashes(request) {
                     hashes.extend(hs.iter().cloned());
                 }
             }
         }
         hashes
+    }
+
+    /// Epoch numbers named by any GetBlockHashesByEpoch request in flight
+    /// or queued for a peer (`pending_requests`, held back by the per-peer
+    /// in-flight cap). Counting only in-flight ones freed every queued epoch
+    /// as an orphan and re-requested all 1200 every 3 s (m2, 2026-10-22).
+    pub fn live_epoch_requests(&self) -> HashSet<u64> {
+        let mut epochs = HashSet::new();
+        let mut add = |request: &Box<dyn Request>| {
+            if let Some(req) = request
+                .as_any()
+                .downcast_ref::<crate::sync::message::GetBlockHashesByEpoch>()
+            {
+                epochs.extend(req.epochs.iter().cloned());
+            }
+        };
+        for container in self.peers.lock().values() {
+            for peer_req in container.inflight_requests.values() {
+                add(&peer_req.message.request);
+            }
+            for msg in container.pending_requests.iter() {
+                add(&msg.request);
+            }
+        }
+        epochs
     }
 
     pub fn process_timeout_requests(

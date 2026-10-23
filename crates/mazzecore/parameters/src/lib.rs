@@ -272,6 +272,30 @@ pub mod pow {
     // See docs/internal/current-state.md and docs/internal/storage-v2-design.md.
     pub const RANDOMX_EPOCH_LENGTH: u64 =
         crate::consensus::ERA_DEFAULT_EPOCH_COUNT;
+
+    static RANDOMX_EPOCH_LENGTH_OVERRIDE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    /// The RandomX seed rotation period in effect: `RANDOMX_EPOCH_LENGTH`,
+    /// unless a test-mode node set `test_randomx_epoch_length`. Every
+    /// consensus-relevant use (seed lookup, anchors, RPC) goes through this.
+    #[inline]
+    pub fn randomx_epoch_length() -> u64 {
+        match RANDOMX_EPOCH_LENGTH_OVERRIDE
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => RANDOMX_EPOCH_LENGTH,
+            l => l,
+        }
+    }
+
+    /// TEST-ONLY: shorten the RandomX seed rotation so a local benchmark
+    /// chain crosses many seeds (configuration honours it only with
+    /// `mode = "test"`). Must be called before the node starts.
+    pub fn set_randomx_epoch_length_for_test(length: u64) {
+        RANDOMX_EPOCH_LENGTH_OVERRIDE
+            .store(length, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 pub mod tx_pool {

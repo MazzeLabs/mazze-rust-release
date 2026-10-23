@@ -9,6 +9,7 @@ use crate::{
             metrics::BLOCK_HEADER_HANDLE_TIMER, Context, GetBlockHeaders,
             Handleable,
         },
+        synchronization_protocol_handler::BlockHeadersTask,
         synchronization_state::PeerFilter,
         Error, ErrorKind,
     },
@@ -126,14 +127,18 @@ impl Handleable for GetBlockHeadersResponse {
                 .select(&ctx.manager.syn)
         };
 
-        // re-request headers requested but not received
-        self.handle_block_headers(
-            ctx,
-            &self.headers,
-            requested,
-            chosen_peer,
-            delay,
-        )?;
+        // Verify and insert on an IO worker (see `BlockHeadersTask`); the
+        // re-request of headers requested but not received happens there.
+        ctx.manager.block_headers_queue.dispatch(
+            ctx.io,
+            BlockHeadersTask {
+                peer: ctx.node_id,
+                headers: self.headers,
+                requested,
+                chosen_peer,
+                delay,
+            },
+        );
 
         timestamp_validation_result
     }
@@ -157,6 +162,23 @@ impl GetBlockHeadersResponse {
         )
     }
 
+    pub(crate) fn handle_block_headers_task(
+        ctx: &Context, headers: Vec<BlockHeader>, requested: HashSet<H256>,
+        chosen_peer: Option<NodeId>, delay: Option<Duration>,
+    ) -> Result<(), Error> {
+        let response = GetBlockHeadersResponse {
+            request_id: 0,
+            headers,
+        };
+        response.handle_block_headers(
+            ctx,
+            &response.headers,
+            requested,
+            chosen_peer,
+            delay,
+        )
+    }
+
     fn handle_block_headers(
         &self, ctx: &Context, block_headers: &Vec<BlockHeader>,
         requested: HashSet<H256>, chosen_peer: Option<NodeId>,
@@ -175,7 +197,24 @@ impl GetBlockHeadersResponse {
             .unwrap()
             .as_secs();
         let mut has_invalid_header = false;
-        for header in block_headers {
+        // Verify parents before children, and hash the whole batch's PoW in
+        // parallel up front (seed-grouped, on the PoW worker pool) instead of
+        // serially on this network thread inside `insert_block_header`.
+        let mut block_headers = block_headers.clone();
+        block_headers.sort_by_key(|h| h.height());
+        let pow_seeds =
+            ctx.manager.graph.prefill_pow_hashes(&mut block_headers);
+        for (index, header) in block_headers.iter_mut().enumerate() {
+            if let Some(seed) = &pow_seeds[index] {
+                if !ctx
+                    .manager
+                    .graph
+                    .pow_hash_seed_still_current(header.height(), seed)
+                {
+                    header.pow_hash = None;
+                }
+            }
+            let header = &*header;
             let hash = header.hash();
             returned_headers.insert(hash);
             if ctx.manager.graph.contains_block_header(&hash) {

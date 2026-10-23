@@ -13,7 +13,7 @@ use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use mazze_internal_common::{
     DatabaseDecodable, DatabaseEncodable, EpochExecutionCommitment,
 };
-use mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
+use mazze_parameters::pow::randomx_epoch_length;
 use mazze_storage::{
     storage_db::{KeyValueDbTrait, KeyValueDbTraitRead},
     KvdbMdbx, MdbxColumn, MdbxEnv,
@@ -640,15 +640,35 @@ impl DBManager {
         let mut block_header: BlockHeader =
             self.load_decodable_val(DBTable::Blocks, hash.as_bytes())?;
 
-        let seed_hash = self.get_current_seed_hash(block_header.height());
-
-        VerificationConfig::get_or_fill_header_pow_quality(
-            &self.pow,
-            &mut block_header,
-            &seed_hash,
-        );
+        // The RandomX hash is stored with the header (`db_encode` writes
+        // `pow_hash`), so a load normally costs no PoW and no seed lookup.
+        // Only a header written without one (e.g. an anchor-bootstrap header
+        // persisted before its seed was known) is hashed here -- and only
+        // with its real seed: a zero seed would memoise a wrong hash that
+        // consensus then reads as the block's PoW quality.
+        if block_header.pow_hash.is_none() {
+            if let Some(seed_hash) =
+                self.try_get_current_seed_hash(block_header.height())
+            {
+                VerificationConfig::get_or_fill_header_pow_quality(
+                    &self.pow,
+                    &mut block_header,
+                    &seed_hash,
+                );
+            }
+        }
 
         Some(block_header)
+    }
+
+    /// The header as stored, without filling a missing RandomX hash. For
+    /// serving peers, who verify PoW themselves: m1's headers written by
+    /// older binaries carry no hash, and hashing each one served kept its
+    /// socket thread at 100% while an archive synced from it (2026-10-22).
+    pub fn block_header_from_db_unhashed(
+        &self, hash: &H256,
+    ) -> Option<BlockHeader> {
+        self.load_decodable_val(DBTable::Blocks, hash.as_bytes())
     }
 
     pub fn remove_block_header_from_db(&self, hash: &H256) {
@@ -1436,7 +1456,7 @@ impl DBManager {
     pub fn try_get_current_seed_hash(
         &self, epoch_height: u64,
     ) -> Option<H256> {
-        let current_epoch = epoch_height / RANDOMX_EPOCH_LENGTH;
+        let current_epoch = epoch_height / randomx_epoch_length();
 
         // Genesis window — seed is the genesis hash, always available.
         if current_epoch == 0 {
@@ -1445,7 +1465,7 @@ impl DBManager {
 
         // Non-genesis epochs: look up the block at the start of the
         // previous RandomX epoch.
-        let seed_height = (current_epoch - 1) * RANDOMX_EPOCH_LENGTH;
+        let seed_height = (current_epoch - 1) * randomx_epoch_length();
         let seed_hash = self
             .executed_epoch_set_hashes_from_db(seed_height)
             .and_then(|hashes| hashes.last().cloned())

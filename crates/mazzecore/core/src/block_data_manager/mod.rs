@@ -677,6 +677,39 @@ impl BlockDataManager {
         )
     }
 
+    /// A header for serving peers: from memory, else from the DB without
+    /// computing a missing RandomX hash (see `block_header_from_db_unhashed`).
+    pub fn block_header_for_peer(&self, hash: &H256) -> Option<BlockHeader> {
+        if let Some(h) = self.block_headers.read().get(hash) {
+            return Some(h.as_ref().clone());
+        }
+        self.db_manager.block_header_from_db_unhashed(hash)
+    }
+
+    /// A block for serving peers: from memory, else from the DB without
+    /// computing a missing RandomX hash for its header.
+    pub fn block_for_peer(&self, hash: &H256) -> Option<Arc<Block>> {
+        if let Some(b) = self.blocks.read().get(hash) {
+            return Some(b.clone());
+        }
+        let header = self.block_header_for_peer(hash)?;
+        let (transactions, shielded) = self.db_manager.block_body_from_db(hash)?;
+        // With its shielded section and (until pruned) its proofs: a body
+        // without them would not match the header's transactions root.
+        let witness = if shielded.is_empty() {
+            Vec::new()
+        } else {
+            self.db_manager
+                .block_witness_from_db(header.height(), hash)
+                .unwrap_or_default()
+        };
+        Some(Arc::new(
+            Block::new(header, transactions)
+                .with_shielded(shielded)
+                .with_witness(witness),
+        ))
+    }
+
     /// This function returns the block from db without wrapping it in `Arc`.
     pub fn block_from_db(&self, hash: &H256) -> Option<Block> {
         self.db_manager.block_from_db(hash)

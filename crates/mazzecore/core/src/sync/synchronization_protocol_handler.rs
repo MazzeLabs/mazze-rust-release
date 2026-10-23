@@ -114,16 +114,29 @@ const EPOCH_SYNC_MAX_RETRY_COUNT: u64 = 20;
 /// If not future epochs can be requested because of `EPOCH_SYNC_MAX_GAP`,
 /// after waiting this timeout we'll request from `best_epoch` again.
 const EPOCH_SYNC_RESTART_TIMEOUT_S: u64 = 60 * 10;
-const EPOCH_SYNC_MAX_INFLIGHT: u64 = 300;
-const EPOCH_SYNC_BATCH_SIZE: u64 = 30;
-// At 4 blocks/sec, 400 in-flight = ~100s of blocks. Keeps RAM bounded.
-const BLOCK_SYNC_MAX_INFLIGHT: usize = 400;
+/// Epoch-hash window. An epoch leaves it when its hashes arrive, before its
+/// headers are fetched and verified, so it bounds the discovery round trips
+/// in flight, not memory (the seed horizon / max gap bound that). 300 epochs
+/// in 30-epoch requests kept header catch-up at ~300 epochs per round trip
+/// with the verification pool mostly idle.
+const EPOCH_SYNC_MAX_INFLIGHT: u64 = 1200;
+/// Epochs per GetBlockHashesByEpoch (servers answer up to
+/// MAX_EPOCHS_TO_SEND = 128). The headers of one batch (~2.7 blocks per
+/// epoch on the fleet) go out as one GetBlockHeaders and are verified as
+/// one PoW batch, so larger batches also keep the worker pool busier.
+const EPOCH_SYNC_BATCH_SIZE: u64 = 60;
+// Bodies in flight. 400 capped a from-genesis archive at ~170 bodies/s with
+// ~2.4 s round trips to its one archive peer (m2, 2026-10-22); 2000 bodies
+// of the fleet's mostly small blocks still keep RAM bounded.
+const BLOCK_SYNC_MAX_INFLIGHT: usize = 2000;
 // Under backpressure, throttle body fetch so consensus can drain its queue --
 // but bodies are precisely what lets consensus advance, so a 64-block cliff
 // starves the pipe on an execution-bound node and deepens the body debt.
 // Phase-0: raise to 256 (RAM stays bounded by the recover-queue byte cap and
 // max_pending_execution_epochs). See docs/internal/throughput-plan-3000tps.md.
-const BLOCK_SYNC_MAX_INFLIGHT_BACKPRESSURE: usize = 256;
+// Raised with BLOCK_SYNC_MAX_INFLIGHT: catch-up is backpressured most of
+// the time, so 256 was the effective window.
+const BLOCK_SYNC_MAX_INFLIGHT_BACKPRESSURE: usize = 1024;
 // Engage backpressure when sync is 256 blocks (~64s) ahead of consensus.
 const SYNC_CONSENSUS_BACKPRESSURE_BLOCK_GAP: usize = 256;
 const ACTIVE_FRONTIER_RESCUE_BATCH_SIZE: usize = 128;
@@ -142,6 +155,7 @@ const BODY_DEBT_EPOCH_THROTTLE: usize = 150_000;
 pub enum SyncHandlerWorkType {
     RecoverPublic = 1,
     LocalMessage = 2,
+    BlockHeaders = 3,
 }
 
 pub trait TaskSize {
@@ -241,6 +255,10 @@ impl<T: TaskSize> AsyncTaskQueue<T> {
         self.inner.read().size
     }
 
+    fn is_empty(&self) -> bool {
+        self.inner.read().tasks.is_empty()
+    }
+
     pub fn is_full(&self) -> bool {
         self.size() >= self.max_capacity
     }
@@ -292,6 +310,31 @@ impl TaskSize for RecoverPublicTask {
 
     fn count(&self) -> usize {
         self.blocks.len()
+    }
+}
+
+/// A peer's GetBlockHeadersResponse, verified and inserted on an IO worker
+/// (`on_block_headers_task`) instead of the socket thread that received it:
+/// header PoW keeps that thread busy for a whole batch, and every other
+/// response from the same peer (epoch hashes, bodies) waited behind it --
+/// in catch-up that stalled the request pipeline and timed requests out.
+pub struct BlockHeadersTask {
+    pub peer: NodeId,
+    pub headers: Vec<BlockHeader>,
+    pub requested: HashSet<H256>,
+    pub chosen_peer: Option<NodeId>,
+    pub delay: Option<Duration>,
+}
+
+impl TaskSize for BlockHeadersTask {
+    fn size(&self) -> usize {
+        // Headers are small and similar; a constant estimate keeps
+        // `dispatch` cheap.
+        self.headers.len() * 600 + std::mem::size_of::<Self>()
+    }
+
+    fn count(&self) -> usize {
+        self.headers.len()
     }
 }
 
@@ -454,6 +497,10 @@ pub struct SynchronizationProtocolHandler {
     #[ignore_malloc_size_of = "channels are not handled in MallocSizeOf"]
     local_message: AsyncTaskQueue<LocalMessageTask>,
 
+    // Worker task queue for received block headers (PoW verification)
+    #[ignore_malloc_size_of = "channels are not handled in MallocSizeOf"]
+    pub block_headers_queue: AsyncTaskQueue<BlockHeadersTask>,
+
     // state sync for any checkpoint
     #[ignore_malloc_size_of = "not used on archive nodes"]
     pub state_sync: Arc<SnapshotChunkSync>,
@@ -567,6 +614,12 @@ impl SynchronizationProtocolHandler {
             local_message: AsyncTaskQueue::new(
                 SyncHandlerWorkType::LocalMessage,
                 10000000000, // TODO: Set a better capacity.
+            ),
+            // ~400k headers. Never dropped in practice: the epoch window
+            // bounds how many headers are requested at once.
+            block_headers_queue: AsyncTaskQueue::new(
+                SyncHandlerWorkType::BlockHeaders,
+                256 * 1024 * 1024,
             ),
             state_sync,
             synced_epoch_id: Default::default(),
@@ -694,6 +747,26 @@ impl SynchronizationProtocolHandler {
             .sync_graph
             .inserted_block_count
             .saturating_sub(statistics.consensus_graph.inserted_block_count)
+    }
+
+    /// Heights below this are deep history: full nodes keep blocks and epoch
+    /// sets only from about their era checkpoint up, so anything more than
+    /// DEEP_HISTORY_ERAS eras below the lowest full peer's tip is asked of
+    /// archive peers. 0 when every peer is an archive.
+    fn deep_history_floor(&self) -> u64 {
+        const DEEP_HISTORY_ERAS: u64 = 3;
+        let era = self.graph.consensus.get_config().inner_conf.era_epoch_count;
+        self.syn
+            .peers
+            .read()
+            .values()
+            .filter_map(|p| {
+                let p = p.read();
+                (p.node_type != NodeType::Archive).then_some(p.best_epoch)
+            })
+            .min()
+            .map(|best| best.saturating_sub(DEEP_HISTORY_ERAS * era))
+            .unwrap_or(0)
     }
 
     fn should_backpressure_block_requests(&self) -> bool {
@@ -1017,6 +1090,20 @@ impl SynchronizationProtocolHandler {
         }
     }
 
+    /// `request_epochs` in the catch-up phases that discover epochs (the
+    /// same phases `start_sync` drives), from the request timer.
+    fn continue_epoch_discovery(&self, io: &dyn NetworkContext) {
+        let phase = self.phase_manager.get_current_phase().phase_type();
+        if matches!(
+            phase,
+            SyncPhaseType::CatchUpSyncBlockHeader
+                | SyncPhaseType::CatchUpSyncBlock
+        ) && !self.graph.consensus.fast_sync_bootstrap_pending()
+        {
+            self.request_epochs(io);
+        }
+    }
+
     pub fn start_sync(&self, io: &dyn NetworkContext) {
         let current_phase_type =
             self.phase_manager.get_current_phase().phase_type();
@@ -1303,32 +1390,81 @@ impl SynchronizationProtocolHandler {
         // RandomX hash, and with the fill set in random height order every
         // lookup built a new light RandomX context (m2: ~3 bodies/s, IO
         // workers stalled on the seed cache).
-        let mut db_candidates = Vec::new();
+        let mut pending = Vec::new();
         {
-            let inner = &mut *self.graph.inner.write();
+            // Scan under the read lock (body responses and header inserts
+            // keep going); take the write lock only to drop filled entries.
+            let inner = self.graph.inner.read();
             for hash in to_request_blocks.iter() {
                 match inner.hash_to_arena_indices.get(hash).copied() {
                     Some(i) if !inner.arena[i].block_ready => {
-                        if db_candidates.len() < LOCAL_BODY_LOOKUPS_PER_TICK {
-                            db_candidates.push(
-                                inner.arena[i].block_header.clone(),
-                            );
-                        }
+                        let header = &inner.arena[i].block_header;
+                        pending.push((header.height(), *hash, header.clone()));
                     }
                     // Body already present, or the block left the graph:
                     // nothing to fill.
                     _ => {
-                        inner.block_to_fill_set.remove(hash);
                         local_hits.insert(*hash);
                     }
                 }
             }
         }
+        if !local_hits.is_empty() {
+            let inner = &mut *self.graph.inner.write();
+            for hash in &local_hits {
+                inner.block_to_fill_set.remove(hash);
+            }
+        }
+        // Lowest heights first. The fill set is a HashSet, so the drain used
+        // to fetch bodies in random height order: the graph-ready frontier
+        // (and with it consensus and execution) only advanced once nearly
+        // all of a catch-up's bodies had arrived. In height order a body is
+        // usable as soon as it lands, so fetching pipelines with execution.
+        let wanted = cmp::max(LOCAL_BODY_LOOKUPS_PER_TICK, max_inflight);
+        if pending.len() > wanted {
+            pending.select_nth_unstable_by_key(wanted, |p| p.0);
+            pending.truncate(wanted);
+        }
+        pending.sort_unstable_by_key(|p| p.0);
+        to_request_blocks = pending.iter().map(|p| p.1).collect();
+        // Local DB lookups run at most every 500 ms (the body tick): this is
+        // also called on every body response, and on a fresh node every
+        // lookup misses.
+        let scan_db = {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static LAST_DB_SCAN_MS: AtomicU64 = AtomicU64::new(0);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let last = LAST_DB_SCAN_MS.load(Ordering::Relaxed);
+            now_ms >= last + 450
+                && LAST_DB_SCAN_MS
+                    .compare_exchange(
+                        last,
+                        now_ms,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+        };
+        let db_candidates: Vec<_> = if scan_db {
+            pending
+                .into_iter()
+                .take(LOCAL_BODY_LOOKUPS_PER_TICK)
+                .map(|p| p.2)
+                .collect()
+        } else {
+            Vec::new()
+        };
         for header in db_candidates {
             let hash = header.hash();
             if let Some((transactions, shielded)) =
                 self.graph.data_man.db_manager.block_body_from_db(&hash)
             {
+                // Not `recover_from_db`: that skips caching the body, and
+                // graph-status propagation would then reload the whole block
+                // from the DB (recomputing the header's RandomX hash).
                 // With its shielded section, as `block_from_db` rebuilds it
                 // (re-read from the DB, so its proofs are not checked again).
                 let witness = if shielded.is_empty() {
@@ -1346,7 +1482,7 @@ impl SynchronizationProtocolHandler {
                         .with_witness(witness),
                     true,  /* need_to_verify */
                     false, /* persistent: already on disk */
-                    true,  /* recover_from_db */
+                    false, /* recover_from_db */
                 );
                 local_hits.insert(hash);
             }
@@ -1387,16 +1523,50 @@ impl SynchronizationProtocolHandler {
         use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
         static BODY_PEER_ROTATION: AtomicUsize = AtomicUsize::new(0);
         let rotation = BODY_PEER_ROTATION.fetch_add(1, AtomicOrdering::Relaxed);
-        for (i, block_chunk) in to_request_blocks[0..n_blocks_to_request]
-            .chunks(MAX_BLOCKS_TO_SEND as usize)
-            .enumerate()
-        {
-            let peer = if body_peers.is_empty() {
-                None
-            } else {
-                Some(body_peers[(rotation + i) % body_peers.len()])
-            };
-            self.request_blocks_without_check(io, peer, block_chunk.to_vec());
+        // Route deep-history bodies to archive peers. Full nodes keep bodies
+        // only from about their era checkpoint up, so a body more than
+        // DEEP_HISTORY_ERAS eras below a full peer's tip is one it no longer
+        // has; asking it costs a round trip and a retry. With one archive
+        // among four peers, a from-genesis archive fetched ~50 bodies/s and
+        // its header sync sat behind the fill debt (m2, 2026-10-22). Recent
+        // bodies still go to every peer (the §3b wedge between two archives
+        // that only asked each other), and with no archive peer every body
+        // goes to every peer as before.
+        let deep_below = self.deep_history_floor();
+        let archive_peers: Vec<NodeId> = self
+            .syn
+            .peers
+            .read()
+            .iter()
+            .filter(|(_, p)| p.read().node_type == NodeType::Archive)
+            .map(|(id, _)| *id)
+            .collect();
+        let (deep, recent): (Vec<H256>, Vec<H256>) = {
+            let inner = self.graph.inner.read();
+            to_request_blocks[0..n_blocks_to_request].iter().partition(|h| {
+                !archive_peers.is_empty()
+                    && inner
+                        .hash_to_arena_indices
+                        .get(*h)
+                        .map(|i| inner.arena[*i].block_header.height() < deep_below)
+                        .unwrap_or(false)
+            })
+        };
+        for (blocks, peers) in [(deep, &archive_peers), (recent, &body_peers)] {
+            for (i, block_chunk) in
+                blocks.chunks(MAX_BLOCKS_TO_SEND as usize).enumerate()
+            {
+                let peer = if peers.is_empty() {
+                    None
+                } else {
+                    Some(peers[(rotation + i) % peers.len()])
+                };
+                self.request_blocks_without_check(
+                    io,
+                    peer,
+                    block_chunk.to_vec(),
+                );
+            }
         }
     }
 
@@ -1490,8 +1660,27 @@ impl SynchronizationProtocolHandler {
         // best_epoch will the tip of the malicious subtree and will remain
         // unchanged, meaning the syncing process will be blocked forever.
         // Increase the syncing gap if our main chain remain unchanged.
-        let sync_max_gap = EPOCH_SYNC_MAX_GAP_START
+        let mut sync_max_gap = EPOCH_SYNC_MAX_GAP_START
             + EPOCH_SYNC_MAX_GAP_INCREASE * retry_count;
+        // Seed horizon: a header at height h can only be verified once the
+        // RandomX seed of its epoch -- the main-chain block at
+        // (h / L - 1) * L, persisted by consensus EPOCH_SET_PERSISTENCE_DELAY
+        // epochs behind its best -- is known. Headers fetched beyond that are
+        // only deferred and fetched again later, and a window spanning many
+        // seeds makes the RandomX cache juggle their contexts. So keep the
+        // first-try window within the current and the next RandomX epoch;
+        // the retry widening (a stuck best epoch) still applies on top.
+        if retry_count == 0 {
+            let l = mazze_parameters::pow::randomx_epoch_length();
+            let ordered = my_best_epoch.saturating_sub(
+                mazze_parameters::consensus::EPOCH_SET_PERSISTENCE_DELAY,
+            );
+            let horizon = (ordered / l + 2) * l;
+            sync_max_gap = cmp::min(
+                sync_max_gap,
+                cmp::max(horizon.saturating_sub(my_best_epoch), EPOCH_SYNC_BATCH_SIZE),
+            );
+        }
         // If the gap is too large, it means that the next epoch of
         // `my_best_epoch` is missing, either because received
         // epoch_set is wrong or we have too many epochs with
@@ -1518,6 +1707,23 @@ impl SynchronizationProtocolHandler {
             }
         }
 
+        if self.request_manager.num_epochs_in_flight()
+            >= EPOCH_SYNC_MAX_INFLIGHT
+        {
+            let cleared =
+                self.request_manager.reconcile_inflight_epoch_orphans();
+            if cleared > 0 {
+                warn!(
+                    "request_epochs: reconciled {} orphaned in-flight epoch \
+                     request(s) holding the epoch window",
+                    cleared
+                );
+                // Freed epochs below `latest_requested_epoch` are requested
+                // again from `my_best_epoch` up.
+                latest_requested_epoch =
+                    min(latest_requested_epoch, my_best_epoch);
+            }
+        }
         while self.request_manager.num_epochs_in_flight()
             < EPOCH_SYNC_MAX_INFLIGHT
             && latest_requested_epoch < my_best_epoch + sync_max_gap
@@ -1550,9 +1756,16 @@ impl SynchronizationProtocolHandler {
 
             // Epoch hashes are not in db, so should be requested from another
             // peer
-            let peer = PeerFilter::new(msgid::GET_BLOCK_HASHES_BY_EPOCH)
-                .with_min_best_epoch(from)
-                .select(&self.syn);
+            // Deep-history epochs go to archive peers when there are any:
+            // full nodes answer them with an empty list, and m2 then never
+            // got those epochs and stalled with a full request window
+            // (2026-10-22).
+            let mut filter = PeerFilter::new(msgid::GET_BLOCK_HASHES_BY_EPOCH)
+                .with_min_best_epoch(from);
+            if from < self.deep_history_floor() {
+                filter = filter.with_preferred_node_type(NodeType::Archive);
+            }
+            let peer = filter.select(&self.syn);
 
             // no peer has the epoch we need; try later
             if peer.is_none() {
@@ -1817,9 +2030,23 @@ impl SynchronizationProtocolHandler {
             self.preferred_peer_node_type_for_get_block(),
         );
         if self.graph.inner.read().locked_for_catchup {
-            self.request_block_bodies(io);
+            if self.request_manager.in_flight_blocks().len()
+                < BLOCK_SYNC_MAX_INFLIGHT / 2
+            {
+                self.request_block_bodies(io);
+            }
             Ok(())
         } else {
+            // Keep the body pipe full in every phase (header catch-up drains
+            // `block_to_fill_set` concurrently, §5.20): refill the in-flight
+            // window as responses land instead of only on the 500 ms tick,
+            // which capped body sync at one window per tick.
+            if !self.graph.inner.read().block_to_fill_set.is_empty()
+                && self.request_manager.in_flight_blocks().len()
+                    < BLOCK_SYNC_MAX_INFLIGHT / 2
+            {
+                self.request_block_bodies(io);
+            }
             let missing_dependencies = dependent_hashes
                 .difference(&received_blocks)
                 .map(Clone::clone)
@@ -1840,6 +2067,58 @@ impl SynchronizationProtocolHandler {
         self.request_manager
             .remove_net_inflight_blocks(task.requested.iter());
         self.on_blocks_inner(io, task)
+    }
+
+    /// Drains `block_headers_queue` on at most `MAX_HEADER_TASK_WORKERS` IO
+    /// workers at a time: each batch already uses the whole PoW pool, and
+    /// the IO workers are shared with body processing (RecoverPublic), which
+    /// starved when every worker sat in header verification.
+    fn on_block_headers_task(&self, io: &dyn NetworkContext) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const MAX_HEADER_TASK_WORKERS: usize = 2;
+        static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+        loop {
+            if ACTIVE.fetch_add(1, Ordering::AcqRel) >= MAX_HEADER_TASK_WORKERS
+            {
+                // Enough drainers already; they will pick this task up.
+                ACTIVE.fetch_sub(1, Ordering::AcqRel);
+                return;
+            }
+            while let Some(task) = self.block_headers_queue.pop() {
+                self.process_block_headers_task(io, task);
+            }
+            ACTIVE.fetch_sub(1, Ordering::AcqRel);
+            // A task queued after our last pop, while the other drainer slots
+            // were taken, would otherwise wait for the next dispatch.
+            if self.block_headers_queue.is_empty() {
+                return;
+            }
+        }
+    }
+
+    fn process_block_headers_task(
+        &self, io: &dyn NetworkContext, task: BlockHeadersTask,
+    ) {
+        let peer = task.peer;
+        let ctx = Context {
+            node_id: peer,
+            io,
+            manager: self,
+        };
+        if let Err(e) = GetBlockHeadersResponse::handle_block_headers_task(
+            &ctx,
+            task.headers,
+            task.requested,
+            task.chosen_peer,
+            task.delay,
+        ) {
+            self.handle_error(
+                io,
+                &peer,
+                msgid::GET_BLOCK_HEADERS_RESPONSE,
+                e,
+            );
+        }
     }
 
     fn on_local_message_task(&self, io: &dyn NetworkContext) {
@@ -2707,6 +2986,10 @@ impl NetworkProtocolHandler for SynchronizationProtocolHandler {
             == SyncHandlerWorkType::LocalMessage as HandlerWorkType
         {
             self.on_local_message_task(io);
+        } else if work_type
+            == SyncHandlerWorkType::BlockHeaders as HandlerWorkType
+        {
+            self.on_block_headers_task(io);
         } else {
             warn!("Unknown SyncHandlerWorkType");
         }
@@ -2784,6 +3067,12 @@ impl NetworkProtocolHandler for SynchronizationProtocolHandler {
                 // when the set is empty (n_blocks_to_request == 0 → early
                 // return) so this is safe in Normal too.
                 self.request_block_bodies(io);
+                // Epoch discovery is otherwise driven only by epoch-hash
+                // responses and peer heartbeats (30 s). Once the window hits
+                // the seed horizon / max gap no response is outstanding, so
+                // after consensus moved on discovery idled until the next
+                // heartbeat -- or forever on a chain that stopped growing.
+                self.continue_epoch_discovery(io);
             }
             HEARTBEAT_TIMER => {
                 self.send_heartbeat(io);

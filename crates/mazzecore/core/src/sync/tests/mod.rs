@@ -384,6 +384,97 @@ fn test_header_then_body_is_delivered_to_consensus_once() {
     remove_test_db(db);
 }
 
+/// A block re-delivered to consensus after a main block has already taken it
+/// into its epoch must not be executed again in a later epoch. Without the
+/// duplicate guard in `ConsensusNewBlockHandler::on_new_block` the repeat
+/// became a shadow arena node; a later block built on it (here `t`, child of
+/// `s`) reached the shadow, which is not in the past set of the previous main
+/// block, so the shadow joined the next epoch too: the epoch held one block
+/// more, every later block number shifted and the state diverged. This is how
+/// m2's from-genesis replay on 9d6249e (no 99b151e) left the network at epoch
+/// 99136 (blocks 0x3bc18a60 / 0x63bb4afe executed in epochs 99133 / 99132 and
+/// again in 99136; receipts root of 4 empty blocks instead of 2).
+#[test]
+fn test_redelivered_block_is_not_executed_in_a_second_epoch() {
+    use crate::sync::utils::create_simple_block_impl;
+    let db = "./test_redelivered_epoch.db/";
+    {
+        let (sync, consensus, _, genesis) = initialize_synchronization_graph(
+            db,
+            1,
+            1,
+            1,
+            1,
+            50000,
+            H256::default(),
+        );
+        let diff = U256::from(10);
+        let block = |parent: H256, refs: Vec<H256>, height: u64, nonce: u64| {
+            create_simple_block_impl(
+                parent,
+                refs,
+                height,
+                U256::from(nonce),
+                diff,
+                1,
+                false,
+            )
+            .1
+        };
+        let headers = |blocks: &[&Block]| {
+            for b in blocks {
+                let mut h = b.block_header.clone();
+                sync.insert_block_header(&mut h, false, true, true, true);
+            }
+            wait_consensus_drained(&sync);
+        };
+
+        // Main chain g <- a1 <- a2 <- a3; side block s (child of g) is
+        // referenced by a2, its child t by a3.
+        let g = genesis.hash();
+        let a1 = block(g, vec![], 1, 1);
+        let s = block(g, vec![], 1, 2);
+        let a2 = block(a1.hash(), vec![s.hash()], 2, 3);
+        headers(&[&a1, &s, &a2]);
+
+        // The repeat delivery (header-graph-ready, then graph-ready).
+        consensus.on_new_block(&s.hash());
+
+        let t = block(s.hash(), vec![], 2, 4);
+        let a3 = block(a2.hash(), vec![t.hash()], 3, 5);
+        headers(&[&t, &a3]);
+
+        let inner = consensus.inner.read();
+        let epoch = |main: &Block| -> Vec<H256> {
+            let idx = inner.hash_to_arena_indices[&main.hash()];
+            inner
+                .get_ordered_executable_epoch_blocks(idx)
+                .iter()
+                .map(|i| inner.arena[*i].hash)
+                .collect()
+        };
+        assert_eq!(epoch(&a1), vec![a1.hash()]);
+        assert_eq!(epoch(&a2), vec![s.hash(), a2.hash()]);
+        assert_eq!(
+            epoch(&a3),
+            vec![t.hash(), a3.hash()],
+            "a block of an earlier epoch was executed again"
+        );
+        let past = |b: &Block| {
+            let idx = inner.hash_to_arena_indices[&b.hash()];
+            inner.arena[idx].past_num_blocks()
+        };
+        // Block numbers stay consecutive: 2 blocks in a3's epoch.
+        assert_eq!(past(&a3), past(&a2) + 2);
+        assert_eq!(
+            inner.arena.len(),
+            6,
+            "duplicate consensus delivery created a shadow arena node"
+        );
+    }
+    remove_test_db(db);
+}
+
 /// A block that becomes HEADER_GRAPH_READY through a call that does not
 /// insert into consensus (e.g. a body response for a header-less block,
 /// `insert_to_consensus = false`) must still reach consensus before a child
@@ -700,4 +791,350 @@ fn an_invalid_proof_is_rejected_on_every_path() {
         assert!(!invalid(insert(&with_section(6000, &good_body), true, false)));
     }
     let _ = fs::remove_dir_all(db);
+}
+
+/// In a header-to-consensus phase a block is in consensus at
+/// HEADER_GRAPH_READY, but it stays in `not_ready_blocks_frontier` until its
+/// body arrives (body sync runs in every phase, §5.20). Expiry must not remove
+/// such a block, nor the chain above it: m2's from-genesis archive replay
+/// (2026-10-20) lost every sync-graph node above height 9374 two hours into
+/// header sync, then rebuilt consensus from the gutted sync graph at the end
+/// of body fill and froze at epoch 9374 for good.
+#[test]
+fn test_expiry_keeps_blocks_consensus_holds() {
+    use crate::sync::utils::create_simple_block_impl;
+    let db = "./test_expiry_keeps_consensus.db/";
+    {
+        let (sync, consensus, _, genesis) = initialize_synchronization_graph(
+            db,
+            1,
+            1,
+            1,
+            1,
+            50000,
+            H256::default(),
+        );
+        let blocks = simple_chain(&sync, &genesis, 4);
+
+        // Header phase: every header goes to consensus at HGR.
+        for b in &blocks {
+            let mut h = b.block_header.clone();
+            sync.insert_block_header(&mut h, false, true, true, true);
+        }
+        // An orphan header whose parent never arrives: not in consensus.
+        let (_, orphan) = create_simple_block_impl(
+            H256::from_low_u64_be(0xdead),
+            vec![],
+            7,
+            U256::from(77),
+            U256::from(10),
+            1,
+            false,
+        );
+        let mut oh = orphan.block_header.clone();
+        sync.insert_block_header(&mut oh, false, true, true, true);
+        wait_consensus_drained(&sync);
+
+        // Only the first body arrives: its HGR child joins the frontier.
+        sync.insert_block(blocks[0].clone(), false, true, false);
+        wait_consensus_drained(&sync);
+        {
+            let mut inner = sync.inner.write();
+            let i1 = inner.hash_to_arena_indices[&blocks[1].hash()];
+            assert!(
+                inner.not_ready_blocks_frontier.contains(&i1),
+                "test setup: the HGR child must be a not-ready frontier block"
+            );
+            let old = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                - 10_000;
+            let idx: Vec<usize> =
+                inner.hash_to_arena_indices.values().copied().collect();
+            for i in idx {
+                inner.arena[i].last_update_timestamp = old;
+            }
+        }
+
+        sync.remove_expire_blocks(500 /* expire_time */);
+
+        let inner = sync.inner.read();
+        for b in &blocks {
+            assert!(
+                inner.hash_to_arena_indices.contains_key(&b.hash()),
+                "block {:?} held by consensus was expired from the sync graph",
+                b.hash()
+            );
+            assert!(
+                sync.data_man.block_header_by_hash(&b.hash()).is_some(),
+                "header of {:?} held by consensus was deleted",
+                b.hash()
+            );
+            assert!(consensus.contains_block(&b.hash()));
+        }
+        assert!(
+            !inner.hash_to_arena_indices.contains_key(&orphan.hash()),
+            "a stale orphan must still expire"
+        );
+    }
+    remove_test_db(db);
+}
+
+/// Cancelling a body request must not remove a block consensus holds, or the
+/// chain above it.
+#[test]
+fn test_cancelled_request_keeps_blocks_consensus_holds() {
+    let db = "./test_cancel_keeps_consensus.db/";
+    {
+        let (sync, _, _, genesis) = initialize_synchronization_graph(
+            db,
+            1,
+            1,
+            1,
+            1,
+            50000,
+            H256::default(),
+        );
+        let blocks = simple_chain(&sync, &genesis, 3);
+        for b in &blocks {
+            let mut h = b.block_header.clone();
+            sync.insert_block_header(&mut h, false, true, true, true);
+        }
+        wait_consensus_drained(&sync);
+
+        let mut to_remove = std::collections::HashSet::new();
+        to_remove.insert(blocks[0].hash());
+        sync.remove_blocks_and_future(&to_remove);
+
+        let inner = sync.inner.read();
+        for b in &blocks {
+            assert!(inner.hash_to_arena_indices.contains_key(&b.hash()));
+            assert!(sync.data_man.block_header_by_hash(&b.hash()).is_some());
+        }
+    }
+    remove_test_db(db);
+}
+
+/// Random DAGs: the windowed outlier difficulty used by the reward
+/// computation (`outlier_difficulty_windowed`) equals the arena-wide brute
+/// force for every executable epoch block, including stale side chains,
+/// partial-invalid blocks (wrong parent choice), blocks left inactive by
+/// referencing them, and (with a small era) blocks across checkpoints.
+#[test]
+fn test_outlier_difficulty_windowed_matches_bruteforce() {
+    use rand_08::{rngs::StdRng, Rng, SeedableRng};
+    // (seed, blocks, parent window, stale %, max referees, era epochs)
+    let cases: &[(u64, usize, usize, u32, usize, u64)] = &[
+        (1, 600, 2, 5, 2, 50000),
+        (2, 800, 4, 10, 3, 50000),
+        (3, 800, 8, 20, 4, 50000),
+        (4, 1000, 3, 15, 3, 40),
+        (5, 1200, 6, 25, 5, 30),
+        (6, 1000, 12, 30, 6, 50000),
+        (7, 1500, 2, 2, 1, 20),
+        (8, 1500, 3, 10, 3, 20),
+        (10, 1500, 5, 20, 4, 30),
+    ];
+    let mut total_nonzero = 0;
+    let mut total_compared = 0;
+    let mut total_no_epoch = 0;
+    for &(seed, n, window, stale_pct, max_refs, era) in cases {
+        let db = format!("./test_outlier_windowed_{}.db/", seed);
+        {
+            // beta, heavy ratio, timer ratio, timer beta: weight-3 blocks are
+            // timer blocks, so checkpoints (eras) can form.
+            let (sync, consensus, _, genesis) =
+                initialize_synchronization_graph(
+                    &db,
+                    1000,
+                    3,
+                    3,
+                    5,
+                    era,
+                    H256::default(),
+                );
+            let mut rng = StdRng::seed_from_u64(seed);
+            // (hash, height)
+            let mut blocks: Vec<(H256, u64)> = vec![(genesis.hash(), 0)];
+            let mut has_child: Vec<bool> = vec![false];
+            for i in 0..n {
+                let len = blocks.len();
+                let p = if rng.gen_range(0..100) < stale_pct {
+                    // stale: a parent far behind the tip
+                    rng.gen_range(len.saturating_sub(40)..len)
+                } else {
+                    rng.gen_range(len.saturating_sub(window)..len)
+                };
+                let mut refs = Vec::new();
+                let nrefs = rng.gen_range(0..=max_refs);
+                for _ in 0..nrefs {
+                    // prefer tips, sometimes any recent block
+                    let lo = len.saturating_sub(30);
+                    let cand: Vec<usize> = (lo..len)
+                        .filter(|j| *j != p && !has_child[*j])
+                        .collect();
+                    let r = if !cand.is_empty() && rng.gen_bool(0.7) {
+                        cand[rng.gen_range(0..cand.len())]
+                    } else {
+                        rng.gen_range(lo..len)
+                    };
+                    if r != p && !refs.contains(&blocks[r].0) {
+                        refs.push(blocks[r].0);
+                        has_child[r] = true;
+                    }
+                }
+                let weight = if rng.gen_range(0..100) < 5 { 3 } else { 1 };
+                let (_, b) = create_simple_block_impl(
+                    blocks[p].0,
+                    refs,
+                    blocks[p].1 + 1,
+                    U256::from(i as u64 + 1),
+                    U256::from(10),
+                    weight,
+                    false,
+                );
+                let mut h = b.block_header.clone();
+                sync.insert_block_header(&mut h, false, true, true, true);
+                has_child[p] = true;
+                blocks.push((b.hash(), blocks[p].1 + 1));
+                has_child.push(false);
+                // Also compare on intermediate graphs (tips outside the
+                // main chain's past have no epoch yet).
+                if i % 97 == 96 {
+                    wait_consensus_drained(&sync);
+                    let st = consensus
+                        .inner
+                        .read()
+                        .check_outlier_difficulty_windowed();
+                    total_no_epoch += st.no_epoch;
+                    total_compared += st.compared;
+                    total_nonzero += st.nonzero;
+                }
+            }
+            wait_consensus_drained(&sync);
+            let inner = consensus.inner.read();
+            let st = inner.check_outlier_difficulty_windowed();
+            println!(
+                "seed {}: arena {} best_epoch {} max_height {} {:?}",
+                seed,
+                inner.arena.len(),
+                inner.best_epoch_number(),
+                blocks.iter().map(|b| b.1).max().unwrap(),
+                st
+            );
+            assert!(st.compared > 0);
+            total_nonzero += st.nonzero;
+            total_compared += st.compared;
+        }
+        remove_test_db(&db);
+    }
+    println!(
+        "compared {} nonzero {} no_epoch (summed over checks) {}",
+        total_compared, total_nonzero, total_no_epoch
+    );
+    assert!(total_nonzero > 0, "no case exercised a non-zero penalty");
+}
+
+/// Cost of the outlier difficulty of old epochs on a large arena (the
+/// archive replay case): brute force vs windowed. Not a correctness test.
+/// `OUTLIER_BENCH_BLOCKS=90000 cargo test --release -p mazzecore --lib
+///  bench_outlier_difficulty -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn bench_outlier_difficulty_large_arena() {
+    use rand_08::{rngs::StdRng, Rng, SeedableRng};
+    use std::time::Instant;
+    let n: usize = std::env::var("OUTLIER_BENCH_BLOCKS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30000);
+    let db = "./bench_outlier_large.db/";
+    {
+        let (sync, consensus, _, genesis) = initialize_synchronization_graph(
+            db,
+            1000,
+            3,
+            3,
+            100,
+            1_000_000_000,
+            H256::default(),
+        );
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut blocks: Vec<(H256, u64)> = vec![(genesis.hash(), 0)];
+        let t = Instant::now();
+        for i in 0..n {
+            let len = blocks.len();
+            let p = rng.gen_range(len.saturating_sub(3)..len);
+            let mut refs = Vec::new();
+            for _ in 0..rng.gen_range(0..=2) {
+                let r = rng.gen_range(len.saturating_sub(6)..len);
+                if r != p && !refs.contains(&blocks[r].0) {
+                    refs.push(blocks[r].0);
+                }
+            }
+            let (_, b) = create_simple_block_impl(
+                blocks[p].0,
+                refs,
+                blocks[p].1 + 1,
+                U256::from(i as u64 + 1),
+                U256::from(10),
+                1,
+                false,
+            );
+            let mut h = b.block_header.clone();
+            sync.insert_block_header(&mut h, false, true, true, true);
+            blocks.push((b.hash(), blocks[p].1 + 1));
+        }
+        while sync.is_consensus_worker_busy() {
+            sleep(Duration::from_millis(50));
+        }
+        let inner = consensus.inner.read();
+        println!(
+            "inserted {} blocks in {:?}; arena {} best_epoch {}",
+            n,
+            t.elapsed(),
+            inner.arena.len(),
+            inner.best_epoch_number()
+        );
+        let sample: Vec<(usize, usize, Vec<usize>)> = (100..300)
+            .filter_map(|h| {
+                let me = inner.get_main_block_arena_index(h);
+                inner.get_main_reward_index(me).map(|(m, c)| {
+                    (m, c, inner.get_ordered_executable_epoch_blocks(m).clone())
+                })
+            })
+            .collect();
+        let blocks_in_sample: usize = sample.iter().map(|s| s.2.len()).sum();
+        let t = Instant::now();
+        let mut brute = Vec::new();
+        for (m, c, bs) in &sample {
+            for b in bs {
+                brute.push(inner.outlier_difficulty_bruteforce(*b, *c, *m));
+            }
+        }
+        let t_brute = t.elapsed();
+        let t = Instant::now();
+        let mut win = Vec::new();
+        for (m, c, bs) in &sample {
+            for b in bs {
+                win.push(
+                    inner.outlier_difficulty_windowed(*b, *c, *m).unwrap(),
+                );
+            }
+        }
+        let t_win = t.elapsed();
+        assert_eq!(brute, win);
+        println!(
+            "{} epochs / {} blocks: brute force {:?} ({:.3} ms/epoch), \
+             windowed {:?} ({:.4} ms/epoch)",
+            sample.len(),
+            blocks_in_sample,
+            t_brute,
+            t_brute.as_secs_f64() * 1e3 / sample.len() as f64,
+            t_win,
+            t_win.as_secs_f64() * 1e3 / sample.len() as f64
+        );
+    }
+    remove_test_db(db);
 }

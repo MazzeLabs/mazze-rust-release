@@ -7,7 +7,7 @@ mod exec_profile;
 
 use core::convert::TryFrom;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     convert::From,
     fmt::{Debug, Formatter},
     sync::{
@@ -50,7 +50,7 @@ use crate::{
     consensus::{
         consensus_inner::{
             consensus_new_block_handler::ConsensusNewBlockHandler,
-            StateBlameInfo,
+            outlier_penalty::OUTLIER_CROSSCHECK, StateBlameInfo,
         },
         ConsensusGraphInner,
     },
@@ -560,15 +560,18 @@ impl ConsensusExecutor {
 
                 let epoch_difficulty =
                     inner.arena[main_arena_index].difficulty;
-                let outlier_cutoff_epoch_outlier_set_ref_opt = inner
+                // The cutoff outlier set: from the cache, or computed by
+                // brute force (O(arena)) only when an epoch block needs it.
+                // When neither the cutoff nor the epoch block is cached the
+                // outlier difficulty is computed inside the epoch window
+                // instead (`outlier_difficulty_windowed`, same value); the
+                // brute force made an archive replay from genesis O(arena)
+                // per block.
+                let cutoff_cached = inner
                     .outlier_cache
-                    .get(outlier_penalty_cutoff_epoch_arena_index);
-                let outlier_cutoff_epoch_outlier_set;
-                if let Some(r) = outlier_cutoff_epoch_outlier_set_ref_opt {
-                    outlier_cutoff_epoch_outlier_set = r.clone();
-                } else {
-                    outlier_cutoff_epoch_outlier_set = ConsensusNewBlockHandler::compute_outlier_hashset_bruteforce(inner, outlier_penalty_cutoff_epoch_arena_index);
-                }
+                    .get(outlier_penalty_cutoff_epoch_arena_index)
+                    .cloned();
+                let mut cutoff_bruteforce: Option<HashSet<usize>> = None;
                 let ordered_epoch_blocks = inner.get_ordered_executable_epoch_blocks(main_arena_index).clone();
                 for index in ordered_epoch_blocks.iter() {
                     let block_consensus_node = &inner.arena[*index];
@@ -593,21 +596,61 @@ impl ConsensusExecutor {
                     // it to 0.
                     let mut outlier_difficulty: U512 = 0.into();
                     if !no_reward {
-                        let block_consensus_node_outlier_opt =
-                            inner.outlier_cache.get(*index);
-                        let block_consensus_node_outlier = if let Some(r) = block_consensus_node_outlier_opt {
-                            r.clone()
+                        let block_cached =
+                            inner.outlier_cache.get(*index).cloned();
+                        let windowed = if block_cached.is_none()
+                            && cutoff_cached.is_none()
+                        {
+                            inner.outlier_difficulty_windowed(
+                                *index,
+                                outlier_penalty_cutoff_epoch_arena_index,
+                                main_arena_index,
+                            )
                         } else {
-                            ConsensusNewBlockHandler::compute_outlier_hashset_bruteforce(inner, *index)
+                            None
                         };
-
-                        for idx in block_consensus_node_outlier {
-                            if inner.is_same_era(idx, main_arena_index) && !outlier_cutoff_epoch_outlier_set.contains(&idx) {
-                                outlier_difficulty +=
-                                    U512::from(U256::from(inner.block_weight(
-                                        idx
-                                    )));
+                        if let Some(d) = windowed {
+                            outlier_difficulty = d;
+                            if *OUTLIER_CROSSCHECK {
+                                let brute = inner
+                                    .outlier_difficulty_bruteforce(
+                                        *index,
+                                        outlier_penalty_cutoff_epoch_arena_index,
+                                        main_arena_index,
+                                    );
+                                if brute != d {
+                                    error!(
+                                        "outlier difficulty mismatch: block \
+                                         {:?} main {:?} windowed {} brute {}",
+                                        inner.arena[*index].hash,
+                                        inner.arena[main_arena_index].hash,
+                                        d,
+                                        brute
+                                    );
+                                    panic!("outlier difficulty mismatch");
+                                }
                             }
+                        } else {
+                            let block_consensus_node_outlier =
+                                match block_cached {
+                                    Some(r) => r,
+                                    None => ConsensusNewBlockHandler::compute_outlier_hashset_bruteforce(inner, *index),
+                                };
+                            if cutoff_cached.is_none()
+                                && cutoff_bruteforce.is_none()
+                            {
+                                cutoff_bruteforce = Some(ConsensusNewBlockHandler::compute_outlier_hashset_bruteforce(inner, outlier_penalty_cutoff_epoch_arena_index));
+                            }
+                            let outlier_cutoff_epoch_outlier_set = cutoff_cached
+                                .as_ref()
+                                .or(cutoff_bruteforce.as_ref())
+                                .expect("set above");
+                            outlier_difficulty = inner
+                                .outlier_difficulty_from_sets(
+                                    &block_consensus_node_outlier,
+                                    outlier_cutoff_epoch_outlier_set,
+                                    main_arena_index,
+                                );
                         }
 
                         // TODO: check the clear definition of outlier penalty,

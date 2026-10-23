@@ -75,8 +75,7 @@ impl Handleable for GetBlockHeaders {
                 ctx.manager
                     .graph
                     .data_man
-                    .block_header_by_hash(&hash)
-                    .map(|header_arc| header_arc.as_ref().clone())
+                    .block_header_for_peer(&hash)
             })
             .collect();
 

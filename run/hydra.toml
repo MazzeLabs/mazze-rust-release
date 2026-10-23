@@ -187,10 +187,13 @@ jsonrpc_ws_eth_port = 58546
 # `debug_*` and `trace_*` are CPU/memory-expensive; `test_*` includes
 # state-mutation RPCs. Use `"safe"` for any public-facing node. See
 # docs/security-audit.md §5.1 and finding C-2.
-# The fleet also leaves out the shielded API (shielded_getWitness reads a
-# whole block per call); it stays on the local port, where the wallet and the
-# auditor connect.
-public_rpc_apis = "mazze,pubsub,txpool"
+# `safe` now includes the shielded API: the block explorer reads it from the
+# public port. The proofs are public chain data (served over P2P too), so this
+# costs no privacy; the open lever is DoS — shielded_getWitness reads a whole
+# block's witness per call, and shielded_sendRawTransaction verifies a STARK
+# with no per-sender penalty. Before mainnet: read only the requested proof,
+# and rate-limit the public port per IP.
+public_rpc_apis = "safe"
 
 # Possible eSpace names are: eth, ethpubsub, ethdebug.
 # `evm` only includes `eth` and `ethpubsub`. `ethdebug` is excluded
@@ -410,14 +413,14 @@ session_ip_limits = "1,32,16,4"
 # Whether to persist block number indices.
 # This only needs to be enabled if you want to use RPCs that take block numbers as an input.
 #
-persist_block_number_index = false
+persist_block_number_index = true
 
 # ---------------- Transaction Cache Parameters -----------------
 
 # Whether to persist transaction indices.
 # This only needs to be enabled if you want to reliably answer transaction-related RPCs.
 #
-persist_tx_index = false
+persist_tx_index = true
 
 # Time to keep transactions in in-memory transaction cache.
 #

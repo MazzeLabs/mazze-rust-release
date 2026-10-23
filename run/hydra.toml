@@ -170,10 +170,6 @@ jsonrpc_http_keep_alive = true
 jsonrpc_ws_port = 52535
 jsonrpc_tcp_port = 52536
 jsonrpc_http_port = 52537
-# The public ports leave out the shielded API (shielded_getWitness reads a
-# whole block per call); it stays on the local port below, where the wallet
-# and the auditor connect.
-public_rpc_apis = "mazze,pubsub,txpool"
 #jsonrpc_local_tcp_port=12538
 jsonrpc_local_http_port=12539
 #jsonrpc_local_ws_port=12540
@@ -191,7 +187,10 @@ jsonrpc_ws_eth_port = 58546
 # `debug_*` and `trace_*` are CPU/memory-expensive; `test_*` includes
 # state-mutation RPCs. Use `"safe"` for any public-facing node. See
 # docs/security-audit.md §5.1 and finding C-2.
-public_rpc_apis = "safe"
+# The fleet also leaves out the shielded API (shielded_getWitness reads a
+# whole block per call); it stays on the local port, where the wallet and the
+# auditor connect.
+public_rpc_apis = "mazze,pubsub,txpool"
 
 # Possible eSpace names are: eth, ethpubsub, ethdebug.
 # `evm` only includes `eth` and `ethpubsub`. `ethdebug` is excluded

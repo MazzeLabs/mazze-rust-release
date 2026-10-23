@@ -170,6 +170,10 @@ jsonrpc_http_keep_alive = true
 jsonrpc_ws_port = 52535
 jsonrpc_tcp_port = 52536
 jsonrpc_http_port = 52537
+# The public ports leave out the shielded API (shielded_getWitness reads a
+# whole block per call); it stays on the local port below, where the wallet
+# and the auditor connect.
+public_rpc_apis = "mazze,pubsub,txpool"
 #jsonrpc_local_tcp_port=12538
 jsonrpc_local_http_port=12539
 #jsonrpc_local_ws_port=12540

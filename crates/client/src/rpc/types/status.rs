@@ -90,7 +90,7 @@ pub struct Status {
     pub network_id: U64,
     /// Legacy alias for `progress.best_epoch_number`.
     pub epoch_number: U64,
-    /// Legacy alias for `progress.processed_block_count`.
+    /// Block number of the best block (same as `progress.best_block_number`).
     pub block_number: U64,
     /// The number of pending transactions
     pub pending_tx_number: U64,

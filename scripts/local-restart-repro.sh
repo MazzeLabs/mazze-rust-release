@@ -203,6 +203,16 @@ write_conf() { # write_conf <node> <bootnodes>
   # recomputes it WITHOUT the genesis txs -> different genesis hash -> every
   # peer rejects it ("genesis hash mismatches").
   set_kv persist_block_number_index true
+  # Transaction load: every node pre-funds the dev genesis accounts (the
+  # genesis must be identical everywhere), TXGEN_NODES generate transfers.
+  if [[ -n "${GENESIS_SECRETS:-}" ]]; then
+    set_kv genesis_secrets "\"$GENESIS_SECRETS\""
+    if [[ " ${TXGEN_NODES:-} " == *" $i "* ]]; then
+      set_kv generate_tx true
+      set_kv generate_tx_period_us "${TXGEN_PERIOD_US:-50000}"
+      set_kv txgen_account_count "${TXGEN_ACCOUNTS:-7}"
+    fi
+  fi
   if compgen -G "$d/data/storage_db/*" >/dev/null; then
     set_kv execute_genesis false
   else
@@ -407,10 +417,14 @@ main_block() { # main_block <node> <epoch>: "<hash> <blockNumber>"
 pick_anchors() {
   local cp list="" k a="${ARCHIVES%% *}"
   cp="$(status_field "$a" latestCheckpoint)"
+  # A node still starting reports no checkpoint (or 0): do not write an
+  # empty/garbage anchors file that a joiner would then silently use.
+  (( cp >= 2 * ERA )) || { echo "pick_anchors: n$a latestCheckpoint=$cp (< 2 eras); not ready" >&2; return 1; }
   for k in 0 1 2; do
     local c=$(( cp / ERA * ERA - k * ERA )) hash bn b bhash
     (( c <= 0 )) && continue
     read -r hash bn <<<"$(main_block "$a" "$c")"
+    [[ -n "$hash" && "$bn" -gt 0 ]] || { echo "pick_anchors: no main block/blockNumber for epoch $c on n$a" >&2; return 1; }
     if [[ "${ANCHOR_FORMAT:-}" == legacy ]]; then
       b=$(( c + ERA + ${BLAME_MARGIN:-100} ))
       read -r bhash _ <<<"$(main_block "$a" "$b")"

@@ -517,23 +517,53 @@ impl SnapshotChunkSync {
             .expect("Set after receving manifest");
         let mut deferred_block_hash =
             related_data.snapshot_info.get_snapshot_epoch_id().clone();
-        // Snapshot recovery gives us a fully verified state root at the sync
-        // point. Earlier reward-window entries reuse that root so receipt and
-        // bloom commitments remain available during recovery; later execution
-        // rewrites authoritative commitments as the chain advances.
-        for i in related_data.blame_vec_offset
-            ..(related_data.blame_vec_offset + REWARD_EPOCH_COUNT as usize)
-        {
+        // Commitments of the snapshot epoch and the reward-window epochs
+        // below it, which this node never executes. Each gets its own state
+        // root from the verified blame vector. They used to all reuse the
+        // snapshot epoch's root, and these epochs are never re-executed, so
+        // that stayed: a blame vector reaching below the snapshot (a block
+        // within a few epochs above it that blames its parents, e.g. while
+        // another miner's state diverged) then did not match, the joiner
+        // flagged valid blocks, and from there its own blocks carried a blame
+        // nobody else agreed with (m6, 2026-10-19, right after its snapshot
+        // at 660000).
+        let offset = related_data.blame_vec_offset;
+        for i in offset..(offset + REWARD_EPOCH_COUNT as usize) {
+            let state_root_with_aux_info = if i == offset {
+                related_data.true_state_root_by_blame_info.clone()
+            } else {
+                match related_data.state_root_vec.get(i) {
+                    Some(root) => {
+                        let mut r =
+                            related_data.true_state_root_by_blame_info.clone();
+                        r.aux_info.state_root_hash =
+                            root.compute_state_root_hash();
+                        r.state_root = root.clone();
+                        r
+                    }
+                    None => {
+                        warn!(
+                            "no blame-vector state root for the epoch {} \
+                             below the snapshot ({:?}); using the snapshot's",
+                            i - offset,
+                            deferred_block_hash
+                        );
+                        related_data.true_state_root_by_blame_info.clone()
+                    }
+                }
+            };
             info!(
-                "insert_epoch_execution_commitment for block hash {:?}",
-                &deferred_block_hash
+                "insert_epoch_execution_commitment for block hash {:?} \
+                 state_root_hash {:?}",
+                &deferred_block_hash,
+                state_root_with_aux_info.aux_info.state_root_hash
             );
             sync_handler
                 .graph
                 .data_man
                 .insert_epoch_execution_commitment(
                     deferred_block_hash,
-                    related_data.true_state_root_by_blame_info.clone(),
+                    state_root_with_aux_info,
                     related_data.receipt_blame_vec[i],
                     related_data.bloom_blame_vec[i],
                 );

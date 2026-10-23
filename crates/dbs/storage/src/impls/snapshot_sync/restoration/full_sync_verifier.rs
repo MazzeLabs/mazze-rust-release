@@ -94,6 +94,16 @@ impl<SnapshotDbManager: SnapshotDbManagerTrait>
                 }
             }
         };
+        // A chunk restored once must not be counted (or its boundary
+        // subtree sizes added) again: a second copy would bring
+        // `number_incomplete_chunk` to zero while another chunk was never
+        // received, and the snapshot would "complete" without that key
+        // range -- the boundary nodes come from the proofs, so its root
+        // would still match.
+        if self.chunk_verified[chunk_index] {
+            debug!("chunk {} already restored; ignoring the copy", chunk_index);
+            return Ok(true);
+        }
         // Check key monotone.
         if !keys.is_empty() {
             let mut previous = keys.first().unwrap();

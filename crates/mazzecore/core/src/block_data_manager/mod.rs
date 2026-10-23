@@ -495,38 +495,56 @@ impl BlockDataManager {
 
     /// A state the transaction pool can start from before consensus tells
     /// it the best executed one: the true genesis state, or, when that is
-    /// gone, the state of the current era genesis. A node that fast-synced
+    /// gone, the state of the current era's stable checkpoint or of its
+    /// genesis -- whichever can actually be opened. A node that fast-synced
     /// from a trusted checkpoint (docs/fast-sync-design.md §5.19) never had
     /// the true genesis state once its snapshot was restored; requiring it
     /// made the node panic on every restart (true_genesis_state_root
-    /// unwrap, block_data_manager/mod.rs:505).
+    /// unwrap). The era genesis alone was not enough either: once the era
+    /// has moved on, its state is often pruned (intermediate MPT gone), and
+    /// a restarted joiner panicked in TransactionPool::best_executed_state.
     pub fn initial_txpool_state_index(&self) -> Option<StateIndex> {
+        let opens = |index: StateIndex| {
+            self.storage_manager
+                .get_state_no_commit(index, /* try_open = */ false, None)
+                .ok()
+                .flatten()
+                .and_then(|state| state.get_state_root().ok())
+        };
         let genesis_hash = self.true_genesis.hash();
         let genesis_index = StateIndex::new_for_readonly(
             &genesis_hash,
             &StateRootWithAuxInfo::genesis(&genesis_hash),
         );
-        let genesis_state = self
-            .storage_manager
-            .get_state_no_commit(genesis_index, /* try_open = */ false, None)
-            .ok()
-            .flatten()
-            .and_then(|state| state.get_state_root().ok());
-        if let Some(root) = genesis_state {
+        if let Some(root) = opens(genesis_index) {
             return Some(StateIndex::new_for_readonly(&genesis_hash, &root));
         }
-        let era_genesis = self.get_cur_consensus_era_genesis_hash();
-        let commitment = self.get_epoch_execution_commitment_with_db(&era_genesis)?;
-        let index = StateIndex::new_for_readonly(
-            &era_genesis,
-            &commitment.state_root_with_aux_info,
-        );
-        warn!(
-            "true genesis state unavailable (fast-synced node); the \
-             transaction pool starts from the era genesis {:?}",
-            era_genesis
-        );
-        Some(index)
+        for (what, hash) in [
+            ("era stable checkpoint", self.get_cur_consensus_era_stable_hash()),
+            ("era genesis", self.get_cur_consensus_era_genesis_hash()),
+        ] {
+            let commitment =
+                match self.get_epoch_execution_commitment_with_db(&hash) {
+                    Some(c) => c,
+                    None => continue,
+                };
+            let index = || {
+                StateIndex::new_for_readonly(
+                    &hash,
+                    &commitment.state_root_with_aux_info,
+                )
+            };
+            if opens(index()).is_none() {
+                continue;
+            }
+            warn!(
+                "true genesis state unavailable (fast-synced node); the \
+                 transaction pool starts from the {} {:?}",
+                what, hash
+            );
+            return Some(index());
+        }
+        None
     }
 
     /// This will return the state root of true genesis block.

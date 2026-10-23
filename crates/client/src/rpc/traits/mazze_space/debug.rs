@@ -68,6 +68,15 @@ pub trait LocalRpc {
     #[method(name = "current_sync_phase", blocking)]
     fn current_sync_phase(&self) -> JsonRpcResult<String>;
 
+    /// `(receipts_root, state_root)` this node computed for the epoch whose
+    /// main block is `block_hash` -- the test RPC `getExecutedInfo`, which
+    /// release builds do not serve, on the debug API (local RPC port), so
+    /// `scripts/compare-executed-state.py` works on a fleet.
+    #[method(name = "debug_getExecutedInfo", blocking)]
+    fn debug_get_executed_info(
+        &self, block_hash: H256,
+    ) -> JsonRpcResult<(H256, H256)>;
+
     #[method(name = "consensus_graph_state", blocking)]
     fn consensus_graph_state(&self) -> JsonRpcResult<ConsensusGraphStates>;
 

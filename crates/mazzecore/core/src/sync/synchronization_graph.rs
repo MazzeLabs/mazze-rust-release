@@ -1213,7 +1213,19 @@ pub struct SynchronizationGraph {
     /// and each costs up to `max_txs_per_block` STARKs. The handler that
     /// inserted it takes the hash back and disconnects the sender.
     shielded_offences: Mutex<HashSet<H256>>,
+
+    /// Headers deferred because their RandomX seed was not known yet
+    /// (hash -> height), re-requested once it is (`take_seed_ready_headers`).
+    /// Header sync requests epochs far ahead of the best epoch, so the
+    /// headers of the next RandomX epoch often arrive before its seed -- the
+    /// pivot one RandomX epoch below them -- is persisted, and nothing asked
+    /// for them again: the node stalled at every RandomX boundary until a
+    /// restart (local cluster with a 400-epoch RandomX period).
+    seed_deferred_headers: Mutex<HashMap<H256, u64>>,
 }
+
+/// Bound on `SynchronizationGraph::seed_deferred_headers`.
+const MAX_SEED_DEFERRED_HEADERS: usize = 100_000;
 
 impl MallocSizeOf for SynchronizationGraph {
     fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
@@ -1281,6 +1293,7 @@ impl SynchronizationGraph {
             fast_sync_anchor: Mutex::new(None),
             max_ready_header_height: AtomicU64::new(0),
             shielded_offences: Mutex::new(HashSet::new()),
+            seed_deferred_headers: Default::default(),
         };
 
         // It receives `BLOCK_GRAPH_READY` blocks in order and handles them in
@@ -1480,6 +1493,31 @@ impl SynchronizationGraph {
             );
         }
         true
+    }
+
+    /// Deferred headers whose RandomX seed is known now; they are removed
+    /// from the deferred set and must be requested again.
+    pub fn take_seed_ready_headers(&self) -> Vec<H256> {
+        let mut deferred = self.seed_deferred_headers.lock();
+        if deferred.is_empty() {
+            return Vec::new();
+        }
+        let db = &self.data_man.db_manager;
+        let mut known_seed: HashMap<u64, bool> = HashMap::new();
+        let l = mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
+        let ready: Vec<H256> = deferred
+            .iter()
+            .filter(|(_, height)| {
+                *known_seed.entry(**height / l).or_insert_with(|| {
+                    db.try_get_current_seed_hash(**height).is_some()
+                })
+            })
+            .map(|(hash, _)| *hash)
+            .collect();
+        for hash in &ready {
+            deferred.remove(hash);
+        }
+        ready
     }
 
     /// Run `switch` (which moves the consensus era genesis) and rebuild the
@@ -2026,6 +2064,35 @@ impl SynchronizationGraph {
                     // the genuinely-anomalous case (DB inconsistency or a
                     // back-dated attacker block) and stays `Invalid` below.
                     SYNC_GRAPH_SEED_DEFERRED.mark(1);
+                    {
+                        let mut deferred = self.seed_deferred_headers.lock();
+                        if deferred.len() < MAX_SEED_DEFERRED_HEADERS {
+                            deferred.insert(header.hash(), header.height());
+                        }
+                    }
+                    // Name the missing seed once a minute: a node that keeps
+                    // deferring the same height is wedged on it.
+                    {
+                        use std::sync::atomic::{AtomicU64, Ordering};
+                        static LAST: AtomicU64 = AtomicU64::new(0);
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        if now >= LAST.load(Ordering::Relaxed) + 60 {
+                            LAST.store(now, Ordering::Relaxed);
+                            let l = mazze_parameters::pow::RANDOMX_EPOCH_LENGTH;
+                            warn!(
+                                "deferring header {:?} at height {}: its \
+                                 RandomX seed (the pivot at height {}) is \
+                                 not known here yet (best epoch {})",
+                                header.hash(),
+                                header.height(),
+                                (header.height() / l).saturating_sub(1) * l,
+                                self.consensus.best_epoch_number(),
+                            );
+                        }
+                    }
                     return (
                         BlockHeaderInsertionResult::TemporarySkipped,
                         Vec::new(),

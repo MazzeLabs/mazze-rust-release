@@ -45,7 +45,20 @@ impl<'a> MptSlicer<'a> {
         }
     }
 
-    pub fn advance(&mut self, mut rlp_size_limit: u64) -> Result<()> {
+    /// Move the cursor to the end of the next chunk of at most
+    /// `rlp_size_limit` bytes -- except that a chunk always takes its first
+    /// key-value, even one larger than the limit. Without that a value
+    /// bigger than the chunk size stopped the slicer for good: every chunk
+    /// boundary after it was that same key, and a manifest page starting
+    /// there named itself as the next page, so the requester asked for it
+    /// forever, appending the same boundaries each time.
+    pub fn advance(&mut self, rlp_size_limit: u64) -> Result<()> {
+        self.advance_impl(rlp_size_limit, rlp_size_limit)
+    }
+
+    fn advance_impl(
+        &mut self, mut rlp_size_limit: u64, chunk_size: u64,
+    ) -> Result<()> {
         let current_node = self.cursor.current_node_mut();
         // First, check the value of this node, if we are the first time
         // visiting this node.
@@ -57,10 +70,14 @@ impl<'a> MptSlicer<'a> {
                         current_node.get_path_to_node().path_size(),
                         value.len(),
                     );
-                    if rlp_size_limit <= key_value_size {
-                        return Ok(());
-                    } else {
+                    if rlp_size_limit > key_value_size {
                         rlp_size_limit -= key_value_size;
+                    } else if rlp_size_limit == chunk_size {
+                        // Oversized first key-value: take it alone; the
+                        // 1 byte left ends the chunk at the next key.
+                        rlp_size_limit = 1;
+                    } else {
+                        return Ok(());
                     }
                 }
                 _ => {}
@@ -98,14 +115,14 @@ impl<'a> MptSlicer<'a> {
                 .unwrap();
 
                 self.cursor.push_node(child_node);
-                return self.advance(rlp_size_limit);
+                return self.advance_impl(rlp_size_limit, chunk_size);
             }
         }
 
         // Pop-up because subtree isn't large enough.
         if rlp_size_limit > 0 && self.cursor.get_path_nodes().len() > 1 {
             self.cursor.pop_one_node()?;
-            return self.advance(rlp_size_limit);
+            return self.advance_impl(rlp_size_limit, chunk_size);
         }
 
         Ok(())

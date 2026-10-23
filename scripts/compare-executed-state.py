@@ -4,8 +4,9 @@
     scripts/compare-executed-state.py <ref_url> <url>... [--step N] [--from E]
 
 Each URL is a node's *local* JSON-RPC endpoint (jsonrpc_local_http_port,
-e.g. http://127.0.0.1:12539 through an ssh tunnel), which serves the test
-RPC `getExecutedInfo`. For every N-th epoch from E to the reference node's
+e.g. http://127.0.0.1:12539 through an ssh tunnel), which serves the debug
+RPC `debug_getExecutedInfo` (or, on older builds, only the test RPC
+`getExecutedInfo`, which release builds do not enable). For every N-th epoch from E to the reference node's
 latest executed epoch, it takes the reference node's main block of that epoch
 and compares (state_root, receipts_root) as executed by every other node.
 
@@ -31,6 +32,15 @@ def rpc(url, method, params):
         return json.loads(r.read())
 
 
+def executed(url, block):
+    """(receipts_root, state_root) the node at `url` executed for the epoch of
+    main block `block`, or None."""
+    r = rpc(url, 'debug_getExecutedInfo', [block])
+    if 'error' in r and r['error'].get('code') == -32601:  # older build
+        r = rpc(url, 'getExecutedInfo', [block])
+    return r.get('result')
+
+
 def main(argv):
     step, start = 100, 1
     if '--step' in argv:
@@ -47,11 +57,11 @@ def main(argv):
         blocks = rpc(ref, 'mazze_getBlocksByEpoch', [hex(e)]).get('result')
         if not blocks:
             continue
-        mine = rpc(ref, 'getExecutedInfo', [blocks[-1]]).get('result')
+        mine = executed(ref, blocks[-1])
         if mine is None:
             continue
         for u in others:
-            theirs = rpc(u, 'getExecutedInfo', [blocks[-1]]).get('result')
+            theirs = executed(u, blocks[-1])
             s = stats[u]
             if theirs is None:
                 s['unavailable'] += 1

@@ -32,6 +32,7 @@
 //! agree about the anchor's tree.
 //! mazze-shielded-wallet restore    --wallet W --rpc URL   (seed asked, or MAZZE_RESTORE_SEED)
 //! mazze-shielded-wallet fund-espace --wallet W --rpc URL --funder-key HEX --amount A   (test helper)
+//! mazze-shielded-wallet funder-address --rpc URL --funder-key HEX   (the key's native and eSpace addresses)
 //! mazze-shielded-wallet resubmit   --wallet W --rpc URL   (re-sends proven txs not yet on chain)
 //! mazze-shielded-wallet abandon-pending --wallet W        (drops proven txs that will never land)
 //! ```
@@ -238,6 +239,23 @@ impl Args {
 fn run(args: &[String]) -> Result<(), String> {
     let command = args.get(1).ok_or("missing command (see the source header)")?;
     let a = Args::parse(&args[2..])?;
+    // The one command without a wallet.
+    if command == "funder-address" {
+        let node = Node::connect(a.get("rpc")?)?;
+        let secret = mazzekey::Secret::from_slice(
+            &hex::decode(a.get("funder-key")?.trim_start_matches("0x")).map_err(|e| e.to_string())?,
+        )
+        .ok_or("--funder-key must be a 32-byte secret")?;
+        let pair = mazzekey::KeyPair::from_secret(secret).map_err(|e| format!("{e:?}"))?;
+        let native = mazze_addr::mazze_addr_encode(
+            pair.address().as_bytes(),
+            native_network(&node)?,
+            mazze_addr::EncodingOptions::Simple,
+        )
+        .map_err(|e| format!("{e:?}"))?;
+        println!("native {native}\nespace {:?}", pair.evm_address());
+        return Ok(());
+    }
     let path = a.get("wallet")?;
     match command.as_str() {
         "init" => {

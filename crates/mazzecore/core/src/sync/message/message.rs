@@ -137,6 +137,8 @@ impl Message for GetBlocksResponse {
         self.blocks.len() > 0
     }
 
+    fn is_block_data(&self) -> bool { true }
+
     fn msg_id(&self) -> MsgId {
         msgid::GET_BLOCKS_RESPONSE
     }
@@ -163,6 +165,8 @@ impl Message for GetBlocksWithPublicResponse {
         self.blocks.len() > 0
     }
 
+    fn is_block_data(&self) -> bool { true }
+
     fn msg_id(&self) -> MsgId {
         msgid::GET_BLOCKS_WITH_PUBLIC_RESPONSE
     }
@@ -184,6 +188,8 @@ impl Message for GetBlockTxnResponse {
     fn is_size_sensitive(&self) -> bool {
         self.block_txn.len() > 1
     }
+
+    fn is_block_data(&self) -> bool { true }
 
     fn msg_id(&self) -> MsgId {
         msgid::GET_BLOCK_TXN_RESPONSE

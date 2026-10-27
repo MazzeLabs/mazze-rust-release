@@ -7,7 +7,7 @@ use crate::{
     sync::{
         message::{
             msgid, Context, GetBlocksResponse, GetBlocksWithPublicResponse,
-            Handleable, Key, KeyContainer,
+            Handleable, Key, KeyContainer, Throttled,
         },
         request_manager::{AsAny, Request},
         Error, ErrorKind, ProtocolConfiguration,
@@ -133,12 +133,36 @@ impl GetBlocks {
             if GetBlocks::is_oversize_packet_err(&e) {
                 let block_count = response.blocks.len() / 2;
                 response.blocks.truncate(block_count);
+            } else if GetBlocks::is_throttling_err(&e) {
+                return Err(self.throttled());
             } else {
                 return Err(e.into());
             }
         }
 
         Ok(())
+    }
+
+    fn is_throttling_err(e: &Error) -> bool {
+        match e.kind() {
+            ErrorKind::Network(network::ErrorKind::Throttling(_)) => true,
+            _ => false,
+        }
+    }
+
+    /// Our egress queue is too full to send the blocks: tell the requester,
+    /// which then asks another peer at once, rather than letting it wait
+    /// out the request timeout and drop us for it.
+    fn throttled(&self) -> Error {
+        ErrorKind::Throttled(
+            "GetBlocks",
+            Throttled {
+                msg_id: msgid::GET_BLOCKS,
+                wait_time_nanos: Duration::from_secs(1).as_nanos() as u64,
+                request_id: Some(self.request_id),
+            },
+        )
+        .into()
     }
 
     fn is_oversize_packet_err(e: &Error) -> bool {
@@ -163,6 +187,8 @@ impl GetBlocks {
             if GetBlocks::is_oversize_packet_err(&e) {
                 let block_count = response.blocks.len() / 2;
                 response.blocks.truncate(block_count);
+            } else if GetBlocks::is_throttling_err(&e) {
+                return Err(self.throttled());
             } else {
                 return Err(e.into());
             }

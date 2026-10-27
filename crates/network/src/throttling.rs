@@ -183,6 +183,22 @@ impl Service {
         Ok(())
     }
 
+    /// The check for block data (block bodies, block transactions), which
+    /// consensus needs: refused only halfway between `max_throttle_queue_size`
+    /// and the queue capacity. Below that, transaction relay is throttled
+    /// first, so a queue filled by gossip under load does not also stop a
+    /// node from serving the blocks its peers are waiting for.
+    pub fn check_block_throttling(&self) -> Result<(), Error> {
+        let limit = self.max_throttle_queue_size
+            + (self.queue_capacity - self.max_throttle_queue_size) / 2;
+        if self.cur_queue_size > limit {
+            debug!("throttling.check_block_throttling: throttled, queue size = {}, block limit = {}", self.cur_queue_size, limit);
+            bail!(ErrorKind::Throttling(ThrottlingReason::Throttled));
+        }
+
+        Ok(())
+    }
+
     /// Get the throttling ratio according to the current queue size.
     ///
     /// If the queue size is smaller than `min_throttle_queue_size`, return 1.0
@@ -268,6 +284,22 @@ mod tests {
         // not throttled after some data dequeued.
         assert_eq!(service.on_dequeue(1, false), max);
         assert!(service.check_throttling().is_ok());
+    }
+
+    #[test]
+    fn test_block_throttle_is_later() {
+        let mut service = super::Service::new();
+        let max = service.max_throttle_queue_size;
+        let block_limit = max + (service.queue_capacity - max) / 2;
+
+        // past the transaction threshold, blocks are still served.
+        service.on_enqueue(max + 1, false).unwrap();
+        assert!(service.check_throttling().is_err());
+        assert!(service.check_block_throttling().is_ok());
+
+        // past the block limit, they are not.
+        service.on_enqueue(block_limit - max, false).unwrap();
+        assert!(service.check_block_throttling().is_err());
     }
 
     #[test]

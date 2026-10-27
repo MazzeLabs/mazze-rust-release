@@ -226,10 +226,11 @@ demote_peer_for_timeout = false
 # Minimum queue size for throttling in manner of ratio.
 # The unit is MB.
 #
-#egress_min_throttle = 50
+#egress_min_throttle = 32
 
 # Maximum queue size for throttling in manner of ratio.
-# The unit is MB.
+# The unit is MB. Past it, transaction relay is refused; block data only
+# halfway from here to egress_queue_capacity.
 #
 #egress_max_throttle = 256
 

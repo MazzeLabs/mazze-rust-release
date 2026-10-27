@@ -240,9 +240,12 @@ build_config! {
         (chunk_size_byte, (u64), DEFAULT_CHUNK_SIZE)
         (demote_peer_for_timeout, (bool), false)
         (dev_allow_phase_change_without_peer, (bool), false)
-        (egress_queue_capacity, (usize), 256)
-        (egress_min_throttle, (usize), 10)
-        (egress_max_throttle, (usize), 64)
+        // MB. Sized for full blocks at 4 BPS: one GetBlocks response is up
+        // to 15.5 MB, and a few catching-up peers at 64 MB refused every
+        // block request on the 2026-10-27 load test.
+        (egress_queue_capacity, (usize), 1024)
+        (egress_min_throttle, (usize), 32)
+        (egress_max_throttle, (usize), 256)
         (expire_block_gc_period_s, (u64), 900)
         (headers_request_timeout_ms, (u64), 7_500)
         (heartbeat_period_interval_ms, (u64), 30_000)

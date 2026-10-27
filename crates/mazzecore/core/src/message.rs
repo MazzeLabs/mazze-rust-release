@@ -63,6 +63,12 @@ pub trait Message:
     fn is_size_sensitive(&self) -> bool {
         false
     }
+    // If true, the message carries block data consensus is waiting for, and
+    // is throttled only at a higher egress queue size than other
+    // size-sensitive messages (see `check_block_throttling`).
+    fn is_block_data(&self) -> bool {
+        false
+    }
     fn msg_id(&self) -> MsgId;
     fn push_msg_id_leb128_encoding(&self, buffer: &mut Vec<u8>) {
         let msg_id = self.msg_id();
@@ -97,7 +103,13 @@ pub trait Message:
         throttling_disabled: bool,
     ) -> Result<(), NetworkError> {
         if !throttling_disabled && self.is_size_sensitive() {
-            if let Err(e) = THROTTLING_SERVICE.read().check_throttling() {
+            let service = THROTTLING_SERVICE.read();
+            let checked = if self.is_block_data() {
+                service.check_block_throttling()
+            } else {
+                service.check_throttling()
+            };
+            if let Err(e) = checked {
                 debug!("Throttling failure: {:?}", e);
                 return Err(e);
             }

@@ -13,6 +13,10 @@ path = "src/main.rs"
 name = "mazze-shielded-auditor"
 path = "src/auditor.rs"
 
+[[bin]]
+name = "mazze-loadgen"
+path = "src/loadgen.rs"
+
 [dependencies]
 mazze-shielded-pq = { path = "../../crates/shielded_pq", features = ["prover"] }
 primitives = { path = "../../crates/primitives" }

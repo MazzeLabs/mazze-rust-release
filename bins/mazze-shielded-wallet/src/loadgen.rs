@@ -120,10 +120,18 @@ fn space_of(a: &Args) -> Result<Space, String> {
 }
 
 fn base32(node: &Node, address: &Address) -> Result<String, String> {
-    let network = match as_u64(&node.call("mazze_getStatus", vec![])?["networkId"])? {
-        1 => mazze_addr::Network::Test,
-        1990 => mazze_addr::Network::Main,
-        n => mazze_addr::Network::Id(n),
+    // The network never changes during a run: ask once.
+    static NETWORK: std::sync::OnceLock<mazze_addr::Network> = std::sync::OnceLock::new();
+    let network = match NETWORK.get() {
+        Some(n) => *n,
+        None => {
+            let n = match as_u64(&node.call("mazze_getStatus", vec![])?["networkId"])? {
+                1 => mazze_addr::Network::Test,
+                1990 => mazze_addr::Network::Main,
+                n => mazze_addr::Network::Id(n),
+            };
+            *NETWORK.get_or_init(|| n)
+        }
     };
     mazze_addr::mazze_addr_encode(address.as_bytes(), network, mazze_addr::EncodingOptions::Simple)
         .map_err(|e| format!("{e:?}"))
@@ -137,21 +145,26 @@ struct Chain {
     epoch: u64,
 }
 
+/// The price paid is the latest block's base price plus a quarter, never
+/// the node's gasPrice quote: that quote follows recent transactions'
+/// prices, so paying a multiple of it under our own load fed back into
+/// itself (2× every refresh, 1e9 → 2e12 in minutes, draining the accounts).
 fn chain(node: &Node, space: Space) -> Result<Chain, String> {
+    let base = |block: Value| -> Result<U256, String> {
+        Ok(U256::from(as_u64(&block["baseFeePerGas"])?) * 5 / 4)
+    };
     Ok(match space {
         Space::Native => {
             let status = node.call("mazze_getStatus", vec![])?;
             Chain {
                 chain_id: as_u64(&status["chainId"])? as u32,
-                // Twice the quoted price, so a rising base price under load
-                // does not reject the transactions signed before a refresh.
-                gas_price: U256::from(as_u64(&node.call("mazze_gasPrice", vec![])?)?) * 2,
+                gas_price: base(node.call("mazze_getBlockByEpochNumber", vec![json!("latest_state"), json!(false)])?)?,
                 epoch: as_u64(&node.call("mazze_epochNumber", vec![json!("latest_state")])?)?,
             }
         }
         Space::Espace => Chain {
             chain_id: as_u64(&node.call("eth_chainId", vec![])?)? as u32,
-            gas_price: U256::from(as_u64(&node.call("eth_gasPrice", vec![])?)?) * 2,
+            gas_price: base(node.call("eth_getBlockByNumber", vec![json!("latest"), json!(false)])?)?,
             epoch: 0,
         },
     })
@@ -240,8 +253,34 @@ impl Batcher {
             .runtime
             .block_on(self.client.batch_request::<Value>(batch))
             .map_err(|e| e.to_string())?;
-        Ok(response.into_iter().map(|r| r.err().map(|e| e.message().to_string())).collect())
+        Ok(response
+            .into_iter()
+            .map(|r| {
+                r.err().map(|e| match e.data() {
+                    Some(data) => format!("{}: {}", e.message(), data.get()),
+                    None => e.message().to_string(),
+                })
+            })
+            .collect())
     }
+}
+
+/// An error with its hashes replaced, so equal reasons count together.
+fn reason(e: &str) -> String {
+    let mut out = String::new();
+    let mut chars = e.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '0' && chars.peek() == Some(&'x') {
+            chars.next();
+            while chars.peek().map_or(false, |c| c.is_ascii_hexdigit()) {
+                chars.next();
+            }
+            out.push('H');
+        } else {
+            out.push(c);
+        }
+    }
+    out.chars().take(160).collect()
 }
 
 fn fund(a: &Args) -> Result<(), String> {
@@ -307,10 +346,31 @@ fn run(a: &Args) -> Result<(), String> {
     let accounts: Arc<Vec<Account>> = Arc::new((0..n).map(|i| account(seed, space, i)).collect());
     let probe = Node::connect(&urls[0])?;
     let state = Arc::new(Mutex::new(chain(&probe, space)?));
-    let mut nonces = Vec::with_capacity(n as usize);
-    for acc in accounts.iter() {
-        nonces.push(nonce_of(&probe, space, &acc.address, false)?);
-    }
+    // The starting nonces, fetched by 32 threads.
+    let mut nonces = vec![0u64; n as usize];
+    std::thread::scope(|scope| -> Result<(), String> {
+        let chunks: Vec<_> = nonces.chunks_mut((n as usize).div_ceil(32).max(1)).enumerate().collect();
+        let width = (n as usize).div_ceil(32).max(1);
+        let jobs: Vec<_> = chunks
+            .into_iter()
+            .map(|(k, chunk)| {
+                let (accounts, url) = (&accounts, &urls[k % urls.len()]);
+                scope.spawn(move || -> Result<(), String> {
+                    let node = Node::connect(url)?;
+                    for (j, slot) in chunk.iter_mut().enumerate() {
+                        // From the executed nonce: a gap an earlier run left is
+                        // filled first.
+                        *slot = nonce_of(&node, space, &accounts[k * width + j].address, true)?;
+                    }
+                    Ok(())
+                })
+            })
+            .collect();
+        for job in jobs {
+            job.join().map_err(|_| "nonce thread panicked")??;
+        }
+        Ok(())
+    })?;
     let nonces = Arc::new(Mutex::new(nonces));
     let (accepted, refused) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
     let errors: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -362,9 +422,13 @@ fn run(a: &Args) -> Result<(), String> {
                                 None => {
                                     accepted.fetch_add(1, Ordering::Relaxed);
                                 }
+                                // The pool already holds it: the gap-filling resend.
+                                Some(e) if e.contains("already exist") => {
+                                    accepted.fetch_add(1, Ordering::Relaxed);
+                                }
                                 Some(e) => {
                                     refused.fetch_add(1, Ordering::Relaxed);
-                                    let key: String = e.chars().take(80).collect();
+                                    let key = reason(&e);
                                     *errors.lock().unwrap().entry(key).or_default() += 1;
                                     resync.lock().unwrap().push(from);
                                 }
@@ -389,17 +453,32 @@ fn run(a: &Args) -> Result<(), String> {
     };
     let mut last = (Instant::now(), executed_sum(&probe), 0u64);
     let base_executed = last.1;
+    {
+        let (state, url) = (state.clone(), urls[0].clone());
+        std::thread::spawn(move || {
+            let node = match Node::connect(&url) {
+                Ok(n) => n,
+                Err(_) => return,
+            };
+            while Instant::now() < deadline {
+                std::thread::sleep(Duration::from_secs(5));
+                if let Ok(c) = chain(&node, space) {
+                    *state.lock().unwrap() = c;
+                }
+            }
+        });
+    }
     while Instant::now() < deadline + Duration::from_secs(5) {
         std::thread::sleep(Duration::from_secs(10));
-        if let Ok(c) = chain(&probe, space) {
-            *state.lock().unwrap() = c;
-        }
+        // A refused transaction leaves a nonce gap that strands every later
+        // one from that sender: restart the sender from its executed nonce,
+        // so the gap is sent again (duplicates are refused harmlessly).
         let stale: Vec<usize> = std::mem::take(&mut *resync.lock().unwrap());
         let mut uniq = stale;
         uniq.sort_unstable();
         uniq.dedup();
         for i in uniq {
-            if let Ok(nonce) = nonce_of(&probe, space, &accounts[i].address, false) {
+            if let Ok(nonce) = nonce_of(&probe, space, &accounts[i].address, true) {
                 nonces.lock().unwrap()[i] = nonce;
             }
         }

@@ -373,15 +373,18 @@ impl Block {
             // returns the cached hash when present and otherwise recomputes it
             // via the node's existing RandomX context (light-cache verify path,
             // ~ms) using the epoch seed.
-            pow_quality: Some(
-                VerificationConfig::get_or_compute_header_pow_quality(
-                    &consensus_inner.pow,
-                    &b.block_header,
-                    &data_man
-                        .db_manager
-                        .get_current_seed_hash(b.block_header.height()),
-                ),
-            ),
+            // Null when the seed is unknown here, rather than a quality
+            // computed against a zero seed.
+            pow_quality: data_man
+                .db_manager
+                .try_get_current_seed_hash(b.block_header.height())
+                .map(|seed| {
+                    VerificationConfig::get_or_compute_header_pow_quality(
+                        &consensus_inner.pow,
+                        &b.block_header,
+                        &seed,
+                    )
+                }),
             adaptive: b.block_header.adaptive(),
             referee_hashes: b
                 .block_header

@@ -87,15 +87,15 @@ lazy_static! {
 /// past this threshold are rejected with `BlockHeaderInsertionResult::Invalid`
 /// so a single misbehaving peer can't blow up the node's memory.
 ///
-/// The realistic working set (a normal era's worth of headers plus a
-/// few orphans) is well under this number — see era_epoch_count =
-/// 20 000 in `docs/chain-model.md`. Tuned conservatively to give legit
-/// catch-up plenty of headroom. See docs/security-audit.md finding H-2.
-///
-/// In healthy operation the arena is kept near one era by
-/// `try_clear_old_era_blocks` (driven by consensus era-genesis
-/// advancement); this cap is only a DoS ceiling, not the working bound.
-const SYNC_GRAPH_ARENA_HARD_CAP: usize = 200_000;
+/// The working set is every block since the stable checkpoint, which
+/// `try_clear_old_era_blocks` reclaims behind. The checkpoint moves only at
+/// era boundaries and trails the tip by 2–3 eras (era_epoch_count = 20 000),
+/// so the arena saws between ~2 and ~3 eras of blocks: at ~3.1 blocks per
+/// epoch (4 BPS) it peaked at ~186 000 on the fleet, against an old cap of
+/// 200 000 sized for one era. The cap covers 3 eras at up to ~16 blocks per
+/// epoch — 5× that peak — for ~1.5 GB of headers at worst. It is a DoS
+/// ceiling, not the working bound. See docs/security-audit.md finding H-2.
+const SYNC_GRAPH_ARENA_HARD_CAP: usize = 1_000_000;
 
 const NULL: usize = !0;
 const BLOCK_INVALID: u8 = 0;

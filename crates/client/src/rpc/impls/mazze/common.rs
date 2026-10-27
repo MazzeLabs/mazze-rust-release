@@ -1451,13 +1451,15 @@ impl RpcImpl {
         let end_epoch_number = start_epoch_number + rx_len - 1;
         let next_transition_epoch_number = end_epoch_number + 1;
 
+        // Any epoch can be asked about, including ones this chain has not
+        // reached: a seed it does not know is null, not a DB error.
         let seed_hash =
-            self.data_man.db_manager.get_current_seed_hash(epoch_num);
+            self.data_man.db_manager.try_get_current_seed_hash(epoch_num);
 
         let obj = serde_json::json!({
             "epochNumber": randomx_epoch_number,
             "selectedEpochNumber": epoch_num,
-            "randomXSeedHash": H256::from(seed_hash),
+            "randomXSeedHash": seed_hash.map(H256::from),
             "startEpochNumber": start_epoch_number,
             "endEpochNumber": end_epoch_number,
             "nextTransitionEpochNumber": next_transition_epoch_number,

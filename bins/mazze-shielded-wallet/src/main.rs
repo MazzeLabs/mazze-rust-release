@@ -29,7 +29,8 @@
 //! mazze-shielded-wallet unshield   --wallet W --rpc URL --to 0xADDR [--espace] --amount A
 //! mazze-shielded-wallet claim      --wallet W --rpc URL [--now]
 //! Commands that prove also take --verify-rpc URL: a second node that must
-//! agree about the anchor's tree.
+//! agree about the anchor's tree, and --hold: keep the proven transaction
+//! pending, unsent, until `resubmit` (to prove ahead for a load test).
 //! mazze-shielded-wallet restore    --wallet W --rpc URL   (seed asked, or MAZZE_RESTORE_SEED)
 //! mazze-shielded-wallet fund-espace --wallet W --rpc URL --funder-key HEX --amount A   (test helper)
 //! mazze-shielded-wallet funder-address --rpc URL --funder-key HEX   (the key's native and eSpace addresses)
@@ -207,7 +208,7 @@ impl Args {
         while let Some(key) = it.next() {
             let key = key.strip_prefix("--").ok_or(format!("unexpected argument {key}"))?;
             // Flags without a value.
-            if key == "espace" || key == "now" {
+            if key == "espace" || key == "now" || key == "hold" {
                 map.insert(key.into(), "1".into());
                 continue;
             }
@@ -561,6 +562,9 @@ struct Context {
     /// notes below that are spendable now.
     anchor: Tree,
     anchor_leaves: u64,
+    /// `--hold`: prove and keep the transaction pending, unsent; `resubmit`
+    /// sends it (load tests prove ahead, then submit in a burst).
+    hold: bool,
 }
 
 /// The canonical anchor (see `ANCHOR_STEP`): the tree at the last boundary
@@ -606,7 +610,8 @@ fn context(w: &mut Wallet, a: &Args) -> Result<Context, String> {
     let mut nodes = vec![&node];
     nodes.extend(verify.as_ref());
     let (anchor, anchor_leaves) = anchor_at(w, executed, &nodes)?;
-    Ok(Context { node, chain, sponge, keys, fee, anchor, anchor_leaves })
+    let hold = a.0.contains_key("hold");
+    Ok(Context { node, chain, sponge, keys, fee, anchor, anchor_leaves, hold })
 }
 
 /// Whether a pending transaction already spends note `i`.
@@ -666,6 +671,10 @@ fn prove(
 }
 
 fn submit(ctx: &Context, body: &primitives::shielded::ShieldedTxBody, proof: &[u8]) -> Result<(), String> {
+    if ctx.hold {
+        println!("proven and held: {:?} (resubmit sends it)", body.hash());
+        return Ok(());
+    }
     let hash = ctx.node.call(
         "shielded_sendRawTransaction",
         vec![hex0x(&rlp::encode(body)), hex0x(proof)],

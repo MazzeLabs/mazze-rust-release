@@ -306,7 +306,7 @@ fn fund(a: &Args) -> Result<(), String> {
                 let mut d = keccak_hash::keccak(b"transferEVM(bytes20)").0[..4].to_vec();
                 d.extend_from_slice(to.as_bytes());
                 d.extend_from_slice(&[0u8; 12]);
-                (Address::from(CROSS_SPACE_ADDRESS), d, 100_000)
+                (Address::from(CROSS_SPACE_ADDRESS), d, 300_000)
             }
         };
         raws.push(sign(Space::Native, &c, &funder, nonce, dest, amount, gas, data));

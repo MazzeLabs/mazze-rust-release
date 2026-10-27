@@ -97,6 +97,10 @@ lazy_static! {
 /// ceiling, not the working bound. See docs/security-audit.md finding H-2.
 const SYNC_GRAPH_ARENA_HARD_CAP: usize = 1_000_000;
 
+/// A not-ready frontier block whose body has not arrived in this long is
+/// treated as stuck and asked of every peer (`collect_stuck_frontier_bodies`).
+const STUCK_FRONTIER_BODY_SECS: u64 = 10;
+
 const NULL: usize = !0;
 const BLOCK_INVALID: u8 = 0;
 const BLOCK_HEADER_ONLY: u8 = 1;
@@ -3047,13 +3051,24 @@ impl SynchronizationGraph {
         // `locked_for_catchup` protects — so it is safe to run during catch-up,
         // and necessary to break the deadlock. Observed live: fleet wedged with
         // 1 not-ready frontier body present only on a forked peer.
+        // Stuck means waiting longer than a body normally takes: a frontier
+        // body still on its way (well under a second at 4 BPS) is not, and
+        // the caller asks every peer for each stuck one, outside the net
+        // in-flight window, on every tick.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let mut stuck = Vec::new();
         for &idx in inner.not_ready_blocks_frontier.get_frontier().iter() {
             let node = match inner.arena.get(idx) {
                 Some(node) => node,
                 None => continue,
             };
-            if !node.block_ready {
+            if !node.block_ready
+                && now.saturating_sub(node.last_update_timestamp)
+                    >= STUCK_FRONTIER_BODY_SECS
+            {
                 stuck.push(node.block_header.hash());
             }
         }

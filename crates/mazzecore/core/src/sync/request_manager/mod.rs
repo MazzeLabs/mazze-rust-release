@@ -1208,13 +1208,35 @@ impl RequestManager {
                 return 0;
             }
         }
-        let mut live = self.request_handler.live_block_request_hashes();
+        let sent = self.request_handler.live_block_request_hashes();
+        let mut live = sent.clone();
         for w in self.waiting_requests.lock().iter() {
             if let Some(hs) = try_get_block_hashes(&w.request.0) {
                 live.extend(hs.iter().cloned());
             }
         }
-        let mut inflight = self.inflight_keys.write(msgid::GET_BLOCKS);
+        let mut cleared = Self::remove_orphans(
+            &mut self.inflight_keys.write(msgid::GET_BLOCKS),
+            &live,
+        );
+        // The net window counts only blocks asked of a peer (a waiting
+        // request is not in it). An entry no sent request names is a leak —
+        // e.g. a response dropped because the recover queue was full, so
+        // `blocks_received` never removed it — and the window is sized by
+        // that queue, which full blocks shrink to a few dozen: enough leaks
+        // and it is full for good, every GetBlocks waits for a peer it is
+        // never given (m2, 2026-10-27 load test: 0 GetBlocks sent, chain
+        // wedged on one missing body that four peers held).
+        cleared += Self::remove_orphans(
+            &mut self.inflight_keys.write(msgid::NET_INFLIGHT_BLOCKS),
+            &sent,
+        );
+        cleared
+    }
+
+    fn remove_orphans(
+        inflight: &mut HashSet<Key>, live: &HashSet<H256>,
+    ) -> usize {
         let orphans: Vec<H256> = inflight
             .iter()
             .filter_map(|k| match k {
@@ -1226,6 +1248,42 @@ impl RequestManager {
             inflight.remove(&Key::Hash(*h));
         }
         orphans.len()
+    }
+
+    /// Asks `peer` for the bodies of the stuck not-ready frontier, outside
+    /// the net in-flight window: every block above them waits on them, and
+    /// the window may be full of exactly those waiting requests.
+    pub fn request_frontier_blocks(
+        &self, io: &dyn NetworkContext, peer: NodeId, hashes: Vec<H256>,
+        with_public: bool, preferred_node_type: Option<NodeType>,
+    ) {
+        let mut request: Box<dyn Request> = Box::new(GetBlocks {
+            request_id: 0,
+            with_public,
+            hashes,
+            preferred_node_type,
+        });
+        request.with_inflight(&self.inflight_keys);
+        if request.is_empty() {
+            return;
+        }
+        if let Some(hashes) = try_get_block_hashes(&request) {
+            let mut net = self.inflight_keys.write(msgid::NET_INFLIGHT_BLOCKS);
+            for h in hashes {
+                net.insert(Key::Hash(*h));
+            }
+        }
+        if let Err(e) = self.request_handler.send_request(
+            io,
+            Some(peer),
+            request,
+            Some(*REQUEST_START_WAITING_TIME),
+        ) {
+            if let Some(hashes) = try_get_block_hashes(&e) {
+                self.remove_net_inflight_blocks(hashes.iter())
+            }
+            e.on_removed(&self.inflight_keys);
+        }
     }
 }
 

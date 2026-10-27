@@ -1266,6 +1266,18 @@ impl SynchronizationProtocolHandler {
             // the frontier (tiny), so fanning out to all peers is cheap; the
             // last send leaves the hashes in-flight, so the `.difference()`
             // drain below still won't double-request them.
+            // Free the window of leaked entries first; the frontier requests
+            // below do not depend on it, the drain after them does.
+            let cleared =
+                self.request_manager.reconcile_inflight_block_orphans();
+            if cleared > 0 {
+                warn!(
+                    "request_block_bodies: reconciled {} orphaned in-flight \
+                     block request(s) behind {} stuck frontier block(s)",
+                    cleared,
+                    stuck.len()
+                );
+            }
             let all_peers: Vec<NodeId> =
                 self.syn.peers.read().keys().cloned().collect();
             for chunk in stuck.chunks(MAX_BLOCKS_TO_SEND as usize) {
@@ -1277,10 +1289,15 @@ impl SynchronizationProtocolHandler {
                             .remove_net_inflight_blocks(chunk.iter());
                         self.request_manager
                             .remove_inflight_blocks(chunk.iter());
-                        self.request_blocks_without_check(
+                        // Outside the net in-flight window: a full window
+                        // turned every one of these into a waiting request
+                        // with no peer, so the frontier was never asked for.
+                        self.request_manager.request_frontier_blocks(
                             io,
-                            Some(*peer),
+                            *peer,
                             chunk.to_vec(),
+                            self.request_block_need_public(),
+                            self.preferred_peer_node_type_for_get_block(),
                         );
                     }
                 }

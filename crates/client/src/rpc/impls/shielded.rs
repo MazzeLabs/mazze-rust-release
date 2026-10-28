@@ -186,19 +186,23 @@ impl ShieldedServer for ShieldedHandler {
     fn shielded_get_witness(
         &self, block_hash: H256, index: U64,
     ) -> JsonRpcResult<ShieldedWitnessInfo> {
-        let block = self
-            .consensus
-            .get_data_manager()
-            .block_by_hash(&block_hash, false)
-            .ok_or_else(|| invalid_params("blockHash", "unknown block"))?;
+        // The body section, then this one proof: never the whole witness
+        // (up to 32 proofs of ~416 KB) for one call on a public port.
+        let data_man = self.consensus.get_data_manager();
+        let unknown = || invalid_params("blockHash", "unknown block");
+        let header = data_man.block_header_by_hash(&block_hash).ok_or_else(unknown)?;
+        let (_, shielded) =
+            data_man.db_manager.block_body_from_db(&block_hash).ok_or_else(unknown)?;
         let i = index.as_u64() as usize;
-        let body = block
-            .shielded
+        let body = shielded
             .get(i)
             .ok_or_else(|| invalid_params("index", "no such shielded transaction"))?;
         Ok(ShieldedWitnessInfo {
             body: Bytes(rlp::encode(&**body).to_vec()),
-            proof: block.witness.get(i).map(|p| Bytes((**p).clone())),
+            proof: data_man
+                .db_manager
+                .block_witness_proof_from_db(header.height(), &block_hash, i)
+                .map(Bytes),
         })
     }
 }

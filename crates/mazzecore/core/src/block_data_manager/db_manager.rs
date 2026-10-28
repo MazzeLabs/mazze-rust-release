@@ -785,8 +785,82 @@ impl DBManager {
     }
 
     /// Stores the proofs of a block's shielded section (transient: see
-    /// `prune_witnesses_below`).
+    /// `prune_witnesses_below`), each in chunks of at most
+    /// `WITNESS_CHUNK_BYTES`, then their lengths under the meta key. A slot
+    /// block's witness as one ~13 MB value needed ~3,300 contiguous pages:
+    /// in a fragmented database MDBX searched its free list for minutes,
+    /// inside the sync-graph insert, and the node froze (m5, 2026-10-28).
+    /// The meta entry goes last, so a witness is never half there.
     pub fn insert_block_witness_to_db(
+        &self, height: u64, hash: &H256, witness: &[Arc<Vec<u8>>],
+    ) {
+        let mut lengths = RlpStream::new_list(witness.len());
+        for (i, proof) in witness.iter().enumerate() {
+            for (k, chunk) in proof.chunks(WITNESS_CHUNK_BYTES).enumerate() {
+                self.insert_to_db(
+                    DBTable::ShieldedWitness,
+                    &witness_chunk_key(height, hash, i as u16, k as u16),
+                    chunk.to_vec(),
+                );
+            }
+            lengths.append(&(proof.len() as u64));
+        }
+        self.insert_to_db(
+            DBTable::ShieldedWitness,
+            &witness_meta_key(height, hash),
+            lengths.out().to_vec(),
+        )
+    }
+
+    /// The lengths of a block's stored proofs (chunked layout).
+    fn witness_lengths(&self, height: u64, hash: &H256) -> Option<Vec<u64>> {
+        let meta = self.load_from_db(
+            DBTable::ShieldedWitness,
+            &witness_meta_key(height, hash),
+        )?;
+        Rlp::new(&meta).as_list().ok()
+    }
+
+    fn witness_proof(
+        &self, height: u64, hash: &H256, i: usize, len: u64,
+    ) -> Option<Vec<u8>> {
+        let mut proof = Vec::with_capacity(len as usize);
+        let chunks = (len as usize).div_ceil(WITNESS_CHUNK_BYTES);
+        for k in 0..chunks {
+            proof.extend_from_slice(&self.load_from_db(
+                DBTable::ShieldedWitness,
+                &witness_chunk_key(height, hash, i as u16, k as u16),
+            )?);
+        }
+        (proof.len() as u64 == len).then_some(proof)
+    }
+
+    pub fn block_witness_from_db(
+        &self, height: u64, hash: &H256,
+    ) -> Option<Vec<Arc<Vec<u8>>>> {
+        if let Some(lengths) = self.witness_lengths(height, hash) {
+            return lengths
+                .iter()
+                .enumerate()
+                .map(|(i, &len)| {
+                    self.witness_proof(height, hash, i, len).map(Arc::new)
+                })
+                .collect();
+        }
+        // Written before chunking: the whole witness as one RLP list.
+        let encoded = self
+            .load_from_db(DBTable::ShieldedWitness, &witness_key(height, hash))?;
+        let rlp = Rlp::new(&encoded);
+        let mut witness = Vec::new();
+        for proof in rlp.iter() {
+            witness.push(Arc::new(proof.data().ok()?.to_vec()));
+        }
+        Some(witness)
+    }
+
+    /// A witness in the layout before chunking (one RLP list value).
+    #[cfg(test)]
+    pub fn insert_legacy_block_witness_for_test(
         &self, height: u64, hash: &H256, witness: &[Arc<Vec<u8>>],
     ) {
         let mut stream = RlpStream::new_list(witness.len());
@@ -800,17 +874,19 @@ impl DBManager {
         )
     }
 
-    pub fn block_witness_from_db(
-        &self, height: u64, hash: &H256,
-    ) -> Option<Vec<Arc<Vec<u8>>>> {
-        let encoded = self
-            .load_from_db(DBTable::ShieldedWitness, &witness_key(height, hash))?;
-        let rlp = Rlp::new(&encoded);
-        let mut witness = Vec::new();
-        for proof in rlp.iter() {
-            witness.push(Arc::new(proof.data().ok()?.to_vec()));
+    /// One proof of a block's witness, read without the others.
+    pub fn block_witness_proof_from_db(
+        &self, height: u64, hash: &H256, index: usize,
+    ) -> Option<Vec<u8>> {
+        match self.witness_lengths(height, hash) {
+            Some(lengths) => {
+                self.witness_proof(height, hash, index, *lengths.get(index)?)
+            }
+            None => self
+                .block_witness_from_db(height, hash)?
+                .get(index)
+                .map(|p| (**p).clone()),
         }
-        Some(witness)
     }
 
     /// Records the executed shielded section of `block_hash`, the pivot of
@@ -1535,10 +1611,30 @@ impl rlp::Decodable for ShieldedHistoryEntry {
 
 /// `height (8B BE) ‖ hash`: heights sort first, so pruning is a range delete.
 fn witness_key(height: u64, block_hash: &H256) -> Vec<u8> {
-    let mut key = Vec::with_capacity(8 + 32);
+    let mut key = Vec::with_capacity(8 + 32 + 4);
     key.extend_from_slice(&height.to_be_bytes());
     key.extend_from_slice(block_hash.as_bytes());
     key
+}
+
+/// The largest value a stored witness is split into: 16 pages of 4 KB.
+const WITNESS_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Chunk `chunk` of proof `tx`. Every witness key starts with the height,
+/// so `prune_witnesses_below` deletes chunks and meta alike.
+fn witness_chunk_key(
+    height: u64, block_hash: &H256, tx: u16, chunk: u16,
+) -> Vec<u8> {
+    let mut key = witness_key(height, block_hash);
+    key.extend_from_slice(&tx.to_be_bytes());
+    key.extend_from_slice(&chunk.to_be_bytes());
+    key
+}
+
+/// The proofs' lengths; `tx` 0xffff is never a proof index (a block holds
+/// at most `max_txs_per_block`).
+fn witness_meta_key(height: u64, block_hash: &H256) -> Vec<u8> {
+    witness_chunk_key(height, block_hash, u16::MAX, u16::MAX)
 }
 
 fn block_body_key(block_hash: &H256) -> Vec<u8> {

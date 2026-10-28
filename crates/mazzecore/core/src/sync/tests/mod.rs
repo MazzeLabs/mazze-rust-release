@@ -608,8 +608,10 @@ fn shielded_section_survives_the_block_database() {
             .with_parent_hash(genesis.hash())
             .with_height(1)
             .build();
-        let witness: Vec<Arc<Vec<u8>>> =
-            (0..3).map(|i| Arc::new(vec![i as u8; 1000])).collect();
+        // The middle proof spans three 64 KB chunks.
+        let witness: Vec<Arc<Vec<u8>>> = (0..3)
+            .map(|i| Arc::new(vec![i as u8; if i == 1 { 150_000 } else { 1000 }]))
+            .collect();
         let block = Arc::new(
             Block::new(header, vec![])
                 .with_shielded(shielded.clone())
@@ -625,12 +627,37 @@ fn shielded_section_survives_the_block_database() {
         assert_eq!(reloaded.witness, witness, "the witness is retained");
         assert_eq!(reloaded.hash(), block.hash());
 
+        // One proof is read without the others.
+        assert_eq!(
+            data_man.db_manager.block_witness_proof_from_db(1, &block.hash(), 1),
+            Some((*witness[1]).clone())
+        );
+        assert_eq!(
+            data_man.db_manager.block_witness_proof_from_db(1, &block.hash(), 3),
+            None
+        );
+
         // Pruning below the block's height keeps it; above deletes it.
         assert_eq!(data_man.db_manager.prune_witnesses_below(1), 0);
-        assert_eq!(data_man.db_manager.prune_witnesses_below(2), 1);
+        // Chunks 1 + 3 + 1, and the meta entry.
+        assert_eq!(data_man.db_manager.prune_witnesses_below(2), 6);
         let reloaded = data_man.db_manager.block_from_db(&block.hash()).unwrap();
         assert_eq!(reloaded.shielded, shielded, "the body stays");
         assert!(reloaded.witness.is_empty());
+
+        // A witness stored before chunking still reads, whole or one proof.
+        data_man.db_manager.insert_legacy_block_witness_for_test(
+            1,
+            &block.hash(),
+            &witness,
+        );
+        let reloaded = data_man.db_manager.block_from_db(&block.hash()).unwrap();
+        assert_eq!(reloaded.witness, witness);
+        assert_eq!(
+            data_man.db_manager.block_witness_proof_from_db(1, &block.hash(), 2),
+            Some((*witness[2]).clone())
+        );
+        assert_eq!(data_man.db_manager.prune_witnesses_below(2), 1);
     }
     let _ = fs::remove_dir_all(dir);
 }

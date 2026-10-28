@@ -1,161 +1,113 @@
 # Mazze Node
 
-Mazze Node is a high-performance implementation of the Mazze protocol in Rust, designed for speed, reliability, and security in blockchain operations.
+The Rust implementation of the Mazze protocol: a proof-of-work blockchain that
+orders blocks as a DAG (Tree-Graph), so blocks mined in parallel are all kept
+instead of orphaned.
 
-## Features
+**The testnet is live.** To run a node and mine on it, follow
+**[Join the testnet](docs/join-testnet.md)**. It takes a few commands.
 
-- **High Performance**: Built with Rust for maximum efficiency and safety
-- **Modular Architecture**: Easy to extend and maintain
-- **Smart Contract Support**: Full EVM compatibility
-- **Mining Support**: Built-in Stratum protocol implementation
-- **Secure**: Advanced cryptography and secure key management
-- **Scalable**: Designed for high transaction throughput
+## What's in it
 
-## Quick Start
+- **Tree-Graph consensus.** Blocks reference every tip they see; a pivot chain
+  orders them into epochs. The target rate is 4 blocks per second, with ASERT
+  difficulty adjustment.
+- **RandomX proof of work.** CPU-friendly mining with a built-in Stratum
+  server and the `mazze-miner` client.
+- **Three spaces on one chain:**
+  - **Native space**: Mazze accounts (`mazze:aa…` addresses).
+  - **eSpace**: an Ethereum-compatible space that runs on revm, so MetaMask and
+    the usual EVM tooling work against it (chain id `1991` on the testnet).
+  - **Shielded Space**: private transfers with post-quantum STARK proofs
+    (Plonky3, Poseidon2). Amounts and owners stay hidden, and the proofs do not
+    rely on elliptic-curve assumptions. Wallet: `mazze-shielded-wallet`.
+- **Fast sync.** A new full node starts from trusted era checkpoints and is at
+  the tip in minutes; an archive node replays and verifies the whole chain
+  from genesis.
+- **MDBX storage.** State, blocks and indexes live in MDBX.
 
-For detailed setup instructions, see our [Node & Miner Setup Guide](docs/setup-guide.md).
-
-### Prerequisites
-
-- Rust (latest stable version)
-- Cargo (Rust's package manager)
-- RocksDB development libraries
-- Clang
-- Make
-- Git
-
-### Building from Source
+## Quick start
 
 ```bash
-# Clone the repository
+# Dependencies (Ubuntu); see docs/join-testnet.md for details
+sudo apt-get install -y build-essential pkg-config clang cmake llvm-dev \
+  libclang-dev libssl-dev liblz4-dev zlib1g-dev libzstd-dev libsnappy-dev \
+  libbz2-dev libsqlite3-dev libhwloc-dev git curl python3
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+# Build
 git clone https://github.com/MazzeLabs/mazze-rust-release
 cd mazze-rust-release
+cargo build --release --bin mazze --bin mazze-miner
 
-# Build the project
-cargo build --release
+# Run a testnet node
+./run/start-node.sh
+tail -f run/logs/mazze-node.log
+
+# Mine: set mining_author in run/hydra.toml, restart the node, then
+./run/start-miner.sh
 ```
 
-## Project Structure
+The Rust toolchain version is pinned in `rust-toolchain.toml` and installed
+automatically by cargo.
+
+## Testnet
+
+| | |
+|---|---|
+| Native chain id | `1990` |
+| eSpace chain id | `1991` |
+| Public RPC (native) | `http://37.27.134.36:52537` |
+| Public RPC (eSpace) | `http://37.27.134.36:58545` |
+| P2P | port `55555`; bootnodes are preset in `run/hydra.toml` |
+
+## Repository layout
 
 ```
-mazze-rust-release/
-├── bins/                  # Binary targets
-│   ├── mazze/            # Main node implementation
-│   ├── mazze-miner/      # Mining client
-│   ├── mazze-key/        # Key management utility
-│   └── mazze-store/      # Storage management
-├── crates/               # Core libraries
-│   ├── accounts/         # Account management
-│   ├── blockgen/         # Block generation
-│   ├── mazzecore/        # Core blockchain logic
-│   ├── network/          # P2P networking
-│   └── ...               # Other utility crates
+bins/
+  mazze/                   the node
+  mazze-miner/             RandomX Stratum miner
+  mazze-shielded-wallet/   Shielded Space wallet (keys, scanning, proving)
+  mazze_key/               key generation (mazzekey)
+  mazze_store/             key store management
+crates/
+  mazzecore/               consensus, sync, execution, storage
+  mazzecore/eth-vm/        eSpace on revm
+  shielded_pq/             Shielded Space: field, hashes, STARK proof system
+  network/                 P2P networking
+  stratum/                 Stratum server
+  client/                  configuration and JSON-RPC
+  …
+run/                       start/stop scripts and the testnet config (hydra.toml)
+docker/                    node and miner images
+docs/                      guides
 ```
 
-## Running the Node
+## Documentation
 
-To start a Mazze node:
+- [Join the testnet](docs/join-testnet.md): build, run, sync, mine, fast sync.
+- [Setup guide](docs/setup-guide.md): Docker and local dev mode.
+- [Mining](docs/mining.md)
+- [CLI wallet](docs/mazze-cli.md)
+- [JSON-RPC](docs/rpc.md)
+- [Viewing logs](docs/viewing-logs.md)
+- [Soak testing](docs/soak-test.md)
+
+## Development
 
 ```bash
-cargo run --release --bin mazze -- [OPTIONS]
+cargo test -p mazzecore --lib     # core unit tests
+./run/start-node-dev.sh           # single-node dev chain
 ```
 
-## Mining
-
-To start mining with the built-in miner:
-
-```bash
-cargo run --release --bin mazze-miner -- [OPTIONS]
-```
-
-## Key Management
-
-Use the key management utility to create and manage keys:
-
-```bash
-cargo run --release --bin mazze-key -- [COMMAND]
-```
-
-## RPC API
-
-Mazze Node provides a comprehensive JSON-RPC API for interacting with the blockchain. The API is available over HTTP, WebSocket, and IPC.
-
-### Available Namespaces
-
-#### 1. Mazze Namespace
-- `mazze_getBalance` - Get balance of an account
-- `mazze_getTransactionCount` - Get transaction count for an account
-- `mazze_blockNumber` - Get current block number
-- `mazze_getBlockByHash` - Get block by hash
-- `mazze_getBlockByNumber` - Get block by number
-- `mazze_getTransactionByHash` - Get transaction by hash
-- `mazze_getTransactionReceipt` - Get transaction receipt
-- `mazze_sendRawTransaction` - Send a signed transaction
-- `mazze_call` - Execute a message call
-- `mazze_estimateGas` - Estimate gas for a transaction
-- `mazze_getLogs` - Get logs matching a filter
-
-#### 2. Debug Namespace
-- `debug_traceTransaction` - Trace a transaction's execution
-- `debug_traceBlockByHash` - Trace all transactions in a block
-- `debug_traceBlockByNumber` - Trace all transactions in a block
-- `debug_traceCall` - Trace a call
-
-#### 3. Trace Namespace
-- `trace_block` - Get all traces produced at a given block
-- `trace_transaction` - Get all traces produced at a given transaction
-- `trace_filter` - Get all traces matching a filter
-
-#### 4. TxPool Namespace
-- `txpool_status` - Get transaction pool status
-- `txpool_content` - Get transaction pool content
-- `txpool_nextNonce` - Get next nonce for an account
-- `txpool_accountPendingInfo` - Get pending transactions for an account
-
-### Example Usage
-
-#### Using cURL
-
-```bash
-# Get current block number
-curl -X POST --data '{"jsonrpc":"2.0","method":"mazze_blockNumber","params":[],"id":1}' http://localhost:8545
-
-# Get balance of an account
-curl -X POST --data '{"jsonrpc":"2.0","method":"mazze_getBalance","params":["0x...", "latest"],"id":1}' http://localhost:8545
-```
-
-#### Using WebSocket
-
-```javascript
-const WebSocket = require('ws');
-const ws = new WebSocket('ws://localhost:8546');
-
-ws.on('open', function open() {
-  ws.send(JSON.stringify({
-    jsonrpc: "2.0",
-    id: 1,
-    method: "mazze_subscribe",
-    params: ["newHeads"]
-  }));
-});
-
-ws.on('message', function incoming(data) {
-  console.log('New block:', JSON.parse(data));
-});
-```
-
-### Authentication
-
-For production deployments, it's recommended to enable authentication. The RPC server supports HTTP basic authentication and JWT tokens.
-
-## License
-
-This project is licensed under the terms specified in the [LICENSE](LICENSE) file.
-
-## Contributing
-
-Contributions are welcome! Please read our contributing guidelines before submitting pull requests.
+Heavy builds and test runs need a lot of RAM; on smaller machines use
+`cargo build -j 4` and `cargo test -- --test-threads 2`.
 
 ## Security
 
-For security-related issues, please contact the development team directly.
+Please report security issues privately to the Mazze team rather than in a
+public issue.
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).

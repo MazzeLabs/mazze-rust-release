@@ -1,0 +1,221 @@
+# Join the Mazze testnet
+
+This guide takes a fresh Linux machine to a running Mazze node on the live
+testnet, and optionally to mining. Everything runs from this repository; the
+default configuration in `run/hydra.toml` already points at the testnet.
+
+| | |
+|---|---|
+| Native chain id | `1990` (addresses look like `mazze:aa…`) |
+| eSpace (EVM) chain id | `1991` |
+| Genesis block | `0x5c7ddc51abd931dabe28461e1887ededfd38c4da9ec4dbae5dd03b63cb414355` |
+| Public RPC (native) | `http://37.27.134.36:52537`, `http://37.27.134.37:52537` |
+| Public RPC (eSpace / MetaMask) | `http://37.27.134.36:58545` |
+| P2P port | `55555` TCP and UDP |
+
+## 1. What you need
+
+- Linux x86_64 (Ubuntu 22.04 or 24.04 are what we test on).
+- 4+ CPU cores (8+ if you want to mine), 16 GB RAM, 100 GB free SSD.
+- Port `55555` TCP and UDP reachable from the internet if you want other
+  nodes to connect to you. The node also works behind NAT, it just won't
+  accept inbound peers.
+
+## 2. Install the build dependencies
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config clang cmake llvm-dev \
+  libclang-dev libssl-dev liblz4-dev zlib1g-dev libzstd-dev libsnappy-dev \
+  libbz2-dev libsqlite3-dev libhwloc-dev git curl python3
+
+# Rust. The exact toolchain (1.93.0) is pinned by rust-toolchain.toml and
+# installed automatically by the first cargo command.
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+```
+
+## 3. Build
+
+```bash
+git clone https://github.com/MazzeLabs/mazze-rust-release
+cd mazze-rust-release
+cargo build --release --bin mazze --bin mazze-miner
+```
+
+The first build takes 10–30 minutes depending on the machine. The binaries end
+up in `target/release/`.
+
+## 4. Start the node
+
+```bash
+./run/start-node.sh
+```
+
+That's it: the node creates its data directory (`blockchain_data/`), connects
+to the testnet bootnodes listed in `run/hydra.toml` and starts syncing.
+
+The default node is an **archive** node. It downloads the whole chain from
+genesis and verifies and executes every block itself, so it trusts nobody.
+Depending on hardware and the chain's height this takes a few hours. If you
+want to be at the tip in minutes instead, see [Fast sync](#7-fast-sync-optional)
+below.
+
+### Check that it's syncing
+
+```bash
+# The node's own view (local RPC, all APIs):
+curl -s -X POST -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"mazze_getStatus","params":[]}' \
+  http://127.0.0.1:12539
+
+# The network's tip, for comparison:
+curl -s -X POST -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"mazze_epochNumber","params":[]}' \
+  http://37.27.134.36:52537
+
+# Logs:
+tail -f run/logs/mazze-node.log | grep -a "phase\|epoch"
+```
+
+While syncing, the log shows phases such as `CatchUpSyncBlockHeaderPhase` and
+`CatchUpFillBlockBodyPhase`. The node is caught up when it logs
+`start phase "NormalSyncPhase"` and its `epochNumber` matches the network's.
+
+### Stop, restart, upgrade
+
+```bash
+./run/stop.sh                 # stop the node (and the miner, if running)
+./run/start-node.sh           # start again; it resumes from its database
+
+# Upgrade to the latest code:
+./run/stop.sh
+git pull
+cargo build --release --bin mazze --bin mazze-miner
+./run/start-node.sh
+```
+
+## 5. Create a wallet
+
+The CLI talks to your node's local RPC.
+
+```bash
+./run/mazze-cli.sh wallet new alice
+./run/mazze-cli.sh wallet address --name alice     # your mazze:aa… address
+./run/mazze-cli.sh wallet balance --name alice
+```
+
+Wallets are stored in `~/.mazze`. See [docs/mazze-cli.md](mazze-cli.md) for
+transfers and the other commands.
+
+## 6. Mine (optional)
+
+Mining needs a node that is caught up (NormalSyncPhase).
+
+1. Put your address in `run/hydra.toml`:
+
+   ```toml
+   mining_author = "mazze:aa…your address…"
+   ```
+
+2. Restart the node so it picks up the new address (the node reads it at
+   startup; restarting only the miner is not enough):
+
+   ```bash
+   ./run/stop.sh && ./run/start-node.sh
+   ```
+
+3. Start the miner once the node is back at the tip:
+
+   ```bash
+   ./run/start-miner.sh
+   tail -f run/logs/mazze-miner.log
+   ```
+
+The miner connects to your own node over Stratum on `127.0.0.1:32525`; the
+shared secret is generated on first start in `run/hydra.secrets.toml`. It uses
+all cores but two and runs at the lowest priority so the node always keeps up.
+Set `NUM_THREADS=<n>` to choose the thread count. Mining is RandomX, so it is
+CPU work; a GPU does not help.
+
+Your node log shows `Mined block 0x…` for every block you find, and your
+balance grows as rewards mature.
+
+## 7. Fast sync (optional)
+
+A **full** node can skip replaying history: it starts from two recent era
+checkpoints, downloads the state at a checkpoint as a verified snapshot, and
+checks the proof of work of every header after it. On our nodes this takes
+about 10 minutes from an empty disk.
+
+The trade-off: you trust the checkpoint hashes you put in the config. The
+helper below reads them from two independent archive nodes and refuses to
+continue if they disagree. Compare them with another source you trust before
+using them.
+
+```bash
+./run/stop.sh
+rm -rf blockchain_data/blockchain_db blockchain_data/storage_db   # fresh start; keeps your node key
+
+./run/fast-sync-anchors.sh
+# prints: trusted_checkpoints = "C:0x…:N,C-20000:0x…:N,C-40000:0x…:N"
+```
+
+Then edit `run/hydra.toml`:
+
+```toml
+node_type = "full"
+trusted_checkpoints = "…the line printed above…"
+```
+
+and start the node as usual with `./run/start-node.sh`. The log shows
+`fast-sync anchor: rooting at checkpoint …`, then the snapshot restore, then
+`NormalSyncPhase`.
+
+A full node keeps only recent history (from about the last era checkpoint
+up). Use the default archive node if you need old blocks, receipts or state.
+
+## 8. Connect a wallet (eSpace / MetaMask)
+
+eSpace is the EVM side of Mazze. In MetaMask, add a network:
+
+| Field | Value |
+|---|---|
+| Network name | Mazze Testnet eSpace |
+| RPC URL | `http://127.0.0.1:58545` (your node) or `http://37.27.134.36:58545` |
+| Chain ID | `1991` |
+| Currency symbol | `MAZZE` |
+
+## 9. Ports
+
+| Port | What | Expose? |
+|---|---|---|
+| 55555 TCP/UDP | P2P | Yes, for inbound peers |
+| 52537 | Native JSON-RPC over HTTP (`safe` APIs only) | Optional |
+| 52535 | Native JSON-RPC over WebSocket | Optional |
+| 58545 / 58546 | eSpace JSON-RPC, HTTP / WebSocket | Optional |
+| 12539 | Local RPC with all APIs (used by the CLI) | **No** |
+| 32525 | Stratum for your miner (`127.0.0.1` only) | **No** |
+
+## 10. Troubleshooting
+
+- **No peers / sync doesn't start.** Check that outbound TCP to port 55555 is
+  allowed. `grep -a "peer" run/logs/mazze-node.log | tail` shows connection
+  attempts.
+- **Every peer disconnects you right after connecting, and the node never
+  leaves the first sync phase.** Your `blockchain_data/` was most likely
+  created for an older testnet (the testnet was relaunched with a new
+  genesis). Stop the node, delete
+  `blockchain_data/blockchain_db` and `blockchain_data/storage_db`, and start
+  again.
+- **The node gets killed.** Usually out of memory. RandomX and the node
+  together need ~16 GB; run the miner with fewer threads (`NUM_THREADS=2`) or
+  without the miner while syncing.
+- **Sync seems stuck.** Compare `mazze_epochNumber` on your node and on the
+  public RPC a few minutes apart. If yours does not move, restart the node
+  (`./run/stop.sh && ./run/start-node.sh`) and open an issue with the last
+  200 lines of `run/logs/mazze-node.log`.
+
+More: [docs/setup-guide.md](setup-guide.md) (Docker and dev mode),
+[docs/mining.md](mining.md), [docs/rpc.md](rpc.md),
+[docs/viewing-logs.md](viewing-logs.md).

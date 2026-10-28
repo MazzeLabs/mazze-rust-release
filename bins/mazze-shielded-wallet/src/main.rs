@@ -565,6 +565,9 @@ struct Context {
     /// `--hold`: prove and keep the transaction pending, unsent; `resubmit`
     /// sends it (load tests prove ahead, then submit in a burst).
     hold: bool,
+    /// The last epoch the anchor is surely accepted at: its epoch plus the
+    /// anchor window (which starts later, when the root is superseded).
+    deadline: u64,
 }
 
 /// The canonical anchor (see `ANCHOR_STEP`): the tree at the last boundary
@@ -611,7 +614,8 @@ fn context(w: &mut Wallet, a: &Args) -> Result<Context, String> {
     nodes.extend(verify.as_ref());
     let (anchor, anchor_leaves) = anchor_at(w, executed, &nodes)?;
     let hold = a.0.contains_key("hold");
-    Ok(Context { node, chain, sponge, keys, fee, anchor, anchor_leaves, hold })
+    let deadline = executed / ANCHOR_STEP * ANCHOR_STEP + as_u64(&status["anchorWindowEpochs"])?;
+    Ok(Context { node, chain, sponge, keys, fee, anchor, anchor_leaves, hold, deadline })
 }
 
 /// Whether a pending transaction already spends note `i`.
@@ -672,7 +676,12 @@ fn prove(
 
 fn submit(ctx: &Context, body: &primitives::shielded::ShieldedTxBody, proof: &[u8]) -> Result<(), String> {
     if ctx.hold {
-        println!("proven and held: {:?} (resubmit sends it)", body.hash());
+        println!(
+            "proven and held: {:?}; resubmit must send it before epoch {}, after which its \
+             anchor is refused and it can never land (a shield-in's deposit is already made)",
+            body.hash(),
+            ctx.deadline
+        );
         return Ok(());
     }
     let hash = ctx.node.call(
@@ -707,7 +716,7 @@ fn self_note(
 /// Saves a proven transaction and the wallet's output before any network
 /// side effect (a deposit, a submission), so `resubmit` can always finish it.
 fn record_pending(
-    w: &mut Wallet, path: &str, body: &primitives::shielded::ShieldedTxBody,
+    ctx: &Context, w: &mut Wallet, path: &str, body: &primitives::shielded::ShieldedTxBody,
     proof: &[u8], stored: StoredNote, inputs: &[usize],
 ) -> Result<(), String> {
     let spends = inputs.iter().map(|&i| w.notes[i].cm).collect();
@@ -716,6 +725,7 @@ fn record_pending(
         proof: hex::encode(proof),
         cm: stored.cm,
         spends,
+        deadline: ctx.deadline,
     });
     w.notes.push(stored);
     w.save(path)
@@ -727,7 +737,17 @@ fn resubmit(path: &str, a: &Args) -> Result<(), String> {
     let node = Node::connect(a.get("rpc")?)?;
     sync(&mut w, &node)?;
     w.save(path)?;
+    let executed = as_u64(&node.call("shielded_getStatus", vec![])?["executedEpoch"])?;
     for p in &w.pending {
+        // Past its deadline the anchor may be gone: the node would refuse
+        // it, and it never lands (abandon-pending drops it).
+        if p.deadline != 0 && executed >= p.deadline {
+            println!("expired at epoch {}: its anchor is refused, it can never land", p.deadline);
+            continue;
+        }
+        if p.deadline != 0 && p.deadline - executed < 10_000 {
+            println!("sending close to its deadline (epoch {})", p.deadline);
+        }
         let r = node.call(
             "shielded_sendRawTransaction",
             vec![json!(format!("0x{}", p.body)), json!(format!("0x{}", p.proof))],
@@ -764,7 +784,7 @@ fn shield_in(path: &str, a: &Args) -> Result<(), String> {
         out_limb_override: [None, None],
     };
     let (body, proof) = prove(&ctx, witness, None, recovery)?;
-    record_pending(&mut w, path, &body, &proof, stored, &[])?;
+    record_pending(&ctx, &mut w, path, &body, &proof, stored, &[])?;
 
     // Before any value moves: the node must accept this body in every
     // respect but the missing deposit. An anchor it no longer accepts, or
@@ -855,7 +875,7 @@ fn send(path: &str, a: &Args) -> Result<(), String> {
         out_limb_override: [None, None],
     };
     let (body, proof) = prove(&ctx, witness, None, recovery)?;
-    record_pending(&mut w, path, &body, &proof, stored, &inputs)?;
+    record_pending(&ctx, &mut w, path, &body, &proof, stored, &inputs)?;
     submit(&ctx, &body, &proof)?;
     println!(
         "sealed opening written to {sealed_out}; deliver it to the recipient once the transaction \
@@ -891,7 +911,7 @@ fn unshield(path: &str, a: &Args) -> Result<(), String> {
     };
     let (body, proof) =
         prove(&ctx, witness, Some(ShieldedDest { space, address: to }), recovery)?;
-    record_pending(&mut w, path, &body, &proof, stored, &inputs)?;
+    record_pending(&ctx, &mut w, path, &body, &proof, stored, &inputs)?;
     submit(&ctx, &body, &proof)?;
     Ok(())
 }
@@ -951,7 +971,7 @@ fn claim(path: &str, a: &Args) -> Result<(), String> {
     };
     let (body, proof) = prove(&ctx, witness, None, recovery)?;
     let spends: Vec<usize> = std::iter::once(received).chain(main).collect();
-    record_pending(&mut w, path, &body, &proof, stored, &spends)?;
+    record_pending(&ctx, &mut w, path, &body, &proof, stored, &spends)?;
     submit(&ctx, &body, &proof)?;
     Ok(())
 }

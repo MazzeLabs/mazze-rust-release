@@ -60,6 +60,10 @@ pub struct PendingTx {
     /// second transaction does not pick them too.
     #[serde(default)]
     pub spends: Vec<[u32; DIGEST]>,
+    /// The last epoch its anchor is surely accepted at (0: not recorded,
+    /// a transaction from an older wallet file).
+    #[serde(default)]
+    pub deadline: u64,
 }
 
 /// A note opening: what the owner needs to spend it. As written to a file

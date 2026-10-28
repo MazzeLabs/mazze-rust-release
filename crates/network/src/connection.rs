@@ -85,9 +85,12 @@ pub enum WriteStatus {
 
 const MAX_PAYLOAD_SIZE: usize = (1 << 24) - 1;
 
-/// Bytes a connection may hold queued for sending: a few of the largest
-/// messages (a slot block is ~13.5 MB).
-const MAX_QUEUED_BYTES: usize = 64 * 1024 * 1024;
+/// Bytes a connection may hold queued for sending: ~16 of the largest
+/// responses (a GetBlocks response is up to 15.5 MB, a slot block ~13.5 MB).
+/// 64 MB was four: a peer catching up through slot blocks hit it, and was
+/// demoted for it (2026-10-28 load test). The global egress queue still
+/// bounds the total over all connections.
+const MAX_QUEUED_BYTES: usize = 256 * 1024 * 1024;
 
 pub trait GenericSocket: Read + Write {}
 

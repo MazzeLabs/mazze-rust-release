@@ -143,16 +143,22 @@ impl GetBlocks {
         Ok(())
     }
 
+    /// The global egress queue, or this peer's own send queue, cannot take
+    /// the blocks now. A full peer queue is not proof of a peer that does
+    /// not read: one catching up through slot blocks fills it honestly, and
+    /// demoting it for that cut m5 off the fleet (2026-10-28).
     fn is_throttling_err(e: &Error) -> bool {
         match e.kind() {
-            ErrorKind::Network(network::ErrorKind::Throttling(_)) => true,
+            ErrorKind::Network(network::ErrorKind::Throttling(_))
+            | ErrorKind::Network(network::ErrorKind::SendQueueFull) => true,
             _ => false,
         }
     }
 
     /// Our egress queue is too full to send the blocks: tell the requester,
     /// which then asks another peer at once, rather than letting it wait
-    /// out the request timeout and drop us for it.
+    /// out the request timeout and drop us for it. If even this reply does
+    /// not fit, the peer is disconnected (`Throttled` handling).
     fn throttled(&self) -> Error {
         ErrorKind::Throttled(
             "GetBlocks",

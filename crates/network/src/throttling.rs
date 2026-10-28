@@ -70,9 +70,10 @@ pub struct Service {
 impl Service {
     fn new() -> Service {
         Service {
-            queue_capacity: n_mb_bytes!(256) as usize,
-            min_throttle_queue_size: n_mb_bytes!(10) as usize,
-            max_throttle_queue_size: n_mb_bytes!(64) as usize,
+            // As the client's egress_* defaults (initialize() sets them).
+            queue_capacity: n_mb_bytes!(1024) as usize,
+            min_throttle_queue_size: n_mb_bytes!(32) as usize,
+            max_throttle_queue_size: n_mb_bytes!(256) as usize,
             cur_queue_size: 0,
             high_queue_size: 0,
             low_queue_size: 0,

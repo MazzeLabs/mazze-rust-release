@@ -448,6 +448,9 @@ pub struct NetworkServiceInner {
     timer_counter: RwLock<usize>,
     pub node_db: RwLock<NodeDatabase>,
     reserved_nodes: RwLock<HashSet<NodeId>>,
+    /// The configured boot nodes. They stay dial targets for good: see
+    /// `connect_peers`.
+    boot_nodes: RwLock<Vec<NodeEntry>>,
     dropped_nodes: RwLock<HashSet<NodeId>>,
 
     is_consortium: bool,
@@ -636,6 +639,7 @@ impl NetworkServiceInner {
                 config.subnet_quota,
             )),
             reserved_nodes: RwLock::new(HashSet::new()),
+            boot_nodes: RwLock::new(Vec::new()),
             dropped_nodes: RwLock::new(HashSet::new()),
             is_consortium: config.is_consortium,
             delayed_queue: None,
@@ -694,10 +698,12 @@ impl NetworkServiceInner {
                 debug!("Could not add node {}: {:?}", id, e);
             }
             Ok(n) => {
-                self.node_db.write().insert_trusted(NodeEntry {
+                let entry = NodeEntry {
                     id: n.id,
                     endpoint: n.endpoint,
-                });
+                };
+                self.boot_nodes.write().push(entry.clone());
+                self.node_db.write().insert_trusted(entry);
             }
         }
     }
@@ -836,11 +842,35 @@ impl NetworkServiceInner {
             );
         }
 
+        // Boot nodes are always dial targets while outbound slots are free.
+        // Outgoing connections only go to trusted nodes, and a peer dropped
+        // for request timeouts is demoted to untrusted: a node on a slow or
+        // briefly broken link demoted every boot node, its peer tables ran
+        // empty and it stayed isolated until restarted (a fresh testnet
+        // joiner, 2026-10-28). Re-trust the ones not connected and dial them.
+        let boot_nodes: Vec<NodeId> = if egress_count
+            < self.config.max_outgoing_peers
+        {
+            let mut node_db = self.node_db.write();
+            self.boot_nodes
+                .read()
+                .iter()
+                .filter(|n| !self.sessions.contains_node(&n.id))
+                .map(|n| {
+                    node_db.insert_trusted(n.clone());
+                    n.id
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         let reserved_nodes = self.reserved_nodes.read();
         // Try to connect all reserved peers and trusted peers
         let nodes = reserved_nodes
             .iter()
             .cloned()
+            .chain(boot_nodes)
             .chain(sampled_archive_nodes)
             .chain(samples);
 

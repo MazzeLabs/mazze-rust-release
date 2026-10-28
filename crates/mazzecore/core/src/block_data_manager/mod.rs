@@ -544,6 +544,49 @@ impl BlockDataManager {
             );
             return Some(index());
         }
+        // A fast-synced node that ran on past its first checkpoints may have
+        // replaced the snapshot under the era checkpoints with a newer one,
+        // so neither opens (a testnet joiner panicked at every restart,
+        // 2026-10-28). Use the newest executed epoch above them whose state
+        // opens; the pool follows execution from there.
+        const STEP: u64 = 1000;
+        const MAX_STEPS: u64 = 400;
+        let base = self
+            .block_header_by_hash(&self.get_cur_consensus_era_stable_hash())
+            .map(|h| h.height())?;
+        let mut found = None;
+        for step in 1..=MAX_STEPS {
+            let height = base + step * STEP;
+            let pivot = match self
+                .executed_epoch_set_hashes_from_db(height)
+                .and_then(|set| set.last().cloned())
+            {
+                Some(h) => h,
+                None => break,
+            };
+            let commitment =
+                match self.get_epoch_execution_commitment_with_db(&pivot) {
+                    Some(c) => c,
+                    None => continue,
+                };
+            let index = || {
+                StateIndex::new_for_readonly(
+                    &pivot,
+                    &commitment.state_root_with_aux_info,
+                )
+            };
+            if opens(index()).is_some() {
+                found = Some((height, index()));
+            }
+        }
+        if let Some((height, index)) = found {
+            warn!(
+                "true genesis and era checkpoint states unavailable; the \
+                 transaction pool starts from executed epoch {}",
+                height
+            );
+            return Some(index);
+        }
         None
     }
 

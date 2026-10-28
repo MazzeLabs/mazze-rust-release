@@ -790,26 +790,25 @@ impl DBManager {
     /// block's witness as one ~13 MB value needed ~3,300 contiguous pages:
     /// in a fragmented database MDBX searched its free list for minutes,
     /// inside the sync-graph insert, and the node froze (m5, 2026-10-28).
-    /// The meta entry goes last, so a witness is never half there.
+    /// Chunks and meta go in one atomic batch.
     pub fn insert_block_witness_to_db(
         &self, height: u64, hash: &H256, witness: &[Arc<Vec<u8>>],
     ) {
+        // One batch, one transaction: a commit per chunk (~210 for a slot
+        // block) each walked MDBX's free list.
+        let mut pairs = Vec::new();
         let mut lengths = RlpStream::new_list(witness.len());
         for (i, proof) in witness.iter().enumerate() {
             for (k, chunk) in proof.chunks(WITNESS_CHUNK_BYTES).enumerate() {
-                self.insert_to_db(
-                    DBTable::ShieldedWitness,
-                    &witness_chunk_key(height, hash, i as u16, k as u16),
+                pairs.push((
+                    witness_chunk_key(height, hash, i as u16, k as u16),
                     chunk.to_vec(),
-                );
+                ));
             }
             lengths.append(&(proof.len() as u64));
         }
-        self.insert_to_db(
-            DBTable::ShieldedWitness,
-            &witness_meta_key(height, hash),
-            lengths.out().to_vec(),
-        )
+        pairs.push((witness_meta_key(height, hash), lengths.out().to_vec()));
+        self.insert_batch_to_db(DBTable::ShieldedWitness, &pairs)
     }
 
     /// The lengths of a block's stored proofs (chunked layout).

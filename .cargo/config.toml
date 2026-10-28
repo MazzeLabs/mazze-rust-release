@@ -1,0 +1,8 @@
+[env]
+# mdbx-sys compiles libmdbx without NDEBUG, so libmdbx built itself as a
+# debug build (MDBX_DEBUG=1): its internal assertions ran in production,
+# among them O(n) checks of the free-page list on every merge, which on a
+# large fragmented database froze a node for minutes inside one commit
+# (2026-10-28 load test). Build it as a release library. A CFLAGS set in the
+# environment takes precedence over this one.
+CFLAGS = "-DMDBX_DEBUG=0"

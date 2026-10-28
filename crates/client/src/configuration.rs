@@ -262,7 +262,10 @@ build_config! {
         (max_outgoing_peers, (usize), 8)
         (max_outgoing_peers_archive, (Option<usize>), None)
         (max_peers_tx_propagation, (usize), 128)
-        (max_unprocessed_block_size_mb, (usize), (128))
+        // A block with shielded transactions carries up to ~13 MB of proofs;
+        // 128 MB held under ten of them, and a node catching up dropped and
+        // refetched them forever.
+        (max_unprocessed_block_size_mb, (usize), (1024))
         // Download↔execution backpressure: pause epoch discovery during
         // catch-up once this many epochs are enqueued-but-unexecuted in
         // the consensus executor. Bounds the Arc<Block>s pinned by the

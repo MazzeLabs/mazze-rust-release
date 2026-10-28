@@ -287,9 +287,11 @@ max_inflight_request_count = 128
 #
 # max_peers_tx_propagation = 128
 
-## Maximum cached received block size waiting to be processed.
-## Keep this lower to prevent OOM during heavy catchup.
-max_unprocessed_block_size_mb = 128
+## Maximum cached received block size waiting to be processed. Blocks
+## that arrive while it is full are dropped and fetched again. A block with
+## shielded transactions carries up to ~13 MB of proofs, so 128 MB stalled
+## catch-up through them; 1024 MB holds ~75 such blocks.
+max_unprocessed_block_size_mb = 1024
 
 # Minimum number of peers to broadcast transaction digests.
 #

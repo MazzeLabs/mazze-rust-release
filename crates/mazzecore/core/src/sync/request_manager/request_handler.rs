@@ -301,7 +301,18 @@ struct RequestContainer {
     pub max_inflight_request_count: u64,
     pub pending_requests: VecDeque<RequestMessage>,
     pub timeout_statistics: VecDeque<u64>,
+    /// When the peer last answered a request (unix seconds), late answers
+    /// included.
+    pub last_response_s: u64,
 }
+
+/// A peer that answered a request this recently is slow, not gone: its
+/// timeouts do not count toward disconnecting it. A node catching up over a
+/// home link through blocks with shielded proofs asks for more than the link
+/// carries within a request timeout, so every peer times out while it
+/// delivers; disconnecting them threw away the half-received blocks and the
+/// node never got past them (join test, 2026-10-28).
+const RESPONSIVE_PEER_WINDOW_S: u64 = 30;
 
 impl RequestContainer {
     pub fn on_timeout_should_disconnect(
@@ -317,6 +328,10 @@ impl RequestContainer {
         }
 
         self.timeout_statistics.push_back(now);
+        if now.saturating_sub(self.last_response_s) <= RESPONSIVE_PEER_WINDOW_S
+        {
+            return false;
+        }
         loop {
             let old_time = *self.timeout_statistics.front().unwrap();
             if now - old_time <= config.timeout_observing_period_s {
@@ -453,6 +468,10 @@ impl RequestContainer {
     pub fn match_request(
         &mut self, request_id: u64,
     ) -> Result<RequestMessage, Error> {
+        self.last_response_s = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let removed_req = self.remove_inflight_request(request_id);
         if let Some(removed_req) = removed_req {
             removed_req

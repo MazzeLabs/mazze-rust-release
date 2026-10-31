@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ulimit -n 200000 || true
+ulimit -n 200000 2>/dev/null || ulimit -n 10240 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -53,7 +53,7 @@ set_conf() {
   local key="$1"
   local value="$2"
   if grep -q "^[[:space:]]*$key[[:space:]]*=" "$TEMP_CONF"; then
-    sed -i "s#^[[:space:]]*$key[[:space:]]*=.*#$key = $value#" "$TEMP_CONF"
+    sed -i.bak "s#^[[:space:]]*$key[[:space:]]*=.*#$key = $value#" "$TEMP_CONF"
   else
     printf '\n%s = %s\n' "$key" "$value" >> "$TEMP_CONF"
   fi
@@ -99,6 +99,7 @@ fi
 
 printf '-------%s-------\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG_FILE"
 
+rm -f "$TEMP_CONF.bak"
 pushd "$REPO_ROOT" >/dev/null
 "$EXECUTABLE" --config "$TEMP_CONF" >> "$LOG_FILE" 2>&1 &
 PID=$!

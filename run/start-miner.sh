@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ulimit -n 200000 || true
+ulimit -n 200000 2>/dev/null || ulimit -n 10240 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -56,20 +56,22 @@ ensure_stratum_secret
 # Merge the template with the secret into a per-run config the miner reads.
 TEMP_CONF="$SCRIPT_DIR/hydra.miner.runtime.toml"
 cp "$CONFIG_FILE" "$TEMP_CONF"
-if grep -q '^\s*stratum_secret\s*=' "$TEMP_CONF"; then
-  sed -i "s#^\s*stratum_secret\s*=.*#stratum_secret = \"$STRATUM_SECRET\"#" "$TEMP_CONF"
+if grep -q '^[[:space:]]*stratum_secret[[:space:]]*=' "$TEMP_CONF"; then
+  sed -i.bak "s#^[[:space:]]*stratum_secret[[:space:]]*=.*#stratum_secret = \"$STRATUM_SECRET\"#" "$TEMP_CONF"
 else
   printf '\nstratum_secret = "%s"\n' "$STRATUM_SECRET" >> "$TEMP_CONF"
 fi
 
 # RANDOMX_FULL_MEM can be exported by the user to control miner memory usage.
+rm -f "$TEMP_CONF.bak"
 pushd "$REPO_ROOT" >/dev/null
 
 # The miner must never starve the node it mines for. At the same priority and
 # with ~1 thread per core, the node got 13-37% of one core: enough to follow
 # the tip, but peers catching up from it saw requests time out for minutes
 # (2026-10-10, m1 restart could not catch up). Lowest priority + 2 free cores.
-DEFAULT_THREADS=$(( $(nproc) - 2 )); [ "$DEFAULT_THREADS" -lt 1 ] && DEFAULT_THREADS=1
+CPUS=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
+DEFAULT_THREADS=$(( CPUS - 2 )); [ "$DEFAULT_THREADS" -lt 1 ] && DEFAULT_THREADS=1
 RANDOMX_FULL_MEM="${RANDOMX_FULL_MEM:-0}" RUST_LOG=info \
 nice -n "${MINER_NICE:-19}" \
 "$EXECUTABLE" --config "$TEMP_CONF" --worker-id "${WORKER_ID:-1}" --num-threads "${NUM_THREADS:-$DEFAULT_THREADS}" \

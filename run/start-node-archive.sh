@@ -11,7 +11,7 @@
 # - mining_type = "disable" so an archive node never mines.
 set -euo pipefail
 
-ulimit -n 200000 || true
+ulimit -n 200000 2>/dev/null || ulimit -n 10240 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -41,7 +41,7 @@ set_kv() {
   local key="$1"
   local value="$2"
   if grep -q "^[[:space:]]*${key}[[:space:]]*=" "$TEMP_CONF"; then
-    sed -i "s#^[[:space:]]*${key}[[:space:]]*=.*#${key} = ${value}#" "$TEMP_CONF"
+    sed -i.bak "s#^[[:space:]]*${key}[[:space:]]*=.*#${key} = ${value}#" "$TEMP_CONF"
   else
     printf '\n%s = %s\n' "$key" "$value" >> "$TEMP_CONF"
   fi
@@ -49,7 +49,7 @@ set_kv() {
 
 comment_kv() {
   local key="$1"
-  sed -i "s#^[[:space:]]*${key}[[:space:]]*=#\# ${key} =#" "$TEMP_CONF"
+  sed -i.bak "s#^[[:space:]]*${key}[[:space:]]*=#\# ${key} =#" "$TEMP_CONF"
 }
 
 # --- Archive profile -------------------------------------------------------
@@ -107,7 +107,7 @@ for _f in enable_mdbx_shadow_hash_by_number enable_mdbx_shadow_tx_index \
           enable_mdbx_shadow_epoch_numbers enable_mdbx_shadow_misc \
           mdbx_read_shadow; do
   if grep -q "^[[:space:]]*${_f}[[:space:]]*=" "$TEMP_CONF"; then
-    sed -i "s#^[[:space:]]*${_f}[[:space:]]*=.*#${_f} = true#" "$TEMP_CONF"
+    sed -i.bak "s#^[[:space:]]*${_f}[[:space:]]*=.*#${_f} = true#" "$TEMP_CONF"
   else
     printf '\n%s = true\n' "$_f" >> "$TEMP_CONF"
   fi
@@ -115,6 +115,7 @@ done
 
 echo "-------$(date '+%Y-%m-%d %H:%M:%S') [archive]-------" >> "$LOG_FILE"
 
+rm -f "$TEMP_CONF.bak"
 pushd "$REPO_ROOT" >/dev/null
 "$EXECUTABLE" --config "$TEMP_CONF" >> "$LOG_FILE" 2>&1 &
 PID=$!

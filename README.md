@@ -40,16 +40,18 @@ git clone https://github.com/MazzeLabs/mazze-rust-release
 cd mazze-rust-release
 cargo build --release --bin mazze --bin mazze-miner
 
-# Run a testnet node
+# Run a testnet node (archive by default; see the guide for fast sync,
+# which reaches the tip in under an hour, and for a low-memory mode)
 ./run/start-node.sh
-tail -f run/logs/mazze-node.log
+tail -F run/logs/mazze-node.log
 
 # Mine: set mining_author in run/hydra.toml, restart the node, then
 ./run/start-miner.sh
 ```
 
 The Rust toolchain version is pinned in `rust-toolchain.toml` and installed
-automatically by cargo.
+automatically by cargo. Linux is the tested platform; Windows works through
+WSL2 and macOS is untested (see the guide).
 
 ## Testnet
 

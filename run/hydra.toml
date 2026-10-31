@@ -293,6 +293,12 @@ max_inflight_request_count = 128
 ## catch-up through them; 1024 MB holds ~75 such blocks.
 max_unprocessed_block_size_mb = 1024
 
+## RandomX full datasets kept in memory to verify proof of work, ~2 GB each.
+## On a machine with 16 GB or less (or WSL with its default memory limit), set
+## 1, or 0 for light mode only (~256 MB per seed, verification several times
+## slower, enough to follow the tip but slow to catch up).
+randomx_full_datasets = 3
+
 # Minimum number of peers to broadcast transaction digests.
 #
 # min_peers_tx_propagation = 8

@@ -27,7 +27,7 @@ use mazzecore::{
     block_data_manager::BlockDataManager,
     db::{COL_BLOCKS, COL_HASH_BY_BLOCK_NUMBER, COL_MISC},
     genesis_block::{self as genesis, genesis_block},
-    pow::PowComputer,
+    pow::{set_max_full_datasets, PowComputer},
     statistics::Statistics,
     sync::SyncPhaseType,
     ConsensusGraph, LightProvider, NodeType, Notifications, Stopable,
@@ -236,6 +236,7 @@ pub fn initialize_common_modules(
 > {
     info!("Working directory: {:?}", std::env::current_dir());
     metrics::initialize(conf.metrics_config());
+    set_max_full_datasets(conf.raw_conf.randomx_full_datasets);
 
     let worker_thread_pool = Arc::new(Mutex::new(ThreadPool::with_name(
         "Tx Recover".into(),

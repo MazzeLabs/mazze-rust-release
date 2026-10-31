@@ -6,6 +6,7 @@ mod cache;
 
 use crate::block_data_manager::BlockDataManager;
 use cache::RandomXCacheBuilder;
+pub use cache::set_max_full_datasets;
 use lru_time_cache::LruCache;
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf as DeriveMallocSizeOf;

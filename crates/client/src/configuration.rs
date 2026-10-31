@@ -191,6 +191,9 @@ build_config! {
         (stratum_port, (u16), 32525)
         (stratum_secret, (Option<String>), None)
         (pow_problem_window_size, (usize), 1)
+        // RandomX full datasets (~2 GB each) kept in memory; 0 = light mode
+        // only (~256 MB per seed, slower verification) for low-memory hosts.
+        (randomx_full_datasets, (usize), 3)
 
         // Network section.
         (jsonrpc_local_tcp_port, (Option<u16>), None)

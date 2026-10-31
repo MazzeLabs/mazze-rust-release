@@ -28,7 +28,7 @@ use rust_randomx::{Context as RandomXContext, Hasher};
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     thread,
@@ -105,7 +105,20 @@ const MAX_SEEDS: usize = 6;
 /// blocks recompute pow_quality with an old seed; once that seed crossed the
 /// promotion threshold it took the full-dataset budget and demoted the TIP
 /// seed, so tip verification ping-ponged between full and light mode.
-const MAX_FULL_DATASETS: usize = 3;
+const DEFAULT_MAX_FULL_DATASETS: usize = 3;
+static MAX_FULL_DATASETS: AtomicUsize =
+    AtomicUsize::new(DEFAULT_MAX_FULL_DATASETS);
+
+/// Sets how many full datasets may be resident (`randomx_full_datasets` in
+/// the config). Each is ~2 GB; 0 keeps every seed in light mode, which needs
+/// ~256 MB per seed but hashes several times slower. The pinned chain seeds
+/// still go full when the limit is above 0. Call before the first
+/// `PowComputer` is built.
+pub fn set_max_full_datasets(n: usize) {
+    MAX_FULL_DATASETS.store(n, Ordering::Relaxed);
+}
+
+fn max_full_datasets() -> usize { MAX_FULL_DATASETS.load(Ordering::Relaxed) }
 /// Hashes on a light-mode seed before it is promoted to a full dataset.
 /// Stragglers from the previous seed epoch stay well below this; the tip seed
 /// (or the seed being replayed in catch-up) crosses it within seconds.
@@ -132,7 +145,7 @@ fn light_only() -> bool {
     *LIGHT_ONLY.get_or_init(|| {
         std::env::var("MAZZE_RANDOMX_LIGHT_ONLY")
             .map_or(false, |v| v == "1" || v == "true")
-    })
+    }) || max_full_datasets() == 0
 }
 
 struct SeedSlot {
@@ -355,7 +368,7 @@ impl RandomXCacheBuilder {
                         .collect();
                     unpinned
                         .sort_by_key(|s| s.last_used.load(Ordering::Relaxed));
-                    let excess = (fulls + 1).saturating_sub(MAX_FULL_DATASETS);
+                    let excess = (fulls + 1).saturating_sub(max_full_datasets());
                     if !pinned && excess > unpinned.len() {
                         slot.hashes.store(0, Ordering::Relaxed);
                         slot.promoting.store(false, Ordering::Release);

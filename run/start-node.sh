@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ulimit -n 200000 || true
+ulimit -n 200000 2>/dev/null || ulimit -n 10240 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -10,6 +10,9 @@ CONFIG_FILE="$SCRIPT_DIR/hydra.toml"
 LOG_DIR="$REPO_ROOT/run/logs"
 PID_FILE="$SCRIPT_DIR/node_pid.txt"
 LOG_FILE="$LOG_DIR/mazze-node.log"
+# The node writes LOG_FILE itself and rotates it (log.node.yaml). Only what
+# bypasses the logger lands here: startup errors and panic backtraces.
+CONSOLE_LOG="$LOG_DIR/mazze-node.console.log"
 
 mkdir -p "$LOG_DIR" "$LOG_DIR/archive"
 
@@ -23,7 +26,11 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
   exit 1
 fi
 
-echo "-------$(date '+%Y-%m-%d %H:%M:%S')-------" >> "$LOG_FILE"
+# Keep the console log bounded too: start it over past 50 MB.
+if [[ -f "$CONSOLE_LOG" ]] && [[ $(wc -c < "$CONSOLE_LOG") -gt 52428800 ]]; then
+  mv "$CONSOLE_LOG" "$CONSOLE_LOG.old"
+fi
+echo "-------$(date '+%Y-%m-%d %H:%M:%S')-------" >> "$CONSOLE_LOG"
 
 SECRETS_FILE="$SCRIPT_DIR/hydra.secrets.toml"
 ensure_stratum_secret() {
@@ -54,11 +61,11 @@ EOF
 ensure_stratum_secret
 
 # Ensure log_conf in config is absolute so it works regardless of CWD
-ABS_LOG_CONF="$SCRIPT_DIR/log.yaml"
+ABS_LOG_CONF="$SCRIPT_DIR/log.node.yaml"
 TEMP_CONF="$SCRIPT_DIR/hydra.runtime.toml"
 cp "$CONFIG_FILE" "$TEMP_CONF"
-if grep -q '^\s*log_conf\s*=' "$TEMP_CONF"; then
-  sed -i "s#^\s*log_conf\s*=.*#log_conf = \"$ABS_LOG_CONF\"#" "$TEMP_CONF"
+if grep -q '^[[:space:]]*log_conf[[:space:]]*=' "$TEMP_CONF"; then
+  sed -i.bak "s#^[[:space:]]*log_conf[[:space:]]*=.*#log_conf = \"$ABS_LOG_CONF\"#" "$TEMP_CONF"
 else
   printf '\nlog_conf = "%s"\n' "$ABS_LOG_CONF" >> "$TEMP_CONF"
 fi
@@ -83,8 +90,8 @@ has_chain_data() {
   return 1
 }
 if has_chain_data "$REPO_ROOT/blockchain_data"; then
-  if grep -q '^\s*execute_genesis\s*=' "$TEMP_CONF"; then
-    sed -i "s#^\s*execute_genesis\s*=.*#execute_genesis = false#" "$TEMP_CONF"
+  if grep -q '^[[:space:]]*execute_genesis[[:space:]]*=' "$TEMP_CONF"; then
+    sed -i.bak "s#^[[:space:]]*execute_genesis[[:space:]]*=.*#execute_genesis = false#" "$TEMP_CONF"
   else
     printf '\nexecute_genesis = false\n' >> "$TEMP_CONF"
   fi
@@ -99,7 +106,7 @@ for _f in enable_mdbx_shadow_hash_by_number enable_mdbx_shadow_tx_index \
           enable_mdbx_shadow_epoch_numbers enable_mdbx_shadow_misc \
           mdbx_read_shadow; do
   if grep -q "^[[:space:]]*${_f}[[:space:]]*=" "$TEMP_CONF"; then
-    sed -i "s#^[[:space:]]*${_f}[[:space:]]*=.*#${_f} = true#" "$TEMP_CONF"
+    sed -i.bak "s#^[[:space:]]*${_f}[[:space:]]*=.*#${_f} = true#" "$TEMP_CONF"
   else
     printf '\n%s = true\n' "$_f" >> "$TEMP_CONF"
   fi
@@ -107,9 +114,10 @@ done
 
 # Run from the repository root so log4rs and helper logs share the same
 # canonical ./logs directory.
+rm -f "$TEMP_CONF.bak"
 pushd "$REPO_ROOT" >/dev/null
 
-"$EXECUTABLE" --config "$TEMP_CONF" >> "$LOG_FILE" 2>&1 &
+"$EXECUTABLE" --config "$TEMP_CONF" >> "$CONSOLE_LOG" 2>&1 &
 PID=$!
 echo "$PID" > "$PID_FILE"
 echo "Mazze node started (pid=$PID). Logs: $LOG_FILE"

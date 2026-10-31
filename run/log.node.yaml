@@ -1,0 +1,28 @@
+# Log config for run/start-node.sh: the node writes run/logs/mazze-node.log
+# itself and rolls it at 200 MB, keeping 5 compressed archives in
+# run/logs/archive/ (~200 MB live + ~100 MB archived at most). The shell
+# redirect `>> mazze-node.log` this replaces had no limit and filled home
+# users' disks. Paths are relative to the repository root, where
+# start-node.sh runs the node.
+refresh_rate: 30 seconds
+
+appenders:
+  logfile:
+    kind: rolling_file
+    path: "run/logs/mazze-node.log"
+    encoder:
+        pattern: "{d} {l:5.5} {T:<20.20} mazzecore - {m:.20000}{n}"
+    policy:
+      kind: compound
+      trigger:
+        kind: size
+        limit: 200 mb
+      roller:
+        kind: fixed_window
+        pattern: "run/logs/archive/mazze-node.{}.log.gz"
+        count: 5
+
+root:
+    level: info
+    appenders:
+        - logfile

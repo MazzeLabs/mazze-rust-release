@@ -43,6 +43,9 @@ fn main() -> Result<(), String> {
                 .name()
                 .unwrap_or_default()
                 .to_string();
+            // Into the log as well: with a log file, stderr is not where
+            // people look when reporting a crash.
+            log::error!("thread '{}' {}", name, info);
             // Consensus threads and the sync/network workers that drive
             // phase changes and block processing: a panic there leaves a
             // node that still answers RPC but no longer follows the chain

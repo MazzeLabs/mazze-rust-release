@@ -194,14 +194,33 @@ impl TransactionPool {
             config.packing_pool_degree,
         );
         let best_executed_state = Mutex::new(
-            Self::best_executed_state(
-                &data_man,
-                data_man.initial_txpool_state_index().expect(
-                    "neither the genesis state nor the era genesis state \
-                     is available",
-                ),
-            )
-            .expect("The initial state is guaranteed to exist."),
+            match data_man.initial_txpool_state_index() {
+                Some(index) => Self::best_executed_state(&data_man, index)
+                    .expect("The initial state is guaranteed to exist."),
+                // A node that stopped during header catch-up, before it
+                // executed or restored any state, has none on disk: its
+                // checkpoints moved past the genesis state, which was
+                // dropped. Panicking here made it unable to start again
+                // until its data was wiped (testnet, 2026-11-11). Start from
+                // an empty state instead; the pool follows execution once
+                // the node has a state again, and it is not used for
+                // mining before then.
+                None => {
+                    warn!(
+                        "no executed state is available yet (the node \
+                         stopped during catch-up); the transaction pool \
+                         starts empty until execution resumes"
+                    );
+                    Arc::new(
+                        State::new(StateDb::new(
+                            data_man
+                                .storage_manager
+                                .get_state_for_genesis_write(),
+                        ))
+                        .expect("an empty state opens"),
+                    )
+                }
+            },
         );
         TransactionPool {
             config,

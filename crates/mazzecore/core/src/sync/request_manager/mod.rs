@@ -1181,6 +1181,49 @@ impl RequestManager {
         orphans.len()
     }
 
+    /// Header counterpart of `reconcile_inflight_epoch_orphans`: drop header
+    /// hashes from the in-flight set that no live request names. A key left
+    /// there makes `with_inflight` strip the hash from every later request,
+    /// so neither the frontier rescue nor the seed-deferred retry could ask
+    /// for it again: a full-fast sync from genesis sat at epoch 365529 with
+    /// 33 parent headers requested every 2 s and never sent (2026-11-12).
+    /// At most every 2 s; returns the number cleared.
+    pub fn reconcile_inflight_header_orphans(&self) -> usize {
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static LAST_MS: AtomicU64 = AtomicU64::new(0);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let last = LAST_MS.load(Ordering::Relaxed);
+            if now_ms < last + 2000
+                || LAST_MS
+                    .compare_exchange(
+                        last,
+                        now_ms,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_err()
+            {
+                return 0;
+            }
+        }
+        let mut live = self.request_handler.live_header_request_hashes();
+        for w in self.waiting_requests.lock().iter() {
+            if let Some(req) =
+                w.request.0.as_any().downcast_ref::<GetBlockHeaders>()
+            {
+                live.extend(req.hashes.iter().cloned());
+            }
+        }
+        Self::remove_orphans(
+            &mut self.inflight_keys.write(msgid::GET_BLOCK_HEADERS),
+            &live,
+        )
+    }
+
     pub fn reconcile_inflight_block_orphans(&self) -> usize {
         // At most every 2 s: it walks every live request of every peer, and
         // `request_block_bodies` (which calls it whenever the window is full)

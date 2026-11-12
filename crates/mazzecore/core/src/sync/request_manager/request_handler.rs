@@ -205,6 +205,29 @@ impl RequestHandler {
         epochs
     }
 
+    /// Header hashes named by any GetBlockHeaders request in flight or
+    /// queued for a peer (see `live_epoch_requests`).
+    pub fn live_header_request_hashes(&self) -> HashSet<H256> {
+        let mut hashes = HashSet::new();
+        let mut add = |request: &Box<dyn Request>| {
+            if let Some(req) = request
+                .as_any()
+                .downcast_ref::<crate::sync::message::GetBlockHeaders>()
+            {
+                hashes.extend(req.hashes.iter().cloned());
+            }
+        };
+        for container in self.peers.lock().values() {
+            for peer_req in container.inflight_requests.values() {
+                add(&peer_req.message.request);
+            }
+            for msg in container.pending_requests.iter() {
+                add(&msg.request);
+            }
+        }
+        hashes
+    }
+
     pub fn process_timeout_requests(
         &self, io: &dyn NetworkContext,
     ) -> Vec<RequestMessage> {

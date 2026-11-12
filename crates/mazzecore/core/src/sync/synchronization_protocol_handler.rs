@@ -183,7 +183,13 @@ pub struct AsyncTaskQueue<T: TaskSize> {
 }
 
 struct AsyncTaskQueueInner<T: TaskSize> {
-    tasks: VecDeque<T>,
+    // Each task with the size it was counted at in `dispatch`: `pop`
+    // subtracts that, not a fresh `task.size()`. A heap measurement that
+    // came out smaller at pop than at dispatch left bytes in `size` for
+    // good; the recover queue sat ~200 bytes under its 1 GB cap with
+    // nothing in it and dropped every body response (full-fast sync from
+    // genesis wedged at epoch 365529, 2026-11-12).
+    tasks: VecDeque<(T, usize)>,
     size: usize,
     moving_average: f64,
 }
@@ -229,7 +235,7 @@ impl<T: TaskSize> AsyncTaskQueue<T> {
                 + (1.0 - self.alpha) * inner.moving_average;
         }
         io.dispatch_work(self.work_type);
-        inner.tasks.push_back(task);
+        inner.tasks.push_back((task, incoming));
         trace!(
             "AsyncTaskQueue dispatch: size={} average={}",
             inner.size,
@@ -239,16 +245,20 @@ impl<T: TaskSize> AsyncTaskQueue<T> {
 
     fn pop(&self) -> Option<T> {
         let mut inner = self.inner.write();
-        let task = inner.tasks.pop_front();
-        task.as_ref().map(|task| {
-            inner.size -= task.size();
-        });
+        let (task, size) = inner.tasks.pop_front()?;
+        inner.size = inner.size.saturating_sub(size);
         trace!(
             "AsyncTaskQueue pop: size={} average={}",
             inner.size,
             inner.moving_average,
         );
-        task
+        Some(task)
+    }
+
+    /// Bytes counted and tasks queued, for the periodic sync log.
+    pub fn usage(&self) -> (usize, usize) {
+        let inner = self.inner.read();
+        (inner.size, inner.tasks.len())
     }
 
     fn size(&self) -> usize {
@@ -1189,6 +1199,16 @@ impl SynchronizationProtocolHandler {
         if missing.is_empty() {
             return;
         }
+        // Keys leaked into the header in-flight set would strip these
+        // hashes from the request below, every time.
+        let cleared = self.request_manager.reconcile_inflight_header_orphans();
+        if cleared > 0 {
+            warn!(
+                "frontier rescue: reconciled {} orphaned in-flight header \
+                 request(s)",
+                cleared
+            );
+        }
 
         debug!(
             "Active frontier rescue requesting {} missing dependency header(s): {:?}",
@@ -1221,7 +1241,12 @@ impl SynchronizationProtocolHandler {
         // The regular fetch pipeline immediately below then picks them
         // up. Idempotent under a fast path — collect_stuck returns
         // Vec::new() when the frontier is clean or catchup-locked.
-        let stuck = self.graph.collect_stuck_frontier_bodies();
+        let mut stuck = self.graph.collect_stuck_frontier_bodies();
+        // A frontier body that came without its pruned shielded proofs waits
+        // here too (`witness_wait`). This fan-out asks every peer on every
+        // tick and every body response, so it re-requested such a block ~37
+        // times a second and kept an IO worker at 100% (2026-11-12).
+        self.graph.retain_witness_due(&mut stuck);
         if !stuck.is_empty() {
             self.request_manager
                 .remove_net_inflight_blocks(stuck.iter());
@@ -1401,6 +1426,9 @@ impl SynchronizationProtocolHandler {
         // 2026-10-19: 1.6M "missing" bodies it already had, fetched at
         // ~26/s). Bounded per tick so one call never holds up the IO worker.
         const LOCAL_BODY_LOOKUPS_PER_TICK: usize = 4096;
+        // Before the local DB lookup as well: a body read back from the DB
+        // has no witness either.
+        self.graph.retain_witness_due(&mut to_request_blocks);
         let mut local_hits = HashSet::new();
         // Headers of blocks still waiting for a body. Taken from the graph:
         // `block_from_db` would decode the header again and recompute its
@@ -1511,7 +1539,6 @@ impl SynchronizationProtocolHandler {
             );
             to_request_blocks.retain(|h| !local_hits.contains(h));
         }
-        self.graph.retain_witness_due(&mut to_request_blocks);
         let n_blocks_to_request = min(
             max_inflight.saturating_sub(in_flight_blocks.len()),
             to_request_blocks.len(),
@@ -2787,11 +2814,16 @@ impl SynchronizationProtocolHandler {
                 LAST_MODE.swap(catch_up_mode, Ordering::Relaxed) != catch_up_mode;
             if flipped || now >= LAST.load(Ordering::Relaxed) + 30 {
                 LAST.store(now, Ordering::Relaxed);
+                let (queued_bytes, queued_tasks) =
+                    self.recover_public_queue.usage();
                 info!(
-                    "Catch-up mode: {}, latest epoch: {} missing_bodies: {}",
+                    "Catch-up mode: {}, latest epoch: {} missing_bodies: {} \
+                     body_queue: {} MB in {} task(s)",
                     catch_up_mode,
                     self.graph.consensus.best_epoch_number(),
-                    self.graph.inner.read().block_to_fill_set.len()
+                    self.graph.inner.read().block_to_fill_set.len(),
+                    queued_bytes / (1024 * 1024),
+                    queued_tasks
                 );
             }
         }

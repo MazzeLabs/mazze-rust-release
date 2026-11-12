@@ -3,30 +3,43 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Miners first, so they stop submitting to a node that is shutting down.
 PID_FILES=(
+  "$SCRIPT_DIR/miner_pid.txt"
+  "$SCRIPT_DIR/miner_pid_dev.txt"
   "$SCRIPT_DIR/node_pid_dev.txt"
   "$SCRIPT_DIR/node_pid.txt"
   "$SCRIPT_DIR/node_pid_full_fast.txt"
   "$SCRIPT_DIR/node_pid_archive.txt"
-  "$SCRIPT_DIR/miner_pid.txt"
-  "$SCRIPT_DIR/miner_pid_dev.txt"
 )
+
+# Seconds to wait after SIGTERM before SIGKILL. The node flushes and closes
+# its databases on SIGTERM and may need minutes on a slow disk; killing it
+# after 5 s, as this script used to, turned nearly every stop into a crash.
+NODE_STOP_TIMEOUT="${NODE_STOP_TIMEOUT:-300}"
+MINER_STOP_TIMEOUT="${MINER_STOP_TIMEOUT:-10}"
 
 kill_pid() {
   local pid="$1"
   local name="$2"
-  local timeout="${3:-5}"
+  local timeout="${3:-$NODE_STOP_TIMEOUT}"
   if ! kill -0 "$pid" >/dev/null 2>&1; then
     echo "No process found with PID: $pid ($name)"
     return 1
   fi
   kill "$pid" >/dev/null 2>&1 || true
+  local start=$SECONDS
   local end=$((SECONDS + timeout))
+  local next_report=$((SECONDS + 10))
   while kill -0 "$pid" >/dev/null 2>&1; do
     if (( SECONDS >= end )); then
       kill -9 "$pid" >/dev/null 2>&1 || true
-      echo "Killed process with PID: $pid ($name) with SIGKILL"
+      echo "Killed process with PID: $pid ($name) with SIGKILL after ${timeout}s"
       return 0
+    fi
+    if (( SECONDS >= next_report )); then
+      echo "Waiting for PID $pid ($name) to shut down cleanly... $((SECONDS - start))s"
+      next_report=$((SECONDS + 10))
     fi
     sleep 0.2
   done
@@ -40,7 +53,11 @@ for PID_FILE in "${PID_FILES[@]}"; do
     found_pid_file=1
     PID="$(cat "$PID_FILE" 2>/dev/null || true)"
     if [[ -n "$PID" ]]; then
-      kill_pid "$PID" "$PID_FILE" || true
+      if [[ "$PID_FILE" == *miner* ]]; then
+        kill_pid "$PID" "$PID_FILE" "$MINER_STOP_TIMEOUT" || true
+      else
+        kill_pid "$PID" "$PID_FILE" || true
+      fi
     else
       echo "Empty PID file: $PID_FILE"
     fi
@@ -55,7 +72,11 @@ done
 # must not cause us to skip killing a still-running node. Match the binary by
 # name so we never touch this shell.
 self=$$
-for pid in $(pgrep -x mazze 2>/dev/null) $(pgrep -x mazze-miner 2>/dev/null); do
+for pid in $(pgrep -x mazze-miner 2>/dev/null); do
+  [[ "$pid" == "$self" ]] && continue
+  kill_pid "$pid" "sweep" "$MINER_STOP_TIMEOUT" || true
+done
+for pid in $(pgrep -x mazze 2>/dev/null); do
   [[ "$pid" == "$self" ]] && continue
   kill_pid "$pid" "sweep" || true
 done

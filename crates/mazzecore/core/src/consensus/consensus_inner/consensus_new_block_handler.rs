@@ -1305,8 +1305,15 @@ impl ConsensusNewBlockHandler {
                     inner.main_chain.len().saturating_sub(fork_main_index);
                 MAIN_CHAIN_CHANGES.inc(1);
                 REORG_LAST_DEPTH.update(reorg_depth);
-                if reorg_depth > 1 {
+                // Rolling back a few blocks happens all the time at four
+                // blocks per second; only a deep reorg is worth INFO.
+                if reorg_depth >= 10 {
                     info!(
+                        "main chain reorg at height {}: rolling back {} blocks",
+                        fork_at, reorg_depth
+                    );
+                } else if reorg_depth > 1 {
+                    debug!(
                         "main chain reorg at height {}: rolling back {} blocks",
                         fork_at, reorg_depth
                     );

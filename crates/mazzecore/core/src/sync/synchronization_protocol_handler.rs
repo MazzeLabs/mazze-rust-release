@@ -2733,9 +2733,9 @@ impl SynchronizationProtocolHandler {
                 self.phase_manager.try_initialize(io, self);
                 loop {
                     let current_phase = self.phase_manager.get_current_phase();
-                    info!("Current phase: {:?}", current_phase.phase_type());
+                    debug!("Current phase: {:?}", current_phase.phase_type());
                     let next_phase_type = current_phase.next(io, self);
-                    info!("Next phase: {:?}", next_phase_type);
+                    debug!("Next phase: {:?}", next_phase_type);
                     if current_phase.phase_type() != next_phase_type {
                         info!("Transitioning to phase: {:?}", next_phase_type);
                         self.phase_manager.change_phase_to(
@@ -2773,12 +2773,28 @@ impl SynchronizationProtocolHandler {
                 need_notify.push(*peer);
             }
         }
-        info!(
-            "Catch-up mode: {}, latest epoch: {} missing_bodies: {}",
-            catch_up_mode,
-            self.graph.consensus.best_epoch_number(),
-            self.graph.inner.read().block_to_fill_set.len()
-        );
+        // Once every 30 s, or when catch-up mode flips: this runs every
+        // second and was a third of a node's log (testnet, 2026-11-09).
+        {
+            use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+            static LAST: AtomicU64 = AtomicU64::new(0);
+            static LAST_MODE: AtomicBool = AtomicBool::new(false);
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let flipped =
+                LAST_MODE.swap(catch_up_mode, Ordering::Relaxed) != catch_up_mode;
+            if flipped || now >= LAST.load(Ordering::Relaxed) + 30 {
+                LAST.store(now, Ordering::Relaxed);
+                info!(
+                    "Catch-up mode: {}, latest epoch: {} missing_bodies: {}",
+                    catch_up_mode,
+                    self.graph.consensus.best_epoch_number(),
+                    self.graph.inner.read().block_to_fill_set.len()
+                );
+            }
+        }
 
         DynamicCapability::NormalPhase(!catch_up_mode)
             .broadcast_with_peers(io, need_notify);

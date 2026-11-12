@@ -409,7 +409,9 @@ enable_discovery = true
 #
 # session_ip_limits="1,8,4,2"
 
-session_ip_limits = "1,32,16,4"
+# 4 per IP: several nodes behind one home router share a public address,
+# and with 1 only the first could connect to each peer (testnet, 2026-11).
+session_ip_limits = "4,32,16,4"
 
 # `subnet_quota` limits the number of nodes for a subnet B (e.g. 192.168.xxx.xxx/16) stored in database.
 # Nodes in database are used to establish outgoing TCP connections for P2P communications.

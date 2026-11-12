@@ -1511,6 +1511,7 @@ impl SynchronizationProtocolHandler {
             );
             to_request_blocks.retain(|h| !local_hits.contains(h));
         }
+        self.graph.retain_witness_due(&mut to_request_blocks);
         let n_blocks_to_request = min(
             max_inflight.saturating_sub(in_flight_blocks.len()),
             to_request_blocks.len(),
@@ -2021,8 +2022,10 @@ impl SynchronizationProtocolHandler {
                     "sent a block whose shielded proofs do not verify",
                 );
             }
-            if insert_result.is_valid() {
-                // The requested block is correctly received
+            if insert_result.is_valid() || insert_result.awaiting_witness() {
+                // The requested block is correctly received, or it came
+                // without its pruned proofs and waits (`witness_wait`)
+                // rather than being asked for again at once.
                 received_blocks.insert(hash);
             }
             if insert_result.should_relay() {

@@ -11,7 +11,7 @@ use std::{
         Arc,
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use futures::executor::block_on;
@@ -100,6 +100,9 @@ const SYNC_GRAPH_ARENA_HARD_CAP: usize = 1_000_000;
 /// A not-ready frontier block whose body has not arrived in this long is
 /// treated as stuck and asked of every peer (`collect_stuck_frontier_bodies`).
 const STUCK_FRONTIER_BODY_SECS: u64 = 10;
+/// How long a body that came without its shielded proofs waits before it is
+/// asked for again, unless the block becomes buried first (`witness_wait`).
+const WITNESS_WAIT_RETRY: Duration = Duration::from_secs(60);
 
 const NULL: usize = !0;
 const BLOCK_INVALID: u8 = 0;
@@ -235,6 +238,15 @@ pub struct SynchronizationGraphInner {
     /// The set of blocks that we need to download block bodies in
     /// `CatchUpFillBlockBodyPhase`.
     pub block_to_fill_set: HashSet<H256>,
+
+    /// Bodies that came without their shielded proofs while this node did
+    /// not yet hold the block as buried: the network prunes proofs an era
+    /// behind its checkpoint, so a node whose headers lag gets them that
+    /// way. Asking again at once looped: a catching-up full-fast node asked
+    /// for the same two blocks ~150 000 times in minutes (2026-11-12). Each
+    /// waits until its height is buried locally, or the retry time, here
+    /// (height, retry at).
+    pub witness_wait: HashMap<H256, (u64, Instant)>,
     machine: Arc<Machine>,
 
     /// Blocks whose parent era is older and to be cleared in background GC.
@@ -281,6 +293,7 @@ impl SynchronizationGraphInner {
             old_era_blocks_frontier: Default::default(),
             old_era_blocks_frontier_set: Default::default(),
             block_to_fill_set: Default::default(),
+            witness_wait: Default::default(),
             locked_for_catchup: false,
             machine,
         };
@@ -1050,9 +1063,14 @@ impl SynchronizationGraphInner {
         Ok(())
     }
 
+    /// `None` when the block's body is no longer in the database: a node
+    /// that keeps no bodies behind its checkpoint (`full-fast`) deletes them
+    /// when a new checkpoint forms, which can happen while the block waits
+    /// here for its parent. Panicking on that killed full-fast nodes in
+    /// catch-up (testnet, 2026-11-11); the caller fetches the body again.
     fn verify_graph_ready_block(
         &self, index: usize, verification_config: &VerificationConfig,
-    ) -> Result<(), Error> {
+    ) -> Option<Result<(), Error>> {
         let block_header = &self.arena[index].block_header;
         // Prefer the parent header held by the graph: one loaded from the DB
         // has its RandomX hash recomputed, which made graph-status
@@ -1065,11 +1083,8 @@ impl SynchronizationGraphInner {
                 .block_header_by_hash(block_header.parent_hash())
                 .expect("headers will not be deleted")
         };
-        let block = self
-            .data_man
-            .block_by_hash(&block_header.hash(), true)
-            .expect("received");
-        verification_config.verify_sync_graph_ready_block(&block, &parent)
+        let block = self.data_man.block_by_hash(&block_header.hash(), true)?;
+        Some(verification_config.verify_sync_graph_ready_block(&block, &parent))
     }
 
     fn process_invalid_blocks(&mut self, invalid_set: &HashSet<usize>) {
@@ -2518,8 +2533,22 @@ impl SynchronizationGraph {
                     index,
                 );
             } else if inner.new_to_be_block_graph_ready(index) {
-                let verify_result = inner
-                    .verify_graph_ready_block(index, &self.verification_config);
+                let verify_result = match inner
+                    .verify_graph_ready_block(index, &self.verification_config)
+                {
+                    Some(r) => r,
+                    None => {
+                        let hash = inner.arena[index].block_header.hash();
+                        warn!(
+                            "Body of {:?} (height {}) is gone from the database; fetching it again",
+                            hash,
+                            inner.arena[index].block_header.height()
+                        );
+                        inner.arena[index].block_ready = false;
+                        inner.block_to_fill_set.insert(hash);
+                        continue;
+                    }
+                };
                 if verify_result.is_err() {
                     warn!(
                         "Invalid block! inserted_header={:?} err={:?}",
@@ -2646,6 +2675,23 @@ impl SynchronizationGraph {
                 )
                 .and_then(|()| shielded_check.unwrap_or(Ok(())));
             match r {
+                Err(Error(
+                    ErrorKind::Block(BlockError::ShieldedWitnessMismatch(e)),
+                    _,
+                )) if block.witness.is_empty() => {
+                    // Pruned by the sender: wait for burial (or retry later)
+                    // instead of asking again at once.
+                    debug!("Shielded proofs pruned by the sender, waiting: hash={:?} err={}", hash, e);
+                    inner.arena[me].block_ready = false;
+                    inner.witness_wait.insert(
+                        hash,
+                        (
+                            block.block_header.height(),
+                            Instant::now() + WITNESS_WAIT_RETRY,
+                        ),
+                    );
+                    return BlockInsertionResult::AwaitingWitness;
+                }
                 Err(Error(
                     ErrorKind::Block(BlockError::ShieldedWitnessMismatch(e)),
                     _,
@@ -3075,6 +3121,28 @@ impl SynchronizationGraph {
         stuck
     }
 
+    /// Drops from `hashes` the bodies still waiting for burial or for their
+    /// retry time (`witness_wait`), and forgets the waits that are over.
+    pub fn retain_witness_due(&self, hashes: &mut Vec<H256>) {
+        let buried_below = {
+            let era = self.consensus.get_config().inner_conf.era_epoch_count;
+            self.max_ready_header_height
+                .load(Ordering::Relaxed)
+                .saturating_sub(crate::verification::WITNESS_BURIAL_ERAS * era)
+        };
+        let now = Instant::now();
+        let inner = &mut *self.inner.write();
+        if inner.witness_wait.is_empty() {
+            return;
+        }
+        let fill = &inner.block_to_fill_set;
+        inner.witness_wait.retain(|h, (height, retry_at)| {
+            fill.contains(h) && *height > buried_below && now < *retry_at
+        });
+        let wait = &inner.witness_wait;
+        hashes.retain(|h| !wait.contains_key(h));
+    }
+
     /// §5.23 recovery: idempotently ensure the given hashes are in
     /// `block_to_fill_set` so `request_block_bodies` will fetch them.
     /// The §5.19 fix already inserts here at HEADER_GRAPH_READY
@@ -3384,6 +3452,9 @@ pub enum BlockInsertionResult {
     // We should request again to get
     // the correct transactions for full verification.
     RequestAgain,
+    // The body came without its shielded proofs and the block is not buried
+    // yet: it waits in `witness_wait` and is fetched again later.
+    AwaitingWitness,
     // This is only for the case the header is removed, possibly because
     // we switch phases.
     // We ignore the block without verification.
@@ -3410,6 +3481,10 @@ impl BlockInsertionResult {
 
     pub fn request_again(&self) -> bool {
         matches!(self, BlockInsertionResult::RequestAgain)
+    }
+
+    pub fn awaiting_witness(&self) -> bool {
+        matches!(self, BlockInsertionResult::AwaitingWitness)
     }
 }
 

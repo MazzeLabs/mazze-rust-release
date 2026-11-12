@@ -27,6 +27,12 @@ home machine.
 | Disk (SSD) | ~25 GB, 50 GB free recommended | 30–70 GB and growing, 100 GB free recommended | – |
 | Time to the tip | under an hour | days | – |
 
+**Use an SSD.** Any SATA SSD will do: a 2018 Samsung 860 EVO ran a mining
+node for hours with no stalls. On a spinning disk the node works but keeps
+the disk busy, pauses for seconds at a time while the database syncs, and
+mines about half as many blocks; a RAID of spinning disks has shown pauses
+long enough (30 s+) to disconnect miners.
+
 Supported systems:
 
 - **Linux x86_64**: Ubuntu 22.04 and 24.04 are what we test on.
@@ -140,6 +146,15 @@ If the node already ran before, stop it and delete its chain data first
 rm -rf blockchain_data/blockchain_db blockchain_data/storage_db
 ```
 
+### Full-fast (miners, no trusted checkpoints)
+
+`node_type = "full-fast"` needs no `trusted_checkpoints`: it downloads and
+checks every header from genesis, then restores the state at a recent
+checkpoint, and keeps no old block bodies. It takes longer than a fast sync
+from trusted checkpoints (the header pass takes a couple of hours) but
+trusts no one for the starting point. It is meant for mining; it serves
+less history to other nodes than a full node.
+
 ### Archive node (default)
 
 Leave `run/hydra.toml` as it is. The node downloads the whole chain from
@@ -203,6 +218,12 @@ is caught up when it logs `start phase "NormalSyncPhase"` and its
 
 ### Stop, restart, upgrade
 
+Always stop with `./run/stop.sh`, and before shutting down the machine or
+running `wsl --shutdown`. It stops the miner, then asks the node to shut
+down and waits up to 5 minutes while it closes its databases (usually
+10–30 s). Killing the node (`kill -9`, closing the WSL window, pulling the
+plug) can leave the database needing a resync.
+
 ```bash
 ./run/stop.sh                 # stop the node (and the miner, if running)
 ./run/start-node.sh           # start again; it resumes from its database
@@ -264,6 +285,24 @@ Mining is RandomX, so it is CPU work; a GPU does not help. Your node log shows
 `Mined block 0x…` for every block you find, and your balance grows as rewards
 mature.
 
+**Who gets paid.** The node builds each block with its own `mining_author`;
+the miner only searches for the nonce. All blocks found through a node pay
+that node's address, whichever machine found them.
+
+**Several machines.** Run one node and point miners on other machines at it
+over your LAN. On the node, set `stratum_listen_address = "0.0.0.0"` in
+`run/hydra.toml` and restart it; Stratum has no authentication, so only do
+this on a network you trust and keep port 32525 closed to the internet. On
+each mining machine, build `mazze-miner`, set `stratum_listen_address` in its
+`run/hydra.toml` to the node's LAN address (for example `"192.168.1.10"`),
+and run `./run/start-miner.sh`. A second node behind the same router also
+works: our nodes accept up to four connections from one public address.
+
+**Virtual machines.** RandomX needs the CPU's AES and AVX2 instructions to
+be fast. In Proxmox and other hypervisors, set the VM's CPU type to `host`:
+generic models such as `x86-64-v2` hide them, and the miner has been seen to
+stall on them.
+
 ## 8. Connect a wallet (eSpace / MetaMask)
 
 eSpace is the EVM side of Mazze. In MetaMask, add a network:
@@ -292,6 +331,12 @@ eSpace is the EVM side of Mazze. In MetaMask, add a network:
   `dmesg | grep -i oom` (Linux) and `run/logs/mazze-node.console.log`. Use the
   [low-memory mode](#low-memory-mode), give WSL more memory, or stop the miner
   while syncing.
+- **Pauses of several seconds, miners disconnecting with "Timeout waiting
+  for message".** The database is waiting on the disk; move the node to an
+  SSD. `mdbx_sync_mode = "utterlynosync"` removes the pauses on slow disks,
+  but a power cut or OS crash can then corrupt the database beyond repair,
+  and you will have to delete `blockchain_data/` and sync again. Larger
+  `mdbx_autosync_*` values make the pauses rarer but longer.
 - **The disk fills up.** The chain data is in `blockchain_data/`; see the
   sizes in section 1. Old installs wrote an unbounded
   `run/logs/mazze-node.log`: delete it while the node is stopped. Also check
